@@ -118,6 +118,7 @@ dependencies = [
  "bpd_protocol",
  "bpd_test",
  "getrandom",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

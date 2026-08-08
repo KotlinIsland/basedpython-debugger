@@ -10,9 +10,15 @@
 //! costs something per event
 
 mod attach;
+mod breakpoints;
+mod code;
+mod events;
+mod files;
 mod run;
+mod session;
 
-use pyo3::exceptions::{PyImportError, PyRuntimeError};
+use bpd_protocol::message::StopReason;
+use pyo3::exceptions::PyImportError;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -161,83 +167,96 @@ mod bpd_agent {
     }
 }
 
-/// turn on the entry stop
+/// turn on code object discovery, and with it the entry stop
 ///
-/// `PY_START` is the only event armed, and it is armed globally because the
-/// program's own code object does not exist yet — there is nothing to scope it
-/// to. every callback that is not the program's entry returns `DISABLE`, so the
-/// cost is one native call per code object first reached during startup, and
-/// the events are turned off entirely once the entry stop has happened
+/// `PY_START` is armed globally, because PEP 669 has no "code object created"
+/// event and a program's code objects are not there to be scoped to yet.
+/// registering each one on its first call and returning `DISABLE` costs one
+/// native call per code object, once, and it is the only way to see the ones
+/// `exec` builds while the program runs
 fn arm(python: Python<'_>) -> PyResult<()> {
     let monitoring = monitoring(python)?;
-    let py_start = monitoring.getattr("events")?.getattr("PY_START")?;
-    let callback = wrap_pyfunction!(on_py_start, python)?;
-
-    // resolved once, here, and never again. the callback runs on entry to every
-    // code object the program reaches, and doing `import sys` plus two attribute
-    // lookups per event would be python work on an event path — which this
-    // architecture does not do, and which re-enters the import system from
-    // inside a monitoring callback while the interpreter is importing
-    DISABLE
-        .set(monitoring.getattr("DISABLE")?.unbind())
-        .map_err(|_| PyRuntimeError::new_err("the agent was armed twice"))?;
-
-    monitoring.call_method1("register_callback", (DEBUGGER_TOOL_ID, &py_start, callback))?;
-    monitoring.call_method1("set_events", (DEBUGGER_TOOL_ID, py_start))?;
-    Ok(())
-}
-
-/// turn every event back off
-///
-/// the entry stop happens once. leaving `PY_START` armed would keep paying a
-/// native call for every code object the program ever reaches, for nothing
-fn disarm(python: Python<'_>) -> PyResult<()> {
-    monitoring(python)?.call_method1("set_events", (DEBUGGER_TOOL_ID, 0))?;
-    Ok(())
+    events::install(
+        python,
+        &monitoring,
+        wrap_pyfunction!(on_py_start, python)?.as_any(),
+        wrap_pyfunction!(on_line, python)?.as_any(),
+    )?;
+    events::watch_every_call(python, true)
 }
 
 /// the `PY_START` callback, called by the interpreter with no python frame in
 /// between
 ///
-/// it does not materialise a frame. deciding whether this is the entry needs
-/// the code object's filename and nothing else, and the common answer is no
+/// it does not materialise a frame. registering a code object needs the object
+/// and its filename, deciding whether this is the program's entry needs the
+/// filename, and neither needs to know anything about the frame that is about
+/// to run — which is the whole reason this is affordable at all
+///
+/// the offset is part of the signature PEP 669 requires and is always zero for
+/// `PY_START`, so there is nothing it could be read for
 #[pyfunction]
 fn on_py_start<'py>(
     python: Python<'py>,
     code: &Bound<'py, PyAny>,
     _offset: i32,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let disable = disable(python);
+    let newly_loaded = code::register(code)?;
 
-    if attach::has_stopped_at_entry() {
-        return Ok(disable);
+    if !attach::has_stopped_at_entry()
+        && let Some(target) = attach::target()
+    {
+        let attribute = code.getattr("co_filename")?;
+        let filename: std::borrow::Cow<'_, str> = attribute.extract()?;
+        if std::path::Path::new(filename.as_ref()) == target {
+            // the program's own code object is registered before the stop, so a
+            // breakpoint set during the entry stop has the whole of the main
+            // module — its functions, classes and comprehensions — to bind to.
+            // that also means a rebinding pass here would have nothing to say,
+            // because the set was resolved with this file already registered
+            attach::mark_stopped_at_entry();
+            session::stop(python, StopReason::Entry)?;
+            return Ok(events::disable(python));
+        }
     }
-    let Some(target) = attach::target() else {
-        return Ok(disable);
-    };
 
-    let attribute = code.getattr("co_filename")?;
-    let filename: std::borrow::Cow<'_, str> = attribute.extract()?;
-    if std::path::Path::new(filename.as_ref()) != target {
-        return Ok(disable);
+    if let Some(loaded) = newly_loaded {
+        session::announce_rebinding(breakpoints::rebind(python, &loaded)?);
     }
-
-    attach::stop_at_entry();
-    disarm(python)?;
-    Ok(disable)
+    Ok(events::disable(python))
 }
 
-/// `sys.monitoring.DISABLE`, resolved at arm time
+/// the `LINE` callback, armed only on the code objects that hold a breakpoint
 ///
-/// a `OnceLock` rather than a lookup, because this is read on every event
-static DISABLE: std::sync::OnceLock<Py<PyAny>> = std::sync::OnceLock::new();
+/// the common answer is "this line is not a breakpoint", and answering it costs
+/// a lookup on the code object's address and the line number. saying `DISABLE`
+/// means the interpreter never offers that line again, so the cost of a
+/// breakpoint is bounded by the number of *distinct lines executed once* in the
+/// handful of code objects that hold one
+#[pyfunction]
+fn on_line<'py>(
+    python: Python<'py>,
+    code: &Bound<'py, PyAny>,
+    line: u32,
+) -> PyResult<Bound<'py, PyAny>> {
+    let Some(breakpoints) = breakpoints::hit(code.as_ptr() as usize, line) else {
+        return Ok(events::disable(python));
+    };
 
-fn disable(python: Python<'_>) -> Bound<'_, PyAny> {
-    DISABLE
-        .get()
-        .expect("the callback cannot run before arm installed DISABLE")
-        .bind(python)
-        .clone()
+    let file: String = code.getattr("co_filename")?.extract()?;
+    let thread = events::thread_ident(python)?;
+    session::stop(
+        python,
+        StopReason::Breakpoint {
+            breakpoints,
+            file,
+            line,
+            thread,
+        },
+    )?;
+
+    // deliberately not `DISABLE`: a breakpoint that fired once still exists
+    Ok(python.None().into_bound(python))
 }
 
 /// `sys.monitoring`, or an error naming what is missing

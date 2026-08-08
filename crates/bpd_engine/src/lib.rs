@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use bpd_protocol::message::{FromAgent, FromEngine, StopReason};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
-pub use launch::{Debuggee, Launched, launch};
+pub use launch::{Debuggee, Launched, Running, launch};
 
 /// the result type for engine operations
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -105,6 +105,32 @@ pub enum Error {
     AgentGone {
         /// what the engine was waiting for
         expected: &'static str,
+    },
+
+    /// two breakpoints in one request claimed the same id
+    ///
+    /// the id is how every later report — a rebinding, a stop — names which
+    /// breakpoint it is about. sharing one would mean the client is given one
+    /// answer for two questions and cannot tell which it belongs to
+    #[error(
+        "two breakpoints in the same request both have id {id}. an id names one \
+         breakpoint in every report about it, so it has to be unique within a set"
+    )]
+    DuplicateBreakpointId {
+        /// the id that was used twice
+        id: u32,
+    },
+
+    /// something was asked of a debuggee that is not stopped
+    ///
+    /// the agent reads the control connection while it is stopped and at no
+    /// other time, so a request made to a running program would be answered
+    /// whenever it next happened to stop. that is not an answer, and waiting
+    /// for it looks exactly like a hang
+    #[error("the debuggee is not stopped, so it cannot be asked for {wanted}")]
+    NotStopped {
+        /// what was asked for
+        wanted: &'static str,
     },
 
     /// the agent said something the engine was not waiting for

@@ -18,7 +18,7 @@ use std::process::{Child, Command, ExitStatus};
 
 use bpd_core::python::Capabilities;
 use bpd_protocol::env;
-use bpd_protocol::message::{FromEngine, StopReason};
+use bpd_protocol::message::{FromAgent, FromEngine, Resolved, SourceBreakpoint, StopReason};
 
 use crate::{Error, Listener, Result, Session, agent};
 
@@ -33,29 +33,113 @@ const BOOTSTRAP: &str = "import bpd_agent; bpd_agent.main()";
 pub struct Debuggee {
     child: Child,
     session: Session,
-    stopped: StopReason,
+    stopped: Option<StopReason>,
     /// held so the staged agent outlives the debuggee that imported it
     _staged: agent::Staged,
 }
 
+/// what a resumed debuggee did next
+///
+/// deliberately closed, like [`Launched`]: a third outcome is something every
+/// caller has to decide about, and a catch-all arm is how a debugger acquires a
+/// state nobody handles
+#[derive(Debug)]
+pub enum Running {
+    /// it stopped again
+    Stopped {
+        /// where, and why
+        reason: StopReason,
+        /// what loading a file changed about the breakpoint set on the way
+        rebound: Vec<Resolved>,
+    },
+
+    /// it finished
+    Exited {
+        /// how it exited
+        status: ExitStatus,
+        /// what loading a file changed about the breakpoint set on the way
+        rebound: Vec<Resolved>,
+    },
+}
+
 impl Debuggee {
-    /// the control connection to the agent
-    pub fn session(&mut self) -> &mut Session {
-        &mut self.session
+    /// why the debuggee is stopped, or `None` once it has been let go
+    pub fn stopped(&self) -> Option<&StopReason> {
+        self.stopped.as_ref()
     }
 
-    /// why the debuggee is stopped
-    pub fn stopped(&self) -> StopReason {
-        self.stopped
+    /// replace the whole breakpoint set, and say how every one of them resolved
+    ///
+    /// only while the debuggee is stopped. the agent reads the control
+    /// connection inside a stop and nowhere else — asking a running program to
+    /// bind something would be a request that is answered whenever it next
+    /// happens to stop, which is not an answer
+    pub fn set_breakpoints(&mut self, breakpoints: Vec<SourceBreakpoint>) -> Result<Vec<Resolved>> {
+        const EXPECTED: &str = "the breakpoints to resolve";
+
+        if self.stopped.is_none() {
+            return Err(Error::NotStopped { wanted: EXPECTED });
+        }
+
+        // every report about a breakpoint, and every stop it causes, names it by
+        // this id. two breakpoints sharing one would give the client a single
+        // answer for two questions, and it would have no way to tell which
+        let mut seen = std::collections::BTreeSet::new();
+        for breakpoint in &breakpoints {
+            if !seen.insert(breakpoint.id) {
+                return Err(Error::DuplicateBreakpointId { id: breakpoint.id });
+            }
+        }
+        self.session
+            .send(&FromEngine::SetBreakpoints { breakpoints })?;
+
+        match self.session.next_event()? {
+            Some(FromAgent::BreakpointsResolved { resolved }) => Ok(resolved),
+            Some(other) => Err(Error::UnexpectedEvent {
+                event: format!("{other:?}"),
+                expected: EXPECTED,
+            }),
+            None => Err(Error::AgentGone { expected: EXPECTED }),
+        }
     }
 
-    /// let the debuggee run, and wait for it to finish
-    pub fn resume_to_exit(mut self) -> Result<ExitStatus> {
+    /// let the debuggee run until it stops again or finishes
+    ///
+    /// the agent can speak while the program runs — loading a module changes
+    /// what a breakpoint resolves to — so everything it said on the way is
+    /// collected and handed back with the outcome, rather than left in a socket
+    /// buffer for someone to find
+    pub fn run(&mut self) -> Result<Running> {
+        const EXPECTED: &str = "the debuggee to stop or exit";
+
+        if self.stopped.take().is_none() {
+            return Err(Error::NotStopped { wanted: EXPECTED });
+        }
         self.session.send(&FromEngine::Resume)?;
-        self.child.wait().map_err(|source| Error::Spawn {
-            interpreter: PathBuf::from("the debuggee"),
-            source,
-        })
+
+        let mut rebound = Vec::new();
+        loop {
+            match self.session.next_event()? {
+                Some(FromAgent::Stopped { reason }) => {
+                    self.stopped = Some(reason.clone());
+                    return Ok(Running::Stopped { reason, rebound });
+                }
+                Some(FromAgent::BreakpointsResolved { resolved }) => rebound.extend(resolved),
+                Some(other) => {
+                    return Err(Error::UnexpectedEvent {
+                        event: format!("{other:?}"),
+                        expected: EXPECTED,
+                    });
+                }
+                None => {
+                    let status = self.child.wait().map_err(|source| Error::Spawn {
+                        interpreter: PathBuf::from("the debuggee"),
+                        source,
+                    })?;
+                    return Ok(Running::Exited { status, rebound });
+                }
+            }
+        }
     }
 }
 
@@ -142,7 +226,7 @@ pub fn launch(interpreter: &Capabilities, script: &Path, args: &[OsString]) -> R
     };
 
     Ok(Launched::Stopped(Debuggee {
-        stopped: reason,
+        stopped: Some(reason),
         child,
         session,
         _staged: staged,

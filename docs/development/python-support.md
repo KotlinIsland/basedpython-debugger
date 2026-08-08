@@ -85,7 +85,13 @@ as a compatibility exercise. what has to be checked, every time:
     `BRANCH_RIGHT`, which is the kind of change that silently drops a feature if
     nobody looks
 - `DISABLE` semantics, and what `restart_events()` re-enables
-- the code object layout that breakpoint binding walks
+- the code object layout that breakpoint binding walks, and what `co_lines()`
+    yields. 3.12 inlined list, dict and set comprehensions into their enclosing
+    function, which moved every breakpoint inside one to a different code
+    object; a module's leading `RESUME` is reported as line 0, which is not a
+    source line. the bytecode offsets a line covers differ between every release
+    measured so far, which is why no test writes one down — the expected values
+    come from `co_lines()` on the interpreter under test
 - the PEP 768 debug offsets, which are version specific by design
 - whether anything in the release makes a previously-required workaround
     unnecessary. removing one is as much a part of the upgrade as adding

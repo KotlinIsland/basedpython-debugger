@@ -73,10 +73,13 @@ finding the code object and line that will actually run
 
 this is where debuggers quietly lie, so it is spelled out:
 
-- a module's code object is a tree. a line inside a comprehension, a lambda, a
-    nested function or a class body belongs to a **different** code object than
-    the module's. binding walks `co_consts` recursively — anything less silently
-    fails to bind breakpoints inside comprehensions
+- a module's code object is a tree. a line inside a lambda, a nested function, a
+    class body or a generator expression belongs to a **different** code object
+    than the module's. binding walks `co_consts` recursively — anything less
+    silently fails to bind breakpoints inside them. (list, dict and set
+    comprehensions are the exception since cpython 3.12 and PEP 709: they are
+    inlined into the function that contains them. the recursion is still what
+    reaches that function)
 - the executable lines of a code object come from `co_lines()`. a breakpoint on
     a blank line, a comment, or a `pass` that the compiler elided has no
     location. it moves to the next executable line **and the response says it

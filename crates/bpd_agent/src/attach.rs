@@ -1,17 +1,15 @@
-//! the control connection, and the stop it serves
+//! the control connection to the engine
 //!
-//! the agent holds the GIL while it is stopped. at an entry stop that is a
-//! complete stop of the whole program, because no user thread exists yet — the
-//! program has run nothing. it is **not** sufficient for a breakpoint, where
-//! other threads are already running and holding the GIL only stops the ones
-//! that want it. real stop coordination is its own piece of work
+//! this module is transport only: it connects, it holds the socket, and it
+//! serialises access to it. what a stop *means* is [`crate::session`]'s
+//! problem, because deciding it needs the interpreter and this does not
 
 use std::io;
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
-use bpd_protocol::message::{FromAgent, FromEngine, StopReason};
+use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
 /// the exit code used when the debugger disappears mid-session
@@ -42,7 +40,7 @@ pub(crate) fn attach(endpoint: &str, token_hex: &str, target: PathBuf) -> io::Re
     frame::write_handshake(&mut stream, &token).map_err(|error| framing(&error))?;
     frame::read_handshake(&mut stream, &token).map_err(|error| framing(&error))?;
 
-    let mut attached = ATTACHED.lock().expect("the attach lock is never poisoned");
+    let mut attached = lock();
     *attached = Some(Attached {
         stream,
         buffer: Vec::new(),
@@ -52,57 +50,78 @@ pub(crate) fn attach(endpoint: &str, token_hex: &str, target: PathBuf) -> io::Re
     Ok(())
 }
 
-/// the program this agent was asked to run
-pub(crate) fn target() -> Option<PathBuf> {
+fn lock() -> MutexGuard<'static, Option<Attached>> {
     ATTACHED
         .lock()
-        .expect("the attach lock is never poisoned")
-        .as_ref()
-        .map(|attached| attached.target.clone())
+        .expect("the attach lock is released by `Held` on every path, including the ones that exit")
+}
+
+/// the program this agent was asked to run
+pub(crate) fn target() -> Option<PathBuf> {
+    lock().as_ref().map(|attached| attached.target.clone())
 }
 
 /// whether the entry stop has already happened
 pub(crate) fn has_stopped_at_entry() -> bool {
-    ATTACHED
-        .lock()
-        .expect("the attach lock is never poisoned")
+    lock()
         .as_ref()
         .is_some_and(|attached| attached.stopped_at_entry)
 }
 
-/// report the entry stop and block until the engine resumes
+/// exclusive use of the control connection
 ///
-/// on losing the engine this exits the process rather than continuing. carrying
-/// on would leave a program running that its user believes is stopped, which is
-/// the exact failure this project exists to prevent
-pub(crate) fn stop_at_entry() {
-    let mut guard = ATTACHED.lock().expect("the attach lock is never poisoned");
-    let Some(attached) = guard.as_mut() else {
-        unreachable!("the entry stop cannot be reached before attach installed the connection");
+/// held for the whole of a stop, so the engine sees one conversation at a time.
+/// a second thread reaching a breakpoint blocks here until the first is
+/// resumed, and then reports its own stop — which is the honest ordering, not a
+/// claim that both were held
+#[derive(Debug)]
+pub(crate) struct Held {
+    guard: MutexGuard<'static, Option<Attached>>,
+}
+
+/// take the control connection
+pub(crate) fn hold() -> Held {
+    Held { guard: lock() }
+}
+
+/// record that the entry stop has happened, so it happens once
+pub(crate) fn mark_stopped_at_entry() {
+    let mut attached = lock();
+    let Some(attached) = attached.as_mut() else {
+        unreachable!("the entry stop cannot be reached before `attach` installed the connection");
     };
     attached.stopped_at_entry = true;
+}
 
-    let exchange = message::write(
-        &mut attached.stream,
-        &FromAgent::Stopped {
-            reason: StopReason::Entry,
-        },
-    )
-    .and_then(|()| message::read::<_, FromEngine>(&mut attached.stream, &mut attached.buffer));
+impl Held {
+    fn attached(&mut self) -> &mut Attached {
+        let Some(attached) = self.guard.as_mut() else {
+            unreachable!("nothing holds the control connection before `attach` installed it");
+        };
+        attached
+    }
 
-    match exchange {
-        Ok(Some(FromEngine::Resume)) => {}
-        // `FromEngine` is non-exhaustive, so a newer engine could ask for
-        // something this build cannot do. carrying on regardless would resume a
-        // program whose debugger asked for the opposite
-        Ok(Some(other)) => lost(&format!(
-            "the debugger asked for {other:?}, which this agent does not \
-             understand"
-        )),
-        Ok(None) => {
-            lost("the debugger closed the control connection while the program was stopped")
+    /// tell the engine something
+    ///
+    /// a write that fails means the engine is gone, and the debuggee does not
+    /// carry on without it
+    pub(crate) fn send(&mut self, message: &FromAgent) {
+        let attached = self.attached();
+        if let Err(error) = message::write(&mut attached.stream, message) {
+            lost(&format!("the control connection failed: {error}"));
         }
-        Err(error) => lost(&format!("the control connection failed: {error}")),
+    }
+
+    /// wait for the engine's next request
+    pub(crate) fn receive(&mut self) -> FromEngine {
+        let attached = self.attached();
+        match message::read::<_, FromEngine>(&mut attached.stream, &mut attached.buffer) {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                lost("the debugger closed the control connection while the program was stopped")
+            }
+            Err(error) => lost(&format!("the control connection failed: {error}")),
+        }
     }
 }
 
@@ -119,7 +138,7 @@ pub(crate) fn stop_at_entry() {
     reason = "the debuggee has no other channel left, and continuing is not an \
               option — see above"
 )]
-fn lost(reason: &str) -> ! {
+pub(crate) fn lost(reason: &str) -> ! {
     eprintln!("bpd: {reason}. the program was stopped and is not being resumed");
     std::process::exit(ENGINE_LOST);
 }

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::{ExitCode, ExitStatus};
 
 use bpd_core::python::Capabilities;
-use bpd_engine::Launched;
+use bpd_engine::{Launched, Running};
 
 use crate::report_error;
 
@@ -56,7 +56,23 @@ pub(crate) fn run(args: &Args) -> ExitCode {
         // interpreter's own words, and a line of bpd's on top would be a line
         // that is not there without the debugger
         Launched::ExitedBeforeStopping(status) => Ok(status),
-        Launched::Stopped(debuggee) => debuggee.resume_to_exit(),
+        Launched::Stopped(mut debuggee) => match debuggee.run() {
+            // `bpd launch` sets no breakpoints, so nothing in the program can
+            // stop it and nothing can change what a breakpoint resolves to.
+            // both are stated rather than absorbed, because a stop nobody
+            // handles is a debuggee left hanging
+            Ok(Running::Exited { status, rebound }) => {
+                assert!(
+                    rebound.is_empty(),
+                    "no breakpoints were set, and the agent reported {rebound:?}"
+                );
+                Ok(status)
+            }
+            Ok(Running::Stopped { reason, .. }) => {
+                unreachable!("no breakpoints were set, and the debuggee stopped for {reason:?}")
+            }
+            Err(error) => Err(error),
+        },
     };
 
     match finished {

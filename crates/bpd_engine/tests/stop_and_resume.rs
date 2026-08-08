@@ -8,7 +8,10 @@
 
 use std::ffi::OsString;
 
+use std::process::ExitStatus;
+
 use bpd_core::python::Capabilities;
+use bpd_engine::Running;
 use bpd_protocol::message::StopReason;
 use bpd_test::debuggee::Fixture;
 
@@ -28,6 +31,19 @@ fn stopped(fixture: &Fixture, args: &[OsString]) -> bpd_engine::Debuggee {
     }
 }
 
+/// resume a debuggee with no breakpoints set, which cannot stop again
+fn to_exit(mut debuggee: bpd_engine::Debuggee) -> ExitStatus {
+    match debuggee.run().expect("the debuggee ran to completion") {
+        Running::Exited { status, rebound } => {
+            assert!(rebound.is_empty(), "nothing was set, and got {rebound:?}");
+            status
+        }
+        Running::Stopped { reason, .. } => {
+            panic!("no breakpoints were set, and it stopped for {reason:?}")
+        }
+    }
+}
+
 /// a program whose very first statement is observable from outside the process
 fn touches(marker: &std::path::Path) -> String {
     format!(
@@ -44,16 +60,14 @@ fn the_program_has_run_nothing_while_it_is_stopped() {
 
     let debuggee = stopped(&fixture, &[]);
 
-    assert_eq!(debuggee.stopped(), StopReason::Entry);
+    assert_eq!(debuggee.stopped(), Some(&StopReason::Entry));
     assert!(
         !marker.exists(),
         "the program's first statement had already run when the engine was told \
          it was stopped"
     );
 
-    let status = debuggee
-        .resume_to_exit()
-        .expect("the debuggee ran to completion");
+    let status = to_exit(debuggee);
     assert!(status.success());
     assert!(
         marker.exists(),
@@ -67,7 +81,7 @@ fn the_exit_code_is_the_programs_own() {
         let fixture = Fixture::new("exits", &format!("raise SystemExit({code})\n"));
         let debuggee = stopped(&fixture, &[]);
 
-        let status = debuggee.resume_to_exit().expect("the debuggee finished");
+        let status = to_exit(debuggee);
         assert_eq!(status.code(), Some(code), "for a program exiting {code}");
     }
 }
@@ -81,7 +95,7 @@ fn the_programs_arguments_reach_it_untouched() {
         .collect();
 
     let debuggee = stopped(&fixture, &arguments);
-    let status = debuggee.resume_to_exit().expect("the debuggee finished");
+    let status = to_exit(debuggee);
 
     // the arguments went to the debuggee's own stdout, which is inherited, so
     // the assertion here is that it ran at all — `bpd`'s own launch parity test

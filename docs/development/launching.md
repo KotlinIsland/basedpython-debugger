@@ -110,8 +110,10 @@ complete stop of the whole program, because no user thread exists yet — the
 program has run nothing
 
 it is not sufficient for a breakpoint. by then other threads are running, and
-holding the GIL only stops the ones that want it. real stop coordination is its
-own piece of work, and it lands with breakpoints
+holding the GIL only stops the ones that want it — and on a free-threaded build
+it stops nothing. real stop coordination is its own piece of work and it is not
+built; what a breakpoint stop does and does not claim is spelled out in
+[breakpoints](breakpoints.md)
 
 ## the transport
 
