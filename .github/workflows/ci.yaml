@@ -63,6 +63,11 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python }}
+      # the agent is a cdylib nothing links, so `cargo test` never builds it —
+      # it has to be built explicitly or the suite finds no agent to stage. on a
+      # fresh checkout that fails loudly; on a machine that has built before it
+      # would quietly test a stale agent, which is worse
+      - run: cargo build -p bpd_agent
       # `bpd_test` discovers interpreters itself and fails loudly when none is
       # supported, so a job that silently tested nothing is not possible
       - run: cargo test --workspace --all-features
