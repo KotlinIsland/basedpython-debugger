@@ -1,0 +1,24 @@
+# which interpreter the agent is built against
+#
+# pyo3's own build script resolves this before ours runs, so it cannot be
+# chosen from inside the workspace — it has to be in the environment. without a
+# default here, `cargo build` picks whatever `python3` is on PATH, which on most
+# machines is older than the minimum and fails a long way from the cause
+#
+# not forced: `PYO3_PYTHON=python3.13 cargo build` still wins, and CI sets it
+# per interpreter in the matrix
+[env]
+PYO3_PYTHON = { value = "python3.14", force = false }
+
+# `bpd_agent` is an extension module: the interpreter that loads it already
+# provides the cpython symbols, so the agent must not try to link them. every
+# other platform's linker allows undefined symbols in a shared object by
+# default. macos does not, and needs to be told
+#
+# maturin passes these for you. this workspace builds the agent with plain
+# cargo, so they live here
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

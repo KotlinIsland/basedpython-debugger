@@ -1,0 +1,29 @@
+[package]
+name = "bpd_agent"
+description = "the native agent loaded into the debuggee"
+edition = { workspace = true }
+rust-version = { workspace = true }
+version = { workspace = true }
+publish = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+
+[lib]
+name = "bpd_agent"
+# the interpreter loads this as an extension module. there is no rlib, because
+# nothing in the workspace links it — the engine stages the built artifact and
+# the interpreter imports it
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true }
+
+[dev-dependencies]
+bpd_core = { workspace = true }
+bpd_test = { workspace = true }
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
+[lints]
+workspace = true

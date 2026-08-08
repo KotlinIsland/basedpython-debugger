@@ -15,6 +15,11 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # the agent is not abi3, so every rust build compiles it against one specific
+  # interpreter. `python` is whatever setup-python put first on PATH, which is
+  # the matrix entry for that job. this overrides the default in
+  # `.cargo/config.toml`
+  PYO3_PYTHON: python
 
 jobs:
   lint:
@@ -26,9 +31,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.14"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
           enable-cache: true
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -75,12 +82,20 @@ jobs:
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: cargo-llvm-cov
+      # measured over the crates that ship. `bpd_test` is the harness, and
+      # covering a harness measures nothing; `bpd_agent` runs inside a python
+      # process where llvm-cov cannot see it, and has its own tests in the
+      # `test` job above
+      #
       # the floor catches a change that adds a body of untested code. it sits
       # below the measured figure by enough to absorb the variation between a
       # runner with one interpreter and a machine with several, because the
       # tests that assert on a refusal only run when an unsupported interpreter
       # is present
-      - run: cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines 88
+      - run: >
+          cargo llvm-cov --workspace --all-features
+          --exclude bpd_agent --exclude bpd_test
+          --summary-only --fail-under-lines 88
 
   bench:
     name: bench
@@ -91,6 +106,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
       # `--test` runs each benchmark once. this catches a benchmark that stops
       # compiling or panics; it deliberately does NOT gate on wall-clock numbers
       # from a shared runner, which vary by more than the effects worth catching
