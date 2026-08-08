@@ -1,0 +1,66 @@
+[project]
+site_name = "basedpythondebugger"
+site_description = "a debugger for python and basedpython, built on PEP 669"
+site_author = "KotlinIsland"
+site_url = "https://kotlinisland.github.io/basedpythondebugger/"
+docs_dir = "docs"
+repo_url = "https://github.com/KotlinIsland/basedpythondebugger"
+repo_name = "KotlinIsland/basedpythondebugger"
+edit_uri = "edit/main/docs"
+
+[project.theme]
+features = [
+  # a click swaps the page in place instead of reloading the whole document,
+  # and a hovered link is fetched before the click lands
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.instant.progress",
+  "navigation.tracking",
+  "navigation.path",
+  "navigation.indexes",
+  "navigation.footer",
+  "navigation.top",
+  "toc.follow",
+  "content.code.copy",
+  "content.code.annotate",
+  "content.tabs.link",
+  "content.action.edit",
+  "search.highlight",
+]
+
+[project.theme.icon]
+logo = "lucide/bug"
+repo = "fontawesome/brands/github"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "black"
+accent = "indigo"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "black"
+accent = "indigo"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/KotlinIsland/basedpythondebugger"
+name = "basedpythondebugger on GitHub"
+
+[[project.nav]]
+basedpythondebugger = "index.md"
+
+[[project.nav]]
+development = [
+  "development/architecture.md",
+  "development/agent-interface.md",
+  "development/python-support.md",
+  "development/source-mapping.md",
+  "development/django-templates.md",
+]

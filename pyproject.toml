@@ -1,0 +1,15 @@
+# this is not a python package. it exists so the docs build and the repository
+# scripts have a pinned environment, and so the basedpython layer under
+# `python/` has somewhere to declare itself when it lands
+[project]
+name = "basedpythondebugger"
+version = "0.0.0"
+description = "a debugger for python and basedpython"
+requires-python = ">=3.13"
+dependencies = []
+
+[dependency-groups]
+docs = ["zensical"]
+
+[tool.uv]
+package = false
