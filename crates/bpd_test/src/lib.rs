@@ -15,6 +15,7 @@
 // the first time a matrix test fails on someone else's machine
 #![allow(clippy::print_stderr)]
 
+pub mod agent;
 pub mod alloc;
 pub mod debuggee;
 

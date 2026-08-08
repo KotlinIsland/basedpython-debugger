@@ -77,11 +77,46 @@ against a specific interpreter:
 BPD_TEST_PYTHONS=/path/to/python3.14 cargo test --workspace
 ```
 
+## building the agent
+
+the agent is a cpython extension module and it is **not** `abi3` — it reads
+`sys.monitoring` and interpreter state whose layout changes between releases, so
+one build is loadable by one `major.minor`
+
+which interpreter it is compiled against comes from `PYO3_PYTHON`, resolved by
+pyo3's own build script before anything in this workspace runs. that is why it
+cannot be chosen from a manifest. `.cargo/config.toml` sets a default so the
+workspace builds out of the box, and it is overridable:
+
+```sh
+PYO3_PYTHON=python3.13 cargo build -p bpd_agent
+```
+
+building against an interpreter older than the minimum fails in `build.rs`
+rather than producing an artifact that could never work
+
+**a successful import is not an ABI check.** on unix an extension module is a
+shared object whose cpython symbols resolve at load time, so cpython 3.13
+imports a 3.14 build without complaint and then runs it against a layout it was
+not compiled for — which is worse than failing. `bpd_agent.verify_interpreter()`
+is the check that actually decides, and
+`crates/bpd_agent/tests/loads.rs` asserts that no interpreter other than the one
+it was built for ever gets past it
+
+the agent's own tests drive a real interpreter with the built artifact staged on
+`PYTHONPATH`, because nothing in the workspace can link a `cdylib`.
+`bpd_test::agent::staged()` does the staging — the rename cargo's artifact name
+needs to become an importable module
+
 ## coverage
 
 ```sh
-cargo llvm-cov --workspace --all-features --summary-only
+cargo llvm-cov --workspace --all-features --exclude bpd_agent --exclude bpd_test --summary-only
 ```
+
+measured over the crates that ship. `bpd_test` is the harness, and covering a
+harness measures nothing about the product; `bpd_agent` executes inside a python
+process where llvm-cov cannot attribute it, and has its own tests instead
 
 CI enforces a floor with `--fail-under-lines`. the floor exists to catch a
 change that adds a body of untested code, not to be optimised against — a test
