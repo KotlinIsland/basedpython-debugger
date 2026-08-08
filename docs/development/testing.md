@@ -88,6 +88,32 @@ change that adds a body of untested code, not to be optimised against — a test
 written to move the number rather than to establish a fact is worse than no
 test, because it makes the number lie
 
+## the launch baseline
+
+running a program under a debugger has to be indistinguishable from running it
+directly. `bpd_test::debuggee` runs a fixture the three ways cpython can be
+entered and returns what the program observed about its own launch, so
+`bpd launch` has something exact to be compared against
+
+the three forms are not variations of one another:
+
+| | `script.py` | `-m module` | `-c source` |
+| --- | --- | --- | --- |
+| `sys.argv[0]` | the path as given | **the resolved file path** | `-c` |
+| `sys.path[0]` | the script's directory | the working directory | `""` |
+| `__main__.__spec__` | absent | the module's spec | absent |
+| `__main__.__package__` | absent | `""` | absent |
+| `__main__.__file__` | the script | the module's file | absent |
+
+these are recorded in `crates/bpd_test/tests/launch_forms.rs` against every
+installed interpreter. two of them are the traps: `-m` rewrites `argv[0]` to the
+resolved *file*, not the module name, and `-c` leaves `sys.path[0]` as the
+empty string, which means "the working directory at import time" and is not the
+same as the working directory spelled out
+
+fixtures must never be run with `-I` or `-E`. isolated mode drops the script's
+directory from `sys.path` entirely, which is one of the values under test
+
 ## benchmarks
 
 ```sh
@@ -103,9 +129,37 @@ claim about how much of a round trip is framing rather than serialisation
 CI runs benchmarks with criterion's `--test` mode, which executes each one once
 to catch a panic or a regression that stops it compiling. it does **not** gate
 on wall-clock numbers from a shared runner: those vary by more than the effects
-worth catching, and a flaky perf gate teaches people to ignore perf failures.
-instruction-count measurement is the way to make that gate meaningful, and it is
-not wired up yet
+worth catching, and a flaky perf gate teaches people to ignore perf failures
+
+## the performance gate that does run in CI
+
+a number that is the same on every machine can be asserted on, and an
+allocation count is such a number. `bpd_test::alloc` counts allocations per
+thread, so a test can state exactly what a hot path is allowed to do:
+
+```rust
+let (present, allocations) = measure(|| read_frame_into(&mut wire, &mut buffer));
+assert_eq!(allocations.count, 0);
+```
+
+this is what protects the documented claim that `read_frame_into` takes the
+caller's buffer so a long lived reader reuses one allocation. that claim is
+either enforced or it is a comment
+
+the gate has been checked against a real regression: replacing the buffer reuse
+with a fresh `vec![0; length]` per frame fails
+`crates/bpd_protocol/tests/allocation.rs` with the count it saw — while **every
+functional test still passes**, which is precisely the class of change that
+would otherwise ship unnoticed
+
+a test binary using this must install the allocator, and
+`Allocations::assert_measured` exists because a binary that forgot to reports
+zero for everything — the same value the assertions are looking for:
+
+```rust
+#[global_allocator]
+static ALLOCATOR: bpd_test::alloc::Counting = bpd_test::alloc::Counting;
+```
 
 ## what is not covered yet
 

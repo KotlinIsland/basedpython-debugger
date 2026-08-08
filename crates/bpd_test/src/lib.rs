@@ -15,6 +15,9 @@
 // the first time a matrix test fails on someone else's machine
 #![allow(clippy::print_stderr)]
 
+pub mod alloc;
+pub mod debuggee;
+
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
