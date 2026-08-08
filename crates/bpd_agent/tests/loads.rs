@@ -5,44 +5,11 @@
 //! built artifact staged on `PYTHONPATH`, which is also how it will reach a
 //! debuggee
 
-use bpd_core::python::Capabilities;
-use bpd_test::agent::staged;
+use bpd_test::agent::matching_interpreter;
 use bpd_test::debuggee::Run;
 
-/// the interpreter the agent was actually built for
-///
-/// selected by `verify_interpreter`, **not** by whether the import succeeds.
-/// those are not the same question: on unix an extension module is a shared
-/// object whose cpython symbols resolve at load time, so a 3.13 interpreter
-/// imports a 3.14 build without complaint and then runs it against a layout it
-/// was not compiled for. that is the whole reason the explicit check exists
-fn matching_interpreter() -> &'static Capabilities {
-    static MATCHING: std::sync::OnceLock<&'static Capabilities> = std::sync::OnceLock::new();
-
-    MATCHING.get_or_init(|| {
-        let supported = bpd_test::discovered().require();
-        let matching = supported.iter().copied().find(|interpreter| {
-            staged()
-                .run(
-                    interpreter,
-                    "import bpd_agent; bpd_agent.verify_interpreter()",
-                )
-                .success
-        });
-
-        match matching {
-            Some(interpreter) => interpreter,
-            None => panic!(
-                "no discovered interpreter can import the built agent. it is \
-                 compiled for one `major.minor` at a time — build it for one \
-                 you have:\n    PYO3_PYTHON=python3.14 cargo build -p bpd_agent"
-            ),
-        }
-    })
-}
-
 fn run(code: &str) -> Run {
-    staged().run(matching_interpreter(), code)
+    bpd_test::agent::run(matching_interpreter(), code)
 }
 
 fn succeeds(code: &str) -> String {
@@ -84,7 +51,7 @@ fn an_interpreter_it_was_not_built_for_never_proceeds_silently() {
             continue;
         }
 
-        let run = staged().run(
+        let run = bpd_test::agent::run(
             interpreter,
             "import bpd_agent; bpd_agent.verify_interpreter()",
         );
@@ -181,7 +148,7 @@ fn importing_the_agent_warns_about_nothing() {
     // `-W error` turns cpython's "this module made me re-enable the gil"
     // RuntimeWarning into a failure. it is the same property as the test above,
     // caught at the moment of import and on every build configuration
-    let run = staged().run(
+    let run = bpd_test::agent::run(
         matching_interpreter(),
         "import warnings; warnings.simplefilter('error'); import bpd_agent",
     );

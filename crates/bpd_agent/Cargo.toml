@@ -16,6 +16,8 @@ name = "bpd_agent"
 crate-type = ["cdylib"]
 
 [dependencies]
+bpd_protocol = { workspace = true }
+
 pyo3 = { workspace = true }
 
 [dev-dependencies]

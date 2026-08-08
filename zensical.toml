@@ -59,6 +59,7 @@ basedpythondebugger = "index.md"
 [[project.nav]]
 development = [
   "development/architecture.md",
+  "development/launching.md",
   "development/agent-interface.md",
   "development/testing.md",
   "development/python-support.md",

@@ -91,14 +91,23 @@ reloading, and any editor integration beyond a launch configuration
 the workspace, the lint and hook configuration, CI across the interpreter
 matrix, the docs site, and `bpd doctor`
 
-### M1 — a process that stops
+### M1 — a process that stops · done
 
-launch an interpreter, load the agent into it, complete the handshake, stop
-before the first user statement, resume on request, and exit with the program's
-own exit code
+`bpd launch` starts an interpreter with the agent attached, holds the program
+before its first statement, resumes it, and exits with the program's own code
 
-this is the milestone that proves the architecture, and it is where the process
-model, the transport and the message set are decided
+running under `bpd` is indistinguishable from running without it, and that is
+checked rather than claimed: the same program runs twice, once bare and once
+debugged, and the launch record, both output streams and the exit code are
+compared. syntax errors, uncaught tracebacks and an unopenable script are all
+reported in the interpreter's own words
+
+what is **not** done here: `-m` and `-c` launch forms, and stop coordination
+strong enough for a breakpoint. an entry stop holds the whole program because no
+user thread exists yet; that stops being true the moment a breakpoint can fire,
+and the real coordination lands with M2
+
+see [launching a debuggee](docs/development/launching.md)
 
 ### M2 — breakpoints
 

@@ -9,6 +9,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod doctor;
+mod launch;
 
 use std::process::ExitCode;
 
@@ -28,10 +29,26 @@ struct Cli {
 enum Command {
     /// report whether an interpreter can be debugged, and why not if it cannot
     Doctor(doctor::Args),
+
+    /// run a program with the debugger attached
+    Launch(launch::Args),
+}
+
+/// print a failure and every cause behind it
+///
+/// shared by the commands so a refusal reads the same wherever it came from
+fn report_error(error: &dyn std::error::Error) {
+    eprintln!("error: {error}");
+    let mut source = error.source();
+    while let Some(cause) = source {
+        eprintln!("  caused by: {cause}");
+        source = cause.source();
+    }
 }
 
 fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Doctor(args) => doctor::run(&args),
+        Command::Launch(args) => launch::run(&args),
     }
 }

@@ -51,13 +51,15 @@ fn round_trip(criterion: &mut Criterion) {
 
 fn handshake(criterion: &mut Criterion) {
     // paid once per session, so it is here to catch it becoming something other
-    // than eight bytes rather than because it is hot
+    // than its fixed size rather than because it is hot
+    let token = [7; bpd_protocol::TOKEN_LEN];
     criterion.bench_function("frame/handshake", |bencher| {
-        let mut wire = Vec::with_capacity(8);
+        let mut wire = Vec::with_capacity(64);
         bencher.iter(|| {
             wire.clear();
-            bpd_protocol::frame::write_handshake(&mut wire).expect("a vec never fails to write");
-            bpd_protocol::frame::read_handshake(&mut wire.as_slice())
+            bpd_protocol::frame::write_handshake(&mut wire, &token)
+                .expect("a vec never fails to write");
+            bpd_protocol::frame::read_handshake(&mut wire.as_slice(), &token)
                 .expect("this build agrees with itself");
             black_box(wire.len())
         });

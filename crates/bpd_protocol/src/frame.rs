@@ -6,7 +6,15 @@ use std::io::{self, Read, Write};
 ///
 /// bumped whenever the byte layout of the handshake or a frame header changes.
 /// the message set carried inside a frame has its own versioning
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// the length of the shared secret exchanged in the handshake
+///
+/// the control plane listens on loopback tcp, which any local process can
+/// connect to. the token is what makes that acceptable: it is generated per
+/// session, passed to the agent through its environment, and a peer that cannot
+/// present it is refused before it can send a single frame
+pub const TOKEN_LEN: usize = 32;
 
 /// the largest frame that will be sent or accepted
 ///
@@ -51,11 +59,25 @@ pub enum Error {
         found: u32,
     },
 
+    /// the peer presented the wrong session token
+    ///
+    /// the token is never included in the message: something on loopback is
+    /// guessing, and telling it how close it got would be absurd
+    #[error("the peer did not present this session's token")]
+    WrongToken,
+
     /// the peer announced a frame larger than [`MAX_FRAME_LEN`]
     #[error("the peer announced a {announced} byte frame, and the limit is {MAX_FRAME_LEN}")]
     FrameTooLarge {
         /// the length in the frame header
         announced: u64,
+    },
+
+    /// a frame arrived whole but its contents made no sense
+    #[error("{reason}")]
+    Undecodable {
+        /// what could not be understood
+        reason: String,
     },
 
     /// the stream ended part way through a frame
@@ -68,17 +90,24 @@ pub enum Error {
     },
 }
 
-/// announce this build to the peer
-pub fn write_handshake<W: Write>(writer: &mut W) -> Result<()> {
+/// how many bytes a handshake occupies on the wire
+const HANDSHAKE_LEN: usize = MAGIC.len() + size_of::<u32>() + TOKEN_LEN;
+
+/// announce this build to the peer, presenting the session token
+pub fn write_handshake<W: Write>(writer: &mut W, token: &[u8; TOKEN_LEN]) -> Result<()> {
     writer.write_all(&MAGIC)?;
     writer.write_all(&PROTOCOL_VERSION.to_le_bytes())?;
+    writer.write_all(token)?;
     writer.flush()?;
     Ok(())
 }
 
 /// read the peer's announcement, and refuse anything that is not an exact match
-pub fn read_handshake<R: Read>(reader: &mut R) -> Result<()> {
-    let mut header = [0u8; 8];
+///
+/// the token comparison is constant time in the length of the token, so a peer
+/// on loopback cannot learn a prefix by timing the refusal
+pub fn read_handshake<R: Read>(reader: &mut R, expected: &[u8; TOKEN_LEN]) -> Result<()> {
+    let mut header = [0u8; HANDSHAKE_LEN];
     if !read_exact_or_eof(reader, &mut header)? {
         return Err(Error::Truncated {
             expected: header.len(),
@@ -86,7 +115,7 @@ pub fn read_handshake<R: Read>(reader: &mut R) -> Result<()> {
         });
     }
 
-    let (magic, version) = header.split_at(MAGIC.len());
+    let (magic, rest) = header.split_at(MAGIC.len());
     if magic != MAGIC {
         return Err(Error::NotAPeer {
             found: header[..MAGIC.len()]
@@ -95,9 +124,18 @@ pub fn read_handshake<R: Read>(reader: &mut R) -> Result<()> {
         });
     }
 
-    let found = u32::from_le_bytes(version.try_into().expect("the remainder is four bytes"));
+    let (version, token) = rest.split_at(size_of::<u32>());
+    let found = u32::from_le_bytes(version.try_into().expect("the split is at four bytes"));
     if found != PROTOCOL_VERSION {
         return Err(Error::VersionMismatch { found });
+    }
+
+    let mut difference = 0u8;
+    for (presented, expected) in token.iter().zip(expected) {
+        difference |= presented ^ expected;
+    }
+    if difference != 0 {
+        return Err(Error::WrongToken);
     }
 
     Ok(())
@@ -180,16 +218,30 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<bool>
 mod tests {
     use super::*;
 
+    const TOKEN: [u8; TOKEN_LEN] = [7; TOKEN_LEN];
+
     #[test]
     fn a_handshake_round_trips() {
         let mut wire = Vec::new();
-        write_handshake(&mut wire).expect("writing to a vec cannot fail");
-        read_handshake(&mut wire.as_slice()).expect("this build agrees with itself");
+        write_handshake(&mut wire, &TOKEN).expect("writing to a vec cannot fail");
+        read_handshake(&mut wire.as_slice(), &TOKEN).expect("this build agrees with itself");
+    }
+
+    #[test]
+    fn a_peer_presenting_the_wrong_token_is_refused() {
+        let mut wire = Vec::new();
+        write_handshake(&mut wire, &[9; TOKEN_LEN]).expect("writing to a vec cannot fail");
+
+        let error = read_handshake(&mut wire.as_slice(), &TOKEN)
+            .expect_err("a peer without the token is not this session's agent");
+        assert!(matches!(error, Error::WrongToken));
     }
 
     #[test]
     fn a_peer_that_is_not_bpd_is_named_as_such() {
-        let error = read_handshake(&mut b"HTTP/1.1".as_slice())
+        let mut wire = b"HTTP/1.1".to_vec();
+        wire.resize(HANDSHAKE_LEN, 0);
+        let error = read_handshake(&mut wire.as_slice(), &TOKEN)
             .expect_err("an http server is not a bpd agent");
         let Error::NotAPeer { found } = error else {
             panic!("expected a peer refusal, got {error:?}");
@@ -203,8 +255,9 @@ mod tests {
         wire.extend_from_slice(&MAGIC);
         wire.extend_from_slice(&(PROTOCOL_VERSION + 1).to_le_bytes());
 
-        let error =
-            read_handshake(&mut wire.as_slice()).expect_err("a newer agent is still a mismatch");
+        wire.resize(HANDSHAKE_LEN, 0);
+        let error = read_handshake(&mut wire.as_slice(), &TOKEN)
+            .expect_err("a newer agent is still a mismatch");
         let Error::VersionMismatch { found } = error else {
             panic!("expected a version mismatch, got {error:?}");
         };

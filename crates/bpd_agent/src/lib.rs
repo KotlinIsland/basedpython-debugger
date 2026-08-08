@@ -9,7 +9,10 @@
 //! through the C interface. calling python from rust is only banned where it
 //! costs something per event
 
-use pyo3::exceptions::PyImportError;
+mod attach;
+mod run;
+
+use pyo3::exceptions::{PyImportError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -31,9 +34,68 @@ const TOOL_NAME: &str = "bpd";
 
 #[pymodule]
 mod bpd_agent {
-    use super::{BUILT_FOR, DEBUGGER_TOOL_ID, TOOL_NAME, monitoring, running_version};
-    use pyo3::exceptions::{PyImportError, PyRuntimeError};
+    use super::{
+        BUILT_FOR, DEBUGGER_TOOL_ID, TOOL_NAME, arm, attach, monitoring, run, running_version,
+    };
+    use pyo3::exceptions::{PyImportError, PyRuntimeError, PySystemExit};
     use pyo3::prelude::*;
+
+    /// the whole of the debuggee's entry point
+    ///
+    /// the interpreter is entered with `python -c "import bpd_agent;
+    /// bpd_agent.main()"`, so this runs before anything of the user's program.
+    /// it attaches, arms the entry stop, and then enters the program the way
+    /// the interpreter would have
+    #[pyfunction]
+    fn main(python: Python<'_>) -> PyResult<()> {
+        verify_interpreter(python)?;
+
+        let endpoint = required_env(bpd_protocol::env::ENDPOINT)?;
+        let token = required_env(bpd_protocol::env::TOKEN)?;
+        let target = required_env(bpd_protocol::env::TARGET)?;
+
+        // taken out of the environment before any user code can see them. a
+        // program that behaves differently because it noticed the debugger is a
+        // program the debugger changed
+        for name in bpd_protocol::env::ALL {
+            forget_env(python, name)?;
+        }
+
+        // absolutised once, here, so the path the entry stop matches on is the
+        // same string the compiled code object carries. the spelling the user
+        // typed is kept too, because `sys.argv[0]` must not be absolutised
+        let as_given = target;
+        let target = std::path::absolute(&as_given).map_err(|error| {
+            PySystemExit::new_err(format!("bpd: could not resolve `{as_given}`: {error}"))
+        })?;
+
+        attach::attach(&endpoint, &token, target.clone())
+            .map_err(|error| PySystemExit::new_err(format!("bpd: could not attach: {error}")))?;
+        claim(python)?;
+        arm(python)?;
+
+        match run::script(python, &as_given, &target) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(run::report_uncaught(python, error)),
+        }
+    }
+
+    /// read a variable the launcher is contracted to have set
+    fn required_env(name: &str) -> PyResult<String> {
+        std::env::var(name).map_err(|_| {
+            PySystemExit::new_err(format!(
+                "bpd: `{name}` is not set. `bpd_agent.main()` is the entry point                  the launcher uses and is not meant to be called by hand"
+            ))
+        })
+    }
+
+    /// remove a variable from the process and from `os.environ`
+    fn forget_env(python: Python<'_>, name: &str) -> PyResult<()> {
+        PyModule::import(python, "os")?
+            .getattr("environ")?
+            .call_method1("pop", (name, python.None()))?;
+        Ok(())
+    }
 
     /// the `major.minor` this artifact was compiled against
     #[pyfunction]
@@ -97,6 +159,85 @@ mod bpd_agent {
             .call_method1("get_tool", (DEBUGGER_TOOL_ID,))?
             .extract()
     }
+}
+
+/// turn on the entry stop
+///
+/// `PY_START` is the only event armed, and it is armed globally because the
+/// program's own code object does not exist yet — there is nothing to scope it
+/// to. every callback that is not the program's entry returns `DISABLE`, so the
+/// cost is one native call per code object first reached during startup, and
+/// the events are turned off entirely once the entry stop has happened
+fn arm(python: Python<'_>) -> PyResult<()> {
+    let monitoring = monitoring(python)?;
+    let py_start = monitoring.getattr("events")?.getattr("PY_START")?;
+    let callback = wrap_pyfunction!(on_py_start, python)?;
+
+    // resolved once, here, and never again. the callback runs on entry to every
+    // code object the program reaches, and doing `import sys` plus two attribute
+    // lookups per event would be python work on an event path — which this
+    // architecture does not do, and which re-enters the import system from
+    // inside a monitoring callback while the interpreter is importing
+    DISABLE
+        .set(monitoring.getattr("DISABLE")?.unbind())
+        .map_err(|_| PyRuntimeError::new_err("the agent was armed twice"))?;
+
+    monitoring.call_method1("register_callback", (DEBUGGER_TOOL_ID, &py_start, callback))?;
+    monitoring.call_method1("set_events", (DEBUGGER_TOOL_ID, py_start))?;
+    Ok(())
+}
+
+/// turn every event back off
+///
+/// the entry stop happens once. leaving `PY_START` armed would keep paying a
+/// native call for every code object the program ever reaches, for nothing
+fn disarm(python: Python<'_>) -> PyResult<()> {
+    monitoring(python)?.call_method1("set_events", (DEBUGGER_TOOL_ID, 0))?;
+    Ok(())
+}
+
+/// the `PY_START` callback, called by the interpreter with no python frame in
+/// between
+///
+/// it does not materialise a frame. deciding whether this is the entry needs
+/// the code object's filename and nothing else, and the common answer is no
+#[pyfunction]
+fn on_py_start<'py>(
+    python: Python<'py>,
+    code: &Bound<'py, PyAny>,
+    _offset: i32,
+) -> PyResult<Bound<'py, PyAny>> {
+    let disable = disable(python);
+
+    if attach::has_stopped_at_entry() {
+        return Ok(disable);
+    }
+    let Some(target) = attach::target() else {
+        return Ok(disable);
+    };
+
+    let attribute = code.getattr("co_filename")?;
+    let filename: std::borrow::Cow<'_, str> = attribute.extract()?;
+    if std::path::Path::new(filename.as_ref()) != target {
+        return Ok(disable);
+    }
+
+    attach::stop_at_entry();
+    disarm(python)?;
+    Ok(disable)
+}
+
+/// `sys.monitoring.DISABLE`, resolved at arm time
+///
+/// a `OnceLock` rather than a lookup, because this is read on every event
+static DISABLE: std::sync::OnceLock<Py<PyAny>> = std::sync::OnceLock::new();
+
+fn disable(python: Python<'_>) -> Bound<'_, PyAny> {
+    DISABLE
+        .get()
+        .expect("the callback cannot run before arm installed DISABLE")
+        .bind(python)
+        .clone()
 }
 
 /// `sys.monitoring`, or an error naming what is missing

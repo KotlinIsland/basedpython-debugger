@@ -27,10 +27,13 @@ what exists today:
 
 ```sh
 cargo run --bin bpd -- doctor
+cargo run --bin bpd -- launch --python python3.14 script.py
 ```
 
-reports whether an interpreter can be debugged, and refuses loudly when it
-cannot
+`doctor` reports whether an interpreter can be debugged and refuses loudly when
+it cannot. `launch` runs a program with the agent attached, holds it before its
+first statement, and lets it go — producing a run indistinguishable from a bare
+one, which is checked rather than claimed
 
 ## documentation
 

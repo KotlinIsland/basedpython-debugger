@@ -15,6 +15,7 @@ use bpd_test::alloc::measure;
 static ALLOCATOR: bpd_test::alloc::Counting = bpd_test::alloc::Counting;
 
 const PAYLOAD: &[u8] = &[0xa5; 4096];
+const TOKEN: [u8; bpd_protocol::TOKEN_LEN] = [7; bpd_protocol::TOKEN_LEN];
 
 fn framed(payload: &[u8]) -> Vec<u8> {
     let mut wire = Vec::new();
@@ -114,11 +115,12 @@ fn a_refused_frame_does_not_allocate_what_it_refused() {
 
 #[test]
 fn the_handshake_does_not_allocate() {
-    let mut wire = Vec::with_capacity(8);
+    let mut wire = Vec::with_capacity(64);
 
     let ((), allocations) = measure(|| {
-        bpd_protocol::frame::write_handshake(&mut wire).expect("writing to a vec cannot fail");
-        bpd_protocol::frame::read_handshake(&mut wire.as_slice())
+        bpd_protocol::frame::write_handshake(&mut wire, &TOKEN)
+            .expect("writing to a vec cannot fail");
+        bpd_protocol::frame::read_handshake(&mut wire.as_slice(), &TOKEN)
             .expect("this build agrees with itself");
     });
 

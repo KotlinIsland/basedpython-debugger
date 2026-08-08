@@ -82,20 +82,28 @@ jobs:
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: cargo-llvm-cov
-      # measured over the crates that ship. `bpd_test` is the harness, and
-      # covering a harness measures nothing; `bpd_agent` runs inside a python
-      # process where llvm-cov cannot see it, and has its own tests in the
-      # `test` job above
+      # `cargo llvm-cov` runs `cargo test --tests`, which never produces a
+      # `cdylib` that nothing links — so the agent would be missing and every
+      # test that stages it would fail. `show-env` puts the instrumentation in
+      # the environment instead, so the agent can be built first
+      #
+      # a welcome side effect: the debuggee inherits `LLVM_PROFILE_FILE`, so the
+      # agent's coverage is collected from inside the python process that ran it
+      #
+      # `bpd_test` is excluded from the report. it is the harness, and covering
+      # a harness measures nothing about the product
       #
       # the floor catches a change that adds a body of untested code. it sits
       # below the measured figure by enough to absorb the variation between a
-      # runner with one interpreter and a machine with several, because the
-      # tests that assert on a refusal only run when an unsupported interpreter
-      # is present
-      - run: >
-          cargo llvm-cov --workspace --all-features
-          --exclude bpd_agent --exclude bpd_test
-          --summary-only --fail-under-lines 88
+      # runner with one interpreter and a machine with several
+      - run: |
+          eval "$(cargo llvm-cov show-env --sh)"
+          cargo llvm-cov clean --workspace
+          cargo build -p bpd_agent
+          cargo test --workspace --all-features
+          cargo llvm-cov report --summary-only \
+            --ignore-filename-regex 'crates/bpd_test/' \
+            --fail-under-lines 78
 
   bench:
     name: bench

@@ -84,6 +84,7 @@ name = "bpd"
 version = "0.0.0"
 dependencies = [
  "bpd_core",
+ "bpd_engine",
  "bpd_test",
  "clap",
 ]
@@ -93,6 +94,7 @@ name = "bpd_agent"
 version = "0.0.0"
 dependencies = [
  "bpd_core",
+ "bpd_protocol",
  "bpd_test",
  "pyo3",
  "pyo3-build-config",
@@ -109,11 +111,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bpd_engine"
+version = "0.0.0"
+dependencies = [
+ "bpd_core",
+ "bpd_protocol",
+ "bpd_test",
+ "getrandom",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "bpd_protocol"
 version = "0.0.0"
 dependencies = [
  "bpd_test",
  "criterion",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -122,6 +138,7 @@ name = "bpd_test"
 version = "0.0.0"
 dependencies = [
  "bpd_core",
+ "bpd_engine",
  "serde",
  "serde_json",
  "tempfile",
