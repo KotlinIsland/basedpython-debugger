@@ -68,8 +68,19 @@ title
 ## running the suite
 
 ```sh
+cargo build -p bpd_agent
 cargo test --workspace --all-features
 ```
+
+**the build step is not optional.** the agent is a `cdylib` and nothing in the
+workspace links it, so `cargo test` does not build it — it builds the agent's
+lib target as a *test* binary instead, which produces no importable module
+
+with no artifact at all the suite fails loudly, naming the build command. the
+dangerous case is the other one: an artifact left by an earlier build is used
+as-is, so an edit to `crates/bpd_agent/` can be "verified" against the previous
+agent and appear to pass. every test touching the agent is then measuring
+something that is not the code in front of you
 
 against a specific interpreter:
 
