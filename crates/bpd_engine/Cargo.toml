@@ -1,6 +1,6 @@
 [package]
-name = "bpd_protocol"
-description = "the control plane framing between the bpd engine and the in-process agent"
+name = "bpd_engine"
+description = "owns debuggee processes and the control plane to their agents"
 edition = { workspace = true }
 rust-version = { workspace = true }
 version = { workspace = true }
@@ -9,17 +9,16 @@ license = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
+bpd_core = { workspace = true }
+bpd_protocol = { workspace = true }
+
+getrandom = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 bpd_test = { workspace = true }
-criterion = { workspace = true }
-
-[[bench]]
-name = "frame"
-harness = false
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

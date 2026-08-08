@@ -4,11 +4,12 @@
 //! script. the report is printed either way, because "which of my six
 //! interpreters can you drive" is the question people actually have
 
-use std::error::Error;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use bpd_core::python::{Capabilities, MINIMUM_SUPPORTED, RemoteDebug};
+
+use crate::report_error;
 
 /// `bpd doctor` arguments
 #[derive(Debug, clap::Args)]
@@ -93,13 +94,4 @@ fn build(capabilities: &Capabilities) -> String {
 
 fn field(name: &str, value: &str) {
     println!("{name:<12} {value}");
-}
-
-fn report_error(error: &dyn Error) {
-    eprintln!("error: {error}");
-    let mut source = error.source();
-    while let Some(cause) = source {
-        eprintln!("  caused by: {cause}");
-        source = cause.source();
-    }
 }

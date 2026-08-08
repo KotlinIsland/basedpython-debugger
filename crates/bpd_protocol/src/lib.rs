@@ -10,6 +10,8 @@
 //! mode, and it is worth a clear error at connect time rather than a decoding
 //! failure ten frames later. there is no compatibility ladder
 
+pub mod env;
 pub mod frame;
+pub mod message;
 
-pub use frame::{Error, MAX_FRAME_LEN, PROTOCOL_VERSION, Result};
+pub use frame::{Error, MAX_FRAME_LEN, PROTOCOL_VERSION, Result, TOKEN_LEN};

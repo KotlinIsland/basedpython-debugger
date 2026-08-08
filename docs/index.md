@@ -30,11 +30,15 @@ early. nothing is installable yet. the design lives under
 `ROADMAP.md`
 
 what exists today is `bpd doctor`, which reports whether an interpreter can be
-debugged:
+debugged, and `bpd launch`, which runs a program with the agent attached and
+stops it before its first statement:
 
 ```sh
 cargo run --bin bpd -- doctor python3.14
+cargo run --bin bpd -- launch --python python3.14 script.py
 ```
+
+see [launching a debuggee](development/launching.md)
 
 ## why not just use debugpy
 
