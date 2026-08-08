@@ -1,0 +1,15 @@
+[package]
+name = "bpd_protocol"
+description = "the control plane framing between the bpd engine and the in-process agent"
+edition = { workspace = true }
+rust-version = { workspace = true }
+version = { workspace = true }
+publish = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,46 @@
+fail_fast: false
+
+exclude: |
+  (?x)^(
+    \.idea/.*
+  )$
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/crate-ci/typos
+    rev: bee27e3a4fd1ea2111cf90ab89cd076c870fce14 # frozen: v1.48.0
+    hooks:
+      - id: typos
+
+  - repo: https://github.com/rbubley/mirrors-prettier
+    rev: 9337a74165b178ae2c766f60bee7252a0f06f3e8 # frozen: v3.9.5
+    hooks:
+      # yaml only. prettier's markdown style — two space list continuation,
+      # `_emphasis_` — disagrees with the four space continuation used across
+      # basedpython's docs, and the docs are meant to read the same in both
+      - id: prettier
+        types: [yaml]
+
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: rustfmt
+        entry: cargo fmt --all --
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: check-docs-nav
+        name: check the docs nav
+        entry: uv run --no-project --python 3.13 python scripts/check_docs_nav.py
+        language: system
+        files: '^(docs/.*\.md|zensical\.toml|scripts/check_docs_nav\.py)$'
+        pass_filenames: false

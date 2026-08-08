@@ -1,0 +1,16 @@
+/target
+
+# coverage instrumentation writes these next to whichever binary ran, and a
+# single `cargo llvm-cov` run leaves hundreds of them
+*.profraw
+/site
+/.venv
+/dist
+
+# scratch files are notes for whoever is working on something, and are not
+# committed
+scratch.*
+
+.DS_Store
+*.pyc
+__pycache__/

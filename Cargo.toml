@@ -1,0 +1,70 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97"
+version = "0.0.0"
+publish = false
+license = "MIT"
+repository = "https://github.com/KotlinIsland/basedpythondebugger"
+
+[workspace.dependencies]
+bpd_core = { path = "crates/bpd_core" }
+bpd_protocol = { path = "crates/bpd_protocol" }
+
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unreachable_pub = "warn"
+missing_docs = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -2 }
+
+# allowed pedantic lints. everything not listed here is on
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+single_match_else = "allow"
+
+# the placeholder ban from AGENTS.md, enforced. these are the two macros that
+# exist purely to mark work that was not done
+todo = "deny"
+unimplemented = "deny"
+
+# failing loudly means never discarding a result or unwrapping without a stated
+# reason. `expect` stays available — its message is the justification
+unwrap_used = "deny"
+let_underscore_must_use = "deny"
+let_underscore_untyped = "deny"
+
+# restriction lints that catch quiet wrongness
+dbg_macro = "deny"
+print_stdout = "warn"
+print_stderr = "warn"
+exit = "warn"
+get_unwrap = "warn"
+iter_over_hash_type = "warn"
+mem_forget = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+verbose_file_reads = "warn"
+
+# nursery
+debug_assert_with_mut_call = "warn"
+redundant_clone = "warn"
+unused_peekable = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
