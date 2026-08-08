@@ -2,7 +2,7 @@
 //!
 //! only the commands that are fully implemented appear here. a subcommand that
 //! parses and then reports that it does not work yet is a placeholder, and this
-//! project does not ship those — see `AGENTS.md`
+//! project does not ship those
 
 // a command line tool is the one place where writing to the terminal is the
 // entire job

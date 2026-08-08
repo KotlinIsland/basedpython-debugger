@@ -3,15 +3,14 @@
 what is being built, in what order, and how we know when each part is finished
 
 this is the high level view. the per-task breakdown lives in
-`scratch.roadmap.md`, which is not committed — see the scratch convention in
-`AGENTS.md`
+`scratch.roadmap.md`, which is a working note and is not committed
 
 ## what "finished" means anywhere on this page
 
-a milestone is finished when every item in the definition of done in
-`AGENTS.md` holds for it: tests that fail without the change, clean clippy and
-hooks, no placeholder of any kind, every new failure mode reporting a cause a
-user can act on, and a docs page wired into the nav
+a milestone is finished when the standard in the contributing section of
+[README.md](README.md) holds for it: tests that fail without the change, clean
+clippy and hooks, no placeholder of any kind, every new failure mode reporting a
+cause a user can act on, and a docs page wired into the nav
 
 a milestone is **not** finished because the happy path works
 

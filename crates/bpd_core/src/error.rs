@@ -38,7 +38,7 @@ pub enum Error {
 
     /// the interpreter is older than the minimum this debugger supports
     ///
-    /// there is no fallback path — see the python support policy in `AGENTS.md`
+    /// there is no fallback path — see `docs/development/python-support.md`
     #[error(
         "`{path}` is python {found}, and bpd requires at least {minimum}. \
          the event backbone is PEP 669 (`sys.monitoring`), and there is no \

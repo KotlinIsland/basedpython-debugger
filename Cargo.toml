@@ -36,8 +36,8 @@ must_use_candidate = "allow"
 similar_names = "allow"
 single_match_else = "allow"
 
-# the placeholder ban from AGENTS.md, enforced. these are the two macros that
-# exist purely to mark work that was not done
+# the placeholder ban, enforced. these are the two macros that exist purely to
+# mark work that was not done, and a feature is fully implemented or absent
 todo = "deny"
 unimplemented = "deny"
 
