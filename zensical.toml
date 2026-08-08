@@ -60,6 +60,7 @@ basedpythondebugger = "index.md"
 development = [
   "development/architecture.md",
   "development/agent-interface.md",
+  "development/testing.md",
   "development/python-support.md",
   "development/source-mapping.md",
   "development/django-templates.md",

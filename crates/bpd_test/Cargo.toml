@@ -1,6 +1,6 @@
 [package]
-name = "bpd_core"
-description = "the debug session model shared by every bpd front end"
+name = "bpd_test"
+description = "test support: finding and running the real interpreters bpd is tested against"
 edition = { workspace = true }
 rust-version = { workspace = true }
 version = { workspace = true }
@@ -9,12 +9,7 @@ license = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-
-[dev-dependencies]
-bpd_test = { workspace = true }
+bpd_core = { workspace = true }
 
 [lints]
 workspace = true
