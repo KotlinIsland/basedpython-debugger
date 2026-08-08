@@ -196,8 +196,28 @@ zero for everything — the same value the assertions are looking for:
 static ALLOCATOR: bpd_test::alloc::Counting = bpd_test::alloc::Counting;
 ```
 
+## proving a stop is real
+
+a debugger that reported a stop a moment too late would look identical from the
+outside, so no test here takes the agent's word for one. the fixture programs
+write a marker on a line **after** the breakpoint, and every stop asserts that
+the marker does not say what that line would have made it say
+
+`crates/bpd_engine/tests/stop_and_resume.rs` does it for the entry stop and
+`crates/bpd_engine/tests/breakpoints.rs` for every breakpoint stop. the same
+discipline covers the line tables: the expected executable lines and offsets
+come from `co_lines()` in a separate interpreter process, so nothing about a
+line table is written down in rust and compared against itself
+
+**the tests are checked against the regressions they exist to catch.** removing
+the `co_consts` recursion fails nine of them; removing the `restart_events()`
+call after a breakpoint change fails exactly one, which is the one written for
+it; keeping cpython's line 0 in the line table fails the line table test. a test
+that cannot be made to fail is not evidence
+
 ## what is not covered yet
 
-everything that needs a debuggee. there is no agent and no engine, so there is
-nothing to stop, step, or inspect. the harness described here is the foundation
-those tests will be written on — see `M1` in the roadmap
+stepping, frames and values, and the two adapters — none of them exist. so does
+stop coordination: a breakpoint stop reports the thread that hit it and claims
+nothing about the others, and there is no test asserting that the others are
+held because they are not

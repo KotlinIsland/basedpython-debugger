@@ -87,6 +87,23 @@ impl Fixture {
         Self::new("launch_probe", LAUNCH_PROBE)
     }
 
+    /// write another module beside this one and return where it landed
+    ///
+    /// the fixture's directory is `sys.path[0]` for the script form, so a
+    /// sibling is importable by name. that is what makes it possible to test a
+    /// breakpoint in a module the program has not imported *yet*
+    ///
+    /// # panics
+    ///
+    /// if the file cannot be written. a fixture that does not exist would make
+    /// every test over it assert against nothing
+    pub fn sibling(&self, module: &str, source: &str) -> PathBuf {
+        let path = self.directory().join(format!("{module}.py"));
+        std::fs::write(&path, source)
+            .unwrap_or_else(|error| panic!("could not write {}: {error}", path.display()));
+        path
+    }
+
     /// the directory the program lives in, resolved
     pub fn directory(&self) -> &Path {
         &self.canonical

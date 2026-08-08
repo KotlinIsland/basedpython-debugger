@@ -35,11 +35,11 @@ breakpoint is not already solid
 
 **breakpoints**
 
-- [ ] a breakpoint binds through the whole code object tree — inside a
+- [x] a breakpoint binds through the whole code object tree — inside a
       comprehension, a lambda, a nested function, a class body
-- [ ] a breakpoint on a non-executable line moves to the next executable line
+- [x] a breakpoint on a non-executable line moves to the next executable line
       and the response says where it moved to
-- [ ] a breakpoint in a module that is not imported yet is reported **unbound**,
+- [x] a breakpoint in a module that is not imported yet is reported **unbound**,
       and binds when the module is imported
 - [ ] conditions, hit counts and logpoints evaluate in the debuggee, not over
       the wire
@@ -104,14 +104,28 @@ reported in the interpreter's own words
 
 what is **not** done here: `-m` and `-c` launch forms, and stop coordination
 strong enough for a breakpoint. an entry stop holds the whole program because no
-user thread exists yet; that stops being true the moment a breakpoint can fire,
-and the real coordination lands with M2
+user thread exists yet; that stops being true the moment a breakpoint can fire
 
 see [launching a debuggee](docs/development/launching.md)
 
-### M2 — breakpoints
+### M2 — breakpoints · binding and stopping done
 
-binding, conditions, hit counts and logpoints, per the criteria above
+a breakpoint set on a source location finds the code object and the offset that
+will run, and the program stops there. code objects are discovered through a
+global `PY_START`, so one built by `exec` an hour into a run is found the same
+way a module's is; binding walks `co_consts`, so a method of a class and a
+generator expression inside it both bind; a location that is not executable
+moves and the answer says where to; and a location with nothing behind it is
+reported unbound with a reason rather than reported as set
+
+stop coordination did **not** land with it. a breakpoint stop reports the thread
+that hit it and deliberately claims nothing about the others, because holding
+them is not implemented and saying otherwise would be the lie this project
+exists to avoid
+
+still to do: conditions, hit counts and logpoints
+
+see [breakpoints](docs/development/breakpoints.md)
 
 ### M3 — stepping, frames and values
 
