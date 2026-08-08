@@ -56,7 +56,45 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python }}
+      # `bpd_test` discovers interpreters itself and fails loudly when none is
+      # supported, so a job that silently tested nothing is not possible
       - run: cargo test --workspace --all-features
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          tool: cargo-llvm-cov
+      # the floor catches a change that adds a body of untested code. it sits
+      # below the measured figure by enough to absorb the variation between a
+      # runner with one interpreter and a machine with several, because the
+      # tests that assert on a refusal only run when an unsupported interpreter
+      # is present
+      - run: cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines 88
+
+  bench:
+    name: bench
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # `--test` runs each benchmark once. this catches a benchmark that stops
+      # compiling or panics; it deliberately does NOT gate on wall-clock numbers
+      # from a shared runner, which vary by more than the effects worth catching
+      - run: cargo bench --workspace --all-features -- --test
 
   docs:
     name: docs
