@@ -1,6 +1,7 @@
 //! what `bpd` needs to know about an interpreter before it will drive it
 //!
-//! the support policy is in `AGENTS.md` and it is not a suggestion: cpython
+//! the support policy is in `docs/development/python-support.md` and it is not
+//! a suggestion: cpython
 //! 3.13 or newer, PEP 669 only, and PEP 768 for attach. this module answers
 //! "can this interpreter be debugged" with a yes or a named reason, never with
 //! a reduced feature set
