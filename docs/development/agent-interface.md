@@ -93,6 +93,114 @@ returns a partial answer that reads like a complete one. an agent cannot see
 the elision that a human would notice, so a truncated object graph says it was
 truncated, and by how much, and how to ask for the rest
 
+## a whole investigation in one call
+
+the interface above removes a round trip per operation. a submitted **script**
+removes them per *investigation*: the agent hands over a program of debugger
+steps with its own branching, and gets back what happened at every step
+
+that is the difference between "step, look, decide" fifty times and one call
+that says *run until this handler is reached with a negative amount, then step
+until the total changes, and tell me the frame where it did*
+
+### it is a structured program, not a language
+
+the steps are a schema-validated tree — `step_over`, `run_to`, `eval`, `if`,
+`while`, `log`, `finish` — submitted as data, not as text to be parsed
+
+this is not a stylistic choice. an MCP tool already takes JSON Schema input, so
+a tree of steps needs **no parser, no grammar, and no syntax errors**, and the
+schema is itself the documentation the agent reads before writing one. a
+bespoke text language would cost a parser and a document nobody has read, to
+arrive at the same semantics
+
+the predicates inside it *are* python — expressions evaluated in a chosen frame,
+through the machinery breakpoint conditions already use. that is the half python
+is genuinely good at, and it is already built
+
+### why not just let the agent submit python
+
+it is the obvious answer and it is worse in three ways:
+
+- **it does not terminate.** a submitted python script can loop forever and hang
+    the session, so a budget is needed regardless — which removes the only real
+    advantage, familiarity, while keeping the cost
+- **it cannot be examined before it runs.** a step tree can be answered with
+    "this runs at most 40 steps and evaluates these four expressions", and
+    refused when it cannot terminate. arbitrary python cannot
+- **it runs somewhere.** in the debuggee it perturbs the program being measured
+    and trips its own breakpoints; outside it, it is an SDK rather than a tool,
+    and the agent could have written it without us
+
+the script runs in the **engine**, driving the session. only the predicates
+reach the debuggee, which is where conditions already go — so the program under
+test is disturbed by exactly the evaluations that were asked for and nothing
+else
+
+### the transcript is the return value
+
+not the final state. an agent that receives only where a script ended cannot
+tell **why** it ended there, and will guess
+
+so every step records what it did, where the program actually was, and — for a
+branch — which way it went. the same script over the same run produces the same
+transcript, so an agent can re-run one to confirm a reading rather than trusting
+its memory of it
+
+three rules keep a transcript from lying:
+
+- **a budget is mandatory** — steps, wall clock, and output bytes. exhausting one
+    returns the transcript so far, **labelled partial**, naming what was left
+- **a step that fails halts the script.** an evaluation that raises is reported
+    and stops, unless the script gave it an explicit branch. carrying on past a
+    failure produces a record of an investigation that did not happen
+- **no step may report a location the program was not at.** the same rule as
+    everywhere else, applied to a log of fifty of them
+
+### it is a capability, so both adapters have it
+
+per the parity rule below. for a human this is "run this investigation" — *run
+to the third call with a negative amount and show me the stack* is a thing
+people want and no debugger offers. the rule requires the capability in both
+adapters; it does not require an IDE to put a button on it
+
+## how an agent learns any of this
+
+MCP has three primitives, and **only one of them is model-controlled**:
+
+| primitive | who decides it is used |
+| --- | --- |
+| tools | the model |
+| resources — read-only documents | the host application |
+| prompts — reusable parameterised workflows | the user |
+
+that asymmetry decides the design. an agent will reliably read a **tool schema**
+and a **tool result**; whether it ever sees a resource is the host's choice, and
+whether it sees a prompt is the user's. so the primary teaching surface is not a
+document — it is the tool descriptions and, above all, the errors
+
+this project is already suited to that. an error here names a cause and an
+action, and an agent that receives
+
+> the interpreter has run code from `x.py` but never the file itself … import it
+> somewhere the program itself runs, or take the condition that imports it off
+
+has been taught the thing at the moment it needed to know, without having read
+anything. that is worth more than a page it may never pull in
+
+the layers, in order of how reliably they arrive:
+
+1. **tool schemas** — the semantics, always in context
+1. **errors** — the corrections, at the moment they apply
+1. **resources** — the deeper model, for a host that pulls them: what a stop
+    claims and does not claim, what each thread mode guarantees
+1. **prompts** — canonical investigations, surfaced as slash commands
+1. **a skill directory in the repository** — for clients that have skills, which
+    is a client feature and not part of MCP
+
+writing 3 through 5 before 1 and 2 are right would be writing documentation to
+compensate for an interface that does not explain itself
+
 ## the parity rule, concretely
 
 a capability is added to `bpd_core` once. both adapters expose it. a pull

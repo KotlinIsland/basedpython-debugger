@@ -152,6 +152,18 @@ the agent interface from
 [agent interface](docs/development/agent-interface.md), and the parity test that
 makes the invariant structural
 
+this is also where the **debug script** lands: a schema-validated tree of steps
+with its own branching, submitted in one call, returning a transcript of what
+happened at every one. it collapses an investigation that would be fifty round
+trips into a single turn, and it is a capability rather than an MCP feature, so
+DAP gets it too
+
+and where **how an agent learns bpd** is answered. only tools are
+model-controlled in MCP — resources are the host's choice and prompts are the
+user's — so the interface has to explain itself through schemas and errors
+first, with documents and canonical investigations layered on top rather than
+compensating for them
+
 **the MVP is M0 through M5**
 
 ## after the MVP
