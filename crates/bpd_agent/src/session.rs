@@ -22,7 +22,7 @@
 use bpd_protocol::message::{FromAgent, FromEngine, LogRecord, StopReason};
 use pyo3::prelude::*;
 
-use crate::{attach, breakpoints, events};
+use crate::{attach, breakpoints, events, frames};
 
 /// tell the engine what a logpoint had to say, and carry straight on
 ///
@@ -41,6 +41,7 @@ pub(crate) fn log(record: LogRecord) {
 pub(crate) fn stop(python: Python<'_>, reason: StopReason) -> PyResult<()> {
     let mut held = attach::hold();
     held.send(&FromAgent::Stopped { reason });
+    let mut stopped = frames::begin(python);
 
     loop {
         match held.receive() {
@@ -48,6 +49,36 @@ pub(crate) fn stop(python: Python<'_>, reason: StopReason) -> PyResult<()> {
             FromEngine::SetBreakpoints { breakpoints } => {
                 let resolved = breakpoints::apply(python, breakpoints)?;
                 held.send(&FromAgent::BreakpointsResolved { resolved });
+            }
+            FromEngine::Stack { top } => {
+                let answer = stopped.stack(top)?;
+                held.send(&answer);
+            }
+            FromEngine::Variables {
+                frame,
+                scope,
+                detail,
+            } => {
+                let answer = stopped.variables(frame, scope, detail)?;
+                held.send(&answer);
+            }
+            FromEngine::Evaluate {
+                frame,
+                expression,
+                detail,
+            } => {
+                let answer = stopped.evaluate(frame, &expression, detail)?;
+                held.send(&answer);
+            }
+            FromEngine::SetVariable {
+                frame,
+                scope,
+                name,
+                value,
+                detail,
+            } => {
+                let answer = stopped.set_variable(frame, scope, &name, &value, detail)?;
+                held.send(&answer);
             }
             // `FromEngine` is non-exhaustive, so a newer engine could ask for
             // something this build cannot do. carrying on regardless would
@@ -58,6 +89,10 @@ pub(crate) fn stop(python: Python<'_>, reason: StopReason) -> PyResult<()> {
         }
     }
     drop(held);
+    // the frames go with the stop that minted their ids: a frame id names the
+    // stop it belongs to, and there is nothing here for one from an older stop
+    // to be answered against
+    drop(stopped);
 
     // discovery costs a native call per code object first reached, and it buys
     // nothing once there is nothing left that could stop

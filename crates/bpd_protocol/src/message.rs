@@ -466,6 +466,623 @@ impl std::fmt::Display for Unbound {
     }
 }
 
+/// which frame of the stopped thread's stack something is asked about
+///
+/// an id is minted at a stop and names the stop it was minted at, so a client
+/// that holds one across a resume finds out rather than reading a frame that is
+/// no longer the one it meant. DAP's opaque handle cannot do that: it looks the
+/// same before and after, and the debugger has to guess which the client meant
+///
+/// `depth` counts from the frame that stopped, so `0` is always where the
+/// program is now
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub struct FrameId {
+    /// which stop this id belongs to, counting from one
+    pub stop: u64,
+    /// how far down the stack, with the frame that stopped at zero
+    pub depth: u32,
+}
+
+impl std::fmt::Display for FrameId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "frame {} of stop {}", self.depth, self.stop)
+    }
+}
+
+/// one frame of the stopped thread's stack
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Frame {
+    /// how to ask about this frame, for as long as this stop lasts
+    pub id: FrameId,
+    /// the `co_filename` of the code it is running
+    pub file: String,
+    /// the line it is on now, as `f_lineno` reports it
+    pub line: u32,
+    /// `co_qualname`
+    pub function: String,
+    /// `co_firstlineno`, which separates two code objects with the same name
+    pub first_line: u32,
+}
+
+/// where a name lives, which is not a detail a debugger may round off
+///
+/// python resolves a name in a function by which of these it is, decided at
+/// compile time. merging them into one "variables" mapping — which is what
+/// `f_locals` itself does — means a report that cannot distinguish a captured
+/// variable from a global of the same name, and "a variable read from the wrong
+/// scope" is the thing this project exists not to do
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// the frame's own locals — `co_varnames`
+    ///
+    /// for a module or a class body there are none of these in the code object,
+    /// and the frame's namespace mapping is the local scope instead
+    Local,
+
+    /// locals of this frame that a nested function captures — `co_cellvars`
+    ///
+    /// an argument that a closure captures is in this scope **and** in
+    /// [`Scope::Local`], because cpython says it is both
+    Cell,
+
+    /// variables this frame captures from an enclosing one — `co_freevars`
+    ///
+    /// the value lives in the enclosing frame's cell. it is not a local of this
+    /// frame and it is not a global
+    Free,
+
+    /// the module namespace the frame's code was compiled into — `f_globals`
+    Global,
+}
+
+impl std::fmt::Display for Scope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Local => "local",
+            Self::Cell => "cell",
+            Self::Free => "free",
+            Self::Global => "global",
+        })
+    }
+}
+
+/// how much of a value to read, and what the debugger may run to read it
+///
+/// every field is a bound the answer is held to, and every bound that bites is
+/// named in the answer. there is no setting here that makes a value quietly
+/// incomplete
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Detail {
+    /// how many levels of container or object to open
+    ///
+    /// zero reports a value's type and size and opens nothing
+    #[serde(default = "Detail::depth")]
+    pub depth: u32,
+
+    /// how many children of one container to read
+    #[serde(default = "Detail::children")]
+    pub children: u32,
+
+    /// how many characters of one string, or bytes of one `bytes`, to read
+    #[serde(default = "Detail::text")]
+    pub text: u32,
+
+    /// the byte budget for the whole answer
+    ///
+    /// spent on the text a value carries, its type name, and a fixed cost per
+    /// value for the envelope around it. when it runs out the answer says so at
+    /// the point it ran out, rather than being quietly shorter than it looks
+    #[serde(default = "Detail::budget")]
+    pub budget: u32,
+
+    /// read an object's instance dictionary
+    ///
+    /// on by default, because it is **storage**: for an ordinary object it is a
+    /// slot read that runs nothing, and it never reaches `__getattr__`, a
+    /// property or any other descriptor. a type is free to make `__dict__` its
+    /// own code, and then this runs that code — which is why it can be turned
+    /// off for a program full of proxies or mocks
+    #[serde(default = "Detail::attributes")]
+    pub attributes: bool,
+
+    /// call `__repr__` on a value that has no structural representation
+    ///
+    /// off by default, because it is **behaviour**: `__repr__` is arbitrary user
+    /// code that can hang, mutate the program, or reach the network. bpd cannot
+    /// interrupt it once it has started, so it is never called unless the
+    /// request asked for it
+    #[serde(default)]
+    pub repr: bool,
+}
+
+impl Detail {
+    /// the default depth
+    const fn depth() -> u32 {
+        3
+    }
+    /// the default number of children per container
+    const fn children() -> u32 {
+        100
+    }
+    /// the default number of characters of one string
+    const fn text() -> u32 {
+        1024
+    }
+    /// the default byte budget for one answer
+    ///
+    /// this is a starting point rather than a settled answer: the budget is
+    /// spending an agent's context window, and what it is worth cannot be known
+    /// until there is an agent surface to measure it against
+    const fn budget() -> u32 {
+        8192
+    }
+    /// whether an object's instance dictionary is read by default
+    const fn attributes() -> bool {
+        true
+    }
+}
+
+impl Default for Detail {
+    fn default() -> Self {
+        Self {
+            depth: Self::depth(),
+            children: Self::children(),
+            text: Self::text(),
+            budget: Self::budget(),
+            attributes: Self::attributes(),
+            repr: false,
+        }
+    }
+}
+
+/// a value as the debugger read it
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Value {
+    /// `type(value)`, qualified by its module unless it is a builtin
+    ///
+    /// always present, and always the value's real type: a `defaultdict` reads
+    /// as a mapping and says it is a `collections.defaultdict`
+    pub kind: String,
+    /// what it is
+    pub content: Content,
+}
+
+/// what a value turned out to be
+///
+/// the structural forms are read through cpython's concrete C interface — the
+/// object's own storage — so an overridden `__getitem__` or `__iter__` cannot
+/// change what is reported, and reading one runs no python
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "content", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Content {
+    /// `None`
+    None,
+
+    /// a `bool`
+    Bool {
+        /// which one
+        value: bool,
+    },
+
+    /// an integer, in decimal
+    ///
+    /// text rather than a number because a python `int` has no width, and a
+    /// json number that silently became a float would be a different value.
+    /// text is **never** cut: half of a number is a different number, so an
+    /// integer too long for the budget is left out entirely and says so
+    Int {
+        /// the digits, or empty when `omitted` says why they are not here
+        text: String,
+        /// why the digits are not here
+        omitted: Option<Omitted>,
+    },
+
+    /// a float, as `float.__repr__` writes it
+    ///
+    /// python's own text, so `inf`, `nan` and `-0.0` survive — a json number
+    /// cannot carry the first two at all
+    Float {
+        /// the repr
+        text: String,
+    },
+
+    /// a string, as itself rather than as a repr
+    Str {
+        /// the characters, cut to the request's limit
+        text: String,
+        /// how many characters the whole string has
+        characters: usize,
+        /// why they are not all here
+        omitted: Option<Omitted>,
+    },
+
+    /// `bytes` or a `bytearray`, in lowercase hex
+    Bytes {
+        /// the bytes, in hex, cut to the request's limit
+        hex: String,
+        /// how many bytes the whole value has
+        length: usize,
+        /// why they are not all here
+        omitted: Option<Omitted>,
+    },
+
+    /// a list, a tuple or a set
+    Sequence {
+        /// the items, in order for a list or a tuple and in iteration order for
+        /// a set
+        items: Vec<Value>,
+        /// how many items the whole value has
+        length: usize,
+        /// why they are not all here
+        omitted: Option<Omitted>,
+    },
+
+    /// a mapping, as pairs rather than as names
+    ///
+    /// a key can be any object, so it is a value in its own right. a mapping
+    /// reported as `name: value` would be a lie about every dict that is not
+    /// keyed by strings
+    Mapping {
+        /// the entries, in iteration order
+        entries: Vec<Pair>,
+        /// how many entries the whole mapping has
+        length: usize,
+        /// why they are not all here
+        omitted: Option<Omitted>,
+    },
+
+    /// an object, read from its instance dictionary
+    Object {
+        /// the attributes it stores
+        attributes: Vec<Entry>,
+        /// why they are not all here, or why there are none
+        omitted: Option<Omitted>,
+    },
+
+    /// what `__repr__` said, because the request asked for it
+    ///
+    /// labelled, so nothing can mistake user code's opinion of a value for the
+    /// value
+    Repr {
+        /// the text, cut to the request's limit
+        text: String,
+        /// how many characters it produced
+        characters: usize,
+        /// why they are not all here
+        omitted: Option<Omitted>,
+    },
+
+    /// nothing was read, and this is why
+    ///
+    /// a cycle, or a budget that ran out before this value was reached
+    Unread {
+        /// what stopped it
+        omitted: Omitted,
+    },
+}
+
+/// one named thing: a variable, or an attribute
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Entry {
+    /// the name
+    pub name: String,
+    /// what it holds
+    pub value: Value,
+}
+
+/// one entry of a mapping
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Pair {
+    /// the key, which is a value like any other
+    pub key: Value,
+    /// what it maps to
+    pub value: Value,
+}
+
+/// what is not in an answer, and why
+///
+/// every one of these is a statement that something exists and is not here. an
+/// answer that was cut and did not say so is worse for an agent than for a
+/// person, who would at least see the ellipsis
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "omitted", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Omitted {
+    /// there is more text than the request asked to see
+    Text {
+        /// how long the whole thing is
+        characters: usize,
+        /// what the request allowed
+        limit: u32,
+    },
+
+    /// there are more children than the request asked to see
+    Children {
+        /// how many there are
+        length: usize,
+        /// what the request allowed
+        limit: u32,
+    },
+
+    /// the depth ran out here
+    Depth {
+        /// the depth that was applied
+        ///
+        /// the request's `depth`, unless [`Omitted::Shallower`] says the budget
+        /// could not fit it
+        limit: u32,
+    },
+
+    /// the request's depth did not fit the budget, so less of it was read
+    ///
+    /// a set of variables is read at the deepest whole level the budget allows,
+    /// rather than at the level asked for until it runs out. spending the whole
+    /// budget on whichever variable came first is honest and useless: every
+    /// module namespace begins with `__builtins__`, and an answer that opened
+    /// that and nothing else would be a true statement about the wrong thing
+    Shallower {
+        /// the depth the request asked for
+        asked: u32,
+        /// the depth that fitted
+        used: u32,
+    },
+
+    /// the answer's byte budget ran out here
+    Budget {
+        /// what the request allowed
+        limit: u32,
+    },
+
+    /// this object is already open further up the same answer
+    ///
+    /// a structure that points back at itself terminates here and says where it
+    /// came round to, rather than stopping silently — which would look exactly
+    /// like a structure that ended
+    Cycle {
+        /// where in this answer it was already opened
+        path: String,
+    },
+
+    /// the type keeps no instance dictionary
+    ///
+    /// a `__slots__` class, or a type implemented in C. what it holds is only
+    /// reachable by running its own code
+    NoAttributes,
+
+    /// the request did not ask for an object's attributes
+    AttributesNotRequested,
+
+    /// reading the instance dictionary raised
+    ///
+    /// which means the type made `__dict__` its own code, and that code failed
+    AttributesRaised {
+        /// what it raised
+        error: PythonError,
+    },
+
+    /// the namespace is not a dictionary
+    ///
+    /// a class body whose metaclass prepared its own mapping — what `enum` does
+    /// — has one. reading it means calling that mapping's own code, which is
+    /// the program, so it is named instead of run
+    NotADictionary,
+
+    /// the string holds code points that cannot be encoded as utf-8
+    ///
+    /// lone surrogates, which is what `surrogateescape` produces for a
+    /// filename the filesystem encoding could not decode. json cannot carry
+    /// them and neither can rust, so they are replaced rather than dropped
+    Unencodable,
+
+    /// entries of an object's dictionary whose keys are not names
+    ///
+    /// reachable by writing into `__dict__` directly. they are not attributes,
+    /// nothing can read them by name, and they are not silently dropped either
+    NotNames {
+        /// how many there are
+        count: usize,
+    },
+}
+
+impl std::fmt::Display for Omitted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text { characters, limit } => write!(
+                formatter,
+                "{characters} characters, of which the request allowed {limit}. \
+                 ask again with a larger `text`"
+            ),
+            Self::Children { length, limit } => write!(
+                formatter,
+                "{length} children, of which the request allowed {limit}. ask \
+                 again with a larger `children`"
+            ),
+            Self::Depth { limit } => write!(
+                formatter,
+                "the depth of {limit} that was applied ran out here. ask again \
+                 with a larger `depth`"
+            ),
+            Self::Shallower { asked, used } => write!(
+                formatter,
+                "the request asked for a depth of {asked} and the byte budget \
+                 fitted {used}, so every value here was read to {used}. ask \
+                 again with a larger `budget`, or for one value rather than a \
+                 whole scope"
+            ),
+            Self::Budget { limit } => write!(
+                formatter,
+                "the request's byte budget of {limit} ran out here. ask again \
+                 with a larger `budget`, or for less of the graph"
+            ),
+            Self::Cycle { path } => write!(
+                formatter,
+                "this is the same object as `{path}`, which is already open \
+                 above it. the structure points back at itself"
+            ),
+            Self::NoAttributes => formatter.write_str(
+                "the type keeps no instance dictionary — it uses `__slots__`, or \
+                 it is implemented in C — so what it holds cannot be read \
+                 without running its own code. ask again with `repr`",
+            ),
+            Self::AttributesNotRequested => formatter.write_str(
+                "the request asked for no attributes, so the object was not \
+                 opened. ask again with `attributes`",
+            ),
+            Self::AttributesRaised { error } => write!(
+                formatter,
+                "reading the instance dictionary raised {error}, so the type \
+                 made `__dict__` its own code and that code failed"
+            ),
+            Self::NotADictionary => formatter.write_str(
+                "the namespace is not a `dict` — a class body whose metaclass \
+                 prepared its own mapping has one — so reading it would mean \
+                 running that mapping's own code",
+            ),
+            Self::Unencodable => formatter.write_str(
+                "the string holds code points that cannot be encoded as utf-8 — \
+                 lone surrogates, which is what `surrogateescape` produces for \
+                 an undecodable filename — and they are replaced here with \
+                 U+FFFD",
+            ),
+            Self::NotNames { count } => write!(
+                formatter,
+                "{count} entries of the instance dictionary have keys that are \
+                 not names, so they are not attributes and nothing can read \
+                 them by name"
+            ),
+        }
+    }
+}
+
+/// what an expression did
+///
+/// an expression that raised has an answer, and the answer is the exception.
+/// reporting `None` for it would be the debugger inventing a value the program
+/// never produced
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "evaluated", rename_all = "snake_case")]
+pub enum Evaluated {
+    /// it produced a value
+    Value {
+        /// what it produced
+        value: Value,
+    },
+    /// it raised
+    Raised {
+        /// what it raised
+        error: PythonError,
+    },
+}
+
+/// a request the agent will not answer, and why
+///
+/// separate from an expression that raised: that is an answer. this is the
+/// agent refusing to guess what was meant
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "refused", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Refusal {
+    /// the frame id was minted at an earlier stop
+    StaleFrame {
+        /// what was asked about
+        frame: FrameId,
+        /// which stop the program is in now
+        stop: u64,
+    },
+
+    /// the stopped thread's stack is not that deep
+    NoSuchFrame {
+        /// what was asked about
+        frame: FrameId,
+        /// how many frames there are
+        depth: usize,
+    },
+
+    /// that scope of that frame holds no such name
+    NoSuchVariable {
+        /// which frame
+        frame: FrameId,
+        /// which scope it was asked for in
+        scope: Scope,
+        /// the name
+        name: String,
+        /// the scopes of that frame that do hold it
+        elsewhere: Vec<Scope>,
+    },
+
+    /// the name is in that scope and the frame does not expose it
+    ///
+    /// the read says the same thing, in `unreadable`. a write is refused
+    /// outright: putting it in the frame's namespace mapping would leave a
+    /// value the compiled code never reads and report a change the program did
+    /// not receive
+    UnreadableVariable {
+        /// which frame
+        frame: FrameId,
+        /// which scope it is in
+        scope: Scope,
+        /// the name
+        name: String,
+    },
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleFrame { frame, stop } => write!(
+                formatter,
+                "{frame} belongs to a stop that has ended — the program is in \
+                 stop {stop} now. a frame id is valid for one stop, because the \
+                 frame it named has run on since. ask for the stack again"
+            ),
+            Self::NoSuchFrame { frame, depth } => write!(
+                formatter,
+                "{frame} does not exist: the stopped thread's stack is {depth} \
+                 frames deep"
+            ),
+            Self::NoSuchVariable {
+                frame,
+                scope,
+                name,
+                elsewhere,
+            } => {
+                write!(formatter, "`{name}` is not in the {scope} scope of {frame}")?;
+                if elsewhere.is_empty() {
+                    formatter.write_str(
+                        ". it is not in any scope of that frame. writing it \
+                         would be accepted by `f_locals` and the program would \
+                         never see it, because compiled code reads the fast \
+                         locals the compiler gave it and nothing else",
+                    )
+                } else {
+                    formatter.write_str(". it is in the ")?;
+                    for (index, scope) in elsewhere.iter().enumerate() {
+                        if index > 0 {
+                            formatter.write_str(" and ")?;
+                        }
+                        write!(formatter, "{scope}")?;
+                    }
+                    formatter.write_str(" scope of it — ask for it there")
+                }
+            }
+            Self::UnreadableVariable { frame, scope, name } => write!(
+                formatter,
+                "`{name}` is in the {scope} scope of {frame} and that frame does \
+                 not expose it: the value lives in a cell only the function \
+                 object holds, which is how a class body sees a variable of the \
+                 function around it. writing it into the frame's namespace would \
+                 leave a value the compiled code never reads"
+            ),
+        }
+    }
+}
+
 /// what the agent tells the engine
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -496,6 +1113,65 @@ pub enum FromAgent {
         /// what it had to say
         record: LogRecord,
     },
+
+    /// the stack of the thread that stopped
+    ///
+    /// **only** that thread. the others were never held — see [`StopReason`] —
+    /// so their frames are moving, and a stack read off a running thread would
+    /// be a picture of a moment that had already passed
+    Stack {
+        /// the frames, the one that stopped first
+        frames: Vec<Frame>,
+        /// how deep the stack is, which is more than `frames` when the request
+        /// asked for fewer
+        depth: usize,
+    },
+
+    /// what one scope of one frame holds
+    Variables {
+        /// which frame it was read from
+        frame: FrameId,
+        /// which scope of it
+        scope: Scope,
+        /// the names it holds, in the order the interpreter keeps them
+        entries: Vec<Entry>,
+        /// names that belong to this scope and hold nothing at this line
+        ///
+        /// a local before its first assignment. it is not the same as absent,
+        /// and it is not `None`
+        unbound: Vec<String>,
+        /// names that belong to this scope and whose value the frame does not
+        /// expose
+        ///
+        /// a class body's free variables are the case: the code object names
+        /// them, and the value lives in a cell that only the function object
+        /// holds. they are **not** unbound — they hold something bpd cannot
+        /// see, and reporting them as absent would make the scope look smaller
+        /// than it is
+        unreadable: Vec<String>,
+        /// everything this answer left out, and why
+        ///
+        /// a list rather than one reason: a scope can be read shallower than
+        /// the request asked **and** have more names than it asked for, and
+        /// reporting whichever came first would leave the other unsaid
+        omitted: Vec<Omitted>,
+    },
+
+    /// what an expression did, or what a write left behind
+    ///
+    /// a write answers with the value read back **out of the frame** after it,
+    /// rather than with the value that was written: what the frame holds now is
+    /// the thing the client asked to be told
+    Evaluated {
+        /// the outcome
+        result: Evaluated,
+    },
+
+    /// the agent will not answer the request, and this is why
+    Refused {
+        /// what stood in the way
+        reason: Refusal,
+    },
 }
 
 /// what the engine tells the agent
@@ -513,6 +1189,58 @@ pub enum FromEngine {
     SetBreakpoints {
         /// every breakpoint that should be armed after this request
         breakpoints: Vec<SourceBreakpoint>,
+    },
+
+    /// walk the stopped thread's frame chain
+    Stack {
+        /// how many frames to report, counting from the one that stopped
+        ///
+        /// `None` is all of them. the answer says how deep the stack really is
+        /// either way, so asking for fewer never hides that there are more
+        top: Option<u32>,
+    },
+
+    /// read one scope of one frame
+    Variables {
+        /// which frame
+        frame: FrameId,
+        /// which scope of it
+        scope: Scope,
+        /// how much of each value to read
+        detail: Detail,
+    },
+
+    /// evaluate a python expression in a frame
+    ///
+    /// this runs the program's own code, by request, in the frame that was
+    /// named. an expression that raises is answered with the exception
+    Evaluate {
+        /// which frame it is evaluated in
+        frame: FrameId,
+        /// the expression, as the client wrote it
+        expression: String,
+        /// how much of the result to read
+        detail: Detail,
+    },
+
+    /// write a variable of a frame
+    ///
+    /// the name must already be in that scope of that frame. this is
+    /// deliberate, and it is not fussiness: `f_locals` accepts a write of a
+    /// name the code object does not have, keeps it, and reads it back — while
+    /// the program itself never sees it. a debugger that reported that as a
+    /// write performed would be reporting a change the program did not receive
+    SetVariable {
+        /// which frame
+        frame: FrameId,
+        /// which scope of it
+        scope: Scope,
+        /// the name to write
+        name: String,
+        /// a python expression, evaluated in that frame, for the new value
+        value: String,
+        /// how much of the value read back to report
+        detail: Detail,
     },
 }
 
@@ -829,6 +1557,196 @@ mod tests {
             error.to_string().contains("does not understand"),
             "the refusal must say what happened, got {error}"
         );
+    }
+
+    #[test]
+    fn a_state_query_and_its_answer_round_trip() {
+        let frame = FrameId { stop: 2, depth: 1 };
+        let request = FromEngine::Variables {
+            frame,
+            scope: Scope::Free,
+            detail: Detail::default(),
+        };
+        let answer = FromAgent::Variables {
+            frame,
+            scope: Scope::Free,
+            entries: vec![Entry {
+                name: "captured".to_string(),
+                value: Value {
+                    kind: "list".to_string(),
+                    content: Content::Sequence {
+                        items: vec![Value {
+                            kind: "int".to_string(),
+                            content: Content::Int {
+                                text: "1".to_string(),
+                                omitted: None,
+                            },
+                        }],
+                        length: 4,
+                        omitted: Some(Omitted::Children {
+                            length: 4,
+                            limit: 1,
+                        }),
+                    },
+                },
+            }],
+            unbound: vec!["later".to_string()],
+            unreadable: Vec::new(),
+            omitted: vec![Omitted::Shallower { asked: 3, used: 1 }],
+        };
+
+        let mut wire = Vec::new();
+        write(&mut wire, &request).expect("writing to a vec cannot fail");
+        write(&mut wire, &answer).expect("writing to a vec cannot fail");
+
+        let mut buffer = Vec::new();
+        let mut wire = wire.as_slice();
+        let received: Option<FromEngine> =
+            read(&mut wire, &mut buffer).expect("the frame is whole");
+        assert_eq!(received, Some(request));
+        let received: Option<FromAgent> = read(&mut wire, &mut buffer).expect("the frame is whole");
+        assert_eq!(received, Some(answer));
+    }
+
+    #[test]
+    fn an_evaluation_that_raised_is_an_answer_and_round_trips_as_one() {
+        let sent = FromAgent::Evaluated {
+            result: Evaluated::Raised {
+                error: PythonError {
+                    kind: "ZeroDivisionError".to_string(),
+                    message: "division by zero".to_string(),
+                    traceback: vec![TracebackFrame {
+                        file: "<bpd evaluation>".to_string(),
+                        line: 1,
+                        function: "<module>".to_string(),
+                    }],
+                },
+            },
+        };
+
+        let mut wire = Vec::new();
+        write(&mut wire, &sent).expect("writing to a vec cannot fail");
+
+        let received: Option<FromAgent> =
+            read(&mut wire.as_slice(), &mut Vec::new()).expect("the frame is whole");
+        assert_eq!(received, Some(sent));
+    }
+
+    #[test]
+    fn a_request_may_leave_the_detail_to_its_defaults() {
+        // an agent that only wants to see something writes what it wants to see
+        let mut wire = Vec::new();
+        frame::write_frame(
+            &mut wire,
+            br#"{"request":"evaluate","frame":{"stop":1,"depth":0},"expression":"x","detail":{}}"#,
+        )
+        .expect("writing to a vec cannot fail");
+
+        let received: Option<FromEngine> =
+            read(&mut wire.as_slice(), &mut Vec::new()).expect("the frame is whole");
+        assert_eq!(
+            received,
+            Some(FromEngine::Evaluate {
+                frame: FrameId { stop: 1, depth: 0 },
+                expression: "x".to_string(),
+                detail: Detail::default(),
+            })
+        );
+    }
+
+    #[test]
+    fn every_omission_says_what_is_missing_and_how_to_ask_for_it() {
+        let cases = [
+            (
+                Omitted::Text {
+                    characters: 4000,
+                    limit: 100,
+                },
+                ["4000", "`text`"],
+            ),
+            (
+                Omitted::Children {
+                    length: 900,
+                    limit: 10,
+                },
+                ["900", "`children`"],
+            ),
+            (Omitted::Depth { limit: 2 }, ["depth of 2", "`depth`"]),
+            (
+                Omitted::Shallower { asked: 3, used: 1 },
+                ["asked for a depth of 3", "fitted 1"],
+            ),
+            (Omitted::Budget { limit: 64 }, ["budget of 64", "`budget`"]),
+            (
+                Omitted::Cycle {
+                    path: "node.next".to_string(),
+                },
+                ["node.next", "points back at itself"],
+            ),
+            (Omitted::NoAttributes, ["__slots__", "`repr`"]),
+            (
+                Omitted::AttributesNotRequested,
+                ["no attributes", "`attributes`"],
+            ),
+            (Omitted::NotNames { count: 2 }, ["2 entries", "not names"]),
+            (Omitted::Unencodable, ["surrogate", "U+FFFD"]),
+            (Omitted::NotADictionary, ["metaclass", "not a `dict`"]),
+        ];
+
+        for (omission, expected) in cases {
+            let said = omission.to_string();
+            for wanted in expected {
+                assert!(said.contains(wanted), "expected {wanted:?} in {said:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_refusal_names_the_frame_and_what_to_do_instead() {
+        let frame = FrameId { stop: 1, depth: 2 };
+        let cases = [
+            (
+                Refusal::StaleFrame { frame, stop: 4 },
+                vec!["frame 2 of stop 1", "stop 4", "ask for the stack again"],
+            ),
+            (
+                Refusal::NoSuchFrame { frame, depth: 2 },
+                vec!["frame 2 of stop 1", "2 frames deep"],
+            ),
+            (
+                Refusal::NoSuchVariable {
+                    frame,
+                    scope: Scope::Local,
+                    name: "total".to_string(),
+                    elsewhere: vec![Scope::Free, Scope::Global],
+                },
+                vec!["`total`", "local scope", "free and global"],
+            ),
+            (
+                Refusal::NoSuchVariable {
+                    frame,
+                    scope: Scope::Local,
+                    name: "typo".to_string(),
+                    elsewhere: Vec::new(),
+                },
+                vec!["`typo`", "the program would never see it"],
+            ),
+            (
+                Refusal::UnreadableVariable {
+                    frame,
+                    scope: Scope::Free,
+                    name: "captured".to_string(),
+                },
+                vec!["`captured`", "free scope", "class body"],
+            ),
+        ];
+
+        for (refusal, expected) in cases {
+            let said = refusal.to_string();
+            for wanted in expected {
+                assert!(said.contains(wanted), "expected {wanted:?} in {said:?}");
+            }
+        }
     }
 
     #[test]

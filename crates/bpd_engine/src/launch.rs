@@ -19,7 +19,8 @@ use std::process::{Child, Command, ExitStatus};
 use bpd_core::python::Capabilities;
 use bpd_protocol::env;
 use bpd_protocol::message::{
-    FromAgent, FromEngine, LogRecord, Resolved, SourceBreakpoint, StopReason,
+    Detail, Entry, Evaluated, Frame, FrameId, FromAgent, FromEngine, LogRecord, Omitted, Resolved,
+    Scope, SourceBreakpoint, StopReason, Value,
 };
 
 use crate::{Error, Listener, Result, Session, agent};
@@ -125,6 +126,112 @@ impl Debuggee {
         }
     }
 
+    /// walk the stopped thread's frame chain
+    ///
+    /// `top` bounds how many frames come back, counting from the one that
+    /// stopped. the answer says how deep the stack really is either way
+    pub fn stack(&mut self, top: Option<u32>) -> Result<Stack> {
+        match self.ask(&FromEngine::Stack { top }, "the stack")? {
+            FromAgent::Stack { frames, depth } => Ok(Stack { frames, depth }),
+            other => Err(unexpected(&other, "the stack")),
+        }
+    }
+
+    /// read one scope of one frame
+    pub fn variables(&mut self, frame: FrameId, scope: Scope, detail: Detail) -> Result<Variables> {
+        const EXPECTED: &str = "the variables of a scope";
+
+        let request = FromEngine::Variables {
+            frame,
+            scope,
+            detail,
+        };
+        match self.ask(&request, EXPECTED)? {
+            FromAgent::Variables {
+                entries,
+                unbound,
+                unreadable,
+                omitted,
+                ..
+            } => Ok(Variables {
+                entries,
+                unbound,
+                unreadable,
+                omitted,
+            }),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// evaluate a python expression in a frame
+    ///
+    /// an expression that raises is answered with the exception, which is the
+    /// answer — not an error of the engine's
+    pub fn evaluate(
+        &mut self,
+        frame: FrameId,
+        expression: &str,
+        detail: Detail,
+    ) -> Result<Evaluated> {
+        const EXPECTED: &str = "the value of an expression";
+
+        let request = FromEngine::Evaluate {
+            frame,
+            expression: expression.to_string(),
+            detail,
+        };
+        match self.ask(&request, EXPECTED)? {
+            FromAgent::Evaluated { result } => Ok(result),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// write a variable of a frame, and read back what the frame holds after it
+    pub fn set_variable(
+        &mut self,
+        frame: FrameId,
+        scope: Scope,
+        name: &str,
+        value: &str,
+        detail: Detail,
+    ) -> Result<Evaluated> {
+        const EXPECTED: &str = "the value a variable was set to";
+
+        let request = FromEngine::SetVariable {
+            frame,
+            scope,
+            name: name.to_string(),
+            value: value.to_string(),
+            detail,
+        };
+        match self.ask(&request, EXPECTED)? {
+            FromAgent::Evaluated { result } => Ok(result),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// send one request and wait for the answer to it
+    ///
+    /// a logpoint's record can be in the socket ahead of an answer, because a
+    /// thread that reaches one sends it without waiting. it is kept for the
+    /// next `run` rather than dropped, for the same reason
+    /// [`Self::set_breakpoints`] keeps one
+    fn ask(&mut self, request: &FromEngine, expected: &'static str) -> Result<FromAgent> {
+        if self.stopped.is_none() {
+            return Err(Error::NotStopped { wanted: expected });
+        }
+        self.session.send(request)?;
+
+        loop {
+            match self.session.next_event()? {
+                Some(FromAgent::Logged { record }) => self.pending_logs.push(record),
+                Some(FromAgent::Refused { reason }) => return Err(Error::Refused { reason }),
+                Some(answer) => return Ok(answer),
+                None => return Err(Error::AgentGone { expected }),
+            }
+        }
+    }
+
     /// let the debuggee run until it stops again or finishes
     ///
     /// the agent can speak while the program runs — loading a module changes
@@ -171,6 +278,55 @@ impl Debuggee {
                 }
             }
         }
+    }
+}
+
+/// the stopped thread's stack
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stack {
+    /// the frames, the one that stopped first
+    pub frames: Vec<Frame>,
+    /// how deep the stack is, which is more than `frames` when fewer were asked
+    /// for
+    pub depth: usize,
+}
+
+/// what one scope of one frame holds
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variables {
+    /// the names it holds
+    pub entries: Vec<Entry>,
+    /// names of the scope that hold nothing at this line
+    pub unbound: Vec<String>,
+    /// names of the scope whose value the frame does not expose
+    pub unreadable: Vec<String>,
+    /// everything the answer left out, and why
+    pub omitted: Vec<Omitted>,
+}
+
+impl Variables {
+    /// what one name holds, or `None` when the scope does not hold it
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| &entry.value)
+    }
+
+    /// the names, in the order the interpreter keeps them
+    pub fn names(&self) -> Vec<&str> {
+        self.entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect()
+    }
+}
+
+/// the agent answered a request with something else entirely
+fn unexpected(event: &FromAgent, expected: &'static str) -> Error {
+    Error::UnexpectedEvent {
+        event: format!("{event:?}"),
+        expected,
     }
 }
 

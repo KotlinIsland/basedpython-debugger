@@ -20,10 +20,10 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use bpd_protocol::message::{FromAgent, FromEngine, StopReason};
+use bpd_protocol::message::{FromAgent, FromEngine, Refusal, StopReason};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
-pub use launch::{Debuggee, Launched, Running, launch};
+pub use launch::{Debuggee, Launched, Running, Stack, Variables, launch};
 
 /// the result type for engine operations
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -131,6 +131,17 @@ pub enum Error {
     NotStopped {
         /// what was asked for
         wanted: &'static str,
+    },
+
+    /// the agent will not answer the request, and said why
+    ///
+    /// not a failure of the engine or of the transport: the agent understood
+    /// the request and refused it, because answering would have meant guessing
+    /// what was meant
+    #[error("{reason}")]
+    Refused {
+        /// what stood in the way
+        reason: Refusal,
     },
 
     /// the agent said something the engine was not waiting for

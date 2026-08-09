@@ -215,4 +215,8 @@ incomplete — the same way a feature without a test is incomplete
 - how a snapshot is addressed across turns without reintroducing DAP's stale
     handle problem. a content addressed id is the current thinking
 - what the right default byte budget is for an object graph, given that it is
-    spending someone's context window
+    spending someone's context window. the mechanism is built and its defaults
+    are a placeholder — [the stopped
+    state](state.md#expansion-and-saying-what-was-left-out) records what they
+    are and why the number cannot be settled until there is an agent surface to
+    measure it against
