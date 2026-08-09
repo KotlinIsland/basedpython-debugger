@@ -30,6 +30,9 @@ struct Handles {
     set_local_events: Py<PyAny>,
     restart_events: Py<PyAny>,
     get_ident: Py<PyAny>,
+    get_frame: Py<PyAny>,
+    compile: Py<PyAny>,
+    eval: Py<PyAny>,
 }
 
 static HANDLES: OnceLock<Handles> = OnceLock::new();
@@ -39,7 +42,9 @@ static HANDLES: OnceLock<Handles> = OnceLock::new();
 /// `_thread.get_ident` rather than `threading.get_ident`: `_thread` is builtin
 /// and always present, where `threading` is an ordinary module that a stop
 /// would otherwise have to import — from inside a callback, which is the thing
-/// this module exists to avoid
+/// this module exists to avoid. `sys` and `builtins` are already imported by
+/// the time any interpreter exists, so neither adds a module the debuggee would
+/// not otherwise have
 pub(crate) fn install(
     python: Python<'_>,
     monitoring: &Bound<'_, PyAny>,
@@ -56,6 +61,7 @@ pub(crate) fn install(
     )?;
     monitoring.call_method1("register_callback", (DEBUGGER_TOOL_ID, &line, on_line))?;
 
+    let builtins = PyModule::import(python, "builtins")?;
     let handles = Handles {
         disable: monitoring.getattr("DISABLE")?.unbind(),
         line: line.unbind(),
@@ -66,6 +72,11 @@ pub(crate) fn install(
         get_ident: PyModule::import(python, "_thread")?
             .getattr("get_ident")?
             .unbind(),
+        get_frame: PyModule::import(python, "sys")?
+            .getattr("_getframe")?
+            .unbind(),
+        compile: builtins.getattr("compile")?.unbind(),
+        eval: builtins.getattr("eval")?.unbind(),
     };
 
     HANDLES
@@ -140,4 +151,48 @@ pub(crate) fn restart(python: Python<'_>) -> PyResult<()> {
 /// the interpreter's identity for the calling thread
 pub(crate) fn thread_ident(python: Python<'_>) -> PyResult<u64> {
     handles().get_ident.bind(python).call0()?.extract()
+}
+
+/// the python frame that is running right now
+///
+/// the callbacks are native, so the interpreter pushes no frame to call them
+/// and `sys._getframe()` is the frame that reached the event. this is the one
+/// thing on the event path that materialises a frame, and it is only reached
+/// after a line has already matched a bound breakpoint — deciding *whether* it
+/// matched needs the code object's address and a line number and nothing else
+pub(crate) fn current_frame(python: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    handles().get_frame.bind(python).call0()
+}
+
+/// compile an expression, once, when the breakpoint is set
+///
+/// `filename` is what a traceback out of this expression will name, so it says
+/// which breakpoint the expression belongs to rather than `<string>`
+pub(crate) fn compile_expression(
+    python: Python<'_>,
+    source: &str,
+    filename: &str,
+) -> PyResult<Py<PyAny>> {
+    Ok(handles()
+        .compile
+        .bind(python)
+        .call1((source, filename, "eval"))?
+        .unbind())
+}
+
+/// evaluate a compiled expression against a frame's own namespaces
+///
+/// `locals` is the frame's `f_locals`, which on 3.13 and later is PEP 667's
+/// write-through proxy rather than a snapshot — so the expression sees the
+/// values the frame holds now, including cell and free variables
+pub(crate) fn evaluate<'py>(
+    python: Python<'py>,
+    code: &Py<PyAny>,
+    globals: &Bound<'py, PyAny>,
+    locals: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    handles()
+        .eval
+        .bind(python)
+        .call1((code.bind(python), globals, locals))
 }

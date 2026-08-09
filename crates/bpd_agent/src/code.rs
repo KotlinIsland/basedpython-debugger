@@ -45,6 +45,12 @@ struct Registry {
     /// set, which is what stops the allocator handing the same address to a
     /// different code object
     retained: BTreeSet<usize>,
+
+    /// the files whose own module-level code object has been registered
+    ///
+    /// binding walks down from the roots, so the whole tree is only reachable
+    /// when the module is one of them. see [`whole_file_seen`]
+    whole: BTreeSet<FileId>,
 }
 
 impl Registry {
@@ -54,6 +60,7 @@ impl Registry {
             resolved: BTreeMap::new(),
             by_id: BTreeMap::new(),
             retained: BTreeSet::new(),
+            whole: BTreeSet::new(),
         }
     }
 }
@@ -85,16 +92,26 @@ pub(crate) fn register(code: &Bound<'_, PyAny>) -> PyResult<Option<FileId>> {
     let filename: Cow<'_, str> = attribute.extract()?;
     let address = code.as_ptr() as usize;
 
+    // the second attribute this path reads, and it buys the invariant that
+    // `units_for` depends on: a module's code object is the root of the whole
+    // tree, and one that is *not* a module reaches only what is under it
+    let attribute = code.getattr("co_qualname")?;
+    let qualname: Cow<'_, str> = attribute.extract()?;
+    let is_module = qualname == "<module>";
+
     let mut registry = write();
-    match registry.resolved.get(&*filename).map(Result::is_ok) {
-        Some(false) => return Ok(None),
-        Some(true) => {
+    match registry.resolved.get(&*filename).cloned() {
+        Some(Err(_)) => return Ok(None),
+        Some(Ok(id)) => {
             if registry.retained.insert(address) {
                 registry
                     .roots
                     .get_mut(&*filename)
                     .expect("a filename that resolved was given a roots entry when it resolved")
                     .push(code.clone().unbind());
+            }
+            if is_module {
+                registry.whole.insert(id);
             }
             return Ok(None);
         }
@@ -114,12 +131,34 @@ pub(crate) fn register(code: &Bound<'_, PyAny>) -> PyResult<Option<FileId>> {
                 .entry(id.clone())
                 .or_default()
                 .insert(filename.clone());
+            if is_module {
+                registry.whole.insert(id.clone());
+            }
             Some(id.clone())
         }
         Err(_) => None,
     };
     registry.resolved.insert(filename, identity);
     Ok(newly)
+}
+
+/// whether the file's own module-level code object has been registered
+///
+/// binding walks **down** from the roots registered for a file, so a root that
+/// is not the module reaches only the code objects nested inside it. the union
+/// of executable lines is then a subset of the file's, and every answer taken
+/// from it is wrong in a way that looks right: a breakpoint moves past the line
+/// it should have landed on, a line that belongs to two code objects is armed
+/// in one of them, and a refusal names a last executable line that is not the
+/// file's last
+///
+/// the only way to reach that state is a code object first run **inside a
+/// monitoring callback** — a module a breakpoint's condition imports — because
+/// the interpreter does not report `PY_START` while a tool is already in a
+/// callback. it is measured in
+/// `the_interpreter_does_not_report_an_event_raised_from_inside_a_callback`
+pub(crate) fn whole_file_seen(wanted: &FileId) -> bool {
+    read().whole.contains(wanted)
 }
 
 /// whether the interpreter has compiled anything under exactly this filename

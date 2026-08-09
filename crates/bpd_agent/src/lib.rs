@@ -12,6 +12,7 @@
 mod attach;
 mod breakpoints;
 mod code;
+mod conditions;
 mod events;
 mod files;
 mod run;
@@ -239,23 +240,78 @@ fn on_line<'py>(
     code: &Bound<'py, PyAny>,
     line: u32,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let Some(breakpoints) = breakpoints::hit(code.as_ptr() as usize, line) else {
+    // this line is being run by a condition or a log message of ours, not by
+    // the program. it is not a hit, and it must not be disabled either — the
+    // program will reach it for real later and has to be offered it then
+    if conditions::evaluating() {
+        return Ok(python.None().into_bound(python));
+    }
+
+    let Some(plans) = breakpoints::hit(code.as_ptr() as usize, line) else {
         return Ok(events::disable(python));
     };
 
     let file: String = code.getattr("co_filename")?.extract()?;
     let thread = events::thread_ident(python)?;
-    session::stop(
-        python,
-        StopReason::Breakpoint {
-            breakpoints,
-            file,
-            line,
-            thread,
-        },
-    )?;
+    let at = conditions::Location {
+        file: &file,
+        line,
+        thread,
+    };
 
-    // deliberately not `DISABLE`: a breakpoint that fired once still exists
+    let mut stopping = Vec::new();
+    let mut failure = None;
+    {
+        // held across every expression of every breakpoint on this line, so a
+        // condition that calls a function with a breakpoint in it runs to an
+        // answer rather than stopping inside itself
+        let _suppressed = conditions::suppress();
+        let mut place = conditions::Place::unfetched(python);
+
+        for plan in &plans {
+            match plan.fire(python, &mut place, &at)? {
+                conditions::Fired::Nothing => {}
+                conditions::Fired::Stop => stopping.push(plan.id),
+                conditions::Fired::Logged(record) => session::log(record),
+                // the remaining breakpoints on this line are left alone: the
+                // program is about to be held here anyway, and a log record
+                // produced during a hit the client is being told is broken
+                // would be a record nobody can trust
+                conditions::Fired::Failed(raised) => {
+                    failure = Some((plan.id, raised));
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some((breakpoint, raised)) = failure {
+        session::stop(
+            python,
+            StopReason::EvaluationFailed {
+                breakpoint,
+                part: raised.part,
+                expression: raised.expression,
+                file,
+                line,
+                thread,
+                error: raised.error,
+            },
+        )?;
+    } else if !stopping.is_empty() {
+        session::stop(
+            python,
+            StopReason::Breakpoint {
+                breakpoints: stopping,
+                file,
+                line,
+                thread,
+            },
+        )?;
+    }
+
+    // deliberately not `DISABLE`: a breakpoint that fired once still exists,
+    // and so does one whose condition was false this time
     Ok(python.None().into_bound(python))
 }
 

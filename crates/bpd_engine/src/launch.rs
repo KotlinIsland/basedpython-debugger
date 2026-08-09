@@ -18,7 +18,9 @@ use std::process::{Child, Command, ExitStatus};
 
 use bpd_core::python::Capabilities;
 use bpd_protocol::env;
-use bpd_protocol::message::{FromAgent, FromEngine, Resolved, SourceBreakpoint, StopReason};
+use bpd_protocol::message::{
+    FromAgent, FromEngine, LogRecord, Resolved, SourceBreakpoint, StopReason,
+};
 
 use crate::{Error, Listener, Result, Session, agent};
 
@@ -34,6 +36,13 @@ pub struct Debuggee {
     child: Child,
     session: Session,
     stopped: Option<StopReason>,
+    /// log records that arrived while the engine was waiting for an answer
+    ///
+    /// a thread that reaches a logpoint sends its record without waiting, so
+    /// one can be in the socket ahead of the reply to a request. it is kept for
+    /// the next `run` rather than dropped, because a log record the client
+    /// never sees is a line of the program's history that silently went missing
+    pending_logs: Vec<LogRecord>,
     /// held so the staged agent outlives the debuggee that imported it
     _staged: agent::Staged,
 }
@@ -68,6 +77,14 @@ impl Debuggee {
         self.stopped.as_ref()
     }
 
+    /// how many requests the engine has sent this debuggee's agent
+    ///
+    /// the agent reads the control connection only inside a stop, so this is
+    /// also the number of times the debuggee has waited for the debugger
+    pub const fn requests_sent(&self) -> u64 {
+        self.session.requests_sent()
+    }
+
     /// replace the whole breakpoint set, and say how every one of them resolved
     ///
     /// only while the debuggee is stopped. the agent reads the control
@@ -93,27 +110,40 @@ impl Debuggee {
         self.session
             .send(&FromEngine::SetBreakpoints { breakpoints })?;
 
-        match self.session.next_event()? {
-            Some(FromAgent::BreakpointsResolved { resolved }) => Ok(resolved),
-            Some(other) => Err(Error::UnexpectedEvent {
-                event: format!("{other:?}"),
-                expected: EXPECTED,
-            }),
-            None => Err(Error::AgentGone { expected: EXPECTED }),
+        loop {
+            match self.session.next_event()? {
+                Some(FromAgent::BreakpointsResolved { resolved }) => return Ok(resolved),
+                Some(FromAgent::Logged { record }) => self.pending_logs.push(record),
+                Some(other) => {
+                    return Err(Error::UnexpectedEvent {
+                        event: format!("{other:?}"),
+                        expected: EXPECTED,
+                    });
+                }
+                None => return Err(Error::AgentGone { expected: EXPECTED }),
+            }
         }
     }
 
     /// let the debuggee run until it stops again or finishes
     ///
     /// the agent can speak while the program runs — loading a module changes
-    /// what a breakpoint resolves to — so everything it said on the way is
-    /// collected and handed back with the outcome, rather than left in a socket
-    /// buffer for someone to find
-    pub fn run(&mut self) -> Result<Running> {
+    /// what a breakpoint resolves to, and a logpoint has something to say every
+    /// time it is reached — so nothing it said is left in a socket buffer for
+    /// someone to find
+    ///
+    /// log records go to `on_log` as they arrive rather than into the result.
+    /// there is no bound on how many a logpoint produces, and a debugger that
+    /// accumulated a million of them before saying anything would be holding
+    /// the program's history hostage to its own memory
+    pub fn run(&mut self, mut on_log: impl FnMut(LogRecord)) -> Result<Running> {
         const EXPECTED: &str = "the debuggee to stop or exit";
 
         if self.stopped.take().is_none() {
             return Err(Error::NotStopped { wanted: EXPECTED });
+        }
+        for record in self.pending_logs.drain(..) {
+            on_log(record);
         }
         self.session.send(&FromEngine::Resume)?;
 
@@ -125,6 +155,7 @@ impl Debuggee {
                     return Ok(Running::Stopped { reason, rebound });
                 }
                 Some(FromAgent::BreakpointsResolved { resolved }) => rebound.extend(resolved),
+                Some(FromAgent::Logged { record }) => on_log(record),
                 Some(other) => {
                     return Err(Error::UnexpectedEvent {
                         event: format!("{other:?}"),
@@ -150,6 +181,12 @@ impl Debuggee {
 /// catch-all arm instead — which is how a debugger acquires a state nobody
 /// handles
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one variant holds a running process and the other holds its exit \
+              status, and boxing the first would put an allocation on the path \
+              every launch takes to make a value that is moved once smaller"
+)]
 pub enum Launched {
     /// the debuggee is attached and held before its first statement
     Stopped(Debuggee),
@@ -229,6 +266,7 @@ pub fn launch(interpreter: &Capabilities, script: &Path, args: &[OsString]) -> R
         stopped: Some(reason),
         child,
         session,
+        pending_logs: Vec::new(),
         _staged: staged,
     }))
 }

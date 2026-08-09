@@ -240,6 +240,7 @@ impl Listener {
 pub struct Session {
     stream: TcpStream,
     buffer: Vec<u8>,
+    requests: u64,
 }
 
 impl Session {
@@ -251,10 +252,21 @@ impl Session {
         let mut session = Self {
             stream,
             buffer: Vec::new(),
+            requests: 0,
         };
         frame::read_handshake(&mut session.stream, token)?;
         frame::write_handshake(&mut session.stream, token)?;
         Ok(session)
+    }
+
+    /// how many requests the engine has sent the agent since it attached
+    ///
+    /// the agent reads the control connection only while it is stopped, so this
+    /// number is also how many times the debuggee has waited on the debugger. a
+    /// feature that claims to cost no round trips is a feature this can be
+    /// counted against
+    pub const fn requests_sent(&self) -> u64 {
+        self.requests
     }
 
     /// the next thing the agent has to say, or `None` once it has hung up
@@ -279,6 +291,7 @@ impl Session {
     /// tell the agent to do something
     pub fn send(&mut self, request: &FromEngine) -> Result<()> {
         message::write(&mut self.stream, request)?;
+        self.requests += 1;
         Ok(())
     }
 }

@@ -56,7 +56,9 @@ pub(crate) fn run(args: &Args) -> ExitCode {
         // interpreter's own words, and a line of bpd's on top would be a line
         // that is not there without the debugger
         Launched::ExitedBeforeStopping(status) => Ok(status),
-        Launched::Stopped(mut debuggee) => match debuggee.run() {
+        Launched::Stopped(mut debuggee) => match debuggee
+            .run(|record| unreachable!("no breakpoints were set, and the agent logged {record:?}"))
+        {
             // `bpd launch` sets no breakpoints, so nothing in the program can
             // stop it and nothing can change what a breakpoint resolves to.
             // both are stated rather than absorbed, because a stop nobody
