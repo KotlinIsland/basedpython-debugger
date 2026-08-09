@@ -137,6 +137,11 @@ see [breakpoints](docs/development/breakpoints.md)
 
 execution control and state, per the criteria above
 
+stop coordination lands here, and **the choice of what a stop means has to be
+made with it** rather than after — see non-stop debugging under
+[further out](#further-out). building "stop the world" as the only mode would
+have to be undone
+
 ### M4 — DAP
 
 the adapter, and an editor driving it end to end
@@ -189,7 +194,7 @@ the answer is to propose one upstream
 both refuse loudly rather than approximating: a jump into a different block,
 into or out of a `try`, or across a `with` is either correct or rejected
 
-### M10 — hot module reloading
+### M10 — hot module reloading and hot code replacement
 
 reload a changed module and keep the process alive: rebind `__code__` on live
 function objects, update class dictionaries in place so existing instances see
@@ -200,6 +205,122 @@ layout, a module with import side effects, a live frame executing the code being
 replaced — is reported as not applicable, with the reason and the name of the
 thing that blocked it. it is never applied partially, because a process half way
 between two versions of a module produces evidence about neither
+
+**what triggers it is a separate and much earlier piece of work.** noticing that
+the file on disk is no longer the code that is running is a correctness feature
+in its own right, and cpython gets it wrong today: a traceback is rendered by
+`linecache` reading the file *now*, so a file edited since import is shown with
+current text against old line numbers. every python debugger inherits that lie.
+detecting it costs a hash recorded at bind time, and once it is detected the
+client can be offered the replacement — "the source does not match what is
+running, replace it?" — through both adapters
+
+## further out
+
+these are not ordered against each other, and none of them is scheduled. what
+each entry records is the reason it is worth doing and the part that is hard,
+so that whoever picks one up starts from the obstacle rather than finding it
+
+### breakpoint sequences
+
+a breakpoint that does not arm until another one has been hit. "stop in the
+handler, but only after the request that set this flag came through"
+
+this is the cheapest item here and it fits what M2 already built: breakpoints
+carry conditions and hit counts evaluated in the agent, and a sequence is one
+more edge in that table. it is also **cheaper than it looks at run time** — a
+breakpoint that is not armed yet has its `LINE` events off entirely, so it costs
+nothing until the one before it fires
+
+the design questions are all about resets: whether arming is one-shot or
+permanent, whether a sequence is per thread or per process, and whether the hit
+counter of a later breakpoint starts before or after it arms. a chain answers
+those differently from a DAG, and picking a chain first is likely right
+
+### non-stop debugging
+
+on a free-threaded build, stopping one thread does not stop the others — that is
+reported honestly today and treated as a gap. it is also a **feature**, and a
+standard one: gdb calls it non-stop mode and DAP has
+`supportsSingleThreadExecutionRequests` for it
+
+so the answer to the M1.7 gap is not "build stop coordination", it is "build
+both and say which is in force". a GIL build can only really offer stop the
+world; a free-threaded build can offer either
+
+what is **not** free is the guarantee. while one thread is stopped and the
+others run, everything the stopped frame can see is being mutated underneath
+the inspection — so a value read twice can differ, and an expression evaluated
+in that frame is racing. the work is not making threads keep running, which
+already happens; it is stating exactly what is stable in each mode and refusing
+to answer what is not
+
+### async causal stacks
+
+`await` preserves a stack. `create_task`, `ensure_future`, callbacks and
+executors sever it, and what is left does not say who is responsible:
+
+```python
+async def h():
+    raise TypeError("Something broke in h")
+
+async def g():
+    asyncio.create_task(h())   # the chain ends here
+```
+
+the traceback for that is **one frame** — `h`, and nothing above it — and the
+process exits **0**, because an exception in an unretrieved task is reported by
+a handler rather than raised. a debugger that says nothing here is agreeing that
+the program succeeded
+
+stitching means recording the stack at the moment a task is created and
+presenting it above the frames that are actually running. cpython 3.14 added
+external asyncio introspection (`python -m asyncio ps`), which is the supported
+way into the task tree and fits the 3.14 line this project already draws
+
+the rule that matters: the stitched frames **did not call** the running ones,
+they scheduled them. presenting one seamless stack would be a fabricated call
+chain, which is the exact lie this project exists to avoid. the join has to be
+visible in the stack itself, not explained in a tooltip
+
+### live heaps and retainers
+
+"what is holding this object" — the question `gc.get_referrers` answers badly
+and slowly. done natively the walk builds a reverse index from the GC's own
+referent graph without allocating millions of python objects to do it, which
+matters because the usual tools perturb the heap they are measuring
+
+three honesty constraints decide the design:
+
+- the debugger's own frames and temporaries are retainers, and have to be
+    excluded **and** said to be excluded
+- objects the GC does not track — ints, strs, anything without GC support —
+    never appear in the walk. a retainer report that omits them silently is
+    wrong; it has to state its coverage
+- a heap snapshot of a running program is racy unless the world is stopped,
+    which ties this directly to the mode question above
+
+with PEP 768 attach (M8) this becomes a snapshot of a production process that
+was never started under a debugger, which is where it earns most
+
+### record and replay
+
+stepping backwards, and asking what a variable was rather than what it is
+
+full deterministic replay is not available: it would mean capturing every
+syscall, thread interleaving, clock read and random source that the interpreter
+and its C extensions touch. what is reachable is a **bounded recording** — an
+event log with retention, giving "step back" and "what was this before" across a
+window, and saying plainly where the window ends
+
+this is the one item that fights the existing architecture. the performance
+model is `DISABLE` on everything uninteresting; recording wants everything, and
+the two cannot both be on. it is a mode, scoped to a region of a run rather than
+a whole session
+
+the trap is the obvious one: a recorder that interpolates state it did not
+capture is a debugger inventing history. it reports what it has and refuses what
+it does not
 
 ## not planned
 
