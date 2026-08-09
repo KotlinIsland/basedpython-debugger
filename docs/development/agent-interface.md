@@ -51,9 +51,20 @@ state: why it stopped, which thread, the top frames, and a digest of the locals
 that changed. one call, one answer, no event correlation
 
 each takes a deadline. when the deadline passes without a stop, the call
-returns a *timeout* result naming what the program is doing instead —
-`still running`, `blocked on this call`, `waiting on this lock` — which is
-itself the answer to the question the agent was probably asking
+returns a *timeout* result rather than hanging, which is itself the answer to
+the question the agent was probably asking
+
+what that result may say is narrower than it first looks. the program is still
+running, so anything read off it is a **sample**, not a stop — a stack taken
+from a thread that is executing describes a moment that has already gone. so a
+timeout reports that it timed out, and any thread state it carries is labelled
+as sampled and possibly already stale. it never presents a sampled stack as a
+stopped one
+
+this is not a limitation to be engineered away. a sample honestly labelled is
+useful — it is what a profiler gives you, and "it is still inside
+`socket.recv`" answers most of these questions. a sample presented as a stop is
+the debugger reporting a state the program was not in
 
 ### state is queried declaratively, in one call
 
