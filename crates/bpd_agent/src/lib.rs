@@ -15,8 +15,10 @@ mod code;
 mod conditions;
 mod events;
 mod files;
+mod frames;
 mod run;
 mod session;
+mod values;
 
 use bpd_protocol::message::StopReason;
 use pyo3::exceptions::PyImportError;
@@ -42,7 +44,8 @@ const TOOL_NAME: &str = "bpd";
 #[pymodule]
 mod bpd_agent {
     use super::{
-        BUILT_FOR, DEBUGGER_TOOL_ID, TOOL_NAME, arm, attach, monitoring, run, running_version,
+        BUILT_FOR, DEBUGGER_TOOL_ID, TOOL_NAME, arm, attach, frames, monitoring, run,
+        running_version,
     };
     use pyo3::exceptions::{PyImportError, PyRuntimeError, PySystemExit};
     use pyo3::prelude::*;
@@ -80,6 +83,13 @@ mod bpd_agent {
             .map_err(|error| PySystemExit::new_err(format!("bpd: could not attach: {error}")))?;
         claim(python)?;
         arm(python)?;
+
+        // this is the one python frame that belongs to bpd — the `-c` bootstrap
+        // the interpreter was entered through — and it is remembered here,
+        // before the program has a frame of its own, so that no stack ever
+        // reports it. `main` is a native function and the interpreter pushes no
+        // frame to call one, so the frame running right now is the bootstrap's
+        frames::remember_bootstrap(python)?;
 
         match run::script(python, &as_given, &target) {
             Ok(()) => Ok(()),

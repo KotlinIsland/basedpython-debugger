@@ -33,6 +33,10 @@ struct Handles {
     get_frame: Py<PyAny>,
     compile: Py<PyAny>,
     eval: Py<PyAny>,
+    int_repr: Py<PyAny>,
+    float_repr: Py<PyAny>,
+    repr: Py<PyAny>,
+    list: Py<PyAny>,
 }
 
 static HANDLES: OnceLock<Handles> = OnceLock::new();
@@ -77,6 +81,13 @@ pub(crate) fn install(
             .unbind(),
         compile: builtins.getattr("compile")?.unbind(),
         eval: builtins.getattr("eval")?.unbind(),
+        // the unbound slots, not `str()` and not `repr()`: a subclass is free
+        // to override either, and then the number bpd reported would not be
+        // the number the object holds
+        int_repr: builtins.getattr("int")?.getattr("__repr__")?.unbind(),
+        float_repr: builtins.getattr("float")?.getattr("__repr__")?.unbind(),
+        repr: builtins.getattr("repr")?.unbind(),
+        list: builtins.getattr("list")?.unbind(),
     };
 
     HANDLES
@@ -178,6 +189,33 @@ pub(crate) fn compile_expression(
         .bind(python)
         .call1((source, filename, "eval"))?
         .unbind())
+}
+
+/// the exact digits of an integer, whatever its type says about itself
+pub(crate) fn int_repr(python: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> {
+    handles().int_repr.bind(python).call1((value,))?.extract()
+}
+
+/// a float as python writes it, so `inf`, `nan` and `-0.0` survive
+pub(crate) fn float_repr(python: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> {
+    handles().float_repr.bind(python).call1((value,))?.extract()
+}
+
+/// `repr(value)`, which is user code and is only reached when a request asked
+pub(crate) fn repr(python: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> {
+    handles().repr.bind(python).call1((value,))?.extract()
+}
+
+/// `list(value)`, the only snapshot of a set cpython offers
+///
+/// there is no concrete accessor for set storage — no `PySet_GetItem` — so a
+/// set is read by iterating it. that is why only an exact `set` or `frozenset`
+/// is read this way: for those, iteration is the interpreter's own code
+pub(crate) fn to_list<'py>(
+    python: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    handles().list.bind(python).call1((value,))
 }
 
 /// evaluate a compiled expression against a frame's own namespaces

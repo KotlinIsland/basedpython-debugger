@@ -244,10 +244,26 @@ suppression becomes the thing holding the line
 
 ## what is not covered yet
 
-stepping, frames and values, and the two adapters — none of them exist. so does
-stop coordination: a breakpoint stop reports the thread that hit it and claims
-nothing about the others, and there is no test asserting that the others are
-held because they are not
+stepping, exception breakpoints and the two adapters — none of them exist. so
+does stop coordination: a breakpoint stop reports the thread that hit it and
+claims nothing about the others, and there is no test asserting that the others
+are held because they are not
+
+frames, scopes and values are covered by `crates/bpd_engine/tests/state.rs`, and
+two of its assertions are about **cpython** rather than about `bpd`, so they are
+made in a bare interpreter: that `f_locals` accepts and reads back a write the
+compiled code can never see — which is the whole reason a write is refused
+unless the name is already in the scope — and that a module frame's locals and
+globals are the same object. see [the stopped state](state.md)
+
+the breaks those tests were checked against: not stopping the stack walk at the
+bootstrap frame fails three, reading a free variable from the globals fails the
+scope test, dropping the scope check before a write fails the refusal test,
+dropping cycle detection fails the cycle test, reading a list's length through
+`__len__` instead of its storage fails the storage test, calling `__repr__`
+without being asked fails the repr test, calling an unreadable name unbound fails
+the class body test, and reading a scope at the depth asked for rather than the
+depth the budget fits fails two
 
 conditions and hit counters are tested on one thread. a counter is shared by
 every thread that reaches its breakpoint, and there is no test of two threads

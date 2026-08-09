@@ -663,7 +663,7 @@ fn parse_template(template: &str) -> Result<Vec<Raw>, String> {
 /// corrupted line numbers once already, and a debuggee that has imported
 /// `traceback` when it otherwise would not have is a debuggee the debugger
 /// changed
-fn capture(python: Python<'_>, error: &PyErr) -> PythonError {
+pub(crate) fn capture(python: Python<'_>, error: &PyErr) -> PythonError {
     let value = error.value(python);
     let kind = value.get_type().fully_qualified_name().map_or_else(
         |_| "<an exception whose type has no name>".to_string(),

@@ -142,6 +142,12 @@ made with it** rather than after — see non-stop debugging under
 [further out](#further-out). building "stop the world" as the only mode would
 have to be undone
 
+the state half has landed: frames and frame identity, the stack, the four scopes
+a frame really has, writing a variable the program then goes on to use, values,
+object graph expansion under a budget that says what it left out, and expression
+evaluation. execution control — stepping and exception breakpoints — has not.
+see [the stopped state](docs/development/state.md)
+
 ### M4 — DAP
 
 the adapter, and an editor driving it end to end
