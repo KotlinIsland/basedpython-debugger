@@ -41,9 +41,9 @@ breakpoint is not already solid
       and the response says where it moved to
 - [x] a breakpoint in a module that is not imported yet is reported **unbound**,
       and binds when the module is imported
-- [ ] conditions, hit counts and logpoints evaluate in the debuggee, not over
+- [x] conditions, hit counts and logpoints evaluate in the debuggee, not over
       the wire
-- [ ] a condition that raises reports the exception, and the breakpoint still
+- [x] a condition that raises reports the exception, and the breakpoint still
       stops — it never silently behaves as false
 
 **execution control**
@@ -108,7 +108,7 @@ user thread exists yet; that stops being true the moment a breakpoint can fire
 
 see [launching a debuggee](docs/development/launching.md)
 
-### M2 — breakpoints · binding and stopping done
+### M2 — breakpoints · done
 
 a breakpoint set on a source location finds the code object and the offset that
 will run, and the program stops there. code objects are discovered through a
@@ -118,12 +118,18 @@ generator expression inside it both bind; a location that is not executable
 moves and the answer says where to; and a location with nothing behind it is
 reported unbound with a reason rather than reported as set
 
+a breakpoint also carries a condition, a hit count and a log message, and all
+three are answered inside the debuggee. an expression is compiled when the
+breakpoint is set and never on the event path, the common `name <op> literal`
+shape is compared natively against the frame's own locals, and an expression
+that raises **stops** and hands over the exception rather than being read as
+false. a logpoint on a line executed a million times produces a million records
+and waits for the debugger none of those times
+
 stop coordination did **not** land with it. a breakpoint stop reports the thread
 that hit it and deliberately claims nothing about the others, because holding
 them is not implemented and saying otherwise would be the lie this project
 exists to avoid
-
-still to do: conditions, hit counts and logpoints
 
 see [breakpoints](docs/development/breakpoints.md)
 

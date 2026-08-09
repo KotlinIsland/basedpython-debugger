@@ -223,8 +223,24 @@ line table is written down in rust and compared against itself
 **the tests are checked against the regressions they exist to catch.** removing
 the `co_consts` recursion fails nine of them; removing the `restart_events()`
 call after a breakpoint change fails exactly one, which is the one written for
-it; keeping cpython's line 0 in the line table fails the line table test. a test
-that cannot be made to fail is not evidence
+it; keeping cpython's line 0 in the line table fails the line table test. for
+what a breakpoint carries: treating a condition that raised as false fails two,
+counting hits the condition rejected fails one, answering a name that is not a
+local as false instead of handing it to the interpreter fails the differential
+corpus, reusing a hit counter for a breakpoint that changed fails one and never
+reusing one fails its opposite, and a transport counter that does not count
+fails the logpoint round trip test. a test that cannot be made to fail is not
+evidence
+
+**one guard here cannot be made to fail, and that is written down rather than
+left looking like coverage.** the agent suppresses its own breakpoints while a
+condition is being evaluated, and cpython already refuses to re-enter a tool's
+callback on a thread that is inside one — so deleting the suppression changes
+nothing observable. the interpreter's behaviour is therefore pinned directly, in
+a bare interpreter with no agent involved, by
+`the_interpreter_does_not_report_an_event_raised_from_inside_a_callback`. if
+that ever changes, the tests around it start being able to fail, and the
+suppression becomes the thing holding the line
 
 ## what is not covered yet
 
@@ -232,3 +248,8 @@ stepping, frames and values, and the two adapters — none of them exist. so doe
 stop coordination: a breakpoint stop reports the thread that hit it and claims
 nothing about the others, and there is no test asserting that the others are
 held because they are not
+
+conditions and hit counters are tested on one thread. a counter is shared by
+every thread that reaches its breakpoint, and there is no test of two threads
+counting the same one, because arranging that without stop coordination would be
+a test racing itself

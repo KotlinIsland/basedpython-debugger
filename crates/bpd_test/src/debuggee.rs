@@ -169,6 +169,33 @@ impl Fixture {
     }
 }
 
+/// the 1-based line `needle` appears on
+///
+/// how a test names a location in a fixture without writing a line number down.
+/// a line number in a test is a line number that goes stale the moment someone
+/// adds a line to the program above it, and a breakpoint test that silently
+/// moved to a different line still passes
+///
+/// # panics
+///
+/// unless `needle` names exactly one line. two matches would make the test
+/// assert about whichever one the search happened to find first
+pub fn line_of(source: &str, needle: &str) -> u32 {
+    let found: Vec<u32> = source
+        .lines()
+        .enumerate()
+        .filter(|(_, text)| text.contains(needle))
+        .map(|(index, _)| u32::try_from(index + 1).expect("a fixture is not four billion lines"))
+        .collect();
+
+    assert_eq!(
+        found.len(),
+        1,
+        "{needle:?} has to name exactly one line, and it is on {found:?}"
+    );
+    found[0]
+}
+
 /// what came back from running a fixture
 #[derive(Debug, Clone)]
 pub struct Run {

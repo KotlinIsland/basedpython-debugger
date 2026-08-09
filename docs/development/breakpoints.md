@@ -8,8 +8,9 @@ everything on this page is about the same rule, applied in four places: if the
 answer is not knowable, say so and say why, rather than reporting a breakpoint
 that quietly never fires
 
-what exists today is binding and stopping. conditions, hit counts and logpoints
-are not built
+what exists today is binding, stopping, conditions, hit counts and logpoints.
+none of it has a command line surface yet — breakpoints reach a user through the
+adapters, which are not built
 
 ## finding the code objects at all
 
@@ -100,6 +101,30 @@ a breakpoint in one binds to the enclosing function's code object. the recursive
 walk is still what finds that function — a method of a class is two levels down
 the module's `co_consts`, and a generator expression inside one is three
 
+### a file only half seen
+
+binding walks **down** from the code objects registered for a file, and the
+premise of that walk is that one of them is the file's own module. a root that
+is not the module reaches only what is nested inside it, so the union of
+executable lines is a *subset* of the file's — and every answer taken from a
+subset is wrong in a way that looks right:
+
+- a breakpoint moves past the line it should have landed on, to a later one
+- a line that belongs to two code objects is armed in only the one that is
+    visible, so it fires in some of the places it should
+- a refusal names a last executable line that is not the file's last
+
+so a file whose module has never been registered binds **nothing**, and the
+reason says exactly that. it is not a subset answered carefully; it is not
+answered
+
+there is one way to reach that state and it is the debugger's own doing: a
+module first imported from inside a breakpoint's condition. the interpreter
+reports no code object created while a monitoring callback is running, so the
+module's `PY_START` never arrives — and then the program calls one of its
+functions, that one *is* reported, and bpd is holding one function out of a
+whole file. see [re-entrancy](#re-entrancy-and-what-the-interpreter-already-does)
+
 ## unbound is an answer, and it can change
 
 a breakpoint in a module that has not been imported cannot bind. it is reported
@@ -121,6 +146,134 @@ onto such a line has to restart everything
 
 it is the wrong instrument for anything per-frame — see the stepping section of
 [architecture](architecture.md)
+
+## conditions, hit counts and logpoints
+
+a breakpoint carries three optional things beyond its location, and they are
+applied in one order on every hit, with no exceptions:
+
+1. the **condition** — a python expression. false means nothing else happens
+1. the **hit count** — which of the hits the condition let through this
+    breakpoint acts on
+1. the **log message** — if there is one, a record is produced and the program
+    keeps running. if there is not, the program stops
+
+so a hit whose condition was false does not count, and a breakpoint that logs
+does not stop. both of those are choices, and both are written into the tests
+rather than into a comment
+
+everything above happens **in the agent**. nothing about a hit is decided by
+asking the engine, which is what makes a logpoint on a hot line affordable:
+`a_logpoint_on_a_hot_line_costs_no_round_trips` puts one on a line executed a
+million times, counts a million records, and counts the requests the engine sent
+while it ran — which is one, the resume
+
+### compiled once
+
+an expression is compiled when the breakpoint is **set**, not when it is hit,
+and never on the event path. one that does not compile makes the breakpoint
+[unbound](#unbound-is-an-answer-and-it-can-change), carrying the interpreter's
+own `SyntaxError`, because a breakpoint whose condition can never be answered
+can never fire. the same is true of a log message with an unbalanced brace or an
+embedded expression that does not compile
+
+the filename each expression is compiled under names the breakpoint it belongs
+to, so anything the interpreter says about it points back at the right one:
+
+```text
+<bpd condition of breakpoint 53>:1: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+```
+
+### the native comparison
+
+`name <op> literal` is the shape a breakpoint condition almost always has, and
+it is answered without building an evaluation frame: the name is read from the
+frame's fast locals and compared against a constant built when the breakpoint
+was set. the answer a breakpoint reports says which path it is on —
+`comparison` or `expression` — for the same reason a `Site` reports its offset
+
+it is a fast path, so it has a differential test rather than an argument.
+`crates/bpd_engine/tests/conditions.rs` asks every condition in a corpus twice,
+once bare and once wrapped in parentheses — the same expression, and a shape the
+native path cannot read — and requires the two to agree on every pass over the
+line
+
+what it declines, and why declining is the point:
+
+| shape | why |
+| --- | --- |
+| `value > 1.5` | parsing a float is a second implementation of python's parser, and one that rounds differently is worse than no fast path |
+| `value == 1_0`, a literal too big for an `i64` | python takes both spellings and rust does not, so both decline rather than differ |
+| `value is 3` | identity is only knowable for `None`, `True` and `False`. against anything else the interpreter compares with the object it put in `co_consts`, which is not the one this would build |
+| `'x' in value`, `value.attr == 1`, `(value == 3)` | not the shape |
+
+a name that reads natively but is **not a local of that frame** is handed to the
+interpreter too. it is then a global, a builtin, or nothing at all, and deciding
+which is `LOAD_NAME`'s job — reimplementing it is how a debugger reads a
+variable from the wrong scope
+
+### a condition that raises
+
+it stops, and the stop carries the exception: its type, its message, and the
+frames its traceback holds. treating a failed condition as false is the exact
+shape of quiet wrongness this project exists to prevent — an expression that
+raised has not said "no", it has said nothing
+
+the exception is read off the object rather than formatted by
+`traceback.format_exception`, which would mean importing a module from inside a
+monitoring callback — the thing that corrupted line numbers once already — and
+would leave `traceback` in the `sys.modules` of a debuggee that never asked for
+it
+
+a log message that raises is treated identically, and the stop says which of the
+two it was
+
+### log messages
+
+the text is emitted as written, except that `{...}` is a python expression
+evaluated in the frame and converted with `str()`, and `{{` and `}}` are a
+literal brace. the expressions are compiled with the breakpoint
+
+format specifiers are not part of it: `{value:.2f}` is not an expression and is
+refused when the breakpoint is set. a brace that does not pair up is refused as
+well, rather than emitted as itself — a log message that silently drops the
+value the user asked for is a log message that lies about the program
+
+### the hit counter
+
+a counter belongs to a breakpoint, counts across every thread, and answers three
+questions: the nth hit exactly, the nth and every one after, or every nth
+
+it survives a request that does not change the breakpoint, and starts again for
+one that does. rebuilding it whenever any *other* breakpoint in the set moved
+would make "the third time this line runs" quietly mean something else, and the
+engine sends the whole set every time
+
+## re-entrancy, and what the interpreter already does
+
+evaluating a condition runs arbitrary user python **inside a `LINE` callback**.
+a condition that calls a function containing a breakpoint would stop inside
+itself, and one that reaches the line it is attached to would recurse without
+end. so a breakpoint reached while a thread is evaluating does not fire, does
+not count, and is not disabled — the flag is per thread, and another thread
+reaching the same breakpoint at that moment is a real hit
+
+cpython already does this, and the tests say so rather than the code assuming
+it. `call_one_instrument` refuses to enter a tool's callback on a thread that is
+already in one, so the events raised by a condition are never offered to us at
+all. that is not in PEP 669, so it is measured — in a bare interpreter, with no
+agent anywhere near it, by
+`the_interpreter_does_not_report_an_event_raised_from_inside_a_callback`
+
+the agent's own suppression therefore cannot be observed today, and is kept
+because the behaviour it enforces is the one `bpd` chose: a stop whose stack is
+half debugger is the thing the stack rules exist to prevent. if cpython ever
+changes, that test fails, and the suppression is what stops the recursion
+
+the same interpreter behaviour has a consequence the discovery design has to
+live with, and it is the reason for
+[a file only half seen](#a-file-only-half-seen): `PY_START` is suppressed the
+same way, so a module a condition imports is never registered by it
 
 ## what a breakpoint stop holds
 
@@ -177,14 +330,19 @@ executed. `a_breakpoint_fires_on_every_pass_over_the_line` is what stops that
 optimisation from eating the answer: the lines around a breakpoint are disabled
 and the breakpoint still fires on every pass
 
-neither callback materialises a frame. deciding "this is not interesting" needs
-the code object's address and a line number, and nothing about the frame that is
-about to run
+neither callback materialises a frame to decide whether a line is interesting:
+that needs the code object's address and a line number, and nothing about the
+frame that is about to run. a frame is fetched only once a line has already
+matched a bound breakpoint **and** something on it has an expression to
+evaluate, so a plain breakpoint costs exactly what it did before conditions
+existed
 
 ## how it is tested
 
-`crates/bpd_engine/tests/breakpoints.rs`. nothing there takes the agent's word
-for a stop: the fixture programs write a marker on a line *after* the breakpoint,
-and every stop asserts that it has not happened yet. the expected line tables
-and offsets come from `co_lines()` in a separate interpreter process, so the
-answer is whatever cpython says on the machine running the test
+`crates/bpd_engine/tests/breakpoints.rs` for binding and stopping, and
+`crates/bpd_engine/tests/conditions.rs` for everything a breakpoint carries.
+nothing in either takes the agent's word for a stop: the fixture programs write
+a marker on a line *after* the breakpoint, and every stop asserts that it has not
+happened yet. the expected line tables and offsets come from `co_lines()` in a
+separate interpreter process, so the answer is whatever cpython says on the
+machine running the test

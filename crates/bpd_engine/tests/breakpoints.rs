@@ -16,7 +16,7 @@ use std::path::Path;
 use bpd_core::python::Capabilities;
 use bpd_engine::{Debuggee, Launched, Running};
 use bpd_protocol::message::{Binding, Resolved, Site, SourceBreakpoint, StopReason, Unbound};
-use bpd_test::debuggee::Fixture;
+use bpd_test::debuggee::{Fixture, line_of};
 
 /// a class, a method, an inlined comprehension and a generator expression
 ///
@@ -70,40 +70,29 @@ fn launch(fixture: &Fixture) -> Debuggee {
     }
 }
 
-/// the 1-based line `needle` appears on, which is how a test names a location
-/// without writing a line number down
-fn line_of(source: &str, needle: &str) -> u32 {
-    let found: Vec<u32> = source
-        .lines()
-        .enumerate()
-        .filter(|(_, text)| text.contains(needle))
-        .map(|(index, _)| u32::try_from(index + 1).expect("a fixture is not four billion lines"))
-        .collect();
-
-    assert_eq!(
-        found.len(),
-        1,
-        "{needle:?} has to name exactly one line, and it is on {found:?}"
-    );
-    found[0]
+/// no breakpoint in this file is a logpoint, so a log record would mean the
+/// agent invented one
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "it stands in for a `FnMut(LogRecord)` sink, which is handed the \
+              record to own"
+)]
+fn unlogged(record: bpd_protocol::message::LogRecord) {
+    panic!("no logpoint was set, and the agent sent {record:?}")
 }
 
 /// ask for one breakpoint per `(id, line)` on the same file
 fn at(file: &Path, lines: &[(u32, u32)]) -> Vec<SourceBreakpoint> {
     lines
         .iter()
-        .map(|&(id, line)| SourceBreakpoint {
-            id,
-            file: file.to_path_buf(),
-            line,
-        })
+        .map(|&(id, line)| SourceBreakpoint::at(id, file, line))
         .collect()
 }
 
 /// the line and the code objects a breakpoint bound to, or the reason it did not
 fn bound(resolved: &Resolved) -> (u32, &[Site]) {
     match &resolved.binding {
-        Binding::Bound { line, sites } => (*line, sites),
+        Binding::Bound { line, sites, .. } => (*line, sites),
         Binding::Unbound { reason } => {
             panic!("breakpoint {} did not bind: {reason}", resolved.id)
         }
@@ -114,7 +103,7 @@ fn bound(resolved: &Resolved) -> (u32, &[Site]) {
 fn unbound(resolved: &Resolved) -> &Unbound {
     match &resolved.binding {
         Binding::Unbound { reason } => reason,
-        Binding::Bound { line, sites } => panic!(
+        Binding::Bound { line, sites, .. } => panic!(
             "breakpoint {} bound to line {line} in {sites:?}, and was not supposed to",
             resolved.id
         ),
@@ -123,7 +112,7 @@ fn unbound(resolved: &Resolved) -> &Unbound {
 
 /// resume and require that the debuggee stops again
 fn to_stop(debuggee: &mut Debuggee) -> (StopReason, Vec<Resolved>) {
-    match debuggee.run().expect("the debuggee was resumed") {
+    match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Stopped { reason, rebound } => (reason, rebound),
         Running::Exited { status, .. } => {
             panic!("the debuggee exited with {status} instead of stopping")
@@ -137,7 +126,7 @@ fn finish(mut debuggee: Debuggee) {
         .set_breakpoints(Vec::new())
         .expect("the breakpoint set was cleared");
 
-    match debuggee.run().expect("the debuggee was resumed") {
+    match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Exited { status, rebound } => {
             assert!(status.success(), "the program exited with {status}");
             assert!(rebound.is_empty(), "nothing is set, and got {rebound:?}");
@@ -280,7 +269,7 @@ fn a_breakpoint_fires_on_every_pass_over_the_line() {
     // reached three times. one stop would mean the first pass disabled the line
     let mut stops = 0;
     loop {
-        match debuggee.run().expect("the debuggee was resumed") {
+        match debuggee.run(unlogged).expect("the debuggee was resumed") {
             Running::Stopped { .. } => stops += 1,
             Running::Exited { status, .. } => {
                 assert!(status.success(), "the program exited with {status}");
@@ -548,21 +537,9 @@ fn a_file_the_interpreter_never_loads_binds_nothing_and_says_which() {
     let mut debuggee = launch(&fixture);
     let resolved = debuggee
         .set_breakpoints(vec![
-            SourceBreakpoint {
-                id: 1,
-                file: never.clone(),
-                line: 1,
-            },
-            SourceBreakpoint {
-                id: 2,
-                file: missing.clone(),
-                line: 1,
-            },
-            SourceBreakpoint {
-                id: 3,
-                file: fixture.directory().to_path_buf(),
-                line: 1,
-            },
+            SourceBreakpoint::at(1, never.clone(), 1),
+            SourceBreakpoint::at(2, missing.clone(), 1),
+            SourceBreakpoint::at(3, fixture.directory(), 1),
         ])
         .expect("the breakpoint request was answered");
 
@@ -621,11 +598,7 @@ packed_mod.f()
         .expect("the program imported the zipped module");
 
     let resolved = debuggee
-        .set_breakpoints(vec![SourceBreakpoint {
-            id: 2,
-            file: inside_the_zip.into(),
-            line: 2,
-        }])
+        .set_breakpoints(vec![SourceBreakpoint::at(2, inside_the_zip, 2)])
         .expect("the breakpoint request was answered");
 
     let reason = unbound(&resolved[0]);
@@ -671,11 +644,7 @@ import blank
     // is a different answer from "not loaded", and saying so is the difference
     // between a user waiting for a stop and a user editing the right file
     let resolved = debuggee
-        .set_breakpoints(vec![SourceBreakpoint {
-            id: 2,
-            file: blank.clone(),
-            line: 1,
-        }])
+        .set_breakpoints(vec![SourceBreakpoint::at(2, blank.clone(), 1)])
         .expect("the breakpoint request was answered");
 
     let reason = unbound(&resolved[0]);
@@ -703,16 +672,8 @@ fn a_path_that_differs_only_in_case_is_never_bound_to_a_different_file() {
     let mut debuggee = launch(&fixture);
     let resolved = debuggee
         .set_breakpoints(vec![
-            SourceBreakpoint {
-                id: 1,
-                file: fixture.path(),
-                line: inside,
-            },
-            SourceBreakpoint {
-                id: 2,
-                file: shouted,
-                line: inside,
-            },
+            SourceBreakpoint::at(1, fixture.path(), inside),
+            SourceBreakpoint::at(2, shouted, inside),
         ])
         .expect("the breakpoint request was answered");
 
@@ -778,7 +739,7 @@ observe()
         .expect("the breakpoint request was answered");
     to_stop(&mut debuggee);
 
-    match debuggee.run().expect("the debuggee was resumed") {
+    match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Exited { status, .. } => assert!(status.success()),
         Running::Stopped { reason, .. } => panic!("it stopped again for {reason:?}"),
     }
@@ -799,16 +760,8 @@ fn a_breakpoint_set_through_a_symlink_binds_the_same_code_object() {
     let mut debuggee = launch(&fixture);
     let resolved = debuggee
         .set_breakpoints(vec![
-            SourceBreakpoint {
-                id: 1,
-                file: fixture.path(),
-                line: inside,
-            },
-            SourceBreakpoint {
-                id: 2,
-                file: link,
-                line: inside,
-            },
+            SourceBreakpoint::at(1, fixture.path(), inside),
+            SourceBreakpoint::at(2, link, inside),
         ])
         .expect("the breakpoint request was answered");
 
@@ -968,7 +921,7 @@ fn a_running_debuggee_refuses_a_request_rather_than_leaving_it_unanswered() {
     let fixture = Fixture::new("widget", WIDGET);
     let mut debuggee = launch(&fixture);
 
-    match debuggee.run().expect("the debuggee was resumed") {
+    match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Exited { .. } => {}
         Running::Stopped { reason, .. } => panic!("nothing was set, got {reason:?}"),
     }

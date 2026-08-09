@@ -19,10 +19,20 @@
 //! work, and until it exists a stop that claimed to hold the program would be
 //! the debugger lying about the one thing it is for
 
-use bpd_protocol::message::{FromAgent, FromEngine, StopReason};
+use bpd_protocol::message::{FromAgent, FromEngine, LogRecord, StopReason};
 use pyo3::prelude::*;
 
 use crate::{attach, breakpoints, events};
+
+/// tell the engine what a logpoint had to say, and carry straight on
+///
+/// the control connection is taken for the write and released. nothing is read
+/// back, so a logpoint on a line executed a million times costs a million
+/// writes and **no** round trips — which is the whole reason the message is
+/// formatted in here rather than by asking the engine to evaluate something
+pub(crate) fn log(record: LogRecord) {
+    attach::hold().send(&FromAgent::Logged { record });
+}
 
 /// report a stop and block until the engine resumes the program
 ///

@@ -9,11 +9,12 @@
 //! its own, the moment the import makes it bindable
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use bpd_protocol::message::{Binding, Resolved, Site, SourceBreakpoint, Unbound};
 use pyo3::prelude::*;
 
+use crate::conditions::Plan;
 use crate::files::{self, FileId};
 use crate::{code, events};
 
@@ -27,6 +28,12 @@ use crate::{code, events};
 struct Pending {
     request: SourceBreakpoint,
     identity: Result<FileId, String>,
+    /// the compiled condition, hit count and log message, or why there are none
+    ///
+    /// compiled once, when the request arrives, and never on the event path.
+    /// the hit counter lives in here, which is why an unchanged request keeps
+    /// the same `Plan` across a rebinding
+    plan: Result<Arc<Plan>, Unbound>,
 }
 
 /// a code object with `LINE` events turned on, and what to do at each line
@@ -34,8 +41,8 @@ struct Pending {
 struct Armed {
     /// the strong reference that keeps this code object's address unique
     code: Py<PyAny>,
-    /// line -> the breakpoints bound to it, smallest id first
-    lines: BTreeMap<u32, Vec<u32>>,
+    /// line -> what the breakpoints bound to it do, smallest id first
+    lines: BTreeMap<u32, Vec<Arc<Plan>>>,
 }
 
 #[derive(Debug)]
@@ -71,11 +78,16 @@ fn write() -> std::sync::RwLockWriteGuard<'static, State> {
         .expect("the breakpoint lock is only held for map operations, which do not panic")
 }
 
-/// the breakpoints bound to this line of this code object, if any
+/// what the breakpoints bound to this line of this code object do, if any
 ///
-/// the whole of the `LINE` event path. it is a lookup on an address and an
-/// integer, and it allocates nothing unless the answer is yes
-pub(crate) fn hit(address: usize, line: u32) -> Option<Vec<u32>> {
+/// the whole of the `LINE` event path's decision. it is a lookup on an address
+/// and an integer, and it allocates nothing unless the answer is yes
+///
+/// the plans are handed back rather than read under the lock, because deciding
+/// them runs user python: a condition that imports a module re-enters the
+/// rebinding path, which takes this lock for writing, and `RwLock` is not
+/// reentrant
+pub(crate) fn hit(address: usize, line: u32) -> Option<Vec<Arc<Plan>>> {
     read().armed.get(&address)?.lines.get(&line).cloned()
 }
 
@@ -100,10 +112,29 @@ pub(crate) fn apply(
          names one breakpoint here"
     );
 
+    // a breakpoint the client asked for again, unchanged, keeps its hit counter.
+    // rebuilding it would reset the count every time any *other* breakpoint in
+    // the set moved, and "the third time this line runs" would quietly mean
+    // something else
+    let previous: BTreeMap<u32, (SourceBreakpoint, Result<Arc<Plan>, Unbound>)> = read()
+        .pending
+        .iter()
+        .map(|pending| {
+            (
+                pending.request.id,
+                (pending.request.clone(), pending.plan.clone()),
+            )
+        })
+        .collect();
+
     let pending = requested
         .into_iter()
         .map(|request| Pending {
             identity: files::identify(&request.file),
+            plan: match previous.get(&request.id) {
+                Some((before, plan)) if *before == request => plan.clone(),
+                _ => Plan::compile(python, &request).map(Arc::new),
+            },
             request,
         })
         .collect();
@@ -136,17 +167,28 @@ fn resolve_all(python: Python<'_>) -> PyResult<(Vec<Resolved>, Vec<Resolved>)> {
     // across it: a rebind runs inside a `PY_START` callback, and a lock held
     // over a call into the interpreter is a lock another thread can be waiting
     // for while it holds the one thing this one needs
-    let pending: Vec<(SourceBreakpoint, Result<FileId, String>)> = read()
+    type Snapshot = (
+        SourceBreakpoint,
+        Result<FileId, String>,
+        Result<Arc<Plan>, Unbound>,
+    );
+    let pending: Vec<Snapshot> = read()
         .pending
         .iter()
-        .map(|pending| (pending.request.clone(), pending.identity.clone()))
+        .map(|pending| {
+            (
+                pending.request.clone(),
+                pending.identity.clone(),
+                pending.plan.clone(),
+            )
+        })
         .collect();
 
     let mut all = Vec::with_capacity(pending.len());
     let mut armed: BTreeMap<usize, Armed> = BTreeMap::new();
 
-    for (request, identity) in pending {
-        let binding = resolve(python, &request, identity.as_ref(), &mut armed)?;
+    for (request, identity, plan) in pending {
+        let binding = resolve(python, &request, identity.as_ref(), &plan, &mut armed)?;
         all.push(Resolved {
             id: request.id,
             binding,
@@ -179,8 +221,21 @@ fn resolve(
     python: Python<'_>,
     request: &SourceBreakpoint,
     identity: Result<&FileId, &String>,
+    plan: &Result<Arc<Plan>, Unbound>,
     armed: &mut BTreeMap<usize, Armed>,
 ) -> PyResult<Binding> {
+    // before the file, because an expression that does not compile makes the
+    // breakpoint impossible wherever the file turns out to be, and that answer
+    // does not change when a module is imported later
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(reason) => {
+            return Ok(Binding::Unbound {
+                reason: reason.clone(),
+            });
+        }
+    };
+
     let identity = match identity {
         Ok(identity) => identity,
         Err(reason) => {
@@ -196,10 +251,18 @@ fn resolve(
     };
 
     let units = code::units_for(python, identity)?;
-    if units.is_empty() {
+    // a partial view of a file answers every question about it wrongly and
+    // plausibly, so nothing is answered from one
+    if !code::whole_file_seen(identity) {
         return Ok(Binding::Unbound {
-            reason: Unbound::NotLoaded {
-                file: request.file.clone(),
+            reason: if units.is_empty() {
+                Unbound::NotLoaded {
+                    file: request.file.clone(),
+                }
+            } else {
+                Unbound::PartiallyLoaded {
+                    file: request.file.clone(),
+                }
             },
         });
     }
@@ -236,9 +299,9 @@ fn resolve(
                 code: unit.code.clone_ref(python),
                 lines: BTreeMap::new(),
             });
-        let ids = entry.lines.entry(line).or_default();
-        ids.push(request.id);
-        ids.sort_unstable();
+        let plans = entry.lines.entry(line).or_default();
+        plans.push(Arc::clone(plan));
+        plans.sort_unstable_by_key(|plan| plan.id);
     }
 
     assert!(
@@ -255,7 +318,11 @@ fn resolve(
         ))
     });
 
-    Ok(Binding::Bound { line, sites })
+    Ok(Binding::Bound {
+        line,
+        sites,
+        evaluation: plan.evaluation(),
+    })
 }
 
 /// make the interpreter's instrumentation match the new `armed` set
