@@ -51,18 +51,22 @@ breakpoint is not already solid
 - [ ] step over, step in, step out, continue, and pause
 - [ ] stepping is correct across generators, coroutines, comprehensions,
       exception unwinding, and re-entrant calls
-- [ ] with several threads running, stopping one stops the rest, and the stop
-      reports which thread caused it
+- [ ] with several threads running, a stop holds **one** thread and the others
+      keep running, on every build, and the stop names the thread it holds
+- [ ] stop-the-world is available as an explicit mode, and a thread parked in a
+      C call is reported as running in native code rather than counted as held
+- [ ] a stop that blocks other threads because the held thread owns a lock is
+      detected and reported, not left looking like `bpd` hanging
 
 **state**
 
 - [ ] the stack, with each frame's source location, on every thread
-- [ ] locals, globals and closure variables read from the scope that was asked
+- [x] locals, globals and closure variables read from the scope that was asked
       for
-- [ ] a local can be **written**, and the write is visible to the program
-- [ ] object graph expansion with an explicit budget, and an explicit statement
+- [x] a local can be **written**, and the write is visible to the program
+- [x] object graph expansion with an explicit budget, and an explicit statement
       of what was left out when the budget is hit
-- [ ] expression evaluation in a chosen frame, where a failure returns the
+- [x] expression evaluation in a chosen frame, where a failure returns the
       exception
 
 **the two front ends**
@@ -137,10 +141,40 @@ see [breakpoints](docs/development/breakpoints.md)
 
 execution control and state, per the criteria above
 
-stop coordination lands here, and **the choice of what a stop means has to be
-made with it** rather than after — see non-stop debugging under
-[further out](#further-out). building "stop the world" as the only mode would
-have to be undone
+the stopped-state half is done: frames, the stack, scopes, values and
+evaluation — see [reading a stopped program](docs/development/state.md).
+stepping and exception breakpoints remain
+
+**the thread model is decided.** a stop stops **one thread**, and every other
+thread keeps running. gdb calls this non-stop mode and DAP exposes it as
+`supportsSingleThreadExecutionRequests`; it is the mode that lets a live server
+keep serving while one handler is inspected
+
+it applies on **every build**, not only free-threaded ones. the agent releases
+the GIL while stopped, so a gil build behaves the same way rather than freezing
+the process by accident — this project does not ship a capability ladder, and
+"threads keep running, except on the interpreter most people have" is one
+
+stop-the-world stays available as an explicit mode, because a coherent view of a
+data structure needs it
+
+what that costs, and what has to be built around it:
+
+- **the stopped thread still holds its locks.** stopping inside `with lock:`,
+    inside `logging`, or mid-import blocks every other thread that wants the
+    same lock. "all threads keep running" quietly becomes "all threads are piled
+    up behind the debugger", and it looks like `bpd` hanging when it is the
+    debuggee deadlocked on itself. it has to be detected and reported, not
+    discovered
+- **a read is a sample, not a snapshot.** read a container's length and then its
+    contents while another thread mutates it, and the answer describes a state
+    the program was never in. every read carries the mode it was taken in, the
+    same rule already applied to a timed out control call
+- **the program can exit while a thread is stopped.** another thread finishing
+    starts interpreter finalization underneath the one being held
+- **concurrent stops need somewhere to go.** today a second thread reaching a
+    breakpoint blocks on the control connection, so it is not running either.
+    stops queue, and resume is per thread
 
 the state half has landed: frames and frame identity, the stack, the four scopes
 a frame really has, writing a variable the program then goes on to use, values,
@@ -254,24 +288,6 @@ the design questions are all about resets: whether arming is one-shot or
 permanent, whether a sequence is per thread or per process, and whether the hit
 counter of a later breakpoint starts before or after it arms. a chain answers
 those differently from a DAG, and picking a chain first is likely right
-
-### non-stop debugging
-
-on a free-threaded build, stopping one thread does not stop the others — that is
-reported honestly today and treated as a gap. it is also a **feature**, and a
-standard one: gdb calls it non-stop mode and DAP has
-`supportsSingleThreadExecutionRequests` for it
-
-so the answer to the M1.7 gap is not "build stop coordination", it is "build
-both and say which is in force". a GIL build can only really offer stop the
-world; a free-threaded build can offer either
-
-what is **not** free is the guarantee. while one thread is stopped and the
-others run, everything the stopped frame can see is being mutated underneath
-the inspection — so a value read twice can differ, and an expression evaluated
-in that frame is racing. the work is not making threads keep running, which
-already happens; it is stating exactly what is stable in each mode and refusing
-to answer what is not
 
 ### async causal stacks
 
