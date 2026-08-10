@@ -244,10 +244,27 @@ suppression becomes the thing holding the line
 
 ## what is not covered yet
 
-stepping, exception breakpoints and the two adapters — none of them exist. so
-does stop coordination: a breakpoint stop reports the thread that hit it and
-claims nothing about the others, and there is no test asserting that the others
-are held because they are not
+stepping, exception breakpoints and the two adapters — none of them exist
+
+the thread model does, and it is covered by `crates/bpd_engine/tests/threads.rs`.
+that file is the first place multi-threaded fixtures are the point rather than
+something avoided, and the way it stays deterministic is that the threads
+coordinate through **files** rather than through timing: a worker waits for a
+file the test writes, and the test waits for a file the worker writes. a slow
+machine makes it slower, not flakier
+
+nothing in it takes the agent's word for anything. that a thread is running is
+proved by a file it wrote **while another thread was held**; that a thread is
+held is proved by a file that did not appear. see [threads](threads.md)
+
+the breaks those tests were checked against: not releasing the GIL while stopped
+fails the progress test and hangs the concurrent-stop one, resuming every thread
+where one was named fails the per-thread resume test, reporting nothing for a
+stop inside an import fails the import test, never reporting a thread as still
+fails both lock tests, counting a thread parked in a C call as held fails the
+stop-the-world test, reporting the wrong mode fails it too, ignoring a resume for
+a thread that is not held fails the refusal test, and reporting an empty held
+list as the program ends fails the finishing test
 
 frames, scopes and values are covered by `crates/bpd_engine/tests/state.rs`, and
 two of its assertions are about **cpython** rather than about `bpd`, so they are
@@ -266,6 +283,7 @@ the class body test, and reading a scope at the depth asked for rather than the
 depth the budget fits fails two
 
 conditions and hit counters are tested on one thread. a counter is shared by
-every thread that reaches its breakpoint, and there is no test of two threads
-counting the same one, because arranging that without stop coordination would be
-a test racing itself
+every thread that reaches its breakpoint, and there is still no test of two
+threads counting the same one — the harness for a deterministic threaded fixture
+now exists, in `threads.rs`, so the reason is that nobody has written it rather
+than that it cannot be written

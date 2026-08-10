@@ -15,6 +15,139 @@ use std::path::PathBuf;
 
 use crate::frame::{self, Result};
 
+/// one thread, held
+///
+/// a stop holds **one thread**, and every other thread in the process goes on
+/// running. that is the whole model, and it is the same on a gil-enabled build
+/// as on a free-threaded one, because the agent releases the GIL for the
+/// duration of a stop rather than letting it freeze the process by accident
+///
+/// so several of these can be outstanding at once, and each is resumed by
+/// naming its thread
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Stop {
+    /// which stop this is, counting from one
+    ///
+    /// the number a [`FrameId`] carries, and the number a request naming a stop
+    /// uses. it is minted once per stop and never reused
+    pub stop: u64,
+    /// the interpreter's identity for the thread that is held, as
+    /// `threading.get_ident` reports it
+    pub thread: u64,
+    /// why it stopped
+    pub reason: StopReason,
+    /// what this thread was holding, of the things another thread can wait for
+    ///
+    /// empty means nothing bpd can know about was held — **not** that nothing
+    /// was. cpython exposes no owner for a `threading.Lock`, so a lock this
+    /// thread took is invisible from here. what is knowable is listed in
+    /// [`Holding`], and the way to see the consequence either way is to ask
+    /// what the other threads are doing
+    pub holding: Vec<Holding>,
+}
+
+/// something a held thread holds that other threads can be waiting for
+///
+/// this is the honest half of the non-stop model. a stop holds one thread and
+/// says the rest keep running, which stops being true the moment the held
+/// thread is inside something the others need. what cpython makes **knowable**
+/// is listed here; everything else is visible only as another thread that is
+/// not getting anywhere, which is what [`FromEngine::Threads`] is for
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "holding", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Holding {
+    /// the thread is inside the import system
+    ///
+    /// cpython holds a lock per module for the whole of that module's
+    /// execution, so any other thread importing the same module blocks until
+    /// this one is resumed — and a thread deep enough in the machinery holds
+    /// more than that. this one is knowable because the import machinery runs
+    /// in python frames whose filenames name it
+    ImportSystem {
+        /// the module being imported, when the machinery's own frame says
+        ///
+        /// `None` when no frame of the walk held a readable name, which is a
+        /// statement about what was there rather than about there being no
+        /// import
+        module: Option<String>,
+    },
+}
+
+impl std::fmt::Display for Holding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ImportSystem {
+                module: Some(module),
+            } => write!(
+                formatter,
+                "the import system, importing `{module}` — another thread \
+                 importing it blocks until this one is resumed"
+            ),
+            Self::ImportSystem { module: None } => formatter.write_str(
+                "the import system — another thread importing the same module \
+                 blocks until this one is resumed",
+            ),
+        }
+    }
+}
+
+/// how the rest of the program was moving while an answer was taken
+///
+/// every read carries one. a debugger that reported a value without saying
+/// whether the program was standing still while it read it is reporting a
+/// number and hiding what kind of number it is
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Mode {
+    /// one thread was held and every other thread went on running
+    ///
+    /// the held thread's **stack** is still a snapshot: it is inside a
+    /// monitoring callback and cannot return, so its frames cannot go away
+    /// underneath the walk. everything the frames point *at* is a **sample** —
+    /// another thread can mutate a list between its length being read and its
+    /// contents being read, and the answer would then describe a state the
+    /// program was never in
+    NonStop,
+
+    /// every thread that could be held was held while the answer was taken
+    ///
+    /// `native` is what keeps this from being a whole-program claim: a thread
+    /// parked in a C call has released the GIL and reaches no monitoring event,
+    /// so nothing available here can stop it. an empty `native` is the only
+    /// case where the answer describes one moment of the whole program
+    StopTheWorld {
+        /// threads that were running python code when the world was stopped and
+        /// never reached a line to be held at, as of that moment
+        ///
+        /// fixed when the world was stopped rather than recomputed per answer,
+        /// so it can name a thread that has parked since. overstating what was
+        /// moving is the safe direction to be wrong in
+        native: Vec<u64>,
+    },
+}
+
+impl std::fmt::Display for Mode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonStop => formatter.write_str(
+                "non-stop: one thread was held and the rest of the program kept \
+                 running, so this is a sample rather than a snapshot",
+            ),
+            Self::StopTheWorld { native } if native.is_empty() => {
+                formatter.write_str("stop-the-world: nothing else in the program was running")
+            }
+            Self::StopTheWorld { native } => write!(
+                formatter,
+                "stop-the-world, except for {} thread(s) parked in a C call \
+                 that nothing here can stop: {native:?}",
+                native.len()
+            ),
+        }
+    }
+}
+
 /// why the debuggee stopped
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,10 +160,8 @@ pub enum StopReason {
 
     /// a thread reached a line a breakpoint is bound to
     ///
-    /// this says what **one thread** did. it deliberately makes no claim about
-    /// the other threads: real stop coordination is not built, and a debugger
-    /// that reported threads as held when they were not would be lying about
-    /// the one thing it exists to measure
+    /// this says what **one thread** did, and the thread it did it on is on the
+    /// [`Stop`] around it. every other thread in the process is running
     Breakpoint {
         /// every breakpoint that decided to stop here, smallest id first
         ///
@@ -43,9 +174,6 @@ pub enum StopReason {
         file: String,
         /// the line it stopped on
         line: u32,
-        /// the interpreter's identity for the thread that stopped, as
-        /// `threading.get_ident` reports it
-        thread: u64,
     },
 
     /// a breakpoint's condition or log message raised
@@ -65,8 +193,6 @@ pub enum StopReason {
         file: String,
         /// the line it was about to run
         line: u32,
-        /// the interpreter's identity for the thread that stopped
-        thread: u64,
         /// what the interpreter raised
         error: PythonError,
     },
@@ -988,12 +1114,12 @@ pub enum Evaluated {
 #[serde(tag = "refused", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Refusal {
-    /// the frame id was minted at an earlier stop
+    /// the frame id was minted at a stop that is no longer held
     StaleFrame {
         /// what was asked about
         frame: FrameId,
-        /// which stop the program is in now
-        stop: u64,
+        /// the stops that are held now
+        held: Vec<u64>,
     },
 
     /// the stopped thread's stack is not that deep
@@ -1030,15 +1156,50 @@ pub enum Refusal {
         /// the name
         name: String,
     },
+
+    /// no thread is held under that stop number
+    ///
+    /// several threads can be held at once, so a request that names a stop
+    /// names one of them. a stop that has been resumed is gone, and answering
+    /// from whichever stop happened to be nearest would be answering a
+    /// different question
+    NoSuchStop {
+        /// the stop that was asked about
+        stop: u64,
+        /// the stops that are held now
+        held: Vec<u64>,
+    },
+
+    /// that thread is not one this agent is holding
+    ///
+    /// resuming a thread that is running is not a no-op to report quietly: the
+    /// client believes it is holding something it is not, and the next thing it
+    /// waits for will never come
+    ThreadNotHeld {
+        /// the thread that was named
+        thread: u64,
+        /// the threads that are held now
+        held: Vec<u64>,
+    },
+
+    /// the request needs a held thread and there is none
+    ///
+    /// the agent runs the interpreter's own api to answer this, and it can only
+    /// do that on a thread it is holding. asking a program with nothing held
+    /// would be a request answered whenever it next happened to stop
+    NothingHeld {
+        /// what was asked for
+        wanted: String,
+    },
 }
 
 impl std::fmt::Display for Refusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::StaleFrame { frame, stop } => write!(
+            Self::StaleFrame { frame, held } => write!(
                 formatter,
-                "{frame} belongs to a stop that has ended — the program is in \
-                 stop {stop} now. a frame id is valid for one stop, because the \
+                "{frame} belongs to a stop that has ended — the stops held now \
+                 are {held:?}. a frame id is valid for one stop, because the \
                  frame it named has run on since. ask for the stack again"
             ),
             Self::NoSuchFrame { frame, depth } => write!(
@@ -1079,8 +1240,92 @@ impl std::fmt::Display for Refusal {
                  function around it. writing it into the frame's namespace would \
                  leave a value the compiled code never reads"
             ),
+            Self::NoSuchStop { stop, held } => write!(
+                formatter,
+                "stop {stop} is not held — the stops held now are {held:?}. a \
+                 stop ends when its thread is resumed, and the thread has run \
+                 on since"
+            ),
+            Self::ThreadNotHeld { thread, held } => write!(
+                formatter,
+                "thread {thread} is not held — the threads held now are \
+                 {held:?}. a stop holds one thread and leaves the rest running, \
+                 so a thread bpd never stopped is one it cannot resume"
+            ),
+            Self::NothingHeld { wanted } => write!(
+                formatter,
+                "no thread is held, so there is nothing to answer {wanted} on. \
+                 the agent runs the interpreter's own api on a thread it is \
+                 holding and at no other time"
+            ),
         }
     }
+}
+
+/// where a thread was when it was sampled
+///
+/// the innermost python frame, which for a thread inside a C call is the frame
+/// that made the call rather than the call itself — the interpreter has no
+/// frame for one, and inventing a location for it would be the debugger
+/// describing something it cannot see
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Where {
+    /// the `co_filename` of the code it is running
+    pub file: String,
+    /// the line it is on, as `f_lineno` reports it
+    pub line: u32,
+    /// `co_qualname`
+    pub function: String,
+}
+
+impl std::fmt::Display for Where {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}:{} in {}",
+            self.file, self.line, self.function
+        )
+    }
+}
+
+/// whether a thread was seen to get anywhere between two samples
+///
+/// this is the general half of the lock problem, and it is deliberately not
+/// called a diagnosis. cpython exposes no owner for a lock, so bpd cannot say
+/// "thread 7 is waiting for a lock thread 3 holds". what it can say is that
+/// thread 7 was in the same place twice, a stated interval apart, which is the
+/// symptom the user is actually looking at when they think bpd has hung
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Progress {
+    /// bpd is holding this thread, so it did not move because bpd stopped it
+    Held,
+    /// it was somewhere else in the second sample
+    Moved,
+    /// it was in the same place in both samples
+    ///
+    /// not proof of anything on its own: a thread blocked in `sock.recv` and a
+    /// thread piled up behind a lock the held thread took look identical from
+    /// here. it is where to look, not what is wrong
+    Still,
+}
+
+/// one thread of the debuggee, as of a sample
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ThreadState {
+    /// the interpreter's identity for it
+    pub thread: u64,
+    /// the stop holding it, when bpd is holding it
+    pub held: Option<u64>,
+    /// where it was, or `None` when it has no python frame of the program's
+    ///
+    /// the agent's own bootstrap frame is not a location: it is the `-c` the
+    /// interpreter was entered through, and reporting it would put a frame of
+    /// bpd's in front of a user
+    pub at: Option<Where>,
+    /// whether it was seen to get anywhere
+    pub progress: Progress,
 }
 
 /// what the agent tells the engine
@@ -1088,10 +1333,63 @@ impl std::fmt::Display for Refusal {
 #[serde(tag = "event", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum FromAgent {
-    /// the debuggee stopped
+    /// a thread of the debuggee stopped
+    ///
+    /// sent the moment the thread is held, without waiting for anything. a
+    /// second thread reaching a breakpoint while a first is held sends its own
+    /// straight away rather than queueing behind the first on the connection —
+    /// a thread waiting for the debugger to finish with another thread is a
+    /// thread that is not running, and nothing would have said so
     Stopped {
-        /// why it stopped
-        reason: StopReason,
+        /// the thread, and why
+        stop: Stop,
+    },
+
+    /// the threads named were let go
+    ///
+    /// sent **before** they are woken, so the client never sees a stop from a
+    /// resumed thread ahead of the acknowledgement that it was resumed
+    Resumed {
+        /// the threads that are running again
+        threads: Vec<u64>,
+    },
+
+    /// what every thread of the debuggee was doing
+    Threads {
+        /// one entry per thread the interpreter knows about
+        threads: Vec<ThreadState>,
+        /// how long, in milliseconds, separated the two samples
+        ///
+        /// what [`Progress::Still`] means, in the answer, rather than in the
+        /// client's memory of what it asked for
+        settle_ms: u32,
+        /// how the program was moving while this was taken
+        mode: Mode,
+    },
+
+    /// the world was stopped, as far as it could be
+    WorldStopped {
+        /// the threads that are held, including the one that asked
+        held: Vec<u64>,
+        /// the threads that never reached a line to be held at
+        ///
+        /// a thread parked in a C call has released the GIL and reaches no
+        /// monitoring event. it is **running**, and it is reported here rather
+        /// than counted among the held — which is the thing a debugger normally
+        /// gets wrong about stopping the world
+        native: Vec<u64>,
+    },
+
+    /// the program has finished and these threads are still held
+    ///
+    /// the interpreter is about to finalize, which joins the program's
+    /// non-daemon threads. a held thread cannot be joined, so the process would
+    /// sit there looking like a hang in bpd when it is the debuggee waiting for
+    /// a resume that never came. sent so the client can say which threads, and
+    /// resume them
+    Finishing {
+        /// the threads still held as the program ended
+        held: Vec<u64>,
     },
 
     /// how the breakpoint set resolves now
@@ -1114,17 +1412,24 @@ pub enum FromAgent {
         record: LogRecord,
     },
 
-    /// the stack of the thread that stopped
+    /// the stack of one held thread
     ///
-    /// **only** that thread. the others were never held — see [`StopReason`] —
-    /// so their frames are moving, and a stack read off a running thread would
-    /// be a picture of a moment that had already passed
+    /// **only** a held thread's. a running thread's frames are moving, and a
+    /// stack read off one would be a picture of a moment that had already
+    /// passed. where a running thread is, as a stated sample, is
+    /// [`FromAgent::Threads`]
     Stack {
         /// the frames, the one that stopped first
         frames: Vec<Frame>,
         /// how deep the stack is, which is more than `frames` when the request
         /// asked for fewer
         depth: usize,
+        /// how the program was moving while this was taken
+        ///
+        /// a held thread's stack is a snapshot in either mode — it is inside a
+        /// callback and cannot return — so what this qualifies is everything
+        /// the frames point at
+        mode: Mode,
     },
 
     /// what one scope of one frame holds
@@ -1155,6 +1460,8 @@ pub enum FromAgent {
         /// the request asked **and** have more names than it asked for, and
         /// reporting whichever came first would leave the other unsaid
         omitted: Vec<Omitted>,
+        /// how the program was moving while this was taken
+        mode: Mode,
     },
 
     /// what an expression did, or what a write left behind
@@ -1165,6 +1472,8 @@ pub enum FromAgent {
     Evaluated {
         /// the outcome
         result: Evaluated,
+        /// how the program was moving while this was taken
+        mode: Mode,
     },
 
     /// the agent will not answer the request, and this is why
@@ -1174,13 +1483,40 @@ pub enum FromAgent {
     },
 }
 
+/// which held threads a resume is about
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "which", rename_all = "snake_case")]
+pub enum Which {
+    /// every thread that is held right now
+    ///
+    /// resolved by the agent at the moment the request arrives, so a thread
+    /// that stopped while this was in flight is included. that is deliberate:
+    /// the alternative is a client that asked for everything and got a program
+    /// with one thread still held and nothing saying so
+    All,
+    /// exactly these, by the interpreter's thread identity
+    ///
+    /// naming a thread that is not held is refused, not ignored
+    Named {
+        /// the threads to let go
+        threads: Vec<u64>,
+    },
+}
+
 /// what the engine tells the agent
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum FromEngine {
-    /// let the debuggee run
-    Resume,
+    /// let held threads run again
+    ///
+    /// resume names the threads it means, because a stop holds one thread and
+    /// there can be several held at once. "continue" that quietly meant "every
+    /// thread" would be a client resuming threads it had forgotten it had
+    Resume {
+        /// which of the held threads to let go
+        which: Which,
+    },
 
     /// replace the whole breakpoint set
     ///
@@ -1191,8 +1527,42 @@ pub enum FromEngine {
         breakpoints: Vec<SourceBreakpoint>,
     },
 
-    /// walk the stopped thread's frame chain
+    /// what every thread of the debuggee is doing
+    ///
+    /// the answer to "the other threads are supposed to be running — are they".
+    /// it is the only request here that is about a thread bpd is **not**
+    /// holding, and everything it says about one is a sample
+    Threads {
+        /// how long to wait, in milliseconds, before taking the second sample
+        ///
+        /// a thread is reported as still only when it was in the same place in
+        /// both. zero takes both samples together, and then "still" says almost
+        /// nothing — which is why the interval comes back in the answer
+        settle_ms: u32,
+    },
+
+    /// hold every thread that can be held, until the asking stop is resumed
+    ///
+    /// the explicit mode. non-stop is the default because a live program should
+    /// go on living, and a coherent view of a data structure needs the opposite
+    ///
+    /// it is not free: catching a thread needs an event, so this arms `LINE`
+    /// for the whole program and calls `restart_events()`, which undoes every
+    /// `DISABLE` in the process. the program pays to re-disable them afterwards
+    StopTheWorld {
+        /// the stop asking, which is the one whose resume releases the world
+        stop: u64,
+        /// how long to wait, in milliseconds, for the other threads to arrive
+        ///
+        /// a thread parked in a C call never will. the answer names the ones
+        /// that did not rather than waiting for them
+        settle_ms: u32,
+    },
+
+    /// walk one held thread's frame chain
     Stack {
+        /// the stop whose thread to walk
+        stop: u64,
         /// how many frames to report, counting from the one that stopped
         ///
         /// `None` is all of them. the answer says how deep the stack really is
@@ -1279,7 +1649,12 @@ mod tests {
     #[test]
     fn an_agent_event_round_trips() {
         let sent = FromAgent::Stopped {
-            reason: StopReason::Entry,
+            stop: Stop {
+                stop: 1,
+                thread: 8_482_561_408,
+                reason: StopReason::Entry,
+                holding: Vec::new(),
+            },
         };
 
         let mut wire = Vec::new();
@@ -1293,11 +1668,16 @@ mod tests {
     #[test]
     fn an_engine_request_round_trips() {
         let mut wire = Vec::new();
-        write(&mut wire, &FromEngine::Resume).expect("writing to a vec cannot fail");
+        let sent = FromEngine::Resume {
+            which: Which::Named {
+                threads: vec![8_482_561_408],
+            },
+        };
+        write(&mut wire, &sent).expect("writing to a vec cannot fail");
 
         let received: Option<FromEngine> =
             read(&mut wire.as_slice(), &mut Vec::new()).expect("the frame is whole");
-        assert_eq!(received, Some(FromEngine::Resume));
+        assert_eq!(received, Some(sent));
     }
 
     #[test]
@@ -1310,11 +1690,17 @@ mod tests {
     #[test]
     fn a_breakpoint_stop_round_trips() {
         let sent = FromAgent::Stopped {
-            reason: StopReason::Breakpoint {
-                breakpoints: vec![1, 4],
-                file: "/tmp/program.py".to_string(),
-                line: 12,
+            stop: Stop {
+                stop: 3,
                 thread: 8_482_561_408,
+                reason: StopReason::Breakpoint {
+                    breakpoints: vec![1, 4],
+                    file: "/tmp/program.py".to_string(),
+                    line: 12,
+                },
+                holding: vec![Holding::ImportSystem {
+                    module: Some("package.module".to_string()),
+                }],
             },
         };
 
@@ -1464,21 +1850,25 @@ mod tests {
     #[test]
     fn a_condition_that_raised_round_trips_with_its_traceback() {
         let sent = FromAgent::Stopped {
-            reason: StopReason::EvaluationFailed {
-                breakpoint: 3,
-                part: Part::Condition,
-                expression: "value.missing".to_string(),
-                file: "/tmp/program.py".to_string(),
-                line: 12,
+            stop: Stop {
+                stop: 1,
                 thread: 8_482_561_408,
-                error: PythonError {
-                    kind: "AttributeError".to_string(),
-                    message: "'int' object has no attribute 'missing'".to_string(),
-                    traceback: vec![TracebackFrame {
-                        file: "<bpd condition of breakpoint 3>".to_string(),
-                        line: 1,
-                        function: "<module>".to_string(),
-                    }],
+                holding: Vec::new(),
+                reason: StopReason::EvaluationFailed {
+                    breakpoint: 3,
+                    part: Part::Condition,
+                    expression: "value.missing".to_string(),
+                    file: "/tmp/program.py".to_string(),
+                    line: 12,
+                    error: PythonError {
+                        kind: "AttributeError".to_string(),
+                        message: "'int' object has no attribute 'missing'".to_string(),
+                        traceback: vec![TracebackFrame {
+                            file: "<bpd condition of breakpoint 3>".to_string(),
+                            line: 1,
+                            function: "<module>".to_string(),
+                        }],
+                    },
                 },
             },
         };
@@ -1593,6 +1983,9 @@ mod tests {
             unbound: vec!["later".to_string()],
             unreadable: Vec::new(),
             omitted: vec![Omitted::Shallower { asked: 3, used: 1 }],
+            mode: Mode::StopTheWorld {
+                native: vec![8_482_561_408],
+            },
         };
 
         let mut wire = Vec::new();
@@ -1611,6 +2004,7 @@ mod tests {
     #[test]
     fn an_evaluation_that_raised_is_an_answer_and_round_trips_as_one() {
         let sent = FromAgent::Evaluated {
+            mode: Mode::NonStop,
             result: Evaluated::Raised {
                 error: PythonError {
                     kind: "ZeroDivisionError".to_string(),
@@ -1706,8 +2100,11 @@ mod tests {
         let frame = FrameId { stop: 1, depth: 2 };
         let cases = [
             (
-                Refusal::StaleFrame { frame, stop: 4 },
-                vec!["frame 2 of stop 1", "stop 4", "ask for the stack again"],
+                Refusal::StaleFrame {
+                    frame,
+                    held: vec![4],
+                },
+                vec!["frame 2 of stop 1", "[4]", "ask for the stack again"],
             ),
             (
                 Refusal::NoSuchFrame { frame, depth: 2 },
@@ -1739,10 +2136,163 @@ mod tests {
                 },
                 vec!["`captured`", "free scope", "class body"],
             ),
+            (
+                Refusal::NoSuchStop {
+                    stop: 2,
+                    held: vec![5, 6],
+                },
+                vec!["stop 2 is not held", "[5, 6]"],
+            ),
+            (
+                Refusal::ThreadNotHeld {
+                    thread: 11,
+                    held: vec![12],
+                },
+                vec!["thread 11 is not held", "[12]"],
+            ),
+            (
+                Refusal::NothingHeld {
+                    wanted: "the breakpoints to resolve".to_string(),
+                },
+                vec!["no thread is held", "the breakpoints to resolve"],
+            ),
         ];
 
         for (refusal, expected) in cases {
             let said = refusal.to_string();
+            for wanted in expected {
+                assert!(said.contains(wanted), "expected {wanted:?} in {said:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_thread_census_and_its_request_round_trip() {
+        let request = FromEngine::Threads { settle_ms: 50 };
+        let answer = FromAgent::Threads {
+            threads: vec![
+                ThreadState {
+                    thread: 1,
+                    held: Some(3),
+                    at: Some(Where {
+                        file: "/tmp/program.py".to_string(),
+                        line: 12,
+                        function: "handler".to_string(),
+                    }),
+                    progress: Progress::Held,
+                },
+                ThreadState {
+                    thread: 2,
+                    held: None,
+                    at: None,
+                    progress: Progress::Still,
+                },
+                ThreadState {
+                    thread: 3,
+                    held: None,
+                    at: Some(Where {
+                        file: "/tmp/program.py".to_string(),
+                        line: 40,
+                        function: "worker".to_string(),
+                    }),
+                    progress: Progress::Moved,
+                },
+            ],
+            settle_ms: 50,
+            mode: Mode::NonStop,
+        };
+
+        let mut wire = Vec::new();
+        write(&mut wire, &request).expect("writing to a vec cannot fail");
+        write(&mut wire, &answer).expect("writing to a vec cannot fail");
+
+        let mut buffer = Vec::new();
+        let mut wire = wire.as_slice();
+        let received: Option<FromEngine> =
+            read(&mut wire, &mut buffer).expect("the frame is whole");
+        assert_eq!(received, Some(request));
+        let received: Option<FromAgent> = read(&mut wire, &mut buffer).expect("the frame is whole");
+        assert_eq!(received, Some(answer));
+    }
+
+    #[test]
+    fn stopping_the_world_and_what_it_could_not_stop_round_trip() {
+        let request = FromEngine::StopTheWorld {
+            stop: 2,
+            settle_ms: 100,
+        };
+        let answer = FromAgent::WorldStopped {
+            held: vec![2, 9],
+            native: vec![11],
+        };
+
+        let mut wire = Vec::new();
+        write(&mut wire, &request).expect("writing to a vec cannot fail");
+        write(&mut wire, &answer).expect("writing to a vec cannot fail");
+
+        let mut buffer = Vec::new();
+        let mut wire = wire.as_slice();
+        let received: Option<FromEngine> =
+            read(&mut wire, &mut buffer).expect("the frame is whole");
+        assert_eq!(received, Some(request));
+        let received: Option<FromAgent> = read(&mut wire, &mut buffer).expect("the frame is whole");
+        assert_eq!(received, Some(answer));
+    }
+
+    #[test]
+    fn a_resume_is_acknowledged_and_an_unfinished_program_says_what_it_still_holds() {
+        for sent in [
+            FromAgent::Resumed { threads: vec![4] },
+            FromAgent::Finishing { held: vec![4, 7] },
+        ] {
+            let mut wire = Vec::new();
+            write(&mut wire, &sent).expect("writing to a vec cannot fail");
+
+            let received: Option<FromAgent> =
+                read(&mut wire.as_slice(), &mut Vec::new()).expect("the frame is whole");
+            assert_eq!(received, Some(sent));
+        }
+    }
+
+    #[test]
+    fn a_mode_says_what_was_moving_while_the_answer_was_taken() {
+        let cases = [
+            (Mode::NonStop, vec!["sample", "kept running"]),
+            (
+                Mode::StopTheWorld { native: Vec::new() },
+                vec!["nothing else in the program was running"],
+            ),
+            (
+                Mode::StopTheWorld { native: vec![7] },
+                vec!["C call", "[7]"],
+            ),
+        ];
+
+        for (mode, expected) in cases {
+            let said = mode.to_string();
+            for wanted in expected {
+                assert!(said.contains(wanted), "expected {wanted:?} in {said:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn what_a_held_thread_holds_says_who_it_blocks() {
+        let cases = [
+            (
+                Holding::ImportSystem {
+                    module: Some("app.db".to_string()),
+                },
+                vec!["`app.db`", "blocks until this one is resumed"],
+            ),
+            (
+                Holding::ImportSystem { module: None },
+                vec!["the import system", "blocks until this one is resumed"],
+            ),
+        ];
+
+        for (holding, expected) in cases {
+            let said = holding.to_string();
             for wanted in expected {
                 assert!(said.contains(wanted), "expected {wanted:?} in {said:?}");
             }

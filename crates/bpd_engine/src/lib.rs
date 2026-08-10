@@ -20,10 +20,10 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use bpd_protocol::message::{FromAgent, FromEngine, Refusal, StopReason};
+use bpd_protocol::message::{FromAgent, FromEngine, Refusal, Stop};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
-pub use launch::{Debuggee, Launched, Running, Stack, Variables, launch};
+pub use launch::{Debuggee, Launched, Running, Stack, Threads, Variables, WorldStopped, launch};
 
 /// the result type for engine operations
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -121,16 +121,48 @@ pub enum Error {
         id: u32,
     },
 
-    /// something was asked of a debuggee that is not stopped
+    /// something was asked of a debuggee with no thread held
     ///
-    /// the agent reads the control connection while it is stopped and at no
-    /// other time, so a request made to a running program would be answered
-    /// whenever it next happened to stop. that is not an answer, and waiting
-    /// for it looks exactly like a hang
-    #[error("the debuggee is not stopped, so it cannot be asked for {wanted}")]
+    /// the agent answers on a thread it is holding and at no other time, so a
+    /// request made to a program with nothing held would be answered whenever
+    /// it next happened to stop. that is not an answer, and waiting for it
+    /// looks exactly like a hang
+    #[error("no thread of the debuggee is held, so it cannot be asked for {wanted}")]
     NotStopped {
         /// what was asked for
         wanted: &'static str,
+    },
+
+    /// a request that is about one stop was made while several were held
+    ///
+    /// a stop holds one thread and there can be more than one of them at a
+    /// time. answering from whichever happened to be first would be answering
+    /// about a thread the caller did not name
+    #[error(
+        "{wanted} is about one held thread and {} are held: {held:?}. name the \
+         stop it is about",
+        held.len()
+    )]
+    AmbiguousStop {
+        /// what was asked for
+        wanted: &'static str,
+        /// the stops that are held
+        held: Vec<u64>,
+    },
+
+    /// an interval was asked for that does not fit the wire
+    ///
+    /// the protocol carries milliseconds as a `u32`. a longer wait is refused
+    /// rather than silently truncated, because a settle interval that quietly
+    /// became a different one would make every "still" it reported mean
+    /// something the caller did not ask for
+    #[error(
+        "an interval of {settle:?} does not fit the protocol, which carries \
+         milliseconds as a 32 bit number — under 49 days"
+    )]
+    SettleTooLong {
+        /// what was asked for
+        settle: Duration,
     },
 
     /// the agent will not answer the request, and said why
@@ -286,11 +318,11 @@ impl Session {
     }
 
     /// wait for the agent to report a stop, and say why it stopped
-    pub fn expect_stop(&mut self) -> Result<StopReason> {
+    pub fn expect_stop(&mut self) -> Result<Stop> {
         const EXPECTED: &str = "the debuggee to stop";
 
         match self.next_event()? {
-            Some(FromAgent::Stopped { reason }) => Ok(reason),
+            Some(FromAgent::Stopped { stop }) => Ok(stop),
             Some(other) => Err(Error::UnexpectedEvent {
                 event: format!("{other:?}"),
                 expected: EXPECTED,

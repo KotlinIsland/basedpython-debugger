@@ -15,7 +15,7 @@ use std::path::Path;
 
 use bpd_core::python::Capabilities;
 use bpd_engine::{Debuggee, Launched, Running};
-use bpd_protocol::message::{Binding, Resolved, Site, SourceBreakpoint, StopReason, Unbound};
+use bpd_protocol::message::{Binding, Resolved, Site, SourceBreakpoint, Stop, StopReason, Unbound};
 use bpd_test::debuggee::{Fixture, line_of};
 
 /// a class, a method, an inlined comprehension and a generator expression
@@ -110,12 +110,15 @@ fn unbound(resolved: &Resolved) -> &Unbound {
     }
 }
 
-/// resume and require that the debuggee stops again
-fn to_stop(debuggee: &mut Debuggee) -> (StopReason, Vec<Resolved>) {
+/// resume every held thread and require that the debuggee stops again
+fn to_stop(debuggee: &mut Debuggee) -> (Stop, Vec<Resolved>) {
     match debuggee.run(unlogged).expect("the debuggee was resumed") {
-        Running::Stopped { reason, rebound } => (reason, rebound),
+        Running::Stopped { stop, rebound } => (stop, rebound),
         Running::Exited { status, .. } => {
             panic!("the debuggee exited with {status} instead of stopping")
+        }
+        Running::Finishing { threads, .. } => {
+            panic!("the debuggee ended holding {threads:?} instead of stopping")
         }
     }
 }
@@ -131,8 +134,11 @@ fn finish(mut debuggee: Debuggee) {
             assert!(status.success(), "the program exited with {status}");
             assert!(rebound.is_empty(), "nothing is set, and got {rebound:?}");
         }
-        Running::Stopped { reason, .. } => {
-            panic!("every breakpoint was cleared, and it still stopped for {reason:?}")
+        Running::Stopped { stop, .. } => {
+            panic!("every breakpoint was cleared, and it still stopped for {stop:?}")
+        }
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
     }
 }
@@ -223,15 +229,15 @@ fn a_breakpoint_inside_a_comprehension_inside_a_method_binds_and_stops() {
         ["Widget.render"]
     );
 
-    let (reason, _) = to_stop(&mut debuggee);
+    let (stop, _) = to_stop(&mut debuggee);
     let StopReason::Breakpoint {
         breakpoints,
         file,
         line,
         ..
-    } = &reason
+    } = &stop.reason
     else {
-        panic!("expected a breakpoint stop, got {reason:?}")
+        panic!("expected a breakpoint stop, got {stop:?}")
     };
     assert_eq!(breakpoints, &[1]);
     assert_eq!(*line, inside);
@@ -274,6 +280,9 @@ fn a_breakpoint_fires_on_every_pass_over_the_line() {
             Running::Exited { status, .. } => {
                 assert!(status.success(), "the program exited with {status}");
                 break;
+            }
+            Running::Finishing { threads, .. } => {
+                panic!("nothing was held, and the debuggee ended holding {threads:?}")
             }
         }
     }
@@ -341,9 +350,9 @@ fn a_breakpoint_on_a_comment_says_which_line_it_moved_to() {
         ["Widget.render"]
     );
 
-    let (reason, _) = to_stop(&mut debuggee);
-    let StopReason::Breakpoint { line, .. } = &reason else {
-        panic!("expected a breakpoint stop, got {reason:?}")
+    let (stop, _) = to_stop(&mut debuggee);
+    let StopReason::Breakpoint { line, .. } = &stop.reason else {
+        panic!("expected a breakpoint stop, got {stop:?}")
     };
     assert_eq!(*line, statement, "it stopped where it said it would");
 
@@ -363,9 +372,9 @@ fn two_breakpoints_that_land_on_one_line_are_both_reported() {
     assert_eq!(bound(&resolved[0]).0, statement);
     assert_eq!(bound(&resolved[1]).0, statement);
 
-    let (reason, _) = to_stop(&mut debuggee);
-    let StopReason::Breakpoint { breakpoints, .. } = &reason else {
-        panic!("expected a breakpoint stop, got {reason:?}")
+    let (stop, _) = to_stop(&mut debuggee);
+    let StopReason::Breakpoint { breakpoints, .. } = &stop.reason else {
+        panic!("expected a breakpoint stop, got {stop:?}")
     };
     assert_eq!(
         breakpoints,
@@ -467,7 +476,7 @@ MARKS.write_text("after")
     assert_eq!(rebound[0].id, 1);
     assert_eq!(bound(&rebound[0]).0, inside);
 
-    let StopReason::Breakpoint { file, line, .. } = &stop else {
+    let StopReason::Breakpoint { file, line, .. } = &stop.reason else {
         panic!("expected a breakpoint stop, got {stop:?}")
     };
     assert_eq!(Path::new(file), late);
@@ -515,7 +524,7 @@ MARKS.write_text("after")
     assert_eq!(rebound.len(), 1, "got {rebound:?}");
     assert_eq!(bound(&rebound[0]).0, inside);
 
-    let StopReason::Breakpoint { file, line, .. } = &stop else {
+    let StopReason::Breakpoint { file, line, .. } = &stop.reason else {
         panic!("expected a breakpoint stop, got {stop:?}")
     };
     assert_eq!(Path::new(file), generated);
@@ -741,7 +750,10 @@ observe()
 
     match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Exited { status, .. } => assert!(status.success()),
-        Running::Stopped { reason, .. } => panic!("it stopped again for {reason:?}"),
+        Running::Stopped { stop, .. } => panic!("it stopped again for {stop:?}"),
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
+        }
     }
     assert_eq!(events(&fixture), py_start);
 }
@@ -772,9 +784,9 @@ fn a_breakpoint_set_through_a_symlink_binds_the_same_code_object() {
          breakpoint set through either is one breakpoint"
     );
 
-    let (reason, _) = to_stop(&mut debuggee);
-    let StopReason::Breakpoint { breakpoints, .. } = &reason else {
-        panic!("expected a breakpoint stop, got {reason:?}")
+    let (stop, _) = to_stop(&mut debuggee);
+    let StopReason::Breakpoint { breakpoints, .. } = &stop.reason else {
+        panic!("expected a breakpoint stop, got {stop:?}")
     };
     assert_eq!(breakpoints, &[1, 2]);
 
@@ -806,17 +818,18 @@ worker.join()
         .set_breakpoints(at(&fixture.path(), &[(1, inside)]))
         .expect("the breakpoint request was answered");
 
-    let (reason, _) = to_stop(&mut debuggee);
-    let StopReason::Breakpoint { thread, .. } = &reason else {
-        panic!("expected a breakpoint stop, got {reason:?}")
-    };
+    let (stop, _) = to_stop(&mut debuggee);
+    assert!(
+        matches!(stop.reason, StopReason::Breakpoint { .. }),
+        "expected a breakpoint stop, got {stop:?}"
+    );
 
     // the program said which thread it was, on the line above the breakpoint.
-    // the stop reports one thread and claims nothing about the others, because
-    // holding them is not built yet and saying so would be the lie
+    // the stop names the one thread it holds, and every other thread in the
+    // process is still running — which is the model, not a shortfall of it
     let reported = std::fs::read_to_string(fixture.directory().join("ident"))
         .expect("the worker thread reached the line above");
-    assert_eq!(reported, thread.to_string());
+    assert_eq!(reported, stop.thread.to_string());
 
     finish(debuggee);
 }
@@ -849,9 +862,9 @@ twice(2)
         .set_breakpoints(at(&fixture.path(), &[(1, second)]))
         .expect("the breakpoint request was answered");
 
-    let (reason, _) = to_stop(&mut debuggee);
-    let StopReason::Breakpoint { line, .. } = &reason else {
-        panic!("expected a breakpoint stop, got {reason:?}")
+    let (stop, _) = to_stop(&mut debuggee);
+    let StopReason::Breakpoint { line, .. } = &stop.reason else {
+        panic!("expected a breakpoint stop, got {stop:?}")
     };
     assert_eq!(*line, second);
 
@@ -863,9 +876,9 @@ twice(2)
         .set_breakpoints(at(&fixture.path(), &[(1, first)]))
         .expect("the breakpoint request was answered");
 
-    let (reason, _) = to_stop(&mut debuggee);
-    let StopReason::Breakpoint { line, .. } = &reason else {
-        panic!("expected a breakpoint stop, got {reason:?}")
+    let (stop, _) = to_stop(&mut debuggee);
+    let StopReason::Breakpoint { line, .. } = &stop.reason else {
+        panic!("expected a breakpoint stop, got {stop:?}")
     };
     assert_eq!(
         *line, first,
@@ -923,14 +936,19 @@ fn a_running_debuggee_refuses_a_request_rather_than_leaving_it_unanswered() {
 
     match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Exited { .. } => {}
-        Running::Stopped { reason, .. } => panic!("nothing was set, got {reason:?}"),
+        Running::Stopped { stop, .. } => panic!("nothing was set, got {stop:?}"),
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
+        }
     }
 
     let error = debuggee
         .set_breakpoints(at(&fixture.path(), &[(1, 1)]))
         .expect_err("a finished debuggee cannot bind anything");
     assert!(
-        error.to_string().contains("not stopped"),
+        error
+            .to_string()
+            .contains("no thread of the debuggee is held"),
         "the refusal must say why, and it said {error}"
     );
 }

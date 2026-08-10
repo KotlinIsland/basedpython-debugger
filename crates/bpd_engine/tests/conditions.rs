@@ -153,10 +153,13 @@ fn stopped_for(reason: &StopReason) -> &[u32] {
 fn run_to_exit(debuggee: &mut Debuggee, mut at_stop: impl FnMut(&StopReason)) {
     loop {
         match debuggee.run(unlogged).expect("the debuggee was resumed") {
-            Running::Stopped { reason, .. } => at_stop(&reason),
+            Running::Stopped { stop, .. } => at_stop(&stop.reason),
             Running::Exited { status, .. } => {
                 assert!(status.success(), "the program exited with {status}");
                 return;
+            }
+            Running::Finishing { threads, .. } => {
+                panic!("nothing was held, and the debuggee ended holding {threads:?}")
             }
         }
     }
@@ -369,8 +372,11 @@ fn a_breakpoint_asked_for_again_unchanged_keeps_its_hit_count() {
         .set_breakpoints(vec![third()])
         .expect("the breakpoint request was answered");
     let (reason, _) = match debuggee.run(unlogged).expect("the debuggee was resumed") {
-        Running::Stopped { reason, rebound } => (reason, rebound),
+        Running::Stopped { stop, rebound } => (stop.reason, rebound),
         Running::Exited { status, .. } => panic!("it exited with {status} instead of stopping"),
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
+        }
     };
     assert_eq!(stopped_for(&reason), [1]);
     assert_eq!(
@@ -402,6 +408,9 @@ fn a_breakpoint_that_changed_starts_counting_again() {
     match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Stopped { .. } => {}
         Running::Exited { status, .. } => panic!("it exited with {status} instead of stopping"),
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
+        }
     }
 
     // a different breakpoint, even though it carries the same id: it counts
@@ -600,9 +609,12 @@ fn a_condition_that_raises_stops_and_reports_the_exception() {
         .expect("the breakpoint request was answered");
 
     let reason = match debuggee.run(unlogged).expect("the debuggee was resumed") {
-        Running::Stopped { reason, .. } => reason,
+        Running::Stopped { stop, .. } => stop.reason,
         Running::Exited { status, .. } => {
             panic!("a condition that raised was treated as false, and the program ran to {status}")
+        }
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
     };
 
@@ -665,8 +677,11 @@ fn a_condition_that_raises_inside_a_call_carries_the_frames_it_raised_in() {
         .expect("the breakpoint request was answered");
 
     let reason = match debuggee.run(unlogged).expect("the debuggee was resumed") {
-        Running::Stopped { reason, .. } => reason,
+        Running::Stopped { stop, .. } => stop.reason,
         Running::Exited { status, .. } => panic!("it ran to {status} instead of stopping"),
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
+        }
     };
     let StopReason::EvaluationFailed { error, .. } = &reason else {
         panic!("expected the failure to be reported, got {reason:?}")
@@ -778,8 +793,11 @@ fn a_logpoint_reports_what_the_frame_held_and_does_not_stop() {
         .expect("the debuggee was resumed")
     {
         Running::Exited { status, .. } => assert!(status.success(), "it exited with {status}"),
-        Running::Stopped { reason, .. } => {
-            panic!("a logpoint logs instead of stopping, and it stopped for {reason:?}")
+        Running::Stopped { stop, .. } => {
+            panic!("a logpoint logs instead of stopping, and it stopped for {stop:?}")
+        }
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
     }
 
@@ -813,9 +831,12 @@ fn a_log_message_that_raises_stops_and_reports_it() {
         .expect("the breakpoint request was answered");
 
     let reason = match debuggee.run(unlogged).expect("the debuggee was resumed") {
-        Running::Stopped { reason, .. } => reason,
+        Running::Stopped { stop, .. } => stop.reason,
         Running::Exited { status, .. } => {
             panic!("a log message that raised was skipped, and it ran to {status}")
+        }
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
     };
     let StopReason::EvaluationFailed {
@@ -881,7 +902,10 @@ fn a_logpoint_on_a_hot_line_costs_no_round_trips() {
         .expect("the debuggee was resumed")
     {
         Running::Exited { status, .. } => assert!(status.success(), "it exited with {status}"),
-        Running::Stopped { reason, .. } => panic!("a logpoint does not stop, and got {reason:?}"),
+        Running::Stopped { stop, .. } => panic!("a logpoint does not stop, and got {stop:?}"),
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
+        }
     }
 
     assert_eq!(records, TOTAL, "one record per pass over the line");
@@ -970,14 +994,17 @@ fn a_file_only_half_seen_binds_nothing_and_says_which_half_is_missing() {
     let mut rebindings = Vec::new();
     loop {
         match debuggee.run(unlogged).expect("the debuggee was resumed") {
-            Running::Stopped { reason, rebound } => {
-                assert_eq!(stopped_for(&reason), [1]);
+            Running::Stopped { stop, rebound } => {
+                assert_eq!(stopped_for(&stop.reason), [1]);
                 rebindings.extend(rebound);
             }
             Running::Exited { status, rebound } => {
                 assert!(status.success(), "the program exited with {status}");
                 rebindings.extend(rebound);
                 break;
+            }
+            Running::Finishing { threads, .. } => {
+                panic!("nothing was held, and the debuggee ended holding {threads:?}")
             }
         }
     }

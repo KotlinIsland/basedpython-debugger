@@ -277,26 +277,20 @@ same way, so a module a condition imports is never registered by it
 
 ## what a breakpoint stop holds
 
-this is the part where it would be easy to overclaim, so it is stated plainly
+**one thread.** every other thread in the program goes on running, and that is
+the model rather than a shortfall of it — see [threads](threads.md)
 
-the thread that hit the breakpoint is genuinely held: it is inside the
-monitoring callback and does not return until the engine resumes it. that thread
-also holds the GIL, so on a gil-enabled build no other python thread makes
-progress either — but that is the interpreter's doing, not stop coordination
-that `bpd` implemented, and on a **free-threaded build it does not happen at
-all**. a thread sitting in a C call has already released the GIL and keeps
-running on both
+the thread that hit the breakpoint is genuinely held: it is inside the monitoring
+callback and does not return until the engine resumes it. it does **not** hold
+the GIL while it waits, which it used to: the agent gives the GIL back for the
+duration of a stop, so a gil-enabled build behaves the same way a free-threaded
+one does instead of freezing the process by accident
 
-so the stop reports **which thread stopped**, and says nothing about the others.
-it does not list them as suspended, because they are not, and a debugger that
-reported a whole-program stop it had not performed would be lying about the one
-thing it exists to measure
-
-real stop coordination — suspending every thread, and reporting the ones parked
-in native code as *running in native code* rather than as stopped — is its own
-piece of work, and it is not built. until it is, a second thread that reaches a
-breakpoint while another is stopped waits for the control connection and then
-reports its own stop, in order
+a second thread that reaches a breakpoint while the first is held reports its own
+stop straight away, and both are held until each is resumed by name. what a stop
+does not claim, and the thing that bites — **the held thread still holds its
+locks** — is on the [threads](threads.md) page, along with the explicit
+stop-the-world mode
 
 ## the shape of a request
 
@@ -307,11 +301,11 @@ the stop it causes — and two breakpoints in one request may not share an id,
 because that would hand the client a single answer for two questions with no way
 to tell which it belonged to
 
-a request is only answered while the debuggee is stopped. the agent reads the
-control connection inside a stop and at no other time, so asking a running
-program to bind something would be a request answered whenever it next happened
-to stop — which is not an answer, and waiting for it looks exactly like a hang.
-the engine refuses instead
+a request is only answered while a thread is held. the agent runs the
+interpreter's own api on a thread it is holding and at no other time, so asking a
+program with nothing held to bind something would be a request answered whenever
+it next happened to stop — which is not an answer, and waiting for it looks
+exactly like a hang. the engine refuses instead
 
 ## what it costs
 

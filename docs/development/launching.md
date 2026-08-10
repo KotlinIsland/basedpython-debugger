@@ -103,17 +103,16 @@ debugged by reading `os.environ`
 this is recorded as an assertion rather than a footnote, in
 `the_program_is_the_only_main_module`
 
-## what the entry stop is, and is not
+## what the entry stop is
 
-the agent holds the GIL while it is stopped. at an **entry** stop that is a
-complete stop of the whole program, because no user thread exists yet — the
-program has run nothing
+a stop of the whole program, and the only one that is. no user thread exists yet
+— the program has run nothing — so the one thread that is held is the only thread
+there is
 
-it is not sufficient for a breakpoint. by then other threads are running, and
-holding the GIL only stops the ones that want it — and on a free-threaded build
-it stops nothing. real stop coordination is its own piece of work and it is not
-built; what a breakpoint stop does and does not claim is spelled out in
-[breakpoints](breakpoints.md)
+every later stop holds one thread and leaves the rest running, including on a
+gil-enabled build: the agent gives the GIL back for the duration of a stop rather
+than freezing the process by accident. that is the model, and its costs are in
+[threads](threads.md)
 
 ## the transport
 

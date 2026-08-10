@@ -42,8 +42,11 @@ fn to_exit(mut debuggee: bpd_engine::Debuggee) -> ExitStatus {
             assert!(rebound.is_empty(), "nothing was set, and got {rebound:?}");
             status
         }
-        Running::Stopped { reason, .. } => {
-            panic!("no breakpoints were set, and it stopped for {reason:?}")
+        Running::Stopped { stop, .. } => {
+            panic!("no breakpoints were set, and it stopped for {stop:?}")
+        }
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
     }
 }
@@ -64,7 +67,11 @@ fn the_program_has_run_nothing_while_it_is_stopped() {
 
     let debuggee = stopped(&fixture, &[]);
 
-    assert_eq!(debuggee.stopped(), Some(&StopReason::Entry));
+    let [held] = debuggee.held() else {
+        panic!("one thread is held at entry, and got {:?}", debuggee.held())
+    };
+    assert_eq!(held.reason, StopReason::Entry);
+    assert_eq!(held.stop, 1, "the entry stop is the first stop there is");
     assert!(
         !marker.exists(),
         "the program's first statement had already run when the engine was told \

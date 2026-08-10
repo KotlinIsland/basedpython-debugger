@@ -195,10 +195,11 @@ a few of those are decisions rather than mechanics:
 the roadmap for this work asked for `__repr__` "under an explicit budget and
 timeout". the budget exists; **the timeout does not, and is not claimed**.
 interrupting user python needs a second thread that can raise into the first,
-and on a gil-enabled build the stopped thread is holding the gil that thread
-would need. a timeout that could not fire would be a promise the debugger cannot
-keep, so what is shipped instead is the opt-in and a sentence saying that a
-`__repr__` which hangs hangs the debuggee
+which is more than releasing the GIL buys: `PyThreadState_SetAsyncExc` lands at
+the next bytecode boundary, and a `__repr__` blocked in a C call never reaches
+one. a timeout that could not fire would be a promise the debugger cannot keep,
+so what is shipped instead is the opt-in and a sentence saying that a `__repr__`
+which hangs hangs the thread it was asked on
 
 ## expansion, and saying what was left out
 
@@ -268,26 +269,36 @@ that has ended, a depth the stack does not reach, a name that is not in the scop
 it was asked for, and a name in a scope the frame does not expose. each names the
 cause and what to do instead
 
-## what a stop does not claim
+## every read says what was moving while it was taken
 
-only the thread that hit the event is held. it is genuinely held — it is inside
-the monitoring callback and does not return until the engine resumes it — and
-that is the whole claim. see
-[what a breakpoint stop holds](breakpoints.md#what-a-breakpoint-stop-holds)
+a stop holds one thread and the rest of the program keeps running, on every
+build — see [threads](threads.md). so a read taken here is a **sample** of a
+program that is still moving, and every answer carries the mode it was taken in
+rather than leaving that to be assumed:
 
-so there is no request here that reports another thread's stack. on a
-gil-enabled build the other python threads are not running because the stopped
-thread holds the gil, which is the interpreter's doing rather than stop
-coordination `bpd` performed; on a **free-threaded build they are running**, and
-a stack read off a running thread would be a description of a moment that had
-already gone
+| mode | what it says |
+| --- | --- |
+| `non_stop` | one thread was held and the rest of the program kept running |
+| `stop_the_world` | everything that could be held was, and here is what could not |
+
+one thing is a snapshot in either mode: **the held thread's own stack**. it is
+inside a monitoring callback and cannot return, so nothing can pop a frame of it
+while it is held. what the mode qualifies is everything the frames point *at* —
+a global another thread rewrites, a list another thread appends to
+
+there is still no request here that walks a thread `bpd` is **not** holding. its
+frames are moving, and a stack read off one would be a description of a moment
+that had already gone; where a running thread is, stated as the sample it is,
+belongs to the thread census — see [threads](threads.md)
 
 the same caveat applies inside one value. a container is read with cpython's own
 copy — `PyList_GetSlice`, `PyDict_Items` — so what comes back is internally
 consistent rather than half of one state and half of another. it is what the
-object held while it was read, and on a free-threaded build nothing stops another
-thread from changing it immediately afterwards. real stop coordination is its own
-piece of work and it is not built
+object held while it was read, and in non-stop mode nothing stops another thread
+from changing it immediately afterwards. what does stop them, for as long as it
+lasts, is
+[stopping the world](threads.md#stopping-the-world) — and even that names the
+threads it could not stop
 
 ## how it is tested
 

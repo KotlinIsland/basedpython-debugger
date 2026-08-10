@@ -70,8 +70,13 @@ pub(crate) fn run(args: &Args) -> ExitCode {
                 );
                 Ok(status)
             }
-            Ok(Running::Stopped { reason, .. }) => {
-                unreachable!("no breakpoints were set, and the debuggee stopped for {reason:?}")
+            Ok(Running::Stopped { stop, .. }) => {
+                unreachable!("no breakpoints were set, and the debuggee stopped for {stop:?}")
+            }
+            // the only stop `bpd launch` makes is the entry one, and it resumes
+            // it before the program runs a line, so nothing can still be held
+            Ok(Running::Finishing { threads, .. }) => {
+                unreachable!("nothing was held, and the debuggee ended holding {threads:?}")
             }
             Err(error) => Err(error),
         },

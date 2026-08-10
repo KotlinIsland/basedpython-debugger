@@ -15,12 +15,13 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
+use std::time::Duration;
 
 use bpd_core::python::Capabilities;
 use bpd_protocol::env;
 use bpd_protocol::message::{
-    Detail, Entry, Evaluated, Frame, FrameId, FromAgent, FromEngine, LogRecord, Omitted, Resolved,
-    Scope, SourceBreakpoint, StopReason, Value,
+    Detail, Entry, Evaluated, Frame, FrameId, FromAgent, FromEngine, LogRecord, Mode, Omitted,
+    Resolved, Scope, SourceBreakpoint, Stop, ThreadState, Value, Which,
 };
 
 use crate::{Error, Listener, Result, Session, agent};
@@ -31,12 +32,17 @@ use crate::{Error, Listener, Result, Session, agent};
 /// contain belongs in the agent, where it is rust and is tested
 const BOOTSTRAP: &str = "import bpd_agent; bpd_agent.main()";
 
-/// a running debuggee, stopped at entry with its agent attached
+/// a running debuggee, with at least one of its threads held
+///
+/// a stop holds **one thread**, so more than one can be held at a time and a
+/// request that is about a thread says which one. the ones that are about the
+/// process — the breakpoint set, the thread census — do not
 #[derive(Debug)]
 pub struct Debuggee {
     child: Child,
     session: Session,
-    stopped: Option<StopReason>,
+    /// the stops held now, in the order the agent reported them
+    held: Vec<Stop>,
     /// log records that arrived while the engine was waiting for an answer
     ///
     /// a thread that reaches a logpoint sends its record without waiting, so
@@ -44,6 +50,12 @@ pub struct Debuggee {
     /// the next `run` rather than dropped, because a log record the client
     /// never sees is a line of the program's history that silently went missing
     pending_logs: Vec<LogRecord>,
+    /// rebindings that arrived while the engine was waiting for an answer
+    ///
+    /// loading a file changes what a breakpoint resolves to, and the agent says
+    /// so while the program runs. kept for the next wait rather than dropped,
+    /// for the same reason a log record is
+    pending_rebinds: Vec<Resolved>,
     /// held so the staged agent outlives the debuggee that imported it
     _staged: agent::Staged,
 }
@@ -55,10 +67,10 @@ pub struct Debuggee {
 /// state nobody handles
 #[derive(Debug)]
 pub enum Running {
-    /// it stopped again
+    /// a thread stopped
     Stopped {
-        /// where, and why
-        reason: StopReason,
+        /// which thread, where, and why
+        stop: Stop,
         /// what loading a file changed about the breakpoint set on the way
         rebound: Vec<Resolved>,
     },
@@ -70,34 +82,64 @@ pub enum Running {
         /// what loading a file changed about the breakpoint set on the way
         rebound: Vec<Resolved>,
     },
+
+    /// the program ran to its end with threads still held
+    ///
+    /// it cannot exit: the interpreter finalizes by joining the program's
+    /// non-daemon threads, and a held one cannot be joined. resuming the named
+    /// threads is what lets it finish, and until then the process is sitting
+    /// there — which is a fact rather than the hang it would otherwise look
+    /// like
+    Finishing {
+        /// the threads still held as the program ended
+        threads: Vec<u64>,
+        /// what loading a file changed about the breakpoint set on the way
+        rebound: Vec<Resolved>,
+    },
 }
 
 impl Debuggee {
-    /// why the debuggee is stopped, or `None` once it has been let go
-    pub fn stopped(&self) -> Option<&StopReason> {
-        self.stopped.as_ref()
+    /// the stops held right now, in the order the agent reported them
+    ///
+    /// more than one is ordinary: a stop holds one thread, so a second thread
+    /// reaching a breakpoint while a first is held reports its own straight
+    /// away rather than waiting for the first to be resumed
+    pub fn held(&self) -> &[Stop] {
+        &self.held
     }
 
     /// how many requests the engine has sent this debuggee's agent
     ///
-    /// the agent reads the control connection only inside a stop, so this is
-    /// also the number of times the debuggee has waited for the debugger
+    /// the agent answers on a thread it is holding, so this is also the number
+    /// of times the debuggee has waited for the debugger
     pub const fn requests_sent(&self) -> u64 {
         self.session.requests_sent()
     }
 
+    /// the one stop that is held, for a request that is about one thread
+    ///
+    /// refuses rather than picking when several are held. a debugger that
+    /// answered about whichever thread came first would be answering a question
+    /// nobody asked
+    fn only(&self, wanted: &'static str) -> Result<u64> {
+        match self.held.as_slice() {
+            [] => Err(Error::NotStopped { wanted }),
+            [stop] => Ok(stop.stop),
+            several => Err(Error::AmbiguousStop {
+                wanted,
+                held: several.iter().map(|stop| stop.stop).collect(),
+            }),
+        }
+    }
+
     /// replace the whole breakpoint set, and say how every one of them resolved
     ///
-    /// only while the debuggee is stopped. the agent reads the control
-    /// connection inside a stop and nowhere else — asking a running program to
-    /// bind something would be a request that is answered whenever it next
-    /// happens to stop, which is not an answer
+    /// only while a thread is held. the agent answers on a thread it is holding
+    /// and nowhere else — asking a running program to bind something would be a
+    /// request that is answered whenever it next happens to stop, which is not
+    /// an answer
     pub fn set_breakpoints(&mut self, breakpoints: Vec<SourceBreakpoint>) -> Result<Vec<Resolved>> {
         const EXPECTED: &str = "the breakpoints to resolve";
-
-        if self.stopped.is_none() {
-            return Err(Error::NotStopped { wanted: EXPECTED });
-        }
 
         // every report about a breakpoint, and every stop it causes, names it by
         // this id. two breakpoints sharing one would give the client a single
@@ -108,33 +150,39 @@ impl Debuggee {
                 return Err(Error::DuplicateBreakpointId { id: breakpoint.id });
             }
         }
-        self.session
-            .send(&FromEngine::SetBreakpoints { breakpoints })?;
 
-        loop {
-            match self.session.next_event()? {
-                Some(FromAgent::BreakpointsResolved { resolved }) => return Ok(resolved),
-                Some(FromAgent::Logged { record }) => self.pending_logs.push(record),
-                Some(other) => {
-                    return Err(Error::UnexpectedEvent {
-                        event: format!("{other:?}"),
-                        expected: EXPECTED,
-                    });
-                }
-                None => return Err(Error::AgentGone { expected: EXPECTED }),
-            }
+        let request = FromEngine::SetBreakpoints { breakpoints };
+        match self.ask(&request, EXPECTED)? {
+            FromAgent::BreakpointsResolved { resolved } => Ok(resolved),
+            other => Err(unexpected(&other, EXPECTED)),
         }
     }
 
-    /// walk the stopped thread's frame chain
+    /// walk one held thread's frame chain
     ///
     /// `top` bounds how many frames come back, counting from the one that
     /// stopped. the answer says how deep the stack really is either way
-    pub fn stack(&mut self, top: Option<u32>) -> Result<Stack> {
-        match self.ask(&FromEngine::Stack { top }, "the stack")? {
-            FromAgent::Stack { frames, depth } => Ok(Stack { frames, depth }),
-            other => Err(unexpected(&other, "the stack")),
+    pub fn stack(&mut self, stop: u64, top: Option<u32>) -> Result<Stack> {
+        const EXPECTED: &str = "the stack";
+
+        match self.ask(&FromEngine::Stack { stop, top }, EXPECTED)? {
+            FromAgent::Stack {
+                frames,
+                depth,
+                mode,
+            } => Ok(Stack {
+                frames,
+                depth,
+                mode,
+            }),
+            other => Err(unexpected(&other, EXPECTED)),
         }
+    }
+
+    /// walk the frame chain of the only held thread
+    pub fn the_stack(&mut self, top: Option<u32>) -> Result<Stack> {
+        let stop = self.only("the stack")?;
+        self.stack(stop, top)
     }
 
     /// read one scope of one frame
@@ -152,12 +200,14 @@ impl Debuggee {
                 unbound,
                 unreadable,
                 omitted,
+                mode,
                 ..
             } => Ok(Variables {
                 entries,
                 unbound,
                 unreadable,
                 omitted,
+                mode,
             }),
             other => Err(unexpected(&other, EXPECTED)),
         }
@@ -181,7 +231,7 @@ impl Debuggee {
             detail,
         };
         match self.ask(&request, EXPECTED)? {
-            FromAgent::Evaluated { result } => Ok(result),
+            FromAgent::Evaluated { result, .. } => Ok(result),
             other => Err(unexpected(&other, EXPECTED)),
         }
     }
@@ -205,19 +255,62 @@ impl Debuggee {
             detail,
         };
         match self.ask(&request, EXPECTED)? {
-            FromAgent::Evaluated { result } => Ok(result),
+            FromAgent::Evaluated { result, .. } => Ok(result),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// what every thread of the debuggee is doing
+    ///
+    /// the answer to "the other threads are supposed to be running — are they".
+    /// everything it says about a thread bpd is not holding is a sample, and
+    /// `settle` is how far apart the two samples it compares were taken
+    pub fn threads(&mut self, settle: Duration) -> Result<Threads> {
+        const EXPECTED: &str = "what the threads are doing";
+
+        let settle_ms =
+            u32::try_from(settle.as_millis()).map_err(|_| Error::SettleTooLong { settle })?;
+        match self.ask(&FromEngine::Threads { settle_ms }, EXPECTED)? {
+            FromAgent::Threads {
+                threads,
+                settle_ms,
+                mode,
+            } => Ok(Threads {
+                threads,
+                settle: Duration::from_millis(settle_ms.into()),
+                mode,
+            }),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// hold every thread that can be held, until `stop` is resumed
+    ///
+    /// the explicit mode. the answer names the threads it could not hold, which
+    /// are parked in a C call and are still running — a whole-program snapshot
+    /// is only what came back with that list empty
+    pub fn stop_the_world(&mut self, stop: u64, settle: Duration) -> Result<WorldStopped> {
+        const EXPECTED: &str = "the world to stop";
+
+        let settle_ms =
+            u32::try_from(settle.as_millis()).map_err(|_| Error::SettleTooLong { settle })?;
+        let request = FromEngine::StopTheWorld { stop, settle_ms };
+        match self.ask(&request, EXPECTED)? {
+            FromAgent::WorldStopped { held, native } => Ok(WorldStopped { held, native }),
             other => Err(unexpected(&other, EXPECTED)),
         }
     }
 
     /// send one request and wait for the answer to it
     ///
-    /// a logpoint's record can be in the socket ahead of an answer, because a
-    /// thread that reaches one sends it without waiting. it is kept for the
-    /// next `run` rather than dropped, for the same reason
-    /// [`Self::set_breakpoints`] keeps one
+    /// a logpoint's record, a rebinding and another thread's stop can all be in
+    /// the socket ahead of an answer, because none of them waits for anything.
+    /// each is kept for the next wait rather than dropped: a log record the
+    /// client never sees is a line of the program's history that silently went
+    /// missing, and a stop that went missing is a thread the client thinks is
+    /// running
     fn ask(&mut self, request: &FromEngine, expected: &'static str) -> Result<FromAgent> {
-        if self.stopped.is_none() {
+        if self.held.is_empty() {
             return Err(Error::NotStopped { wanted: expected });
         }
         self.session.send(request)?;
@@ -225,6 +318,12 @@ impl Debuggee {
         loop {
             match self.session.next_event()? {
                 Some(FromAgent::Logged { record }) => self.pending_logs.push(record),
+                Some(FromAgent::BreakpointsResolved { resolved })
+                    if !matches!(request, FromEngine::SetBreakpoints { .. }) =>
+                {
+                    self.pending_rebinds.extend(resolved);
+                }
+                Some(FromAgent::Stopped { stop }) => self.held.push(stop),
                 Some(FromAgent::Refused { reason }) => return Err(Error::Refused { reason }),
                 Some(answer) => return Ok(answer),
                 None => return Err(Error::AgentGone { expected }),
@@ -232,41 +331,64 @@ impl Debuggee {
         }
     }
 
-    /// let the debuggee run until it stops again or finishes
+    /// let named threads go, without waiting for what they do next
     ///
-    /// the agent can speak while the program runs — loading a module changes
-    /// what a breakpoint resolves to, and a logpoint has something to say every
-    /// time it is reached — so nothing it said is left in a socket buffer for
-    /// someone to find
+    /// naming a thread that is not held is refused rather than ignored: the
+    /// client would otherwise believe it had released something it had not, and
+    /// the next thing it waited for would never come
+    pub fn resume(&mut self, threads: &[u64]) -> Result<Vec<u64>> {
+        self.let_go(Which::Named {
+            threads: threads.to_vec(),
+        })
+    }
+
+    /// let every held thread go, without waiting for what they do next
+    pub fn resume_all(&mut self) -> Result<Vec<u64>> {
+        self.let_go(Which::All)
+    }
+
+    fn let_go(&mut self, which: Which) -> Result<Vec<u64>> {
+        const EXPECTED: &str = "the threads to be resumed";
+
+        match self.ask(&FromEngine::Resume { which }, EXPECTED)? {
+            FromAgent::Resumed { threads } => {
+                self.held.retain(|stop| !threads.contains(&stop.thread));
+                Ok(threads)
+            }
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// wait for the next thing the debuggee does
     ///
     /// log records go to `on_log` as they arrive rather than into the result.
     /// there is no bound on how many a logpoint produces, and a debugger that
     /// accumulated a million of them before saying anything would be holding
     /// the program's history hostage to its own memory
-    pub fn run(&mut self, mut on_log: impl FnMut(LogRecord)) -> Result<Running> {
-        const EXPECTED: &str = "the debuggee to stop or exit";
-
-        if self.stopped.take().is_none() {
-            return Err(Error::NotStopped { wanted: EXPECTED });
-        }
+    pub fn wait(&mut self, mut on_log: impl FnMut(LogRecord)) -> Result<Running> {
         for record in self.pending_logs.drain(..) {
             on_log(record);
         }
-        self.session.send(&FromEngine::Resume)?;
+        let mut rebound = std::mem::take(&mut self.pending_rebinds);
 
-        let mut rebound = Vec::new();
         loop {
             match self.session.next_event()? {
-                Some(FromAgent::Stopped { reason }) => {
-                    self.stopped = Some(reason.clone());
-                    return Ok(Running::Stopped { reason, rebound });
+                Some(FromAgent::Stopped { stop }) => {
+                    self.held.push(stop.clone());
+                    return Ok(Running::Stopped { stop, rebound });
+                }
+                Some(FromAgent::Finishing { held }) => {
+                    return Ok(Running::Finishing {
+                        threads: held,
+                        rebound,
+                    });
                 }
                 Some(FromAgent::BreakpointsResolved { resolved }) => rebound.extend(resolved),
                 Some(FromAgent::Logged { record }) => on_log(record),
                 Some(other) => {
                     return Err(Error::UnexpectedEvent {
                         event: format!("{other:?}"),
-                        expected: EXPECTED,
+                        expected: "the debuggee to stop or exit",
                     });
                 }
                 None => {
@@ -279,9 +401,18 @@ impl Debuggee {
             }
         }
     }
+
+    /// let every held thread go and wait for what the debuggee does next
+    ///
+    /// the whole-program "continue". it resumes everything held rather than one
+    /// thread, and what it waits for is the program, not a particular thread
+    pub fn run(&mut self, mut on_log: impl FnMut(LogRecord)) -> Result<Running> {
+        self.resume_all()?;
+        self.wait(&mut on_log)
+    }
 }
 
-/// the stopped thread's stack
+/// one held thread's stack
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stack {
     /// the frames, the one that stopped first
@@ -289,6 +420,8 @@ pub struct Stack {
     /// how deep the stack is, which is more than `frames` when fewer were asked
     /// for
     pub depth: usize,
+    /// how the program was moving while this was taken
+    pub mode: Mode,
 }
 
 /// what one scope of one frame holds
@@ -302,6 +435,39 @@ pub struct Variables {
     pub unreadable: Vec<String>,
     /// everything the answer left out, and why
     pub omitted: Vec<Omitted>,
+    /// how the program was moving while this was taken
+    pub mode: Mode,
+}
+
+/// what every thread of the debuggee was doing, as a sample
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Threads {
+    /// one entry per thread the interpreter knows about
+    pub threads: Vec<ThreadState>,
+    /// how far apart the two samples were taken
+    pub settle: Duration,
+    /// how the program was moving while this was taken
+    pub mode: Mode,
+}
+
+impl Threads {
+    /// what one thread was doing, when the census saw it
+    pub fn get(&self, thread: u64) -> Option<&ThreadState> {
+        self.threads.iter().find(|state| state.thread == thread)
+    }
+}
+
+/// what stopping the world managed to stop
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldStopped {
+    /// the threads that are held
+    pub held: Vec<u64>,
+    /// the threads parked in a C call, which are **running**
+    ///
+    /// nothing available here can stop one: it has released the GIL and
+    /// executes no python, so it reaches no monitoring event. an answer taken
+    /// with this list non-empty is not a whole-program snapshot, and says so
+    pub native: Vec<u64>,
 }
 
 impl Variables {
@@ -337,12 +503,6 @@ fn unexpected(event: &FromAgent, expected: &'static str) -> Error {
 /// catch-all arm instead — which is how a debugger acquires a state nobody
 /// handles
 #[derive(Debug)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "one variant holds a running process and the other holds its exit \
-              status, and boxing the first would put an allocation on the path \
-              every launch takes to make a value that is moved once smaller"
-)]
 pub enum Launched {
     /// the debuggee is attached and held before its first statement
     Stopped(Debuggee),
@@ -406,8 +566,8 @@ pub fn launch(interpreter: &Capabilities, script: &Path, args: &[OsString]) -> R
         }
     };
 
-    let reason = match session.expect_stop() {
-        Ok(reason) => reason,
+    let stop = match session.expect_stop() {
+        Ok(stop) => stop,
         Err(Error::AgentGone { .. }) => {
             let status = child.wait().map_err(|source| Error::Spawn {
                 interpreter: interpreter.executable.clone(),
@@ -419,10 +579,11 @@ pub fn launch(interpreter: &Capabilities, script: &Path, args: &[OsString]) -> R
     };
 
     Ok(Launched::Stopped(Debuggee {
-        stopped: Some(reason),
+        held: vec![stop],
         child,
         session,
         pending_logs: Vec::new(),
+        pending_rebinds: Vec::new(),
         _staged: staged,
     }))
 }
