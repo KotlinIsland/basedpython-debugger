@@ -5,6 +5,8 @@ first statement, and lets it go
 
 ```sh
 bpd launch --python python3.14 script.py --and its arguments
+bpd launch --python python3.14 -m package.module --and its arguments
+bpd launch --python python3.14 -c 'print("and its arguments")' --and them
 ```
 
 there is nothing yet that could be told about the stop or asked what to do next,
@@ -12,6 +14,44 @@ so the stop happens and the program is resumed immediately. what it establishes
 is the part everything else needs: the agent attaches, the program is genuinely
 held before it has run, and letting it go produces a run indistinguishable from
 a bare one
+
+## the three forms
+
+an interpreter can be entered three ways, and **none of them is a special case
+of another**. what they differ in is visible to the program:
+
+| | `script.py` | `-m module` | `-c source` |
+| --- | --- | --- | --- |
+| `sys.argv[0]` | the path as typed | **the resolved file** | `-c` |
+| `sys.path[0]` | the script's directory | the working directory | `""` |
+| `__main__.__spec__` | absent | the module's spec | absent |
+| `__main__.__package__` | absent | `""`, or the package | absent |
+| `__main__.__file__` | the script | the module's file | absent |
+| `__main__.__cached__` | `None` | the `.pyc` | absent |
+
+`__cached__` is in that table with a caveat: **cpython 3.15 removed it** from
+module namespaces, from a script's `__main__`, from runpy's and from every
+imported module. so the row is 3.13 and 3.14. the launcher does not carry a
+version table for it — it asks the running interpreter whether a module it
+loaded through `SourceFileLoader` carries the name, which is the same removal
+seen from the same process. 3.13 has an `__annotations__` in `__main__` that
+3.14 does not, and that one needs no rule at all: the program's `__main__`
+starts as a **copy** of the one the interpreter built
+
+two of those are traps. `-m` rewrites `sys.argv[0]` to the **file** the module
+resolved to, not to the module name — so a program that reports its own
+invocation shows a path nobody typed. and `-c` leaves `sys.path[0]` as the empty
+string, which means "the working directory, resolved at import time": spelling
+the working directory out instead looks identical until the program calls
+`os.chdir`, and then it imports a different module, or none
+
+`bpd launch` takes the interpreter's own argument vector for all three, so the
+same words that follow `python` follow `bpd launch --python python`. `-m` and
+`-c` each take the whole of the rest of the line, which is what the interpreter
+does — `python -m pkg -c x` runs `pkg` with `-c x` as its arguments, and so does
+this. that is also what makes the three forms exclusive without a conflict rule:
+there is no arrangement of arguments in which two of them are given. giving
+**none** of them is refused while parsing
 
 ## the shape of a launch
 
@@ -28,9 +68,11 @@ a bare one
    │                                        ├─ read the endpoint and token
    │                                        ├─ erase them from the environment
    │  ◀──────── connect, handshake ─────────┤
+   │                                        ├─ take its own directory back off
+   │                                        │  PYTHONPATH and sys.path
    │                                        ├─ claim the monitoring tool id
    │                                        ├─ arm PY_START
-   │                                        ├─ repair argv and sys.path[0]
+   │                                        ├─ repair what the form needs
    │                                        ├─ install a fresh __main__
    │  ◀──────── stopped: entry ─────────────┤  ← the program has run nothing
    ├─ resume ──────────────────────────────▶│
@@ -141,27 +183,90 @@ so the entry point is the shortest thing that can work —
 
 ## what `-c` breaks, and what puts it back
 
-entering through `-c` is not the launch form the user asked for, and the
-differences are visible to the program:
+entering through `-c` is only the launch form the user asked for one time in
+three, and the differences are visible to the program:
 
-| | what `-c` leaves | what the program expects |
-| --- | --- | --- |
-| `sys.argv[0]` | `-c` | the script path **as typed** |
-| `sys.path[0]` | `""` | the script's directory |
-| `__main__` | the bootstrap's module | the program's own |
-| `__file__` | absent | the script, absolutised |
+| | what `-c` leaves | a script | `-m` |
+| --- | --- | --- | --- |
+| `sys.argv[0]` | `-c` | the path **as typed** | the resolved file |
+| `sys.path[0]` | `""` | the script's directory | the working directory |
+| `__main__` | the bootstrap's module | the program's own | the program's own |
+| `__file__` | absent | the script, absolutised | the module's file |
 
-two of these are easy to get subtly wrong. `sys.argv[0]` is the path **as
-typed** — cpython does not absolutise it, though it does absolutise `__file__`,
-so the two disagree on purpose. and `sys.path[0]` is the script's *directory*,
-not the working directory; the two coincide often enough that only a test which
-separates them proves which one the launcher used
+the command form is the one that needs nothing put back, and saying so is the
+point: `-c` is entered through `-c`, so `sys.argv[0]` and `sys.path[0]` are
+already what they should be. writing them anyway is how the empty string turns
+into a working directory that stops tracking `os.chdir`
+
+`sys.argv[0]` for a script is the path **as typed** — cpython does not
+absolutise it, though it does absolutise `__file__`, so the two disagree on
+purpose. and `sys.path[0]` is the script's *directory*, not the working
+directory; the two coincide often enough that only a test which separates them
+proves which one the launcher used
+
+**`PYTHONSAFEPATH` and `-P` turn the prepending off entirely.** there is then no
+`sys.path[0]` of the interpreter's to replace — slot zero is the first real
+entry, which on a stock build is the stdlib zip — so the repair does nothing at
+all. a launcher that wrote its entry anyway would hand the program a search path
+a bare run never has, and take a stdlib entry out on the way
 
 none of this is asserted from memory.
 `crates/bpd_test/tests/launch_forms.rs` records what a bare interpreter
 produces, and `crates/bpd/tests/launch_parity.rs` runs the same program twice —
-once bare, once under `bpd` — and compares. no expected value is written down,
-because the expected value is whatever cpython does
+once bare, once under `bpd` — and compares, for **all three forms**, by handing
+the same argument vector to `python` and to `bpd launch`. no expected value is
+written down, because the expected value is whatever cpython does
+
+### `-m` is runpy's, whole
+
+`bpd` does not resolve a module. it calls `runpy._run_module_as_main`, which is
+private and is also exactly what cpython's own `pymain_run_module` calls — and
+the reason it is the *whole* of what `bpd` does is measured rather than stylistic.
+a bare `-m` traceback holds runpy's own frames:
+
+```text
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/tmp/boom.py", line 1, in <module>
+```
+
+so resolving the module here and running the code object directly would produce
+a traceback with **fewer** frames than a bare run, and resolving it once to learn
+the file and then calling `_run_module_as_main` anyway would run a failing
+package's `__init__` twice and report the failure from the wrong depth. that also
+settles the package case, the missing-module message and the `argv[0]` rewrite
+without any of them being a rule `bpd` wrote down
+
+it does cost one thing, and it is what the entry stop had to be redesigned
+around: nothing outside runpy knows which **file** the module resolved to until
+runpy is already running it
+
+### how the entry stop knows the program
+
+the stop fires on the `PY_START` of the program's own body, so that a breakpoint
+set during it has the whole main module — its functions, classes and
+comprehensions — already registered to bind to. which code object that is, is
+answered two ways because the forms genuinely differ in who compiles the program:
+
+- a script and a `-c` command are compiled by `bpd`, so the code object **is**
+    the program and it is recognised by identity
+- `-m` is compiled inside runpy, so what identifies it is the file `__main__`
+    names — a module namespace is complete before its body runs, so `__file__`
+    is already there when the first `PY_START` from that file arrives
+
+### the `<string>` a traceback would have shown
+
+cpython keeps the source of a `-c` command in `linecache` so a traceback can
+print the line it came from, keyed on the code object's filename, qualname and
+first line. the bootstrap **is** a `-c` command, so `("<string>", "<module>", 1)`
+holds `import bpd_agent; bpd_agent.main()` before the agent has run at all — and
+`compile` names its code `<string>` by default
+
+that is a wrong line, not a missing one: a traceback through anything the program
+compiled would print `bpd`'s bootstrap as the program's source, with a caret
+under it. the entry is removed for every form, and the command form then
+registers its own source through the same function `pythonrun.c` uses
 
 ## failures belong to the program
 
@@ -173,6 +278,10 @@ have said:
     traceback holds the program's frames and none of `bpd`'s
 - an unreadable script is reported with `os.strerror` and exits **2**, which is
     what cpython uses — not the 1 an uncaught exception produces
+- a module that is not there is reported by runpy, in the wording and with the
+    exit code runpy gives it: `<executable>: No module named nope`, exit **1**.
+    a package that raises while it is being imported reports from inside runpy's
+    resolution, one frame shallower than a failure in the module itself
 - an uncaught exception is printed by cpython's own printer, so a program that
     installed its own `sys.excepthook` still gets it
 
@@ -182,14 +291,32 @@ there without the debugger
 
 ## the one fingerprint that remains
 
-`bpd_agent` stays in the debuggee's `sys.modules`. it cannot be removed —
-unimporting it would unload the code that is running. everything else is
-erased: the endpoint, the token and the target path are taken out of the
-environment before any user code runs, so a program cannot tell it is being
-debugged by reading `os.environ`
+`bpd_agent` stays in the debuggee's `sys.modules`, and so do the modules
+importing it pulled in. it cannot be removed — unimporting it would unload the
+code that is running
 
-this is recorded as an assertion rather than a footnote, in
-`the_program_is_the_only_main_module`
+everything else is erased before any user code runs:
+
+- the endpoint, the token, the target and the form leave `os.environ`
+- **`PYTHONPATH` is put back to what it was**, and the agent's staged directory
+    comes off `sys.path`. that directory is how the bootstrap can import the
+    agent at all, and both halves of it were visible: the variable in
+    `os.environ`, and the directory on the search path — where under
+    `PYTHONSAFEPATH` it lands in **slot zero**, ahead of the stdlib. a directory
+    searched before everything else is the debugger deciding what the program
+    imports. an inherited `PYTHONPATH` is prepended to rather than replaced, so
+    a program does not lose search path it was given
+- the `linecache` entry for the bootstrap's own source, above
+
+this is recorded as assertions rather than footnotes, in
+`the_program_is_the_only_main_module`,
+`a_program_that_reads_its_own_environment_finds_no_debugger_in_it` and
+`a_program_that_reads_its_own_import_path_finds_no_debugger_on_it`
+
+what is **not** erased is `sys.modules`: importing the agent imports
+`threading`, `re`, `sysconfig` and the rest of what it needs, and a program that
+lists its own modules sees them. that is a difference `bpd` has not closed, and
+it is written here rather than implied away
 
 ## what the entry stop is
 

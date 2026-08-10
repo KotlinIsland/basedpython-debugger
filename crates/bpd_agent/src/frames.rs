@@ -111,6 +111,18 @@ pub(crate) const fn begin(python: Python<'_>, stop: u64) -> Stopped<'_> {
 }
 
 /// whether a frame is the one the agent entered the program from
+/// the code object of the `-c` command the interpreter was entered through
+///
+/// the one thing about the bootstrap that outlives its frame: cpython keeps the
+/// source of a `-c` command in `linecache`, keyed on the code object, and
+/// [`crate::run`] takes that entry out so the program never sees bpd's line
+pub(crate) fn bootstrap_code(python: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    let frame = BOOTSTRAP.get().unwrap_or_else(|| {
+        unreachable!("the bootstrap frame is remembered before the program is entered")
+    });
+    frame.bind(python).getattr("f_code")
+}
+
 pub(crate) fn is_bootstrap(frame: &Bound<'_, PyAny>) -> bool {
     BOOTSTRAP
         .get()

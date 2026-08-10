@@ -161,8 +161,37 @@ resolved *file*, not the module name, and `-c` leaves `sys.path[0]` as the
 empty string, which means "the working directory at import time" and is not the
 same as the working directory spelled out
 
+`crates/bpd/tests/launch_parity.rs` is the other side of it, and the comparison
+is literal: `bpd launch` takes the interpreter's own argument vector, so the
+**same words** are handed to `python` and to `bpd launch --python python` and
+the two runs are compared. a form only one of them understands fails there
+rather than in a second spelling somebody wrote by hand
+
+the breaks those tests were checked against: never matching the `-m` entry gate
+fails the entry stop in every form; not registering a `-c` command's source with
+`linecache` fails the compiled-source traceback test and the uncaught exception
+one; leaving the bootstrap's own source in `linecache` fails the first of those;
+writing `sys.path[0]` under a safe path fails the safe-path test; leaving the
+agent's directory on the import path fails three; dropping `__cached__` or the
+`BuiltinImporter` loader from `__main__` fails the whole-record comparison;
+letting runpy skip the `argv[0]` rewrite, not copying `__main__` from the one
+the interpreter built, spelling the working directory out under `-c`, or taking
+the module's own directory instead of the working one each fail between two and
+thirteen
+
+**one of those guards can only be made to fail on an interpreter this project
+does not support yet**, and that is written down rather than left looking like
+coverage. setting `__cached__` unconditionally instead of asking the interpreter
+whether it still carries one is correct on 3.13 and 3.14 and wrong on 3.15,
+which removed the name — so the break is invisible until the agent is built with
+`PYO3_PYTHON=python3.15`, where it fails the whole-record comparison. that is
+also how the guard was arrived at: 3.15 failed first, and the rule was written
+to answer it
+
 fixtures must never be run with `-I` or `-E`. isolated mode drops the script's
-directory from `sys.path` entirely, which is one of the values under test
+directory from `sys.path` entirely, which is one of the values under test.
+`PYTHONSAFEPATH` and `-P` are a *tested* case rather than a banned one: they
+turn the prepending off, and the launcher has to turn its repair off with them
 
 ## benchmarks
 

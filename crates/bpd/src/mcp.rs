@@ -15,7 +15,7 @@ use std::thread::JoinHandle;
 
 use bpd_core::python::Capabilities;
 use bpd_core::{Reporting, Request, Response, Stop};
-use bpd_engine::{Debuggee, Launched};
+use bpd_engine::{Debuggee, Launched, Program};
 use bpd_mcp::{Configuration, Failed, Launcher, ProgramOutput, Session, Started, Stream};
 
 use crate::report_error;
@@ -63,8 +63,11 @@ impl Launcher for Engine {
             .collect();
 
         let forwarding = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let launched =
-            bpd_engine::launch_piped(&interpreter, &configuration.program, &arguments, {
+        let launched = bpd_engine::launch_piped(
+            &interpreter,
+            &Program::Script(configuration.program.clone()),
+            &arguments,
+            {
                 let forwarding = Arc::clone(&forwarding);
                 move |stdout, stderr| {
                     let mut threads = forwarding
@@ -73,7 +76,8 @@ impl Launcher for Engine {
                     threads.push(forward(stdout, Stream::Stdout, &output));
                     threads.push(forward(stderr, Stream::Stderr, &output));
                 }
-            })?;
+            },
+        )?;
 
         Ok(match launched {
             Launched::Stopped(debuggee) => Started::Stopped(Box::new(Attached(debuggee))),

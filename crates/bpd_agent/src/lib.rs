@@ -53,6 +53,7 @@ mod bpd_agent {
         BUILT_FOR, DEBUGGER_TOOL_ID, TOOL_NAME, arm, attach, frames, monitoring, run,
         running_version, session,
     };
+    use bpd_protocol::env::Form;
     use pyo3::exceptions::{PyImportError, PyRuntimeError, PySystemExit};
     use pyo3::prelude::*;
 
@@ -69,6 +70,8 @@ mod bpd_agent {
         let endpoint = required_env(bpd_protocol::env::ENDPOINT)?;
         let token = required_env(bpd_protocol::env::TOKEN)?;
         let target = required_env(bpd_protocol::env::TARGET)?;
+        let spelled = required_env(bpd_protocol::env::FORM)?;
+        let inherited_path = std::env::var(bpd_protocol::env::PYTHON_PATH).ok();
 
         // taken out of the environment before any user code can see them. a
         // program that behaves differently because it noticed the debugger is a
@@ -76,16 +79,19 @@ mod bpd_agent {
         for name in bpd_protocol::env::ALL {
             forget_env(python, name)?;
         }
+        forget_agent_path(python, inherited_path.as_deref())?;
 
-        // absolutised once, here, so the path the entry stop matches on is the
-        // same string the compiled code object carries. the spelling the user
-        // typed is kept too, because `sys.argv[0]` must not be absolutised
-        let as_given = target;
-        let target = std::path::absolute(&as_given).map_err(|error| {
-            PySystemExit::new_err(format!("bpd: could not resolve `{as_given}`: {error}"))
-        })?;
+        let Some(form) = Form::parse(&spelled) else {
+            return Err(PySystemExit::new_err(format!(
+                "bpd: `{}` is `{spelled}`, which is not a launch form. the \
+                 engine and the agent ship together and disagree about this \
+                 one, which means the staged agent is not the one this bpd \
+                 built",
+                bpd_protocol::env::FORM
+            )));
+        };
 
-        attach::attach(&endpoint, &token, target.clone())
+        attach::attach(&endpoint, &token)
             .map_err(|error| PySystemExit::new_err(format!("bpd: could not attach: {error}")))?;
         claim(python)?;
         arm(python)?;
@@ -97,7 +103,7 @@ mod bpd_agent {
         // frame to call one, so the frame running right now is the bootstrap's
         frames::remember_bootstrap(python)?;
 
-        let outcome = match run::script(python, &as_given, &target) {
+        let outcome = match run::enter(python, form, &target) {
             Ok(()) => Ok(()),
             Err(error) => Err(run::report_uncaught(python, error)),
         };
@@ -124,6 +130,50 @@ mod bpd_agent {
         PyModule::import(python, "os")?
             .getattr("environ")?
             .call_method1("pop", (name, python.None()))?;
+        Ok(())
+    }
+
+    /// take the agent's own directory back off the debuggee's import path
+    ///
+    /// the agent is reached by putting its staged directory in front of
+    /// `PYTHONPATH`, and **both halves of that are visible to the program**:
+    /// the variable is in `os.environ`, and the directory is on `sys.path` —
+    /// where under `PYTHONSAFEPATH` it is `sys.path[0]`, the first place every
+    /// import looks. neither is there without the debugger, and a directory
+    /// searched before everything else is a debugger deciding what the program
+    /// imports
+    ///
+    /// the agent has already been imported, so taking it back off costs
+    /// nothing. where it was is read off the module's own `__file__` rather
+    /// than taken from the launcher, so what is removed is the directory the
+    /// agent really came from
+    fn forget_agent_path(python: Python<'_>, inherited: Option<&str>) -> PyResult<()> {
+        let file: String = PyModule::import(python, "bpd_agent")?
+            .getattr("__file__")?
+            .extract()?;
+        let staged = std::path::Path::new(&file)
+            .parent()
+            .unwrap_or_else(|| unreachable!("`{file}` is a file, so it has a directory"))
+            .display()
+            .to_string();
+
+        let sys = PyModule::import(python, "sys")?;
+        let path = sys.getattr("path")?;
+        let before = path.len()?;
+        path.call_method1("remove", (&staged,))?;
+        assert_eq!(
+            path.len()? + 1,
+            before,
+            "removing the staged agent's directory took one entry off `sys.path`"
+        );
+
+        let environ = PyModule::import(python, "os")?.getattr("environ")?;
+        match inherited {
+            Some(original) => environ.set_item("PYTHONPATH", original)?,
+            None => {
+                environ.call_method1("pop", ("PYTHONPATH", python.None()))?;
+            }
+        }
         Ok(())
     }
 
@@ -227,8 +277,8 @@ fn arm(python: Python<'_>) -> PyResult<()> {
 ///
 /// it does not materialise a frame. registering a code object needs the object
 /// and its filename, deciding whether this is the program's entry needs the
-/// filename, and neither needs to know anything about the frame that is about
-/// to run — which is the whole reason this is affordable at all
+/// code object itself, and neither needs to know anything about the frame that
+/// is about to run — which is the whole reason this is affordable at all
 ///
 /// the offset is part of the signature PEP 669 requires and is always zero for
 /// `PY_START`, so there is nothing it could be read for
@@ -240,21 +290,15 @@ fn on_py_start<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let newly_loaded = code::register(code)?;
 
-    if !attach::has_stopped_at_entry()
-        && let Some(target) = attach::target()
-    {
-        let attribute = code.getattr("co_filename")?;
-        let filename: std::borrow::Cow<'_, str> = attribute.extract()?;
-        if std::path::Path::new(filename.as_ref()) == target {
-            // the program's own code object is registered before the stop, so a
-            // breakpoint set during the entry stop has the whole of the main
-            // module — its functions, classes and comprehensions — to bind to.
-            // that also means a rebinding pass here would have nothing to say,
-            // because the set was resolved with this file already registered
-            attach::mark_stopped_at_entry();
-            session::stop(python, events::thread_ident(python)?, StopReason::Entry)?;
-            return Ok(may_forget_a_code_object(python));
-        }
+    if !run::has_stopped_at_entry() && run::is_the_program(python, code)? {
+        // the program's own code object is registered before the stop, so a
+        // breakpoint set during the entry stop has the whole of the main
+        // module — its functions, classes and comprehensions — to bind to.
+        // that also means a rebinding pass here would have nothing to say,
+        // because the set was resolved with this file already registered
+        run::mark_stopped_at_entry();
+        session::stop(python, events::thread_ident(python)?, StopReason::Entry)?;
+        return Ok(may_forget_a_code_object(python));
     }
 
     if let Some(loaded) = newly_loaded {
