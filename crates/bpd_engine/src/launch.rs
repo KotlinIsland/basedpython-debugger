@@ -288,7 +288,7 @@ impl Debuggee {
     /// to apply it and two of them applying their own would make a request that
     /// names no stop mean two things
     fn only(&self, wanted: &'static str) -> Result<u64> {
-        Ok(bpd_core::only_stop(&self.held, wanted)?)
+        Ok(bpd_core::only_stop(&self.held, self.exit_code()?, wanted)?)
     }
 
     /// replace the whole breakpoint set, and say how every one of them resolved
@@ -668,9 +668,49 @@ impl Debuggee {
         reporting: &mut dyn Reporting,
     ) -> Result<FromAgent> {
         if self.held.is_empty() {
+            // "nothing is held" invites holding something, and a program that
+            // has ended cannot be held at all. the child is the only authority
+            // on which of the two this is
+            if let Some(code) = self.exit_code()? {
+                return Err(bpd_core::Error::ProgramExited {
+                    code,
+                    wanted: expected,
+                }
+                .into());
+            }
             return Err(bpd_core::Error::NotStopped { wanted: expected }.into());
         }
         self.send_and_wait(request, expected, reporting)
+    }
+
+    /// what the debuggee exited with, or `None` while it is still running
+    ///
+    /// a front end needs this to tell the two shapes of "nothing is held" apart
+    /// — a program that is running and has to be stopped, and one that is over
+    /// and cannot be. a failure to read the child's status is reported as no
+    /// exit: it is not evidence that the program ended, and claiming one would
+    /// be the debugger inventing a state
+    pub fn exited(&self) -> Option<i64> {
+        self.exit_code().ok().flatten()
+    }
+
+    /// what the debuggee exited with, or `None` while it is still running
+    ///
+    /// `try_wait` reaps a child that has ended and remembers the status, so the
+    /// `wait` on the exit path afterwards still answers with it
+    fn exit_code(&self) -> Result<Option<i64>> {
+        let ended = self
+            .child
+            .lock()
+            .expect(
+                "nothing panics holding the debuggee: every path through it is a kill or a wait",
+            )
+            .try_wait()
+            .map_err(|source| Error::Spawn {
+                interpreter: PathBuf::from("the debuggee"),
+                source,
+            })?;
+        Ok(ended.map(bpd_core::exit_code))
     }
 
     /// send one request and wait for the answer, of a program that may be

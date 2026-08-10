@@ -203,7 +203,7 @@ fn a_method_this_server_does_not_implement_is_refused_by_name() {
     let transcript = drive(&Asked::default());
     let refused = transcript
         .error_of(&serde_json::json!(9_001))
-        .expect("`resources/list` is not implemented");
+        .expect("`completion/complete` is not implemented");
     assert_eq!(refused["code"], -32601);
     let message = refused["message"].as_str().expect("an error says why");
     assert!(
@@ -366,7 +366,7 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)]) -> Transcript 
     }
 
     // a method this server does not implement, under an id the test can find
-    client.under(&serde_json::json!(9_001), "resources/list");
+    client.under(&serde_json::json!(9_001), "completion/complete");
     client.call("terminate", &serde_json::json!({}));
 
     let Client { writes, reads, .. } = client;
@@ -732,6 +732,13 @@ fn integer(text: &str) -> Value {
 impl Session for FakeSession {
     fn held(&self) -> Vec<Stop> {
         self.held.clone()
+    }
+
+    /// this fake's program never ends: the whole conversation it drives happens
+    /// against one that is there, and a fake that claimed an exit would answer
+    /// every refusal with the wrong one of the two reasons
+    fn ended(&self) -> Option<i64> {
+        None
     }
 
     fn terminate(&mut self) -> Result<(), Failed> {

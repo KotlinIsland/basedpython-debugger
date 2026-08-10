@@ -35,9 +35,11 @@ between them; anything else is answered with `2025-06-18`, which is the client's
 cue to decide whether it can go on. a JSON-RPC **batch** is refused with the
 reason — MCP removed batching in the revision above
 
-only the `tools` capability is declared. resources are pulled at the host's
-discretion and prompts are invoked by the user, so neither is a surface an agent
-can be relied on to see — see [what is not built](#what-is-not-built)
+`tools`, `resources` and `prompts` are declared, and each of the three is
+declared because it is implemented. what is *load bearing* is only in the tools
+and the errors, because those are the only surfaces an agent is certain to see —
+[what a resource may say](#resources-carry-the-model-a-schema-cannot-hold) is
+the rule that keeps it that way
 
 ## every control tool returns the stop it produced
 
@@ -182,6 +184,15 @@ refused by name rather than taking a default that does not exist, and a
 misspelled `dept` inside `detail` is refused rather than leaving the answer cut
 in the same place with the same advice
 
+**and no argument is parsed that the schema does not name**, which is the other
+half and the half that had drifted: `launch` read a `frames` its schema never
+declared, so the number of frames the entry stop comes back with was a setting
+no agent could find and a strict client would have had rejected. a schema and a
+struct are two descriptions of one thing and nothing makes them agree, so
+`every_tools_schema_names_exactly_the_arguments_it_parses` compares them for
+every tool — with the field list **asked of serde** rather than written down,
+the way `crates/bpd_dap/tests/vscode.rs` does it for the vs code manifest
+
 ### an answer is json, and it says what it left out
 
 each tool result is one text block holding pretty-printed json. the machine
@@ -217,13 +228,114 @@ two shapes, and they are different on purpose:
   is the reason, with `isError: true`. that is what an agent reads, and a
   refusal here names a cause and an action in the same words `bpd` uses
   everywhere
-- a **protocol** failure — a method that does not exist, arguments that are not
-  the shape the schema says — is a JSON-RPC error. a client is entitled to hide
-  one of those from the model, which is exactly why nothing about the program
-  goes down that channel
+- a **protocol** failure — a method that does not exist, a `tools/call` with no
+  `name`, a tool nobody offers, a resource uri nobody serves — is a JSON-RPC
+  error. a client is entitled to hide one of those from the model, which is
+  exactly why nothing about the program goes down that channel
+
+**arguments that are not the shape the schema says are the first of those, not
+the second.** they read like a protocol failure and they are not one: a
+misspelled `deadline_ms` is the *model's* mistake and the model is the one that
+has to correct it, so it comes back as a tool failure the model is certain to
+see. the refusal names the tool as well as the argument, since an agent that
+made several calls in a turn is otherwise told which argument was wrong without
+being told which call it belonged to
 
 an expression that raises is **neither**. it is a result carrying the exception,
 because the interpreter is the authority on what an expression is
+
+### two errors that used to be one
+
+nothing held has two causes and they need opposite things done about them, so
+they are two refusals rather than one:
+
+- the program is **running**, and has to be held before anything can be asked.
+  the refusal says so, and names the two ways: run it to a breakpoint, or pause
+  it
+- the program has **exited**, and there is nothing left to hold. the refusal
+  names the exit code
+
+`bpd_core::only_stop` cannot tell them apart from the held stops alone, so it
+takes the exit as an argument and every caller supplies it — the engine from the
+child process, this adapter through `Session::ended`. a client told only
+"nothing is held" about a program that has ended goes on pausing a process that
+is not there
+
+## resources carry the model a schema cannot hold
+
+only tools are model-controlled. a resource is read at the **host application's**
+discretion, so the rule for one is a rule about what may go in it: **nothing
+here may be the only place something is said.** an agent that never receives a
+resource still has to be able to use `bpd` correctly from the tool schemas and
+the errors, and if the answer to "the agent got this wrong" is a paragraph in a
+resource, the tool or the error was the thing that needed fixing
+
+what is left after that is real, and it is the part neither can carry: not what
+a call takes, but what its answer **claims**, and where the claim stops
+
+| uri | what it is |
+| --- | --- |
+| `bpd://model/stops` | a stop holds one thread and not the program; the frame chain is a snapshot and every value through it is a sample; a timeout carries no location at all and why; what a stop number, a frame depth and a snapshot id each stay valid for |
+| `bpd://model/values` | why the four scopes are never merged; why an `int` arrives as text; what every bound that bit is called where it bit; why source is proved in the debuggee rather than read from disk; what a diff refuses to call unchanged |
+
+two, and no more, because a third would be padding. a uri nobody serves is a
+JSON-RPC error under MCP's own `-32002` rather than a page saying so — a page of
+prose in place of the page that was asked for is a thing an agent could read as
+true
+
+## prompts are canonical investigations
+
+a prompt is invoked by the **user**, usually as a slash command. so the bar for
+one is narrower than "a thing you can do with `bpd`": it has to be an
+investigation a competent agent would otherwise get **wrong** or do the long
+way. a prompt that restates a tool name is a slash command that costs a
+keystroke and teaches nothing
+
+| prompt | what it would otherwise cost |
+| --- | --- |
+| `nth_call` | a counter written into the program, or n resumes counted by hand, rather than a typed hit condition the debuggee evaluates itself |
+| `step_until` | a step and an evaluate per line of the program, rather than one submitted script whose transcript is the answer |
+| `what_changed` | both states shipped to the agent and compared in its head, which spends the context twice and calls a truncated value unchanged |
+| `why_wont_it_stop` | resuming again with a larger deadline, having read a timeout as a location |
+
+each carries the whole investigation with its arguments substituted. a required
+argument that was not given is refused naming it, because an investigation with
+a hole in it is a workflow that says to set a breakpoint and does not say where
+
+## a skill directory, for clients that have one
+
+`skills/bpd/SKILL.md` is in the repository. a skill is a **client** feature and
+no part of MCP — a client that has them reads it, and one that does not is not
+missing anything load bearing, for the same reason a resource is not load
+bearing
+
+it is at the top level rather than under `.claude/`, because `.claude/` is not
+committed. a client that reads skills from a project directory wants it copied
+or symlinked into place — for claude code that is `.claude/skills/bpd/` in a
+project, or `~/.claude/skills/bpd/` for every project
+
+what it carries that the tools do not: when a debugger is the right tool at all,
+how the server is configured, the order of a session, and the handful of things
+an agent gets wrong. `crates/bpd/tests/skill.rs` checks it against the tool
+table, the resource uris and the prompt names, because nothing else parses it
+
+## nothing a resource, a prompt or the skill names has gone away
+
+prose loses to renames. a page that names `run_to` after `run_to` stopped being
+a tool reads exactly as well as one that is true, and an agent will act on it —
+which is worse than having no page
+
+so every tool a resource or a prompt names is **declared beside it**, and
+`crates/bpd_mcp/tests/teaching.rs` checks the declaration in both directions: a
+declared name has to be a tool this server offers, and a tool named in the text
+has to be declared. every argument a prompt declares has to really reach its
+text, and filling one in with everything given has to leave no placeholder
+behind — a parameter accepted and ignored is the placeholder ban applied to a
+workflow
+
+what none of that catches is a name that never existed anywhere, which is a typo
+rather than a drift. the same limit is written beside the parity test's hand kept
+list, for the same reason
 
 ## the parity rule, now both sided
 
@@ -261,8 +373,9 @@ drift apart
   a **step of `run_script`**, where the engine owns the whole composition
   including the removal — that reasoning, and what became of the failure mode,
   is [the debug script](scripts.md#run_to-lives-here-and-nowhere-else)
-- **resources and prompts**. only tools are model-controlled, so they are what
-  has to explain the interface first. writing a document to explain an interface
-  that does not explain itself is how the tool that needed fixing stays broken
 - **attach**, which is PEP 768 and needs cpython 3.14. `launch` is the only way
   in, and a tool that needs a program says so by name
+- **a subscription for a program that stops on its own.** `wait` touches the
+  program in no way and returns whatever it did, so an agent that wants to hear
+  about a background stop asks for one. what is not answered is the agent that is
+  not asking

@@ -44,3 +44,9 @@ one, which is checked rather than claimed
 ## documentation
 
 design docs live in `docs/`, built with [zensical](https://zensical.org)
+
+`skills/bpd/SKILL.md` is for ai clients that read skills — a client feature and
+no part of MCP, so copy or symlink it where yours looks for one. what it says is
+not load bearing: a client without skills gets everything that matters from the
+tool descriptions and the errors, which is where
+[the MCP adapter](docs/development/mcp.md) keeps the semantics

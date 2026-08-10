@@ -325,6 +325,50 @@ the layers, in order of how reliably they arrive:
 writing 3 through 5 before 1 and 2 are right would be writing documentation to
 compensate for an interface that does not explain itself
 
+### what building it found, in the order above
+
+all five are built — [the MCP adapter](mcp.md) has the resources, the prompts
+and the skill in full. what matters is that **1 and 2 were not already right**,
+and going over them first is what found it. three of the four things fixed were
+not gaps in what the interface *said*; they were places where it said something
+untrue:
+
+- **`launch` read an argument its schema did not declare.** the number of frames
+    the entry stop comes back with was a real setting, undiscoverable from
+    `tools/list`, and a client that validates against `additionalProperties:
+    false` would have refused the call that used it. a schema and a struct are
+    two descriptions of one thing and nothing made them agree, so a test now
+    compares them for every tool — the field list asked of serde rather than
+    written down, the way the vs code manifest is checked
+- **`pause` claimed a cause that was often false.** an empty `running` was
+    reported as "every thread is parked in a C call", and `running` deliberately
+    leaves out the threads bpd is itself **holding**. so a pause armed while a
+    stop was outstanding told an agent its program was stuck in native code when
+    bpd was what was holding it still. the honest form has two branches and the
+    answer says which
+- **every read said "this is a sample rather than a snapshot".** carried on a
+    *stack* answer that is wrong, and it contradicted the `stack` tool in the
+    same session: a held thread's own frame chain **is** a snapshot, because it
+    is inside a monitoring callback and cannot return. what the rest of the
+    program can move underneath is the values reached through it
+- **"nothing is held" was one refusal doing two jobs.** a program that is
+    running has to be held before it can be asked anything; a program that has
+    **exited** cannot be held at all. an agent told the first about the second
+    goes on pausing a process that is not there, so they are two refusals now,
+    and each names what to do
+
+what 3 through 5 were left to carry, once those were fixed, is narrower than the
+list above suggests and is the honest shape of it: not what a call takes, but
+what its answer **claims** and where the claim stops. the rule for a resource is
+that nothing in one may be the only place something is said, and the bar for a
+prompt is that it be an investigation a competent agent would otherwise get
+wrong or do the long way — four met it
+
+the one thing prose could not do for itself is stay true. every tool a resource
+or a prompt names is declared beside it and checked both ways against the tool
+table, and the skill is checked the same way, because a page that names a tool
+after it is renamed reads exactly as well as one that is true
+
 ## the parity rule, concretely
 
 a capability is added to `bpd_core` once. both adapters expose it. a pull

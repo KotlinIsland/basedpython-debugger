@@ -950,7 +950,10 @@ fn two_breakpoints_cannot_share_one_id() {
 }
 
 #[test]
-fn a_running_debuggee_refuses_a_request_rather_than_leaving_it_unanswered() {
+fn a_debuggee_that_has_exited_says_so_rather_than_that_nothing_is_held() {
+    // "nothing is held" invites holding something, and there is nothing left to
+    // hold. a client told the weaker of the two would go on pausing a process
+    // that is not there
     let fixture = Fixture::new("widget", WIDGET);
     let mut debuggee = launch(&fixture);
 
@@ -969,10 +972,69 @@ fn a_running_debuggee_refuses_a_request_rather_than_leaving_it_unanswered() {
     let error = debuggee
         .set_breakpoints(at(&fixture.path(), &[(1, 1)]))
         .expect_err("a finished debuggee cannot bind anything");
+    let said = error.to_string();
     assert!(
-        error
-            .to_string()
-            .contains("no thread of the debuggee is held"),
-        "the refusal must say why, and it said {error}"
+        said.contains("the program has exited with 0"),
+        "the refusal must name what became of the program, and it said {said}"
     );
+    assert!(
+        said.contains("the breakpoints to resolve"),
+        "the refusal must name what was asked for, and it said {said}"
+    );
+}
+
+#[test]
+fn a_running_debuggee_refuses_a_request_rather_than_leaving_it_unanswered() {
+    // still alive, and still unaskable: the agent answers on a thread it is
+    // holding, so a request made here would be answered whenever the program
+    // next happened to stop — which is indistinguishable from a hang
+    let fixture = Fixture::new("sleeper", SLEEPER);
+    let mut debuggee = launch(&fixture);
+
+    let running = debuggee
+        .dispatch(
+            bpd_core::Request::Run {
+                deadline: Some(std::time::Duration::from_millis(100)),
+            },
+            &mut Nothing,
+        )
+        .expect("the debuggee was resumed");
+    match running {
+        bpd_core::Response::Ran(Running::StillRunning { .. }) => {}
+        other => panic!("this program sleeps for a second, and the run answered {other:?}"),
+    }
+
+    let error = debuggee
+        .set_breakpoints(at(&fixture.path(), &[(1, 1)]))
+        .expect_err("a running debuggee has no thread to bind on");
+    let said = error.to_string();
+    assert!(
+        said.contains("no thread of the debuggee is held"),
+        "the refusal must say why, and it said {said}"
+    );
+    assert!(
+        said.contains("pausing it"),
+        "the refusal must say what to do about it, and it said {said}"
+    );
+
+    debuggee
+        .interrupt()
+        .terminate()
+        .expect("the sleeping program was ended");
+}
+
+/// a program that is still running a moment after it is let go
+const SLEEPER: &str = "import time\n\ntime.sleep(1)\n";
+
+/// a `Reporting` that is asked for nothing, since nothing here logs or pauses
+struct Nothing;
+
+impl bpd_core::Reporting for Nothing {
+    fn logged(&mut self, record: bpd_core::LogRecord) {
+        panic!("nothing here sets a logpoint, and one recorded {record:?}")
+    }
+
+    fn pausing(&mut self, running: Vec<u64>) {
+        panic!("nothing here arms a pause, and one acknowledged {running:?}")
+    }
 }

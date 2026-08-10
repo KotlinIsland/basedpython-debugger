@@ -270,6 +270,78 @@ fn a_program_that_never_stops_answers_the_deadline_rather_than_hanging() {
     client.finish();
 }
 
+#[test]
+fn a_refusal_names_what_became_of_the_program_rather_than_only_that_nothing_is_held() {
+    // the two states a program with nothing held can be in are "running" and
+    // "over", and they need opposite things done about them. an agent told only
+    // "nothing is held" about a program that has ended goes on pausing a process
+    // that is not there
+    let fixture = Fixture::new("ender", PROGRAM);
+    let mut client = Client::start();
+
+    client.ask("initialize", &serde_json::json!({}));
+    client.call(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+
+    let ended = client.call("continue_", &serde_json::json!({ "deadline_ms": GENEROUS }));
+    assert_eq!(ended["outcome"], "exited", "continue_ gave {ended}");
+
+    let refused = client.failure("stack", &serde_json::json!({}));
+    assert!(
+        refused.contains("the program has exited with 3"),
+        "the program exited with 3 and the refusal said {refused}"
+    );
+    assert!(
+        refused.contains("`launch` another program"),
+        "a refusal names what to do about it, and said {refused}"
+    );
+
+    client.finish();
+}
+
+#[test]
+fn a_pause_that_catches_nothing_says_which_of_the_two_reasons_it_was() {
+    // `running` leaves out the threads bpd is itself holding, so an empty one
+    // has two causes: every other thread is parked in a C call, or the thread
+    // that would reach a line is the one already held. naming the first when it
+    // is the second tells an agent its program is stuck in native code when bpd
+    // is what is holding it still
+    let fixture = Fixture::new("paused", PROGRAM);
+    let mut client = Client::start();
+
+    client.ask("initialize", &serde_json::json!({}));
+    client.call(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+
+    // the entry stop is still held, and it is the only thread this program has
+    let armed = client.call("pause", &serde_json::json!({ "deadline_ms": 300 }));
+    assert_eq!(
+        armed["outcome"], "timed_out",
+        "the one thread is held, so nothing can reach the armed line: {armed}"
+    );
+    assert_eq!(
+        armed["running"],
+        serde_json::json!([]),
+        "a held thread is not running python: {armed}"
+    );
+
+    let note = armed["note"].as_str().expect("an empty `running` says why");
+    assert!(
+        note.contains("already holding"),
+        "bpd is holding the only thread, and the note said {note}"
+    );
+    assert!(
+        !note.contains("every thread of the program is parked in a C call"),
+        "nothing here is in a C call, and the note said {note}"
+    );
+
+    client.finish();
+}
+
 /// a program that reaches one line several times
 const COUNTING: &str = r#"import sys
 

@@ -106,8 +106,31 @@ pub enum Error {
     /// the agent answers on a thread it is holding, so a request made to a
     /// program with nothing held would be answered whenever it next happened to
     /// stop. that is not an answer, and waiting for it looks exactly like a hang
-    #[error("no thread of the debuggee is held, so it cannot be asked for {wanted}")]
+    #[error(
+        "no thread of the debuggee is held, so it cannot be asked for {wanted}. \
+         the agent runs the interpreter's own api on a thread it is holding and \
+         at no other time — hold one first, by letting the program run to a \
+         breakpoint or by pausing it"
+    )]
     NotStopped {
+        /// what was asked for
+        wanted: &'static str,
+    },
+
+    /// something was asked of a program that has ended
+    ///
+    /// distinct from [`Self::NotStopped`], and the distinction is the whole
+    /// reason this variant exists: "nothing is held" invites holding something,
+    /// and there is nothing left to hold. a client told the first would go on
+    /// pausing a process that is not there
+    #[error(
+        "the program has exited with {code}, so there is nothing left to ask \
+         for {wanted}. every stop it had has ended with it — `launch` another \
+         program to debug one again"
+    )]
+    ProgramExited {
+        /// what the program exited with, as [`crate::exit_code`] renders one
+        code: i64,
         /// what was asked for
         wanted: &'static str,
     },
