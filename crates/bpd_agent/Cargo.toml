@@ -16,12 +16,12 @@ name = "bpd_agent"
 crate-type = ["cdylib"]
 
 [dependencies]
+bpd_core = { workspace = true }
 bpd_protocol = { workspace = true }
 
 pyo3 = { workspace = true }
 
 [dev-dependencies]
-bpd_core = { workspace = true }
 bpd_test = { workspace = true }
 
 [build-dependencies]

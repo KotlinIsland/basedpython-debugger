@@ -13,10 +13,10 @@ that was designed
   ┌────────────────────────────────────┐
   │  bpd_dap        │       bpd_mcp    │   adapters, no logic
   ├────────────────────────────────────┤
-  │            bpd_core                │   sessions, breakpoints, stepping
+  │            bpd_core                │   the vocabulary, and Request/Response
   │   bpd_sourcemap    bpd_django      │   locations in, locations out
   ├────────────────────────────────────┤
-  │            bpd_engine              │   owns targets, drives the transport
+  │            bpd_engine              │   owns targets, answers requests
   └───────────────┬────────────────────┘
                   │ bpd_protocol, over a socket
   ┌───────────────▼────────────────────┐
@@ -28,6 +28,13 @@ that was designed
 the engine is out of process. the agent is a native extension module loaded
 into the debuggee. they talk over a length prefixed socket, and the agent never
 runs python code to service the protocol
+
+the dependency direction is acyclic and is the whole point of the layering:
+`bpd_protocol` depends on `bpd_core`; `bpd_engine` and `bpd_agent` depend on
+both; the adapters depend on `bpd_core` alone. an adapter that could reach
+`bpd_engine` or `bpd_protocol` would be an adapter shaped by how the agent
+happens to report something, and how the agent reports something would become
+what a DAP client sees
 
 ## why the agent is native
 
@@ -123,12 +130,74 @@ the whole of it is [stepping](stepping.md)
 
 ## the session core, and adapter parity
 
-`bpd_core` holds the session: targets, threads, frames, breakpoints, the stop
-state machine, evaluation. it has no idea what DAP or MCP are
+`bpd_core` holds two things and nothing else:
 
-`bpd_dap` and `bpd_mcp` translate. neither may contain a capability that the
-other does not have, and neither may contain logic — if an adapter needs to
-decide something, that decision belongs in the core where both get it
+- the **vocabulary** that describes a debugged program — stops, breakpoints,
+    frames, scopes, values, threads, the exceptions it raises and the refusals
+    it earns
+- the **capability surface**, as `Request` and `Response`: everything a client
+    can ask of a session
+
+it has no idea what DAP or MCP are. `bpd_dap` and `bpd_mcp` translate. neither
+may contain a capability the other does not have, and neither may contain logic
+— if an adapter needs to decide something, that decision belongs in the core
+where both get it
+
+### why the surface is data
+
+a capability used to be a *method* on the engine's debuggee, and rust cannot
+enumerate methods. the parity rule — no capability in one adapter and not the
+other — was therefore a policy someone had to remember rather than something CI
+could check, and the parity test this page promised could not be written at all
+
+so the surface is an enum. `bpd_engine` answers it in one place, with a match
+that has **no catch-all arm**: a variant added to `Request` is a compile error
+in the engine rather than a request nothing answers. the ergonomic methods on
+`Debuggee` build a request and come through that match, so there is a single
+implementation of every capability rather than one per front end
+
+the same enum then serves four consumers, which is the sign it is the right
+shape — DAP requests map onto it, MCP tools map onto it, the debug script is a
+*tree* of it, and the parity test enumerates it. the test arrives with the
+second adapter: a parity test with one adapter to check is a test with nothing
+to check
+
+### one definition, not two
+
+there is **no conversion layer** between the domain types and the wire. the
+messages in `bpd_protocol` carry `bpd_core`'s types directly
+
+two models are worth it when the wire has to stay stable independently of the
+domain. here the agent and the engine are built and shipped together and the
+handshake refuses a mismatch outright, so a protocol change costs nothing that
+has not already been accepted. a mapping layer is not free either: every
+mapping is a place a field can be dropped, which is exactly the quiet wrongness
+this project bans. two models would buy a stability nobody needs at the price
+of a seam nobody wants
+
+the serde derives on core types are not a wire format in the sense that matters.
+the rule is that `bpd_core` knows nothing about **DAP or MCP**, and it does not
+
+what is *not* one definition is the request set. `bpd_core::Request` is what a
+client asks of a session; `bpd_protocol::message::FromEngine` is what the
+session asks of the agent. they differ where the session does something the
+agent has no single request for — running the program is a resume followed by a
+wait — and they share the vocabulary rather than mapping between two copies of
+it
+
+### where a failure lives
+
+the split is what the failure *describes*:
+
+- a failure that describes the **program** is a `bpd_core::Error` — an
+    interpreter that cannot be debugged, a request made with nothing held, a
+    request that names one stop while several are, a refusal the agent gave a
+    reason for. a front end that depends on `bpd_core` alone still has to render
+    every one of them
+- a failure that describes **`bpd`'s own machinery** is a `bpd_engine::Error` —
+    a socket, a spawned process, an agent artifact that could not be found, an
+    interval that does not fit the wire. the engine carries a core error
+    transparently rather than restating it
 
 this is the mechanism behind the promise that an agent can do everything a
 human can. it is not a policy anyone has to remember; it falls out of there

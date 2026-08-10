@@ -40,9 +40,8 @@
 
 use std::sync::OnceLock;
 
-use bpd_protocol::message::{
-    Detail, Entry, Evaluated, Frame, FrameId, FromAgent, Holding, Omitted, Refusal, Scope, Where,
-};
+use bpd_core::{Detail, Entry, Evaluated, Frame, FrameId, Holding, Omitted, Refusal, Scope, Where};
+use bpd_protocol::message::FromAgent;
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;

@@ -41,7 +41,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use bpd_protocol::message::StepKind;
+use bpd_core::StepKind;
 use pyo3::prelude::*;
 
 use crate::{events, frames, session};

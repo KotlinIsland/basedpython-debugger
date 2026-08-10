@@ -20,21 +20,33 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use bpd_protocol::message::{FromAgent, FromEngine, Refusal, Stop};
+use bpd_core::Stop;
+use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
-pub use launch::{
-    Debuggee, ExceptionBreakpoints, Launched, Running, Stack, Threads, Variables, WorldStopped,
-    launch,
-};
+pub use launch::{Debuggee, Launched, launch};
 
 /// the result type for engine operations
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// a failure the engine reports rather than works around
+///
+/// only the ones that describe `bpd`'s own machinery: a socket, a process, an
+/// artifact that could not be found, an interval that does not fit the wire.
+/// everything that describes the **program** — nothing held, a stop that is
+/// ambiguous, a refusal the agent gave a reason for — is a
+/// [`bpd_core::Error`], because a front end that depends on `bpd_core` alone
+/// still has to render it
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// the session refused, for a reason that is about the program
+    ///
+    /// carried rather than restated: an adapter renders it out of `bpd_core`
+    /// without knowing an engine exists
+    #[error(transparent)]
+    Session(#[from] bpd_core::Error),
+
     /// the agent build could not be found
     #[error("{reason}")]
     LocateAgent {
@@ -110,49 +122,6 @@ pub enum Error {
         expected: &'static str,
     },
 
-    /// two breakpoints in one request claimed the same id
-    ///
-    /// the id is how every later report — a rebinding, a stop — names which
-    /// breakpoint it is about. sharing one would mean the client is given one
-    /// answer for two questions and cannot tell which it belongs to
-    #[error(
-        "two breakpoints in the same request both have id {id}. an id names one \
-         breakpoint in every report about it, so it has to be unique within a set"
-    )]
-    DuplicateBreakpointId {
-        /// the id that was used twice
-        id: u32,
-    },
-
-    /// something was asked of a debuggee with no thread held
-    ///
-    /// the agent answers on a thread it is holding and at no other time, so a
-    /// request made to a program with nothing held would be answered whenever
-    /// it next happened to stop. that is not an answer, and waiting for it
-    /// looks exactly like a hang
-    #[error("no thread of the debuggee is held, so it cannot be asked for {wanted}")]
-    NotStopped {
-        /// what was asked for
-        wanted: &'static str,
-    },
-
-    /// a request that is about one stop was made while several were held
-    ///
-    /// a stop holds one thread and there can be more than one of them at a
-    /// time. answering from whichever happened to be first would be answering
-    /// about a thread the caller did not name
-    #[error(
-        "{wanted} is about one held thread and {} are held: {held:?}. name the \
-         stop it is about",
-        held.len()
-    )]
-    AmbiguousStop {
-        /// what was asked for
-        wanted: &'static str,
-        /// the stops that are held
-        held: Vec<u64>,
-    },
-
     /// an interval was asked for that does not fit the wire
     ///
     /// the protocol carries milliseconds as a `u32`. a longer wait is refused
@@ -166,17 +135,6 @@ pub enum Error {
     SettleTooLong {
         /// what was asked for
         settle: Duration,
-    },
-
-    /// the agent will not answer the request, and said why
-    ///
-    /// not a failure of the engine or of the transport: the agent understood
-    /// the request and refused it, because answering would have meant guessing
-    /// what was meant
-    #[error("{reason}")]
-    Refused {
-        /// what stood in the way
-        reason: Refusal,
     },
 
     /// the agent said something the engine was not waiting for

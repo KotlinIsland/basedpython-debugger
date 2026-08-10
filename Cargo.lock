@@ -127,6 +127,7 @@ dependencies = [
 name = "bpd_protocol"
 version = "0.0.0"
 dependencies = [
+ "bpd_core",
  "bpd_test",
  "criterion",
  "serde",

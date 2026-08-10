@@ -26,7 +26,7 @@ mod threads;
 mod values;
 mod world;
 
-use bpd_protocol::message::StopReason;
+use bpd_core::StopReason;
 use pyo3::exceptions::PyImportError;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;

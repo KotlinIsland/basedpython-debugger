@@ -15,8 +15,10 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use bpd_core::python::Capabilities;
-use bpd_engine::{Debuggee, ExceptionBreakpoints, Launched, Running};
-use bpd_protocol::message::{Binding, LogRecord, PythonError, SourceBreakpoint, StopReason};
+use bpd_core::{
+    Binding, ExceptionBreakpoints, LogRecord, PythonError, Running, SourceBreakpoint, StopReason,
+};
+use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
 
 /// a library that raises and catches, and an exception two frames deep that the

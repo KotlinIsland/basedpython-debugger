@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
-use bpd_protocol::message::{Binding, Resolved, Site, SourceBreakpoint, Unbound};
+use bpd_core::{Binding, Resolved, Site, SourceBreakpoint, Unbound};
 use pyo3::prelude::*;
 
 use crate::conditions::Plan;

@@ -16,11 +16,11 @@
 use std::path::Path;
 
 use bpd_core::python::Capabilities;
-use bpd_engine::{Debuggee, Launched, Running, Variables};
-use bpd_protocol::message::{
-    Binding, Content, Detail, Evaluated, FrameId, LogRecord, Omitted, Resolved, Scope,
-    SourceBreakpoint, StopReason, Value,
+use bpd_core::{
+    Binding, Content, Detail, Evaluated, FrameId, LogRecord, Omitted, Resolved, Running, Scope,
+    SourceBreakpoint, StopReason, Value, Variables,
 };
+use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
 
 /// a closure over a variable that a global of the same name also has

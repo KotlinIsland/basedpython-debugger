@@ -15,10 +15,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
-use bpd_engine::{Debuggee, Launched, Running};
-use bpd_protocol::message::{
-    Binding, Detail, Evaluated, LogRecord, SourceBreakpoint, StepKind, Stop, StopReason,
+use bpd_core::{
+    Binding, Detail, Evaluated, LogRecord, Running, SourceBreakpoint, StepKind, Stop, StopReason,
 };
+use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
 
 /// how long a test waits for a side effect it expects to happen

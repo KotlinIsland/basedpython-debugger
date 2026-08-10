@@ -14,8 +14,9 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::{ExitCode, ExitStatus};
 
+use bpd_core::Running;
 use bpd_core::python::Capabilities;
-use bpd_engine::{Launched, Running};
+use bpd_engine::Launched;
 
 use crate::report_error;
 

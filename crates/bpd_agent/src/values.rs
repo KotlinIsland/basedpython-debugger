@@ -30,7 +30,7 @@
 
 use std::fmt::Write as _;
 
-use bpd_protocol::message::{Content, Detail, Entry, Omitted, Pair, Value};
+use bpd_core::{Content, Detail, Entry, Omitted, Pair, Value};
 use pyo3::exceptions::PyAttributeError;
 use pyo3::prelude::*;
 use pyo3::types::{

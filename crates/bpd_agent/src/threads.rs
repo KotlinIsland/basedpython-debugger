@@ -20,7 +20,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use bpd_protocol::message::{FromAgent, Progress, ThreadState, Where};
+use bpd_core::{Progress, ThreadState, Where};
+use bpd_protocol::message::FromAgent;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
