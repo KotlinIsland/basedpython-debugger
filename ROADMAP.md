@@ -80,7 +80,14 @@ breakpoint is not already solid
 - [ ] the registration stub vs code needs to name the executable at all. it
       resolves a configuration's `type` through an extension contributing a
       `debuggers` entry and offers no way to point at a binary, so without one
-      no vs code user can run `bpd` however complete the adapter is
+      no vs code user can run `bpd` however complete the adapter is.
+      **built and not ticked**: `editors/vscode/` contributes the type, the
+      launch attributes and a `PATH` lookup for the binary, and
+      `crates/bpd_dap/tests/vscode.rs` fails if its schema and
+      `bpd_dap::Configuration` disagree — but nobody has installed it in vs
+      code and started a session, and this project does not tick a box on a
+      thing it has not seen work. see
+      [the vs code extension](docs/development/vscode.md)
 - [x] an MCP server exposing the same session
 - [x] a parity test that enumerates the capabilities in `bpd_core` and fails if
       either adapter is missing one. the rule is enforced by CI, not by review
@@ -224,7 +231,7 @@ exception breakpoints. see [the stopped state](docs/development/state.md),
 [stepping](docs/development/stepping.md) and
 [threads](docs/development/threads.md)
 
-### M4 — DAP · the adapter is built
+### M4 — DAP · the adapter is built, the extension is unverified
 
 `bpd dap` speaks the debug adapter protocol on stdin and stdout. a breakpoint is
 set, hit, the frame's locals read, a local written, and a step taken — proved
@@ -242,11 +249,15 @@ a per-client convention, and bpd refuses one rather than guessing which was
 meant. `supportsSingleThreadExecutionRequests` is on, because a stop holds one
 thread and a client told otherwise would render a stop that never happened
 
-**not done: an editor driving it.** vs code resolves a configuration's `"type"`
-through an extension, and there is no way to name an adapter executable from
-`launch.json` alone — so the vs code half of M4.4 needs an extension that does
-nothing but contribute the type, and that is not built. `nvim-dap` names the
-executable in the configuration itself and works today
+**the registration vs code needs is built, and has not been driven.**
+`editors/vscode/` contributes `"type": "bpd"`, the launch attributes, and a
+lookup that finds `bpd` on `PATH` or says which of two things to do about it —
+and nothing else, no panel and no view. its schema cannot drift from
+`bpd_dap::Configuration` without `cargo test` failing. what has **not** happened
+is anyone installing it and starting a session, so the criterion stays unticked;
+[the vs code extension](docs/development/vscode.md) lists what that leaves
+unverified. `nvim-dap` names the executable in the configuration itself and has
+worked since the adapter was built
 
 the whole of it is [the DAP adapter](docs/development/dap.md)
 

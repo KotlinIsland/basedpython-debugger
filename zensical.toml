@@ -65,6 +65,7 @@ development = [
   "development/stepping.md",
   "development/threads.md",
   "development/dap.md",
+  "development/vscode.md",
   "development/agent-interface.md",
   "development/mcp.md",
   "development/testing.md",
