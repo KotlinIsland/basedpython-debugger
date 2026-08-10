@@ -87,8 +87,12 @@ breakpoint is not already solid
 
 **evidence**
 
-- [ ] a benchmark in the tree comparing a run under `bpd` with no breakpoints
-      against the same program run bare, and with breakpoints against debugpy
+- [x] a benchmark in the tree comparing a run under `bpd` with no breakpoints
+      against the same program run bare, and with breakpoints against debugpy.
+      `crates/bpd/benches/overhead.rs`, reported in
+      [what bpd costs](docs/development/overhead.md) — which also records what
+      it contradicted, since two of the claims it was written to check turned
+      out to be wrong
 - [ ] integration tests that spawn real interpreters across the version and
       build matrix
 

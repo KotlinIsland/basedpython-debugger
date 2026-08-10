@@ -14,6 +14,13 @@ name = "bpd_agent"
 # nothing in the workspace links it — the engine stages the built artifact and
 # the interpreter imports it
 crate-type = ["cdylib"]
+# `cargo bench` otherwise builds this lib as a benchmark harness and runs it as
+# an ordinary executable. it is a cpython extension module: the cpython symbols
+# it references are supposed to come from the interpreter that loads it, so the
+# harness aborts in dyld before main, and `cargo bench --workspace` fails before
+# it reaches a benchmark. there are none here to lose. the *test* harness is
+# left on — `cargo test` runs the three unit tests in `conditions`
+bench = false
 
 [dependencies]
 bpd_core = { workspace = true }

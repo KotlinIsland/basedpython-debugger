@@ -7,8 +7,11 @@ compatibility layer holding it back:
 
 - **PEP 669 native** — `sys.monitoring` callbacks are rust functions. no python
     trace function, no python frame per event. a line with no breakpoint on it
-    is `DISABLE`d the first time the interpreter reaches it, and never costs
-    anything again
+    is `DISABLE`d the first time the interpreter reaches it and is never
+    reported again — [measured](development/overhead.md) at within 1% of a bare
+    run, on a loop of eighteen million line locations with a breakpoint held in
+    the same function. what a session *does* cost is the 150 ms it takes to
+    attach, and that is on the same page
 - **speaks DAP** — the [debug adapter
     protocol](https://microsoft.github.io/debug-adapter-protocol/), the same
     protocol vs code, pycharm, neovim and the rest already know how to drive.
@@ -42,13 +45,25 @@ see [launching a debuggee](development/launching.md)
 
 ## why not just use debugpy
 
-debugpy predates PEP 669 and carries a decade of compatibility with it. it
-still has to work on interpreters where the only interface is `sys.settrace`,
-which means a python callback on every line of every frame that is being
-traced, and a large body of cython and frame-evaluation machinery to claw that
-cost back
+not for the reason this page used to give. debugpy vendors pydevd, and pydevd
+has used `sys.monitoring` since cpython 3.12 — with a cython-compiled callback,
+not a python one. on every interpreter `bpd` supports, debugpy is a PEP 669
+debugger too, and with no breakpoints set it costs a program as little as `bpd`
+does
 
-`bpd` starts from the assumption that PEP 669 exists, and that dropping support
-for the interpreters where it does not is a feature rather than a cost. that
-assumption changes the architecture, not just the implementation — see
+what it still carries is a decade of having to work on interpreters where the
+only interface was `sys.settrace`, and the shape that left behind shows up the
+moment a breakpoint exists. [measured](development/overhead.md): a breakpoint on
+a line in a hot function — a line the program **never reaches** — makes that
+function run 63× slower under debugpy and not measurably slower under `bpd`,
+because `DISABLE` is how the lines around a breakpoint stop being reported and a
+design that predates it has nowhere to put that
+
+`bpd` starts from the assumption that PEP 669 is all there is, and that dropping
+support for the interpreters where it is not is a feature rather than a cost.
+that assumption changes the architecture, not just the implementation — see
 [architecture](development/architecture.md)
+
+starting a session costs something in both, and that is on the same page too:
+about 150 ms before the program's first statement under `bpd`, about 1.0 s under
+debugpy

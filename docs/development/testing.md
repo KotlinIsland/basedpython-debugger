@@ -163,19 +163,52 @@ directory from `sys.path` entirely, which is one of the values under test
 ## benchmarks
 
 ```sh
+cargo build --release -p bpd_agent
+uv pip install --python "$(command -v python3.14)" debugpy
 cargo bench --workspace
 ```
 
 benchmarks live in the tree, because a performance claim in a commit message is
-not evidence. `crates/bpd_protocol/benches/frame.rs` measures the control plane
-framing across the payload sizes the protocol actually carries — this is the
-baseline the message encoding decision needs, since "json is fast enough" is a
-claim about how much of a round trip is framing rather than serialisation
+not evidence. there are two:
+
+- `crates/bpd_protocol/benches/frame.rs` measures the control plane framing
+    across the payload sizes the protocol actually carries — the baseline the
+    message encoding decision needs, since "json is fast enough" is a claim
+    about how much of a round trip is framing rather than serialisation
+- `crates/bpd/benches/overhead.rs` runs real programs bare, under `bpd`, and
+    under debugpy, and is the evidence behind [what bpd costs](overhead.md).
+    the two setup lines above are its requirements, and it refuses to run
+    without either rather than dropping half the comparison
+
+**the agent has to be built `--release`.** `cargo bench` compiles in the release
+profile, so the artifact a debug build left behind is in a directory the bench
+binary does not look in. the benchmark says so and names the command, rather
+than measuring a debug agent and reporting the number as the shipped one
+
+**debugpy has to be importable**, by an interpreter of the same `major.minor` as
+the one under test — debugpy vendors pydevd with compiled tracing built per
+series, and a mismatch would quietly measure its pure python fallback instead.
+`BPD_BENCH_DEBUGPY` names an interpreter that has it, so a machine's own python
+does not have to be written to
 
 CI runs benchmarks with criterion's `--test` mode, which executes each one once
-to catch a panic or a regression that stops it compiling. it does **not** gate
-on wall-clock numbers from a shared runner: those vary by more than the effects
-worth catching, and a flaky perf gate teaches people to ignore perf failures
+to catch a panic, a failed assertion, or a regression that stops it compiling.
+it does **not** gate on wall-clock numbers from a shared runner: those vary by
+more than the effects worth catching, and a flaky perf gate teaches people to
+ignore perf failures
+
+`cargo bench --workspace` also builds every crate's lib as a benchmark harness
+and runs it. `bpd_agent`'s cannot be run that way — it is a cpython extension
+module, and the cpython symbols it references are supposed to come from the
+interpreter that loads it, so the harness aborts in the dynamic linker before
+`main`. its manifest sets `bench = false` for that reason; the **test** harness
+stays on, and `cargo test` runs its unit tests as usual
+
+`overhead.rs` is arranged so that one criterion sample is **one whole process**.
+what it measures takes hundreds of milliseconds and the interesting variation is
+between processes, so averaging inside a sample would hide exactly what a
+process-level measurement is for. criterion says on stderr that it could not fit
+ten samples in the target time; that is the arrangement rather than a problem
 
 ## the performance gate that does run in CI
 

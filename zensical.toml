@@ -68,6 +68,7 @@ development = [
   "development/agent-interface.md",
   "development/mcp.md",
   "development/testing.md",
+  "development/overhead.md",
   "development/python-support.md",
   "development/source-mapping.md",
   "development/django-templates.md",

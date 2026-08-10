@@ -23,7 +23,15 @@ clap = { workspace = true }
 [dev-dependencies]
 bpd_test = { workspace = true }
 
+criterion = { workspace = true }
 serde_json = { workspace = true }
+
+# the whole-process comparison: a program run bare, under bpd, and under
+# debugpy. it drives the `bpd` binary above through DAP, which is why it lives
+# in this crate rather than beside the engine
+[[bench]]
+name = "overhead"
+harness = false
 
 [lints]
 workspace = true
