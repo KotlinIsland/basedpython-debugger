@@ -8,6 +8,7 @@
 // entire job
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod dap;
 mod doctor;
 mod launch;
 
@@ -32,6 +33,9 @@ enum Command {
 
     /// run a program with the debugger attached
     Launch(launch::Args),
+
+    /// speak the debug adapter protocol on stdin and stdout, for an editor
+    Dap(dap::Args),
 }
 
 /// print a failure and every cause behind it
@@ -50,5 +54,6 @@ fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Doctor(args) => doctor::run(&args),
         Command::Launch(args) => launch::run(&args),
+        Command::Dap(args) => dap::run(&args),
     }
 }

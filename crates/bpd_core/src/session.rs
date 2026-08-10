@@ -15,7 +15,7 @@
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use crate::breakpoint::{Resolved, SourceBreakpoint};
+use crate::breakpoint::{LogRecord, Resolved, SourceBreakpoint};
 use crate::frame::{Frame, FrameId, Scope};
 use crate::stop::{Mode, StepKind, Stop};
 use crate::thread::{ThreadState, Which};
@@ -146,6 +146,52 @@ pub enum Request {
         /// how much of the value read back to report
         detail: Detail,
     },
+}
+
+impl Request {
+    /// what to call this request in a message about it
+    ///
+    /// a front end has to name a capability in an error, and a refusal that
+    /// said `Step { stop: 3, kind: Over }` would be reporting rust at somebody.
+    /// the match is exhaustive and has no catch-all arm, for the reason the
+    /// enum is closed
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::SetBreakpoints { .. } => "setting the breakpoints",
+            Self::SetExceptionBreakpoints { .. } => "setting the exception breakpoints",
+            Self::Run => "running the program",
+            Self::Wait => "waiting for the program",
+            Self::Resume { .. } => "resuming a thread",
+            Self::Step { .. } => "stepping a thread",
+            Self::Pause => "pausing the program",
+            Self::Threads { .. } => "the thread census",
+            Self::StopTheWorld { .. } => "stopping the world",
+            Self::Stack { .. } => "the stack",
+            Self::Variables { .. } => "the variables of a scope",
+            Self::Evaluate { .. } => "evaluating an expression",
+            Self::SetVariable { .. } => "writing a variable",
+        }
+    }
+}
+
+/// what a running debuggee says that is not the answer to a [`Request`]
+///
+/// a logpoint's record and a pause's acknowledgement both arrive while the
+/// program is running, so neither answers anything a client is waiting on. they
+/// are handed over as they arrive rather than accumulated: there is no bound on
+/// how many records a logpoint produces, and a debugger that buffered a million
+/// of them before saying anything would be holding the program's history in its
+/// own heap
+pub trait Reporting {
+    /// a logpoint produced a record
+    fn logged(&mut self, record: LogRecord);
+
+    /// a pause is armed, and these threads were running python when it was
+    ///
+    /// an empty list means the pause is armed and **nothing is going to
+    /// arrive** until some thread runs python again: every thread is parked in
+    /// a C call, where there is no monitoring event to hold one at
+    fn pausing(&mut self, running: Vec<u64>);
 }
 
 /// what a session answered a [`Request`] with
@@ -292,6 +338,19 @@ pub struct Threads {
 }
 
 impl Threads {
+    /// how far apart to take the two samples when the client has no way to say
+    ///
+    /// DAP's `threads` request carries no interval and neither does anything an
+    /// agent would naturally ask, so a front end has to supply one. it lives
+    /// here rather than in an adapter because [`crate::Progress::Still`] means
+    /// "in the same place, this far apart", and two adapters choosing their own
+    /// interval would make the same word mean two things
+    ///
+    /// long enough that a thread going round an ordinary python loop is seen to
+    /// move, and short enough that asking for a thread list does not feel like
+    /// a pause
+    pub const SETTLE: Duration = Duration::from_millis(50);
+
     /// what one thread was doing, when the census saw it
     pub fn get(&self, thread: u64) -> Option<&ThreadState> {
         self.threads.iter().find(|state| state.thread == thread)

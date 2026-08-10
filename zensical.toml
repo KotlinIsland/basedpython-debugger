@@ -64,6 +64,7 @@ development = [
   "development/state.md",
   "development/stepping.md",
   "development/threads.md",
+  "development/dap.md",
   "development/agent-interface.md",
   "development/testing.md",
   "development/python-support.md",

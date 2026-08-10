@@ -16,18 +16,40 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Detail, Evaluated, ExceptionBreakpoints, FrameId, LogRecord, Request, Resolved, Response,
-    Running, Scope, SourceBreakpoint, Stack, StepKind, Stop, Threads, Variables, Which,
+    Detail, Evaluated, ExceptionBreakpoints, FrameId, LogRecord, Reporting, Request, Resolved,
+    Response, Running, Scope, SourceBreakpoint, Stack, StepKind, Stop, Threads, Variables, Which,
     WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine};
 
-use crate::{Error, Listener, Result, Session, agent};
+use crate::{Error, Interrupt, Listener, Result, Session, agent};
+
+/// a [`Reporting`] sink that can only take log records
+///
+/// what the ergonomic methods on [`Debuggee`] hand to [`Debuggee::dispatch`].
+/// a pause acknowledgement cannot reach one: [`Debuggee::pause`] waits for its
+/// own, and the other way to arm one is [`Interrupt::deliver`], whose
+/// acknowledgement arrives at whatever sink the wait was given
+struct OnlyLogs<F>(F);
+
+impl<F: FnMut(LogRecord)> Reporting for OnlyLogs<F> {
+    fn logged(&mut self, record: LogRecord) {
+        (self.0)(record);
+    }
+
+    fn pausing(&mut self, running: Vec<u64>) {
+        unreachable!(
+            "a pause was acknowledged to a caller that cannot have armed one, \
+             naming {running:?} as running python"
+        )
+    }
+}
 
 /// the entry point the interpreter is given
 ///
@@ -42,7 +64,9 @@ const BOOTSTRAP: &str = "import bpd_agent; bpd_agent.main()";
 /// process — the breakpoint set, the thread census — do not
 #[derive(Debug)]
 pub struct Debuggee {
-    child: Child,
+    /// shared with every [`Interrupt`], which can end a program the session is
+    /// waiting on
+    child: Arc<Mutex<Child>>,
     session: Session,
     /// the stops held now, in the order the agent reported them
     held: Vec<Stop>,
@@ -77,8 +101,17 @@ impl Debuggee {
     ///
     /// the agent answers on a thread it is holding, so this is also the number
     /// of times the debuggee has waited for the debugger
-    pub const fn requests_sent(&self) -> u64 {
+    pub fn requests_sent(&self) -> u64 {
         self.session.requests_sent()
+    }
+
+    /// a handle that reaches this debuggee while the session is waiting on it
+    ///
+    /// the only way to arm a pause or end a program from a front end that is
+    /// blocked in [`Request::Wait`], which is what an event driven front end
+    /// spends most of a session doing
+    pub fn interrupt(&self) -> Interrupt {
+        Interrupt::new(self.session.writer(), Arc::clone(&self.child))
     }
 
     /// answer one [`Request`] against this debuggee
@@ -93,46 +126,50 @@ impl Debuggee {
     /// [`Request`] is a compile error here rather than a request nothing
     /// answers
     ///
-    /// `on_log` is a parameter of the call rather than a field of the request
-    /// because a log record is not an answer to anything: a logpoint fires
-    /// while the program runs, and only [`Request::Run`] and [`Request::Wait`]
-    /// are waiting when it does
+    /// `reporting` is a parameter of the call rather than a field of the
+    /// request because what it takes is not an answer to anything: a logpoint
+    /// fires while the program runs, and so does the acknowledgement of a pause
+    /// armed on an [`Interrupt`]
     pub fn dispatch(
         &mut self,
         request: Request,
-        on_log: &mut dyn FnMut(LogRecord),
+        reporting: &mut dyn Reporting,
     ) -> Result<Response> {
         match request {
             Request::SetBreakpoints { breakpoints } => Ok(Response::BreakpointsResolved {
-                resolved: self.resolve_breakpoints(breakpoints)?,
+                resolved: self.resolve_breakpoints(breakpoints, reporting)?,
             }),
             Request::SetExceptionBreakpoints { raised, uncaught } => Ok(
-                Response::ExceptionBreakpoints(self.arm_exceptions(raised, uncaught)?),
+                Response::ExceptionBreakpoints(self.arm_exceptions(raised, uncaught, reporting)?),
             ),
             Request::Run => {
-                self.let_go(Which::All)?;
-                Ok(Response::Ran(self.wait_for(on_log)?))
+                self.let_go(Which::All, reporting)?;
+                Ok(Response::Ran(self.wait_for(reporting)?))
             }
-            Request::Wait => Ok(Response::Ran(self.wait_for(on_log)?)),
+            Request::Wait => Ok(Response::Ran(self.wait_for(reporting)?)),
             Request::Resume { which } => Ok(Response::Resumed {
-                threads: self.let_go(which)?,
+                threads: self.let_go(which, reporting)?,
             }),
             Request::Step { stop, kind } => Ok(Response::Resumed {
-                threads: self.step_thread(stop, kind)?,
+                threads: self.step_thread(stop, kind, reporting)?,
             }),
             Request::Pause => Ok(Response::Pausing {
-                running: self.arm_pause()?,
+                running: self.arm_pause(reporting)?,
             }),
-            Request::Threads { settle } => Ok(Response::Threads(self.census(settle)?)),
-            Request::StopTheWorld { stop, settle } => {
-                Ok(Response::WorldStopped(self.stop_world(stop, settle)?))
+            Request::Threads { settle } => Ok(Response::Threads(self.census(settle, reporting)?)),
+            Request::StopTheWorld { stop, settle } => Ok(Response::WorldStopped(
+                self.stop_world(stop, settle, reporting)?,
+            )),
+            Request::Stack { stop, top } => {
+                Ok(Response::Stack(self.walk_stack(stop, top, reporting)?))
             }
-            Request::Stack { stop, top } => Ok(Response::Stack(self.walk_stack(stop, top)?)),
             Request::Variables {
                 frame,
                 scope,
                 detail,
-            } => Ok(Response::Variables(self.read_scope(frame, scope, detail)?)),
+            } => Ok(Response::Variables(
+                self.read_scope(frame, scope, detail, reporting)?,
+            )),
             Request::Evaluate {
                 frame,
                 expression,
@@ -141,6 +178,7 @@ impl Debuggee {
                 frame,
                 &expression,
                 detail,
+                reporting,
             )?)),
             Request::SetVariable {
                 frame,
@@ -148,9 +186,9 @@ impl Debuggee {
                 name,
                 value,
                 detail,
-            } => Ok(Response::Evaluated(
-                self.write_variable(frame, scope, &name, &value, detail)?,
-            )),
+            } => Ok(Response::Evaluated(self.write_variable(
+                frame, scope, &name, &value, detail, reporting,
+            )?)),
         }
     }
 
@@ -160,7 +198,7 @@ impl Debuggee {
     /// `pending_logs` for the next [`Self::wait`] rather than handed over here,
     /// so there is nothing for a sink to receive
     fn ask_for(&mut self, request: Request) -> Result<Response> {
-        self.dispatch(request, &mut drop)
+        self.dispatch(request, &mut OnlyLogs(drop))
     }
 
     /// the one stop that is held, for a request that is about one thread
@@ -193,7 +231,11 @@ impl Debuggee {
         }
     }
 
-    fn resolve_breakpoints(&mut self, breakpoints: Vec<SourceBreakpoint>) -> Result<Vec<Resolved>> {
+    fn resolve_breakpoints(
+        &mut self,
+        breakpoints: Vec<SourceBreakpoint>,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Vec<Resolved>> {
         const EXPECTED: &str = "the breakpoints to resolve";
 
         // every report about a breakpoint, and every stop it causes, names it by
@@ -207,7 +249,7 @@ impl Debuggee {
         }
 
         let request = FromEngine::SetBreakpoints { breakpoints };
-        match self.ask(&request, EXPECTED)? {
+        match self.ask(&request, EXPECTED, reporting)? {
             FromAgent::BreakpointsResolved { resolved } => Ok(resolved),
             other => Err(unexpected(&other, EXPECTED)),
         }
@@ -229,11 +271,16 @@ impl Debuggee {
         }
     }
 
-    fn arm_exceptions(&mut self, raised: bool, uncaught: bool) -> Result<ExceptionBreakpoints> {
+    fn arm_exceptions(
+        &mut self,
+        raised: bool,
+        uncaught: bool,
+        reporting: &mut dyn Reporting,
+    ) -> Result<ExceptionBreakpoints> {
         const EXPECTED: &str = "the exception breakpoints to be set";
 
         let request = FromEngine::SetExceptionBreakpoints { raised, uncaught };
-        match self.ask(&request, EXPECTED)? {
+        match self.ask(&request, EXPECTED, reporting)? {
             FromAgent::ExceptionBreakpointsSet { raised, uncaught } => {
                 Ok(ExceptionBreakpoints { raised, uncaught })
             }
@@ -260,10 +307,15 @@ impl Debuggee {
         self.step(stop, kind)
     }
 
-    fn step_thread(&mut self, stop: u64, kind: StepKind) -> Result<Vec<u64>> {
+    fn step_thread(
+        &mut self,
+        stop: u64,
+        kind: StepKind,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Vec<u64>> {
         const EXPECTED: &str = "the thread to be stepped";
 
-        match self.ask(&FromEngine::Step { stop, kind }, EXPECTED)? {
+        match self.ask(&FromEngine::Step { stop, kind }, EXPECTED, reporting)? {
             FromAgent::Resumed { threads } => {
                 self.held.retain(|stop| !threads.contains(&stop.thread));
                 Ok(threads)
@@ -290,10 +342,10 @@ impl Debuggee {
         }
     }
 
-    fn arm_pause(&mut self) -> Result<Vec<u64>> {
+    fn arm_pause(&mut self, reporting: &mut dyn Reporting) -> Result<Vec<u64>> {
         const EXPECTED: &str = "a pause to be armed";
 
-        match self.send_and_wait(&FromEngine::Pause, EXPECTED)? {
+        match self.send_and_wait(&FromEngine::Pause, EXPECTED, reporting)? {
             FromAgent::Pausing { running } => Ok(running),
             other => Err(unexpected(&other, EXPECTED)),
         }
@@ -316,10 +368,15 @@ impl Debuggee {
         self.stack(stop, top)
     }
 
-    fn walk_stack(&mut self, stop: u64, top: Option<u32>) -> Result<Stack> {
+    fn walk_stack(
+        &mut self,
+        stop: u64,
+        top: Option<u32>,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Stack> {
         const EXPECTED: &str = "the stack";
 
-        match self.ask(&FromEngine::Stack { stop, top }, EXPECTED)? {
+        match self.ask(&FromEngine::Stack { stop, top }, EXPECTED, reporting)? {
             FromAgent::Stack {
                 frames,
                 depth,
@@ -345,7 +402,13 @@ impl Debuggee {
         }
     }
 
-    fn read_scope(&mut self, frame: FrameId, scope: Scope, detail: Detail) -> Result<Variables> {
+    fn read_scope(
+        &mut self,
+        frame: FrameId,
+        scope: Scope,
+        detail: Detail,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Variables> {
         const EXPECTED: &str = "the variables of a scope";
 
         let request = FromEngine::Variables {
@@ -353,7 +416,7 @@ impl Debuggee {
             scope,
             detail,
         };
-        match self.ask(&request, EXPECTED)? {
+        match self.ask(&request, EXPECTED, reporting)? {
             FromAgent::Variables {
                 entries,
                 unbound,
@@ -397,6 +460,7 @@ impl Debuggee {
         frame: FrameId,
         expression: &str,
         detail: Detail,
+        reporting: &mut dyn Reporting,
     ) -> Result<Evaluated> {
         const EXPECTED: &str = "the value of an expression";
 
@@ -405,7 +469,7 @@ impl Debuggee {
             expression: expression.to_string(),
             detail,
         };
-        match self.ask(&request, EXPECTED)? {
+        match self.ask(&request, EXPECTED, reporting)? {
             FromAgent::Evaluated { result, .. } => Ok(result),
             other => Err(unexpected(&other, EXPECTED)),
         }
@@ -439,6 +503,7 @@ impl Debuggee {
         name: &str,
         value: &str,
         detail: Detail,
+        reporting: &mut dyn Reporting,
     ) -> Result<Evaluated> {
         const EXPECTED: &str = "the value a variable was set to";
 
@@ -449,7 +514,7 @@ impl Debuggee {
             value: value.to_string(),
             detail,
         };
-        match self.ask(&request, EXPECTED)? {
+        match self.ask(&request, EXPECTED, reporting)? {
             FromAgent::Evaluated { result, .. } => Ok(result),
             other => Err(unexpected(&other, EXPECTED)),
         }
@@ -467,12 +532,12 @@ impl Debuggee {
         }
     }
 
-    fn census(&mut self, settle: Duration) -> Result<Threads> {
+    fn census(&mut self, settle: Duration, reporting: &mut dyn Reporting) -> Result<Threads> {
         const EXPECTED: &str = "what the threads are doing";
 
         let settle_ms =
             u32::try_from(settle.as_millis()).map_err(|_| Error::SettleTooLong { settle })?;
-        match self.ask(&FromEngine::Threads { settle_ms }, EXPECTED)? {
+        match self.ask(&FromEngine::Threads { settle_ms }, EXPECTED, reporting)? {
             FromAgent::Threads {
                 threads,
                 settle_ms,
@@ -498,13 +563,18 @@ impl Debuggee {
         }
     }
 
-    fn stop_world(&mut self, stop: u64, settle: Duration) -> Result<WorldStopped> {
+    fn stop_world(
+        &mut self,
+        stop: u64,
+        settle: Duration,
+        reporting: &mut dyn Reporting,
+    ) -> Result<WorldStopped> {
         const EXPECTED: &str = "the world to stop";
 
         let settle_ms =
             u32::try_from(settle.as_millis()).map_err(|_| Error::SettleTooLong { settle })?;
         let request = FromEngine::StopTheWorld { stop, settle_ms };
-        match self.ask(&request, EXPECTED)? {
+        match self.ask(&request, EXPECTED, reporting)? {
             FromAgent::WorldStopped { held, native } => Ok(WorldStopped { held, native }),
             other => Err(unexpected(&other, EXPECTED)),
         }
@@ -518,11 +588,16 @@ impl Debuggee {
     /// client never sees is a line of the program's history that silently went
     /// missing, and a stop that went missing is a thread the client thinks is
     /// running
-    fn ask(&mut self, request: &FromEngine, expected: &'static str) -> Result<FromAgent> {
+    fn ask(
+        &mut self,
+        request: &FromEngine,
+        expected: &'static str,
+        reporting: &mut dyn Reporting,
+    ) -> Result<FromAgent> {
         if self.held.is_empty() {
             return Err(bpd_core::Error::NotStopped { wanted: expected }.into());
         }
-        self.send_and_wait(request, expected)
+        self.send_and_wait(request, expected, reporting)
     }
 
     /// send one request and wait for the answer, of a program that may be
@@ -532,7 +607,12 @@ impl Debuggee {
     /// answered on a thread the agent is already holding, and asks through
     /// [`Self::ask`] so that a request made to a running program is refused
     /// here rather than waited on for ever
-    fn send_and_wait(&mut self, request: &FromEngine, expected: &'static str) -> Result<FromAgent> {
+    fn send_and_wait(
+        &mut self,
+        request: &FromEngine,
+        expected: &'static str,
+        reporting: &mut dyn Reporting,
+    ) -> Result<FromAgent> {
         self.session.send(request)?;
 
         loop {
@@ -544,6 +624,13 @@ impl Debuggee {
                     self.pending_rebinds.extend(resolved);
                 }
                 Some(FromAgent::Stopped { stop }) => self.held.push(stop),
+                // an interrupt can arm a pause at any moment, including while
+                // an answer is on its way. it is not the answer to this
+                // request, and it is not something to drop either: an empty
+                // `running` is how a client learns that nothing is coming
+                Some(FromAgent::Pausing { running }) if !matches!(request, FromEngine::Pause) => {
+                    reporting.pausing(running);
+                }
                 Some(FromAgent::Refused { reason }) => {
                     return Err(bpd_core::Error::Refused { reason }.into());
                 }
@@ -576,10 +663,10 @@ impl Debuggee {
         }
     }
 
-    fn let_go(&mut self, which: Which) -> Result<Vec<u64>> {
+    fn let_go(&mut self, which: Which, reporting: &mut dyn Reporting) -> Result<Vec<u64>> {
         const EXPECTED: &str = "the threads to be resumed";
 
-        match self.ask(&FromEngine::Resume { which }, EXPECTED)? {
+        match self.ask(&FromEngine::Resume { which }, EXPECTED, reporting)? {
             FromAgent::Resumed { threads } => {
                 self.held.retain(|stop| !threads.contains(&stop.thread));
                 Ok(threads)
@@ -594,8 +681,8 @@ impl Debuggee {
     /// there is no bound on how many a logpoint produces, and a debugger that
     /// accumulated a million of them before saying anything would be holding
     /// the program's history hostage to its own memory
-    pub fn wait(&mut self, mut on_log: impl FnMut(LogRecord)) -> Result<Running> {
-        match self.dispatch(Request::Wait, &mut on_log)? {
+    pub fn wait(&mut self, on_log: impl FnMut(LogRecord)) -> Result<Running> {
+        match self.dispatch(Request::Wait, &mut OnlyLogs(on_log))? {
             Response::Ran(running) => Ok(running),
             other => unreachable!("a wait was answered with {other:?}"),
         }
@@ -605,16 +692,16 @@ impl Debuggee {
     ///
     /// the whole-program "continue". it resumes everything held rather than one
     /// thread, and what it waits for is the program, not a particular thread
-    pub fn run(&mut self, mut on_log: impl FnMut(LogRecord)) -> Result<Running> {
-        match self.dispatch(Request::Run, &mut on_log)? {
+    pub fn run(&mut self, on_log: impl FnMut(LogRecord)) -> Result<Running> {
+        match self.dispatch(Request::Run, &mut OnlyLogs(on_log))? {
             Response::Ran(running) => Ok(running),
             other => unreachable!("a run was answered with {other:?}"),
         }
     }
 
-    fn wait_for(&mut self, on_log: &mut dyn FnMut(LogRecord)) -> Result<Running> {
+    fn wait_for(&mut self, reporting: &mut dyn Reporting) -> Result<Running> {
         for record in self.pending_logs.drain(..) {
-            on_log(record);
+            reporting.logged(record);
         }
         let mut rebound = std::mem::take(&mut self.pending_rebinds);
 
@@ -631,7 +718,11 @@ impl Debuggee {
                     });
                 }
                 Some(FromAgent::BreakpointsResolved { resolved }) => rebound.extend(resolved),
-                Some(FromAgent::Logged { record }) => on_log(record),
+                Some(FromAgent::Logged { record }) => reporting.logged(record),
+                // the acknowledgement of a pause armed on an `Interrupt`. it
+                // arrives here because here is where the reading end is, and
+                // its `running` is what says whether a stop is coming at all
+                Some(FromAgent::Pausing { running }) => reporting.pausing(running),
                 Some(other) => {
                     return Err(Error::UnexpectedEvent {
                         event: format!("{other:?}"),
@@ -639,10 +730,18 @@ impl Debuggee {
                     });
                 }
                 None => {
-                    let status = self.child.wait().map_err(|source| Error::Spawn {
-                        interpreter: PathBuf::from("the debuggee"),
-                        source,
-                    })?;
+                    let status = self
+                        .child
+                        .lock()
+                        .expect(
+                            "nothing panics holding the debuggee: every path \
+                             through it is a kill or a wait",
+                        )
+                        .wait()
+                        .map_err(|source| Error::Spawn {
+                            interpreter: PathBuf::from("the debuggee"),
+                            source,
+                        })?;
                     return Ok(Running::Exited { status, rebound });
                 }
             }
@@ -682,8 +781,42 @@ pub enum Launched {
 /// launch a script under the debugger and stop before its first statement
 ///
 /// returns once the agent has reported that it is stopped, so the caller holds a
-/// debuggee that has run none of the program yet
+/// debuggee that has run none of the program yet. the debuggee's own stdout and
+/// stderr are bpd's, untouched — which is what makes a run under bpd
+/// indistinguishable from a bare one
 pub fn launch(interpreter: &Capabilities, script: &Path, args: &[OsString]) -> Result<Launched> {
+    start(interpreter, script, args, None)
+}
+
+/// launch with the debuggee's own output in pipes rather than on bpd's streams
+///
+/// what a front end whose own stdout is a **protocol** needs: one `print` from
+/// the program in the middle of a message and every message after it is
+/// unreadable
+///
+/// `on_spawn` is handed the two pipes the moment the process exists and before
+/// anything waits on it. that ordering is the whole of the contract: a pipe
+/// nobody is reading fills up, and a process whose pipe is full stops — so a
+/// launcher that waited first and handed the pipes over afterwards would hang
+/// on any program that says more than a pipe buffer holds
+pub fn launch_piped(
+    interpreter: &Capabilities,
+    script: &Path,
+    args: &[OsString],
+    on_spawn: impl FnOnce(std::process::ChildStdout, std::process::ChildStderr) + 'static,
+) -> Result<Launched> {
+    start(interpreter, script, args, Some(Box::new(on_spawn)))
+}
+
+/// what to do with the debuggee's own output the moment it exists
+type OnSpawn = Box<dyn FnOnce(std::process::ChildStdout, std::process::ChildStderr)>;
+
+fn start(
+    interpreter: &Capabilities,
+    script: &Path,
+    args: &[OsString],
+    piped: Option<OnSpawn>,
+) -> Result<Launched> {
     interpreter
         .require_debuggable()
         .map_err(|error| Error::LocateAgent {
@@ -704,10 +837,28 @@ pub fn launch(interpreter: &Capabilities, script: &Path, args: &[OsString]) -> R
         .env(env::TARGET, script)
         .env("PYTHONPATH", staged.python_path());
 
+    if piped.is_some() {
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+    }
+
     let mut child = command.spawn().map_err(|source| Error::Spawn {
         interpreter: interpreter.executable.clone(),
         source,
     })?;
+
+    if let Some(hand_over) = piped {
+        let stdout = child
+            .stdout
+            .take()
+            .expect("the command asked for a stdout pipe and cargo has not taken it");
+        let stderr = child
+            .stderr
+            .take()
+            .expect("the command asked for a stderr pipe and cargo has not taken it");
+        hand_over(stdout, stderr);
+    }
 
     let session = listener.accept(|| {
         let exited = child.try_wait().map_err(|source| Error::Spawn {
@@ -742,7 +893,7 @@ pub fn launch(interpreter: &Capabilities, script: &Path, args: &[OsString]) -> R
 
     Ok(Launched::Stopped(Debuggee {
         held: vec![stop],
-        child,
+        child: Arc::new(Mutex::new(child)),
         session,
         pending_logs: Vec::new(),
         pending_rebinds: Vec::new(),

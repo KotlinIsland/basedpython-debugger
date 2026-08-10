@@ -71,7 +71,10 @@ breakpoint is not already solid
 
 **the two front ends**
 
-- [ ] a DAP adapter that vs code drives end to end from a launch configuration
+- [ ] a DAP adapter that vs code drives end to end from a launch configuration.
+      the adapter is built and driven end to end by a test and by `nvim-dap`;
+      vs code needs an extension to contribute the configuration type, and that
+      is what is missing
 - [ ] an MCP server exposing the same session
 - [ ] a parity test that enumerates the capabilities in `bpd_core` and fails if
       either adapter is missing one. the rule is enforced by CI, not by review
@@ -204,11 +207,34 @@ exception breakpoints. see [the stopped state](docs/development/state.md),
 [stepping](docs/development/stepping.md) and
 [threads](docs/development/threads.md)
 
-### M4 — DAP
+### M4 — DAP · the adapter is built
 
-the adapter, and an editor driving it end to end
+`bpd dap` speaks the debug adapter protocol on stdin and stdout. a breakpoint is
+set, hit, the frame's locals read, a local written, and a step taken — proved
+end to end against a real interpreter in `crates/bpd/tests/dap.rs`, where the
+write is checked by the **program's own output** rather than by reading it back
 
-**the move it needed has landed.** `bpd_core` is what the contract says it is:
+`bpd_dap` depends on `bpd_core` alone. the session arrives through traits the
+adapter defines, and `crates/bpd/src/dap.rs` is where `bpd_engine` is put behind
+them — so nothing about how the agent reports something can shape what a DAP
+client sees
+
+what it advertises is only what is implemented, and the absences have reasons
+rather than being oversights: DAP's `hitCondition` is a string whose meaning is
+a per-client convention, and bpd refuses one rather than guessing which was
+meant. `supportsSingleThreadExecutionRequests` is on, because a stop holds one
+thread and a client told otherwise would render a stop that never happened
+
+**not done: an editor driving it.** vs code resolves a configuration's `"type"`
+through an extension, and there is no way to name an adapter executable from
+`launch.json` alone — so the vs code half of M4.4 needs an extension that does
+nothing but contribute the type, and that is not built. `nvim-dap` names the
+executable in the configuration itself and works today
+
+the whole of it is [the DAP adapter](docs/development/dap.md)
+
+**the move it needed had already landed.** `bpd_core` is what the contract says
+it is:
 the domain vocabulary, and the capability surface as a `Request`/`Response`
 pair naming everything a client can ask of a session. `bpd_protocol` depends on
 it and keeps only what is genuinely wire — framing, the handshake, the token,

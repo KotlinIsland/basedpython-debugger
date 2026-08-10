@@ -162,6 +162,11 @@ shape — DAP requests map onto it, MCP tools map onto it, the debug script is a
 second adapter: a parity test with one adapter to check is a test with nothing
 to check
 
+the first adapter is built, and the one-sided half of that test is with it:
+`bpd_dap::reach_of` matches `Request` with no catch-all arm, so a capability
+added to the core is a compile error until someone says how DAP reaches it. the
+whole of it is [the DAP adapter](dap.md)
+
 ### one definition, not two
 
 there is **no conversion layer** between the domain types and the wire. the
