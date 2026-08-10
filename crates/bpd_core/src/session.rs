@@ -52,13 +52,28 @@ pub enum Request {
     ///
     /// the whole-program "continue": it resumes everything held rather than one
     /// thread, and what it waits for is the program rather than a thread
-    Run,
+    Run {
+        /// how long to wait before answering that it is still running
+        ///
+        /// `None` waits for as long as the program takes, which is what an
+        /// event driven front end does — it has an event stream to report a
+        /// stop on whenever it arrives. a front end whose answer *is* the stop
+        /// has to bound the wait, or a program that never stops is a call that
+        /// never returns
+        deadline: Option<Duration>,
+    },
 
     /// wait for the next thing the program does, resuming nothing
     ///
     /// what a step is followed by. a step lets one thread go and returns, and
     /// where it landed arrives as a stop of its own
-    Wait,
+    Wait {
+        /// how long to wait before answering that it is still running
+        ///
+        /// `None` waits for as long as the program takes — see
+        /// [`Request::Run`]
+        deadline: Option<Duration>,
+    },
 
     /// let held threads go, without waiting for what they do next
     Resume {
@@ -159,8 +174,8 @@ impl Request {
         match self {
             Self::SetBreakpoints { .. } => "setting the breakpoints",
             Self::SetExceptionBreakpoints { .. } => "setting the exception breakpoints",
-            Self::Run => "running the program",
-            Self::Wait => "waiting for the program",
+            Self::Run { .. } => "running the program",
+            Self::Wait { .. } => "waiting for the program",
             Self::Resume { .. } => "resuming a thread",
             Self::Step { .. } => "stepping a thread",
             Self::Pause => "pausing the program",
@@ -279,6 +294,70 @@ pub enum Running {
         /// what loading a file changed about the breakpoint set on the way
         rebound: Vec<Resolved>,
     },
+
+    /// the deadline passed and the program is **still running**
+    ///
+    /// only ever the answer to a [`Request::Run`] or [`Request::Wait`] that
+    /// carried a deadline. it is not a stop and must never be rendered as one:
+    /// no thread is held, nothing was read off the program, and the program is
+    /// executing while this is being read
+    ///
+    /// nothing about the running threads is carried, and that is a limit rather
+    /// than an omission. everything the agent answers, it answers on a thread it
+    /// is holding — including the thread census — so a program with nothing held
+    /// cannot be asked what its threads are doing. arming a [`Request::Pause`]
+    /// is what turns one into something that can be asked
+    StillRunning {
+        /// how long was actually waited before giving up
+        ///
+        /// the measured wait rather than the deadline that was asked for, so a
+        /// caller can tell a deadline that was reached from one that was
+        /// overshot
+        waited: Duration,
+        /// what loading a file changed about the breakpoint set on the way
+        rebound: Vec<Resolved>,
+    },
+}
+
+/// the program's exit, as one number a front end can show
+///
+/// a signalled child becomes `128 + signal`, which is the number a shell
+/// reports for one — so what a client is shown is what a terminal would have
+/// shown. the convention lives here rather than in a front end because two
+/// front ends choosing their own would make the same exit read as two different
+/// numbers
+pub fn exit_code(status: ExitStatus) -> i64 {
+    if let Some(code) = status.code() {
+        return code.into();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        if let Some(signal) = status.signal() {
+            return i64::from(128 + signal);
+        }
+    }
+    unreachable!("an exit status is either a code or a signal, and this was {status}")
+}
+
+/// the one stop that is held, for a request that is about one thread
+///
+/// refuses rather than picking when several are held. a debugger that answered
+/// about whichever thread came first would be answering a question nobody asked
+///
+/// this lives here rather than in a front end because a stop holds one thread
+/// and several can be held at once — so *every* front end has to decide what a
+/// request that names no stop means, and two front ends deciding it separately
+/// is how the same call comes to mean two things
+pub fn only_stop(held: &[Stop], wanted: &'static str) -> crate::Result<u64> {
+    match held {
+        [] => Err(crate::Error::NotStopped { wanted }),
+        [stop] => Ok(stop.stop),
+        several => Err(crate::Error::AmbiguousStop {
+            wanted,
+            held: several.iter().map(|stop| stop.stop).collect(),
+        }),
+    }
 }
 
 /// one held thread's stack
@@ -377,4 +456,40 @@ pub struct WorldStopped {
     /// executes no python, so it reaches no monitoring event. an answer taken
     /// with this list non-empty is not a whole-program snapshot, and says so
     pub native: Vec<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stop::StopReason;
+
+    fn held_at(stop: u64) -> Stop {
+        Stop {
+            stop,
+            thread: 7,
+            reason: StopReason::Entry,
+            holding: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_request_that_names_no_stop_is_refused_rather_than_answered_about_one_of_several() {
+        assert_eq!(
+            only_stop(&[held_at(3)], "the stack").expect("one is held"),
+            3
+        );
+
+        let nothing = only_stop(&[], "the stack").expect_err("nothing is held");
+        assert!(
+            nothing.to_string().contains("the stack"),
+            "the refusal has to name what was asked for, and said {nothing}"
+        );
+
+        // answering from whichever stop came first would be answering about a
+        // thread the caller did not name
+        let several = only_stop(&[held_at(3), held_at(4)], "the stack").expect_err("two are held");
+        let said = several.to_string();
+        assert!(said.contains("[3, 4]"), "said {said}");
+        assert!(said.contains("name the stop"), "said {said}");
+    }
 }

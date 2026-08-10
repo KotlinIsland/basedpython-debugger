@@ -17,7 +17,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
@@ -142,11 +142,14 @@ impl Debuggee {
             Request::SetExceptionBreakpoints { raised, uncaught } => Ok(
                 Response::ExceptionBreakpoints(self.arm_exceptions(raised, uncaught, reporting)?),
             ),
-            Request::Run => {
+            Request::Run { deadline } => {
+                // the deadline bounds the wait rather than the whole request:
+                // the resume is answered on a thread that is already held, so
+                // it cannot be what a program with nothing to say delays
                 self.let_go(Which::All, reporting)?;
-                Ok(Response::Ran(self.wait_for(reporting)?))
+                Ok(Response::Ran(self.wait_for(deadline, reporting)?))
             }
-            Request::Wait => Ok(Response::Ran(self.wait_for(reporting)?)),
+            Request::Wait { deadline } => Ok(Response::Ran(self.wait_for(deadline, reporting)?)),
             Request::Resume { which } => Ok(Response::Resumed {
                 threads: self.let_go(which, reporting)?,
             }),
@@ -203,19 +206,11 @@ impl Debuggee {
 
     /// the one stop that is held, for a request that is about one thread
     ///
-    /// refuses rather than picking when several are held. a debugger that
-    /// answered about whichever thread came first would be answering a question
-    /// nobody asked
+    /// the rule itself is [`bpd_core::only_stop`], because every front end has
+    /// to apply it and two of them applying their own would make a request that
+    /// names no stop mean two things
     fn only(&self, wanted: &'static str) -> Result<u64> {
-        match self.held.as_slice() {
-            [] => Err(bpd_core::Error::NotStopped { wanted }.into()),
-            [stop] => Ok(stop.stop),
-            several => Err(bpd_core::Error::AmbiguousStop {
-                wanted,
-                held: several.iter().map(|stop| stop.stop).collect(),
-            }
-            .into()),
-        }
+        Ok(bpd_core::only_stop(&self.held, wanted)?)
     }
 
     /// replace the whole breakpoint set, and say how every one of them resolved
@@ -682,7 +677,7 @@ impl Debuggee {
     /// accumulated a million of them before saying anything would be holding
     /// the program's history hostage to its own memory
     pub fn wait(&mut self, on_log: impl FnMut(LogRecord)) -> Result<Running> {
-        match self.dispatch(Request::Wait, &mut OnlyLogs(on_log))? {
+        match self.dispatch(Request::Wait { deadline: None }, &mut OnlyLogs(on_log))? {
             Response::Ran(running) => Ok(running),
             other => unreachable!("a wait was answered with {other:?}"),
         }
@@ -693,19 +688,45 @@ impl Debuggee {
     /// the whole-program "continue". it resumes everything held rather than one
     /// thread, and what it waits for is the program, not a particular thread
     pub fn run(&mut self, on_log: impl FnMut(LogRecord)) -> Result<Running> {
-        match self.dispatch(Request::Run, &mut OnlyLogs(on_log))? {
+        match self.dispatch(Request::Run { deadline: None }, &mut OnlyLogs(on_log))? {
             Response::Ran(running) => Ok(running),
             other => unreachable!("a run was answered with {other:?}"),
         }
     }
 
-    fn wait_for(&mut self, reporting: &mut dyn Reporting) -> Result<Running> {
+    /// wait for the next thing the debuggee does, giving up after `deadline`
+    ///
+    /// giving up leaves nothing outstanding on the wire. a wait is not a request
+    /// the agent is answering — it is the engine reading the connection — so
+    /// stopping reading it costs nothing and whatever the program says next is
+    /// still there for the next wait
+    fn wait_for(
+        &mut self,
+        deadline: Option<Duration>,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Running> {
         for record in self.pending_logs.drain(..) {
             reporting.logged(record);
         }
         let mut rebound = std::mem::take(&mut self.pending_rebinds);
 
+        let started = Instant::now();
+        let until = deadline.map(|deadline| started + deadline);
+
         loop {
+            if let Some(until) = until
+                && !self.session.readable_by(until)?
+            {
+                // the rebindings gathered so far go out with the timeout. a
+                // breakpoint that bound while the program ran is a fact about
+                // the program, and losing it because a deadline passed would
+                // leave a client believing a breakpoint is still unbound
+                return Ok(Running::StillRunning {
+                    waited: started.elapsed(),
+                    rebound,
+                });
+            }
+
             match self.session.next_event()? {
                 Some(FromAgent::Stopped { stop }) => {
                     self.held.push(stop.clone());

@@ -11,6 +11,7 @@
 mod dap;
 mod doctor;
 mod launch;
+mod mcp;
 
 use std::process::ExitCode;
 
@@ -36,6 +37,9 @@ enum Command {
 
     /// speak the debug adapter protocol on stdin and stdout, for an editor
     Dap(dap::Args),
+
+    /// speak the model context protocol on stdin and stdout, for an ai agent
+    Mcp(mcp::Args),
 }
 
 /// print a failure and every cause behind it
@@ -55,5 +59,6 @@ fn main() -> ExitCode {
         Command::Doctor(args) => doctor::run(&args),
         Command::Launch(args) => launch::run(&args),
         Command::Dap(args) => dap::run(&args),
+        Command::Mcp(args) => mcp::run(&args),
     }
 }

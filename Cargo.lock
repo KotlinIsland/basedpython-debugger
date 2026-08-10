@@ -86,6 +86,7 @@ dependencies = [
  "bpd_core",
  "bpd_dap",
  "bpd_engine",
+ "bpd_mcp",
  "bpd_test",
  "clap",
  "serde_json",
@@ -132,6 +133,16 @@ dependencies = [
  "getrandom",
  "serde_json",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "bpd_mcp"
+version = "0.0.0"
+dependencies = [
+ "bpd_core",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

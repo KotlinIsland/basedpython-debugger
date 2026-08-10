@@ -19,24 +19,36 @@ use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 
 use bpd_core::{
-    Binding, Content, Entry, Evaluated, Evaluation, Frame, FrameId, Mode, Reporting, Request,
-    Resolved, Response, Running, Site, Stack, Stop, StopReason, Threads, Value, Variables,
+    Binding, Content, Entry, Evaluated, Evaluation, Facet, Frame, FrameId, Mode, Reach, Reporting,
+    Request, Resolved, Response, Running, Site, Stack, Stop, StopReason, Threads, Value, Variables,
     WorldStopped,
 };
 use bpd_dap::{
-    Configuration, Failed, Interrupt, Launcher, ProgramOutput, Reach, Session, Started, reach_of,
-    surface,
+    Configuration, Failed, Interrupt, Launcher, ProgramOutput, Session, Started, reach_of,
+    reach_of_facet, surface,
 };
 
 /// the interpreter's identity for the one thread this fake ever holds
 const THREAD: u64 = 4242;
 
-/// every request the session was asked, in order
-type Asked = Arc<Mutex<Vec<&'static str>>>;
+/// what the session was asked, and what the requests carried
+///
+/// the names alone answer "was this capability reached at all". a capability
+/// carried *inside* a request needs the payload too: the launch configuration
+/// is the only route DAP has to `bpd_core::Detail`, and a table that claimed it
+/// without checking would be claiming a mapping nobody had made
+#[derive(Debug, Default)]
+struct Recorder {
+    requests: Vec<&'static str>,
+    details: Vec<bpd_core::Detail>,
+}
+
+/// the recorder, shared with the fake session
+type Asked = Arc<Mutex<Recorder>>;
 
 #[test]
 fn every_capability_of_the_core_is_reachable_through_a_dap_request() {
-    let asked = Arc::new(Mutex::new(Vec::new()));
+    let asked = Asked::default();
     let client = drive(&asked);
 
     // a refusal would mean the conversation never got as far as the request it
@@ -48,6 +60,7 @@ fn every_capability_of_the_core_is_reachable_through_a_dap_request() {
     let asked: BTreeSet<&str> = asked
         .lock()
         .expect("the recorder is not poisoned")
+        .requests
         .iter()
         .copied()
         .collect();
@@ -55,7 +68,7 @@ fn every_capability_of_the_core_is_reachable_through_a_dap_request() {
     for request in surface() {
         let name = request.name();
         match reach_of(&request) {
-            Reach::Command(command) => assert!(
+            Reach::Direct(command) => assert!(
                 asked.contains(name),
                 "`{name}` is said to be reachable through DAP's `{command}`, and \
                  driving the adapter never asked for it. what was asked: {asked:?}"
@@ -64,6 +77,11 @@ fn every_capability_of_the_core_is_reachable_through_a_dap_request() {
                 asked.contains(name),
                 "`{name}` is said to be made by the adapter {when}, and driving \
                  it never asked for it. what was asked: {asked:?}"
+            ),
+            Reach::Unreachable { why } => assert!(
+                !asked.contains(name),
+                "`{name}` is said to be unreachable from DAP — {why} — and \
+                 driving the adapter asked for it anyway"
             ),
             Reach::Composed { of, .. } => {
                 assert!(
@@ -84,8 +102,42 @@ fn every_capability_of_the_core_is_reachable_through_a_dap_request() {
 }
 
 #[test]
+fn every_capability_carried_inside_a_request_is_reached_or_says_why_not() {
+    let asked = Asked::default();
+    drive(&asked);
+    let recorded = asked.lock().expect("the recorder is not poisoned");
+
+    for facet in Facet::ALL {
+        match reach_of_facet(facet) {
+            Reach::Direct(_) | Reach::OnItsOwn(_) | Reach::Composed { .. } => {}
+            Reach::Unreachable { why } => assert!(
+                !why.is_empty(),
+                "`{}` is said to be out of DAP's reach and no reason is given",
+                facet.name()
+            ),
+        }
+    }
+
+    // the claim under test: DAP has nowhere on a request to put the bounds on a
+    // value read, so the launch configuration is the route — and the
+    // conversation set `children` to 7 there. a session asked for the default
+    // 100 instead would mean the configuration was parsed and not used
+    assert!(
+        !recorded.details.is_empty(),
+        "nothing read a value, so the launch configuration's bounds reached nothing"
+    );
+    for detail in &recorded.details {
+        assert_eq!(
+            detail.children, 7,
+            "the launch configuration asked for 7 children per container and \
+             the session was asked for {detail:?}"
+        );
+    }
+}
+
+#[test]
 fn a_stop_that_ends_takes_its_references_with_it() {
-    let asked = Arc::new(Mutex::new(Vec::new()));
+    let asked = Asked::default();
     let client = drive(&asked);
 
     // the conversation asks for the same `variablesReference` again after the
@@ -103,7 +155,7 @@ fn a_stop_that_ends_takes_its_references_with_it() {
 
 #[test]
 fn the_thread_model_reaches_the_client_on_every_stop() {
-    let client = drive(&Arc::new(Mutex::new(Vec::new())));
+    let client = drive(&Asked::default());
     let stopped = client.events("stopped");
     assert!(!stopped.is_empty(), "nothing stopped");
 
@@ -179,6 +231,9 @@ fn drive(asked: &Asked) -> Transcript {
             "program": "/tmp/fake.py",
             "stopOnEntry": true,
             "stopTheWorld": true,
+            // the only route DAP has to `bpd_core::Detail`, which is a
+            // capability of the core that no DAP *request* can carry
+            "variables": { "children": 7 },
         }),
     );
     answer(
@@ -449,10 +504,16 @@ impl Session for FakeSession {
         request: Request,
         _reporting: &mut dyn Reporting,
     ) -> Result<Response, Failed> {
-        self.asked
-            .lock()
-            .expect("the recorder is not poisoned")
-            .push(request.name());
+        {
+            let mut recorder = self.asked.lock().expect("the recorder is not poisoned");
+            recorder.requests.push(request.name());
+            match &request {
+                Request::Variables { detail, .. }
+                | Request::Evaluate { detail, .. }
+                | Request::SetVariable { detail, .. } => recorder.details.push(*detail),
+                _ => {}
+            }
+        }
 
         Ok(match request {
             Request::SetBreakpoints { breakpoints } => Response::BreakpointsResolved {
@@ -475,8 +536,10 @@ impl Session for FakeSession {
             Request::SetExceptionBreakpoints { raised, uncaught } => {
                 Response::ExceptionBreakpoints(bpd_core::ExceptionBreakpoints { raised, uncaught })
             }
-            Request::Run => unreachable!("DAP resumes and waits, and never composes the two"),
-            Request::Wait => {
+            Request::Run { .. } => {
+                unreachable!("DAP resumes and waits, and never composes the two")
+            }
+            Request::Wait { .. } => {
                 let running = match self.remaining.pop() {
                     Some(next) => {
                         self.held.push(next.clone());
@@ -554,6 +617,7 @@ impl Interrupt for FakeInterrupt {
         self.asked
             .lock()
             .expect("the recorder is not poisoned")
+            .requests
             .push(request.name());
         Ok(())
     }

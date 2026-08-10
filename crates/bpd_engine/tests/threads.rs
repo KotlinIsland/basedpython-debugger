@@ -99,6 +99,10 @@ fn next_stop(debuggee: &mut Debuggee) -> Stop {
         Running::Exited { status, .. } => {
             panic!("the debuggee exited with {status} instead of stopping")
         }
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("the debuggee ended holding {threads:?} instead of stopping")
         }
@@ -112,6 +116,10 @@ fn to_exit(debuggee: &mut Debuggee) {
             assert!(status.success(), "the program exited with {status}");
         }
         Running::Stopped { stop, .. } => panic!("it stopped again for {stop:?}"),
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("the debuggee ended holding {threads:?}")
         }
@@ -802,6 +810,10 @@ fn a_program_that_ends_with_a_thread_still_held_says_so_rather_than_looking_like
     expect(&fixture, "main_finished");
 
     match debuggee.wait(unlogged).expect("the debuggee was waited on") {
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => assert_eq!(threads, [stop.thread]),
         other => panic!("expected the program to report what it still holds, got {other:?}"),
     }

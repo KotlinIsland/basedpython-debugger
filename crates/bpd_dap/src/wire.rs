@@ -77,7 +77,7 @@ pub enum Error {
     },
 }
 
-/// how much of an unparseable body is quoted back
+/// how much of an unparsable body is quoted back
 ///
 /// enough to identify the message, short enough that a client sending a
 /// megabyte of nonsense does not put a megabyte in a log

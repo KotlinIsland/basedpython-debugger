@@ -1,0 +1,729 @@
+//! every capability of the core is reachable through a tool, and a control tool
+//! really does return the stop it produced
+//!
+//! the session here is a fake, deliberately. what is under test is the server's
+//! own translation: which tool becomes which `Request`, what the answer looks
+//! like, and whether the table beside it is honest. that a tool really stops a
+//! real interpreter is `crates/bpd/tests/mcp.rs`, against a real one
+//!
+//! the fake is also how the **timeout** shape is exercised without waiting for
+//! one: it answers the last wait with `Running::StillRunning`, which is what an
+//! engine whose deadline passed returns. that a real deadline really passes is
+//! the other test's job
+
+use std::collections::BTreeSet;
+use std::io::{BufRead as _, BufReader, Write};
+use std::sync::{Arc, Mutex};
+
+use bpd_core::{
+    Binding, Content, Detail, Entry, Evaluated, Evaluation, Facet, Frame, FrameId, HitCondition,
+    Mode, Reach, Reporting, Request, Resolved, Response, Running, Site, SourceBreakpoint, Stack,
+    Stop, StopReason, Threads, Value, Variables, WorldStopped,
+};
+use bpd_mcp::{
+    Configuration, Failed, Launcher, ProgramOutput, Session, Started, reach_of, reach_of_facet,
+    surface, tools,
+};
+
+/// the interpreter's identity for the one thread this fake ever holds
+const THREAD: u64 = 4242;
+
+/// what the session was asked, and what the requests carried
+///
+/// the names alone answer "was this capability reached at all". a capability
+/// carried *inside* a request needs the payload: a hit condition is a field of a
+/// breakpoint, and the bounds on a value read are a field of three requests
+#[derive(Debug, Default)]
+struct Recorder {
+    requests: Vec<&'static str>,
+    breakpoints: Vec<SourceBreakpoint>,
+    details: Vec<Detail>,
+}
+
+type Asked = Arc<Mutex<Recorder>>;
+
+#[test]
+fn every_capability_of_the_core_is_reachable_through_a_tool() {
+    let asked = Asked::default();
+    let transcript = drive(&asked);
+
+    let failed = transcript.failures();
+    assert!(failed.is_empty(), "the server refused: {failed:?}");
+
+    let asked: BTreeSet<&str> = asked
+        .lock()
+        .expect("the recorder is not poisoned")
+        .requests
+        .iter()
+        .copied()
+        .collect();
+
+    for request in surface() {
+        let name = request.name();
+        match reach_of(&request) {
+            Reach::Direct(tool) => assert!(
+                asked.contains(name),
+                "`{name}` is said to be reachable through `{tool}`, and driving \
+                 the server never asked for it. what was asked: {asked:?}"
+            ),
+            Reach::OnItsOwn(when) => assert!(
+                asked.contains(name),
+                "`{name}` is said to be made by the server {when}, and driving \
+                 it never asked for it. what was asked: {asked:?}"
+            ),
+            Reach::Composed { of, .. } => {
+                for part in of {
+                    assert!(
+                        asked.contains(part),
+                        "`{name}` is said to be a composition of `{part}`, and \
+                         driving the server never asked for that either"
+                    );
+                }
+            }
+            Reach::Unreachable { why } => assert!(
+                !asked.contains(name),
+                "`{name}` is said to be out of an agent's reach — {why} — and \
+                 driving the server asked for it anyway"
+            ),
+        }
+    }
+}
+
+#[test]
+fn every_capability_carried_inside_a_request_reaches_the_session() {
+    let asked = Asked::default();
+    drive(&asked);
+    let recorded = asked.lock().expect("the recorder is not poisoned");
+
+    for facet in Facet::ALL {
+        assert!(
+            reach_of_facet(facet).reaches(),
+            "`{}` is said to be out of an agent's reach, and an MCP tool takes \
+             JSON Schema input — there is nothing it cannot carry",
+            facet.name()
+        );
+    }
+
+    // the capability DAP has no route for at all. the conversation asked for
+    // every third qualifying hit, and a session that was handed `None` would
+    // mean the tool parsed it and dropped it
+    let hits: Vec<Option<HitCondition>> = recorded
+        .breakpoints
+        .iter()
+        .map(|breakpoint| breakpoint.hits)
+        .collect();
+    assert!(
+        hits.iter().any(|hits| matches!(
+            hits,
+            Some(HitCondition::Every { count }) if count.get() == 3
+        )),
+        "the hit condition never reached the session: {hits:?}"
+    );
+
+    // and the bounds on a value read, which reach DAP only through the launch
+    // configuration and reach an agent per call
+    assert!(
+        !recorded.details.is_empty(),
+        "nothing read a value, so the bounds reached nothing"
+    );
+    for detail in &recorded.details {
+        assert_eq!(
+            detail.children, 7,
+            "the tool call asked for 7 children per container and the session \
+             was asked for {detail:?}"
+        );
+    }
+}
+
+#[test]
+fn a_control_tool_returns_the_stop_it_produced_and_nothing_arrives_as_an_event() {
+    let transcript = drive(&Asked::default());
+
+    // the headline claim: a step is one call and one answer. every message the
+    // server wrote answers something the client asked, so there is no event
+    // stream to correlate and nothing to poll
+    for message in &transcript.messages {
+        assert!(
+            message.get("id").is_some(),
+            "this server writes nothing but answers, and wrote {message}"
+        );
+    }
+
+    let stepped = transcript.result_of("step_over");
+    assert_eq!(stepped["outcome"], "stopped", "step_over gave {stepped}");
+    assert_eq!(stepped["stop"], 2);
+    // the frames come with it. an agent that had to ask again for where it
+    // stopped would be paying the round trip this interface exists to remove
+    assert_eq!(stepped["frames"][0]["function"], "main");
+    assert_eq!(stepped["frames"][0]["frame"], 0);
+}
+
+#[test]
+fn a_deadline_that_passes_is_a_timeout_and_is_never_dressed_as_a_stop() {
+    let transcript = drive(&Asked::default());
+    let timed_out = transcript.result_of("wait");
+
+    assert_eq!(
+        timed_out["outcome"], "timed_out",
+        "the wait gave {timed_out}"
+    );
+    assert!(
+        timed_out.get("frames").is_none() && timed_out.get("thread").is_none(),
+        "a timeout carries no location at all, and carried {timed_out}"
+    );
+    let note = timed_out["note"]
+        .as_str()
+        .expect("a timeout says what it is");
+    assert!(note.contains("still running"), "said {note}");
+    assert!(
+        note.contains("pause"),
+        "a timeout has to say what can be done instead, and said {note}"
+    );
+}
+
+#[test]
+fn an_argument_a_tool_does_not_take_is_refused_with_the_name_of_it() {
+    let asked = Asked::default();
+    let transcript = drive_with(&asked, &[("wait", serde_json::json!({ "deadlineMs": 5 }))]);
+
+    let refused = transcript
+        .failures()
+        .into_iter()
+        .next()
+        .expect("`deadlineMs` is not an argument of `wait`");
+    assert!(refused.contains("deadlineMs"), "said {refused}");
+    assert!(
+        refused.contains("tools/list"),
+        "a refusal has to say where the truth is, and said {refused}"
+    );
+}
+
+#[test]
+fn a_method_this_server_does_not_implement_is_refused_by_name() {
+    let transcript = drive(&Asked::default());
+    let refused = transcript
+        .error_of(&serde_json::json!(9_001))
+        .expect("`resources/list` is not implemented");
+    assert_eq!(refused["code"], -32601);
+    let message = refused["message"].as_str().expect("an error says why");
+    assert!(
+        message.contains("tools/call"),
+        "a refusal has to name what does exist, and said {message}"
+    );
+}
+
+#[test]
+fn what_the_program_printed_comes_back_on_the_answer_that_let_it_run() {
+    let transcript = drive(&Asked::default());
+
+    // the server's stdout is the protocol, so the debuggee's cannot be. a
+    // program whose output vanished would be a debugger that swallowed the
+    // evidence
+    let ran = transcript.result_of("continue_");
+    let said = ran["output"]["text"]
+        .as_str()
+        .expect("the program printed something and the answer carries it");
+    assert!(said.contains("the program said this"), "carried {ran}");
+    assert!(said.contains("[stdout]"), "which stream it was on: {ran}");
+}
+
+// ---- the conversation ----------------------------------------------------
+
+/// run one whole MCP session against the fake, plus any extra calls
+///
+/// one conversation rather than one per test: the point of it is coverage of
+/// the whole surface, and several tests reading different parts of the same
+/// transcript is what that looks like
+fn drive(asked: &Asked) -> Transcript {
+    drive_with(asked, &[])
+}
+
+fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)]) -> Transcript {
+    let (to_server, client_writes) = std::io::pipe().expect("a pipe is available");
+    let (client_reads, from_server) = std::io::pipe().expect("a pipe is available");
+
+    let served = std::thread::spawn({
+        let asked = Arc::clone(asked);
+        move || {
+            bpd_mcp::serve(
+                &mut Fake { asked },
+                Box::new(to_server),
+                Box::new(from_server),
+            )
+        }
+    });
+
+    let mut client = Client {
+        writes: client_writes,
+        reads: Messages::new(client_reads),
+        seq: 0,
+    };
+
+    client.ask(
+        "initialize",
+        &serde_json::json!({ "protocolVersion": bpd_mcp::PROTOCOL_VERSION }),
+    );
+    client.notify("notifications/initialized");
+    client.ask("tools/list", &serde_json::json!({}));
+
+    client.call(
+        "launch",
+        &serde_json::json!({ "program": "/tmp/fake.py", "python": "python3" }),
+    );
+    client.call(
+        "set_breakpoints",
+        &serde_json::json!({
+            "breakpoints": [ {
+                "file": "/tmp/fake.py",
+                "line": 3,
+                "condition": "total > 1",
+                // the capability DAP has no route for
+                "hits": { "hits": "every", "count": 3 },
+            } ],
+        }),
+    );
+    client.call(
+        "set_exception_breakpoints",
+        &serde_json::json!({ "uncaught": true }),
+    );
+    client.call("threads", &serde_json::json!({ "settle_ms": 10 }));
+    client.call("stop_the_world", &serde_json::json!({}));
+    client.call("stack", &serde_json::json!({}));
+    client.call(
+        "variables",
+        &serde_json::json!({ "scope": "local", "detail": { "children": 7 } }),
+    );
+    client.call(
+        "evaluate",
+        &serde_json::json!({ "expression": "total + 1", "detail": { "children": 7 } }),
+    );
+    client.call(
+        "set_variable",
+        &serde_json::json!({
+            "scope": "local", "name": "total", "value": "9",
+            "detail": { "children": 7 },
+        }),
+    );
+
+    client.call("step_over", &serde_json::json!({ "deadline_ms": 500 }));
+    client.call("step_in", &serde_json::json!({ "deadline_ms": 500 }));
+    client.call("step_out", &serde_json::json!({ "deadline_ms": 500 }));
+    client.call("continue_", &serde_json::json!({ "deadline_ms": 500 }));
+    client.call("pause", &serde_json::json!({ "deadline_ms": 500 }));
+    client.call("resume", &serde_json::json!({}));
+    // the fake has no stops left, so this is the timeout shape
+    client.call("wait", &serde_json::json!({ "deadline_ms": 500 }));
+
+    for (tool, arguments) in extra {
+        client.call(tool, arguments);
+    }
+
+    // a method this server does not implement, under an id the test can find
+    client.under(&serde_json::json!(9_001), "resources/list");
+    client.call("terminate", &serde_json::json!({}));
+
+    let Client { writes, reads, .. } = client;
+    drop(writes);
+    served
+        .join()
+        .expect("the server did not panic")
+        .expect("the server served the whole conversation");
+
+    Transcript {
+        messages: reads.seen,
+    }
+}
+
+/// an MCP client, talking to the server over a pipe
+struct Client {
+    writes: std::io::PipeWriter,
+    reads: Messages,
+    seq: i64,
+}
+
+impl Client {
+    /// send a request and read until its answer arrives
+    fn ask(&mut self, method: &str, params: &serde_json::Value) -> serde_json::Value {
+        self.seq += 1;
+        let id = serde_json::json!(self.seq);
+        self.write(&serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": method, "params": params,
+        }));
+        self.reads.answer_to(&id)
+    }
+
+    /// call one tool
+    fn call(&mut self, tool: &str, arguments: &serde_json::Value) -> serde_json::Value {
+        self.ask(
+            "tools/call",
+            &serde_json::json!({ "name": tool, "arguments": arguments }),
+        )
+    }
+
+    /// send a request under an id of the caller's choosing
+    fn under(&mut self, id: &serde_json::Value, method: &str) -> serde_json::Value {
+        self.write(&serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": method, "params": {},
+        }));
+        self.reads.answer_to(id)
+    }
+
+    /// send something that is not answered
+    fn notify(&mut self, method: &str) {
+        self.write(&serde_json::json!({ "jsonrpc": "2.0", "method": method }));
+    }
+
+    fn write(&mut self, message: &serde_json::Value) {
+        writeln!(self.writes, "{message}").expect("the server is reading");
+        self.writes.flush().expect("the server is reading");
+    }
+}
+
+/// everything the server said
+struct Transcript {
+    messages: Vec<serde_json::Value>,
+}
+
+impl Transcript {
+    /// the parsed result of the first successful call of one tool
+    fn result_of(&self, tool: &str) -> serde_json::Value {
+        let index = self.call_index(tool);
+        let message = self
+            .messages
+            .get(index)
+            .unwrap_or_else(|| panic!("nothing answered `{tool}`"));
+        assert_eq!(
+            message["result"]["isError"], false,
+            "`{tool}` failed: {message}"
+        );
+        let text = message["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("`{tool}` answered with no text: {message}"));
+        serde_json::from_str(text)
+            .unwrap_or_else(|error| panic!("`{tool}` answered with {text}: {error}"))
+    }
+
+    /// which message answered the first call of one tool
+    ///
+    /// the calls go out in order and the answers come back in order, so the nth
+    /// `tools/call` answer is the nth tool. the transcript does not carry the
+    /// request, so this counts the tool results rather than searching them
+    fn call_index(&self, tool: &str) -> usize {
+        let order = tool_order();
+        let wanted = order
+            .iter()
+            .position(|name| *name == tool)
+            .unwrap_or_else(|| panic!("`{tool}` is not in the conversation"));
+        self.messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message["result"]["content"].is_array())
+            .map(|(index, _)| index)
+            .nth(wanted)
+            .unwrap_or_else(|| panic!("only {} tools were answered", self.messages.len()))
+    }
+
+    /// every tool call that reported a failure, with what it said
+    fn failures(&self) -> Vec<String> {
+        self.messages
+            .iter()
+            .filter(|message| message["result"]["isError"] == true)
+            .map(|message| {
+                message["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// the JSON-RPC error answered under one id
+    fn error_of(&self, id: &serde_json::Value) -> Option<serde_json::Value> {
+        self.messages
+            .iter()
+            .find(|message| &message["id"] == id && message.get("error").is_some())
+            .map(|message| message["error"].clone())
+    }
+}
+
+/// the tools the conversation calls, in order
+fn tool_order() -> Vec<&'static str> {
+    vec![
+        "launch",
+        "set_breakpoints",
+        "set_exception_breakpoints",
+        "threads",
+        "stop_the_world",
+        "stack",
+        "variables",
+        "evaluate",
+        "set_variable",
+        "step_over",
+        "step_in",
+        "step_out",
+        "continue_",
+        "pause",
+        "resume",
+        "wait",
+    ]
+}
+
+#[test]
+fn the_conversation_calls_every_tool_this_server_offers() {
+    // a tool nobody calls is a tool nothing checks. `terminate` is called last
+    // and is not in the ordered list, because the extra calls come before it
+    let called: BTreeSet<&str> = tool_order().into_iter().chain(["terminate"]).collect();
+    let offered: BTreeSet<&str> = tools().iter().map(|tool| tool.name).collect();
+    assert_eq!(
+        offered.difference(&called).collect::<Vec<_>>(),
+        Vec::<&&str>::new(),
+        "a tool is offered and the coverage conversation never calls it"
+    );
+}
+
+/// the messages the server writes, read one line at a time
+struct Messages {
+    input: BufReader<std::io::PipeReader>,
+    seen: Vec<serde_json::Value>,
+}
+
+impl Messages {
+    fn new(input: std::io::PipeReader) -> Self {
+        Self {
+            input: BufReader::new(input),
+            seen: Vec::new(),
+        }
+    }
+
+    fn answer_to(&mut self, id: &serde_json::Value) -> serde_json::Value {
+        loop {
+            let mut line = String::new();
+            let read = self
+                .input
+                .read_line(&mut line)
+                .expect("the server is writing");
+            assert_ne!(
+                read, 0,
+                "the server hung up mid-conversation: {:#?}",
+                self.seen
+            );
+            let message: serde_json::Value = serde_json::from_str(line.trim())
+                .unwrap_or_else(|error| panic!("the server wrote {line:?}: {error}"));
+            self.seen.push(message.clone());
+            if &message["id"] == id {
+                return message;
+            }
+        }
+    }
+}
+
+// ---- the fake session -----------------------------------------------------
+
+/// a session that answers everything and records what it was asked
+struct Fake {
+    asked: Asked,
+}
+
+struct FakeSession {
+    asked: Asked,
+    held: Vec<Stop>,
+    /// stops still to come, innermost first
+    remaining: Vec<Stop>,
+    output: Arc<dyn ProgramOutput>,
+}
+
+impl Launcher for Fake {
+    fn launch(
+        &mut self,
+        _configuration: &Configuration,
+        output: Arc<dyn ProgramOutput>,
+    ) -> Result<Started, Failed> {
+        Ok(Started::Stopped(Box::new(FakeSession {
+            asked: Arc::clone(&self.asked),
+            held: vec![stop(1, StopReason::Entry)],
+            // innermost first, so `pop` hands them out in order
+            remaining: vec![
+                stop(
+                    6,
+                    StopReason::Paused {
+                        file: "/tmp/fake.py".to_string(),
+                        line: 8,
+                    },
+                ),
+                stop(
+                    5,
+                    StopReason::Breakpoint {
+                        breakpoints: vec![1],
+                        file: "/tmp/fake.py".to_string(),
+                        line: 3,
+                    },
+                ),
+                stepped(4, bpd_core::StepKind::Out, 7),
+                stepped(3, bpd_core::StepKind::In, 6),
+                stepped(2, bpd_core::StepKind::Over, 4),
+            ],
+            output,
+        })))
+    }
+}
+
+fn stop(number: u64, reason: StopReason) -> Stop {
+    Stop {
+        stop: number,
+        thread: THREAD,
+        reason,
+        holding: Vec::new(),
+    }
+}
+
+fn stepped(number: u64, kind: bpd_core::StepKind, line: u32) -> Stop {
+    stop(
+        number,
+        StopReason::Stepped {
+            kind,
+            file: "/tmp/fake.py".to_string(),
+            line,
+        },
+    )
+}
+
+fn integer(text: &str) -> Value {
+    Value {
+        kind: "int".to_string(),
+        content: Content::Int {
+            text: text.to_string(),
+            omitted: None,
+        },
+    }
+}
+
+impl Session for FakeSession {
+    fn held(&self) -> Vec<Stop> {
+        self.held.clone()
+    }
+
+    fn terminate(&mut self) -> Result<(), Failed> {
+        self.held.clear();
+        Ok(())
+    }
+
+    fn dispatch(
+        &mut self,
+        request: Request,
+        _reporting: &mut dyn Reporting,
+    ) -> Result<Response, Failed> {
+        {
+            let mut recorder = self.asked.lock().expect("the recorder is not poisoned");
+            recorder.requests.push(request.name());
+            match &request {
+                Request::SetBreakpoints { breakpoints } => {
+                    recorder.breakpoints.extend(breakpoints.iter().cloned());
+                }
+                Request::Variables { detail, .. }
+                | Request::Evaluate { detail, .. }
+                | Request::SetVariable { detail, .. } => recorder.details.push(*detail),
+                _ => {}
+            }
+        }
+
+        Ok(match request {
+            Request::SetBreakpoints { breakpoints } => Response::BreakpointsResolved {
+                resolved: breakpoints
+                    .iter()
+                    .map(|breakpoint| Resolved {
+                        id: breakpoint.id,
+                        binding: Binding::Bound {
+                            line: breakpoint.line,
+                            sites: vec![Site {
+                                qualname: "main".to_string(),
+                                first_line: 1,
+                                offset: 0,
+                            }],
+                            evaluation: Evaluation::Expression,
+                        },
+                    })
+                    .collect(),
+            },
+            Request::SetExceptionBreakpoints { raised, uncaught } => {
+                Response::ExceptionBreakpoints(bpd_core::ExceptionBreakpoints { raised, uncaught })
+            }
+            Request::Run { .. } => {
+                self.output
+                    .wrote(bpd_mcp::Stream::Stdout, "the program said this\n");
+                self.held.clear();
+                Response::Ran(self.next_stop())
+            }
+            Request::Wait { .. } => Response::Ran(self.next_stop()),
+            Request::Resume { .. } | Request::Step { .. } => {
+                self.held.clear();
+                Response::Resumed {
+                    threads: vec![THREAD],
+                }
+            }
+            Request::Pause => Response::Pausing {
+                running: vec![THREAD],
+            },
+            Request::Threads { settle } => Response::Threads(Threads {
+                threads: vec![bpd_core::ThreadState {
+                    thread: THREAD,
+                    held: self.held.first().map(|stop| stop.stop),
+                    at: None,
+                    progress: bpd_core::Progress::Held,
+                }],
+                settle,
+                mode: Mode::NonStop,
+            }),
+            Request::StopTheWorld { .. } => Response::WorldStopped(WorldStopped {
+                held: vec![THREAD],
+                native: Vec::new(),
+            }),
+            Request::Stack { stop, .. } => Response::Stack(Stack {
+                frames: vec![Frame {
+                    id: FrameId { stop, depth: 0 },
+                    file: "/tmp/fake.py".to_string(),
+                    line: 3,
+                    function: "main".to_string(),
+                    first_line: 1,
+                }],
+                depth: 1,
+                mode: Mode::NonStop,
+            }),
+            Request::Variables { .. } => Response::Variables(Variables {
+                entries: vec![Entry {
+                    name: "total".to_string(),
+                    value: integer("1"),
+                }],
+                unbound: Vec::new(),
+                unreadable: Vec::new(),
+                omitted: Vec::new(),
+                mode: Mode::NonStop,
+            }),
+            Request::Evaluate { .. } | Request::SetVariable { .. } => {
+                Response::Evaluated(Evaluated::Value {
+                    value: integer("9"),
+                })
+            }
+        })
+    }
+}
+
+impl FakeSession {
+    /// the next stop, or the timeout shape once there are none left
+    fn next_stop(&mut self) -> Running {
+        match self.remaining.pop() {
+            Some(next) => {
+                self.held.push(next.clone());
+                Running::Stopped {
+                    stop: next,
+                    rebound: Vec::new(),
+                }
+            }
+            // what an engine whose deadline passed answers. the program is
+            // running, so there is nothing to say about where it is
+            None => Running::StillRunning {
+                waited: std::time::Duration::from_millis(500),
+                rebound: Vec::new(),
+            },
+        }
+    }
+}

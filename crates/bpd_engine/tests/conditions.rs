@@ -158,6 +158,10 @@ fn run_to_exit(debuggee: &mut Debuggee, mut at_stop: impl FnMut(&StopReason)) {
                 assert!(status.success(), "the program exited with {status}");
                 return;
             }
+            Running::StillRunning { waited, .. } => unreachable!(
+                "this wait carries no deadline and was answered after {waited:?} \
+                 with the program still running"
+            ),
             Running::Finishing { threads, .. } => {
                 panic!("nothing was held, and the debuggee ended holding {threads:?}")
             }
@@ -374,6 +378,10 @@ fn a_breakpoint_asked_for_again_unchanged_keeps_its_hit_count() {
     let (reason, _) = match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Stopped { stop, rebound } => (stop.reason, rebound),
         Running::Exited { status, .. } => panic!("it exited with {status} instead of stopping"),
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -408,6 +416,10 @@ fn a_breakpoint_that_changed_starts_counting_again() {
     match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Stopped { .. } => {}
         Running::Exited { status, .. } => panic!("it exited with {status} instead of stopping"),
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -613,6 +625,10 @@ fn a_condition_that_raises_stops_and_reports_the_exception() {
         Running::Exited { status, .. } => {
             panic!("a condition that raised was treated as false, and the program ran to {status}")
         }
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -679,6 +695,10 @@ fn a_condition_that_raises_inside_a_call_carries_the_frames_it_raised_in() {
     let reason = match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Stopped { stop, .. } => stop.reason,
         Running::Exited { status, .. } => panic!("it ran to {status} instead of stopping"),
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -796,6 +816,10 @@ fn a_logpoint_reports_what_the_frame_held_and_does_not_stop() {
         Running::Stopped { stop, .. } => {
             panic!("a logpoint logs instead of stopping, and it stopped for {stop:?}")
         }
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -835,6 +859,10 @@ fn a_log_message_that_raises_stops_and_reports_it() {
         Running::Exited { status, .. } => {
             panic!("a log message that raised was skipped, and it ran to {status}")
         }
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -903,6 +931,10 @@ fn a_logpoint_on_a_hot_line_costs_no_round_trips() {
     {
         Running::Exited { status, .. } => assert!(status.success(), "it exited with {status}"),
         Running::Stopped { stop, .. } => panic!("a logpoint does not stop, and got {stop:?}"),
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -1003,6 +1035,10 @@ fn a_file_only_half_seen_binds_nothing_and_says_which_half_is_missing() {
                 rebindings.extend(rebound);
                 break;
             }
+            Running::StillRunning { waited, .. } => unreachable!(
+                "this wait carries no deadline and was answered after {waited:?} \
+                 with the program still running"
+            ),
             Running::Finishing { threads, .. } => {
                 panic!("nothing was held, and the debuggee ended holding {threads:?}")
             }
