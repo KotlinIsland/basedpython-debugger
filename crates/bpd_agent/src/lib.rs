@@ -14,10 +14,13 @@ mod breakpoints;
 mod code;
 mod conditions;
 mod events;
+mod exceptions;
 mod files;
 mod frames;
+mod pause;
 mod run;
 mod session;
+mod steps;
 mod stops;
 mod threads;
 mod values;
@@ -200,10 +203,23 @@ fn arm(python: Python<'_>) -> PyResult<()> {
     events::install(
         python,
         &monitoring,
-        wrap_pyfunction!(on_py_start, python)?.as_any(),
-        wrap_pyfunction!(on_line, python)?.as_any(),
+        &events::Callbacks {
+            py_start: wrap_pyfunction!(on_py_start, python)?.as_any(),
+            line: wrap_pyfunction!(on_line, python)?.as_any(),
+            py_return: wrap_pyfunction!(on_py_return, python)?.as_any(),
+            py_resume: wrap_pyfunction!(on_py_resume, python)?.as_any(),
+            py_unwind: wrap_pyfunction!(on_py_unwind, python)?.as_any(),
+            py_throw: wrap_pyfunction!(on_py_throw, python)?.as_any(),
+            raised: wrap_pyfunction!(on_raise, python)?.as_any(),
+        },
     )?;
-    events::watch_globally(python, true, false)
+    events::watch_globally(
+        python,
+        events::Global {
+            py_start: true,
+            ..events::Global::default()
+        },
+    )
 }
 
 /// the `PY_START` callback, called by the interpreter with no python frame in
@@ -237,14 +253,34 @@ fn on_py_start<'py>(
             // because the set was resolved with this file already registered
             attach::mark_stopped_at_entry();
             session::stop(python, events::thread_ident(python)?, StopReason::Entry)?;
-            return Ok(events::disable(python));
+            return Ok(may_forget_a_code_object(python));
         }
     }
 
     if let Some(loaded) = newly_loaded {
         session::announce_rebinding(breakpoints::rebind(python, &loaded)?);
     }
-    Ok(events::disable(python))
+
+    // this is one of the three ways a frame is entered, and a step in follows
+    // the frame the thread has just entered
+    if steps::armed_here() {
+        steps::entered_frame(python)?;
+    }
+    Ok(may_forget_a_code_object(python))
+}
+
+/// whether the interpreter may be told never to report this code object again
+///
+/// `DISABLE` is process wide, so a code object forgotten because *this* thread
+/// had no use for it is one another thread's step in would never be offered —
+/// and a step in that was never offered the frame it entered behaves exactly
+/// like a step over, which is a step landing somewhere other than it claimed
+fn may_forget_a_code_object(python: Python<'_>) -> Bound<'_, PyAny> {
+    if steps::entering_anywhere() {
+        python.None().into_bound(python)
+    } else {
+        events::disable(python)
+    }
 }
 
 /// the `LINE` callback, armed only on the code objects that hold a breakpoint
@@ -267,28 +303,26 @@ fn on_line<'py>(
         return Ok(python.None().into_bound(python));
     }
 
-    let Some(plans) = breakpoints::hit(code.as_ptr() as usize, line) else {
-        // the world is stopped, so this thread is caught here and held rather
-        // than told never to offer the line again: it is the only chance there
-        // is to catch it, and disabling the line would throw that away
-        if world::parking() {
-            world::park(python, events::thread_ident(python)?);
-            return Ok(python.None().into_bound(python));
-        }
+    let plans = breakpoints::hit(code.as_ptr() as usize, line);
+    if plans.is_none() && !steps::armed_anywhere() && !world::parking() && !pause::pausing() {
+        // nothing wants this line now, and nothing in the process could want it
+        // again before something arms it. `DISABLE` is process wide, so a line
+        // forgotten here is one a step being made on another thread would never
+        // be offered — which is why a step anywhere is enough to keep it
         return Ok(events::disable(python));
-    };
+    }
 
     let file: String = code.getattr("co_filename")?.extract()?;
     let thread = events::thread_ident(python)?;
-    let at = conditions::Location {
-        file: &file,
-        line,
-        thread,
-    };
 
     let mut stopping = Vec::new();
     let mut failure = None;
-    {
+    if let Some(plans) = plans {
+        let at = conditions::Location {
+            file: &file,
+            line,
+            thread,
+        };
         // held across every expression of every breakpoint on this line, so a
         // condition that calls a function with a breakpoint in it runs to an
         // answer rather than stopping inside itself
@@ -312,7 +346,13 @@ fn on_line<'py>(
         }
     }
 
+    // asked whatever the breakpoints decided, because a step that landed here
+    // has to be taken off either way — one left armed would go on watching for
+    // a frame the thread is already being held in
+    let landed = steps::reached_line(python)?;
+
     if let Some((breakpoint, raised)) = failure {
+        steps::cancel(python)?;
         session::stop(
             python,
             thread,
@@ -325,14 +365,12 @@ fn on_line<'py>(
                 error: raised.error,
             },
         )?;
-    } else if stopping.is_empty() {
-        // nothing on this line decided to stop, so a stopped world still has to
-        // catch the thread here — otherwise a line that holds a breakpoint
-        // whose condition was false would be the one place a thread escapes
-        if world::parking() {
-            world::park(python, thread);
-        }
-    } else {
+    } else if !stopping.is_empty() {
+        // a breakpoint decides the reason even when a step landed on the same
+        // line: the thread is held exactly where the step was going to put it,
+        // and a breakpoint reported as a step would be one the client never
+        // saw fire
+        steps::cancel(python)?;
         session::stop(
             python,
             thread,
@@ -342,10 +380,157 @@ fn on_line<'py>(
                 line,
             },
         )?;
+    } else if let Some(kind) = landed {
+        session::stop(python, thread, StopReason::Stepped { kind, file, line })?;
+    } else if world::parking() {
+        // nothing on this line decided to stop, so a stopped world still has to
+        // catch the thread here — otherwise a line that holds a breakpoint
+        // whose condition was false would be the one place a thread escapes
+        world::park(python, thread);
+    } else if pause::pausing() && pause::claim() {
+        pause::disarm(python)?;
+        session::stop(python, thread, StopReason::Paused { file, line })?;
     }
 
     // deliberately not `DISABLE`: a breakpoint that fired once still exists,
     // and so does one whose condition was false this time
+    Ok(python.None().into_bound(python))
+}
+
+/// the `PY_RETURN` callback, armed on the code objects a step is following
+///
+/// a return finishes a frame. the step that was in it moves to the caller and
+/// lands at its next line, which is what makes stepping over the last statement
+/// of a function land where the call came from
+///
+/// the returned value is part of the signature PEP 669 requires. reading it
+/// would be reading the program's state to decide whether to stop, which is the
+/// thing the event path does not do
+#[pyfunction]
+fn on_py_return<'py>(
+    python: Python<'py>,
+    _code: &Bound<'py, PyAny>,
+    _offset: i32,
+    _returned: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if steps::armed_here() {
+        steps::left_frame(python)?;
+    }
+    Ok(python.None().into_bound(python))
+}
+
+/// the `PY_RESUME` callback, armed for the program while a step in is in flight
+///
+/// resuming a generator or a coroutine enters a frame without starting one, so
+/// this is the event a step in needs for `next(gen)` and for the second `await`
+/// of a coroutine. the offset is part of the signature and is always the point
+/// the frame suspended at, which the frame itself already says
+#[pyfunction]
+fn on_py_resume<'py>(
+    python: Python<'py>,
+    _code: &Bound<'py, PyAny>,
+    _offset: i32,
+) -> PyResult<Bound<'py, PyAny>> {
+    if steps::armed_here() {
+        steps::entered_frame(python)?;
+    }
+    Ok(python.None().into_bound(python))
+}
+
+/// the `PY_THROW` callback, the third way a frame is entered
+///
+/// `gen.throw()` and `gen.close()` resume a suspended frame with an exception
+/// already set, which is neither a start nor a resume. the exception is the
+/// one being thrown in, and nothing here decides anything from it
+#[pyfunction]
+fn on_py_throw<'py>(
+    python: Python<'py>,
+    _code: &Bound<'py, PyAny>,
+    _offset: i32,
+    _thrown: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if steps::armed_here() {
+        steps::entered_frame(python)?;
+    }
+    Ok(python.None().into_bound(python))
+}
+
+/// the `PY_UNWIND` callback, armed for the program while anything needs it
+///
+/// two things do, and they are unrelated: a step whose frame is being left by
+/// an exception rather than by a return, and the exception breakpoint that
+/// stops where an exception leaves the program. `PY_UNWIND` cannot be a local
+/// event — `set_local_events` refuses it — so both pay for it process wide
+#[pyfunction]
+fn on_py_unwind<'py>(
+    python: Python<'py>,
+    code: &Bound<'py, PyAny>,
+    _offset: i32,
+    exception: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if conditions::evaluating() {
+        return Ok(python.None().into_bound(python));
+    }
+    if steps::armed_here() {
+        steps::left_frame(python)?;
+    }
+
+    if exceptions::uncaught() {
+        let frame = events::current_frame(python)?;
+        let caller = frame.getattr("f_back")?;
+        // no frame above this one that bpd would ever report, so nothing left
+        // that could catch it. this is the first moment that is knowable, and
+        // the frames it came through have already been popped — what is left of
+        // them is the traceback the exception carries
+        //
+        // the bootstrap is excluded as a frame in its own right and not only as
+        // a caller: the agent reports an exception the program did not catch by
+        // raising `SystemExit` out of that frame, and reporting *that* would be
+        // bpd stopping the program for a decision bpd had just made
+        if !frames::is_bootstrap(&frame) && (caller.is_none() || frames::is_bootstrap(&caller)) {
+            session::stop(
+                python,
+                events::thread_ident(python)?,
+                StopReason::Uncaught {
+                    error: conditions::capture(python, &PyErr::from_value(exception.clone())),
+                    file: code.getattr("co_filename")?.extract()?,
+                    line: frame.getattr("f_lineno")?.extract()?,
+                },
+            )?;
+        }
+    }
+    Ok(python.None().into_bound(python))
+}
+
+/// the `RAISE` callback, armed for the program while the exception breakpoint is
+///
+/// cpython raises this **again in every frame the exception propagates into**,
+/// with the same object, so what is reported is the first sighting of it on
+/// this thread — the frame it was raised in, with the whole stack still standing
+#[pyfunction]
+fn on_raise<'py>(
+    python: Python<'py>,
+    code: &Bound<'py, PyAny>,
+    _offset: i32,
+    exception: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if conditions::evaluating()
+        || !exceptions::raised()
+        || !exceptions::newly_raised(python, exception)
+    {
+        return Ok(python.None().into_bound(python));
+    }
+
+    let frame = events::current_frame(python)?;
+    session::stop(
+        python,
+        events::thread_ident(python)?,
+        StopReason::Raised {
+            error: conditions::capture(python, &PyErr::from_value(exception.clone())),
+            file: code.getattr("co_filename")?.extract()?,
+            line: frame.getattr("f_lineno")?.extract()?,
+        },
+    )?;
     Ok(python.None().into_bound(python))
 }
 

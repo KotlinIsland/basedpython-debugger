@@ -153,14 +153,25 @@ fn read_requests(mut stream: TcpStream) {
 /// frame happened to be running and could be caught by it. a program that
 /// swallowed the loss of its debugger and kept going is the outcome this
 /// prevents
+pub(crate) fn lost(reason: &str) -> ! {
+    fatal(&format!(
+        "{reason}. the program was stopped and is not being resumed"
+    ));
+}
+
+/// the agent cannot do what it was asked and cannot say so over the connection
+///
+/// the same exit as [`lost`], and for the same reason: there is nothing on the
+/// other end that would receive an error, and an exception raised here would
+/// unwind into whatever user frame happened to be running
 #[expect(
     clippy::print_stderr,
     clippy::exit,
     reason = "the debuggee has no other channel left, and continuing is not an \
               option — see above"
 )]
-pub(crate) fn lost(reason: &str) -> ! {
-    eprintln!("bpd: {reason}. the program was stopped and is not being resumed");
+pub(crate) fn fatal(reason: &str) -> ! {
+    eprintln!("bpd: {reason}");
     std::process::exit(ENGINE_LOST);
 }
 

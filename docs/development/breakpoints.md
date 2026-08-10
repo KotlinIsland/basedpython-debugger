@@ -144,8 +144,8 @@ here: a line that ran once and was not a breakpoint told the interpreter never
 to offer it again, and PEP 669 has no per-location undo. moving a breakpoint
 onto such a line has to restart everything
 
-it is the wrong instrument for anything per-frame — see the stepping section of
-[architecture](architecture.md)
+a step pays for the same thing, for the same reason: a line it has to be offered
+may have disabled itself on an earlier pass. see [stepping](stepping.md)
 
 ## conditions, hit counts and logpoints
 

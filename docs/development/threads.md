@@ -210,11 +210,23 @@ pretending to handle it
 - **a thread bpd is not holding has no stack request.** its frames are moving,
   and a stack read off one would be a description of a moment that had already
   gone. where it is, stated as the sample it is, is the thread census
-- **stepping** is M3.6 and is not built. the interaction between a step and the
-  threads that keep running underneath it is that work's problem, not this one's
 - **there is no cli surface.** the thread model reaches a user through the
   adapters, which are not built. the capability is `Debuggee::held`,
   `Debuggee::resume`, `Debuggee::threads` and `Debuggee::stop_the_world`
+
+## stepping is one thread's, and it is built
+
+a step steps the thread its stop is holding, and every other thread goes on
+running underneath it. the interaction that needed care is `DISABLE`: it is
+process wide, so a line reported and disabled on one thread is a line a step on
+another would never be offered again. while any step is armed anywhere, nothing
+disables a line — and `a_step_is_offered_a_line_another_thread_would_have_
+disabled` holds a step open while a second thread runs the same function
+throughout
+
+a **pause** is the one request made with nothing held at all, and it holds one
+thread like every other stop: whichever reaches a line first. see
+[stepping](stepping.md)
 
 ## how it is tested
 

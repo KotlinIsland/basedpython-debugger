@@ -6,9 +6,10 @@ thing `bpd` knows and a thing it can only assume, and about saying which is
 which
 
 what exists today is frames, the stack, scopes, values, object graph expansion
-and expression evaluation. stepping and exception breakpoints are not built, and
-none of this has a command line surface yet — it reaches a user through the
-adapters, which are not built either
+and expression evaluation. how a thread gets from one stop to the next —
+stepping, pausing and the exception breakpoints — is
+[stepping](stepping.md). none of this has a command line surface yet: it reaches
+a user through the adapters, which are not built
 
 ## a frame identity says which stop it belongs to
 

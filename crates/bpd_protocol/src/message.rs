@@ -176,6 +176,66 @@ pub enum StopReason {
         line: u32,
     },
 
+    /// a step the debugger asked for completed
+    ///
+    /// this says what **one thread** did. every other thread in the process
+    /// went on running while it stepped, and a step steps one of them
+    Stepped {
+        /// the step that was asked for
+        kind: StepKind,
+        /// the `co_filename` of the code object that is running now
+        file: String,
+        /// the line it is about to run
+        line: u32,
+    },
+
+    /// the debugger asked for a thread, and this is the one that arrived
+    ///
+    /// there is nothing in cpython that suspends a thread, so a pause arms
+    /// `LINE` for the whole program and holds the first thread that reaches
+    /// one. which thread that is belongs to the operating system — a pause
+    /// names the thread it got, and the threads that were running when it was
+    /// armed are on the acknowledgement
+    Paused {
+        /// the `co_filename` of the code object that was running
+        file: String,
+        /// the line it is about to run
+        line: u32,
+    },
+
+    /// an exception was raised
+    ///
+    /// the frame it was raised in is the one that is held, so the stack is the
+    /// whole of the program at the moment it went wrong. cpython raises this
+    /// event again in **every frame the exception propagates into**, and those
+    /// are the same exception rather than new ones — so an exception is
+    /// reported once, where it was raised
+    Raised {
+        /// what was raised
+        error: PythonError,
+        /// the `co_filename` of the code object that raised it
+        file: String,
+        /// the line it was raised on
+        line: u32,
+    },
+
+    /// an exception is leaving the program, and nothing will catch it
+    ///
+    /// only knowable at unwind time: an exception is caught or not caught by
+    /// what happens after it is raised, and a debugger that decided at the
+    /// raise would be predicting. so this is reported from the **outermost**
+    /// frame, as the exception leaves it — which is also why the held stack is
+    /// that one frame and the frames it came through are on the `error`'s own
+    /// traceback
+    Uncaught {
+        /// what is leaving
+        error: PythonError,
+        /// the `co_filename` of the outermost code object
+        file: String,
+        /// the line of it the exception is leaving from
+        line: u32,
+    },
+
     /// a breakpoint's condition or log message raised
     ///
     /// the program is held rather than resumed. an expression that raises has
@@ -196,6 +256,44 @@ pub enum StopReason {
         /// what the interpreter raised
         error: PythonError,
     },
+}
+
+/// which way a step goes
+///
+/// a step is **one thread's**. the rest of the program keeps running while it
+/// happens, which is the same model a stop has — see [`Stop`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepKind {
+    /// run to the next line of this frame, whatever it calls on the way
+    ///
+    /// a call the line makes is run to its end. a frame that **suspends** is
+    /// not left: a `yield` or an `await` hands control away and comes back, so
+    /// a step over one lands on the next line of the same frame rather than in
+    /// the generator's consumer or in the event loop
+    Over,
+
+    /// stop at the first line of the next frame this thread enters
+    ///
+    /// entering means a function called, a generator or coroutine resumed, or
+    /// one thrown into. a line that enters nothing behaves as [`StepKind::Over`]
+    In,
+
+    /// run until this frame is finished, and stop at the next line of its caller
+    ///
+    /// finished, not suspended: a generator that yields is resumed later and is
+    /// still the frame the step is in, so a step out of one runs it to its end
+    Out,
+}
+
+impl std::fmt::Display for StepKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Over => "step over",
+            Self::In => "step in",
+            Self::Out => "step out",
+        })
+    }
 }
 
 /// which part of a breakpoint an expression belongs to
@@ -1354,6 +1452,26 @@ pub enum FromAgent {
         threads: Vec<u64>,
     },
 
+    /// a pause is armed, and these threads were running python when it was
+    ///
+    /// the stop it produces arrives separately, as a [`StopReason::Paused`] one.
+    /// `running` is what says whether to expect it: a thread parked in a C call
+    /// has released the GIL and executes no python, so it reaches no line and
+    /// nothing here can hold it. an empty `running` means the pause is armed
+    /// and **nothing is going to arrive** until some thread runs python again
+    Pausing {
+        /// the threads that were running python when the pause was armed
+        running: Vec<u64>,
+    },
+
+    /// what the exception breakpoints are set to now
+    ExceptionBreakpointsSet {
+        /// stopping where an exception is raised
+        raised: bool,
+        /// stopping where an exception leaves the outermost frame
+        uncaught: bool,
+    },
+
     /// what every thread of the debuggee was doing
     Threads {
         /// one entry per thread the interpreter knows about
@@ -1516,6 +1634,42 @@ pub enum FromEngine {
     Resume {
         /// which of the held threads to let go
         which: Which,
+    },
+
+    /// let one held thread go, and hold it again when the step lands
+    ///
+    /// a step is a resume with instrumentation, so it is acknowledged with
+    /// [`FromAgent::Resumed`] naming the thread, and the landing arrives later
+    /// as a [`StopReason::Stepped`] stop of its own
+    ///
+    /// it names the **stop** rather than the thread, because a step is about
+    /// the frame that stop is held in
+    Step {
+        /// the stop whose thread to step
+        stop: u64,
+        /// which way
+        kind: StepKind,
+    },
+
+    /// hold the next thread of the debuggee that reaches a line
+    ///
+    /// the only request here that is sent to a program with **nothing held**.
+    /// there is nothing in cpython that suspends a thread, so this arms `LINE`
+    /// for the whole program and holds the first thread to reach one — which
+    /// is why the acknowledgement says which threads were running python, and
+    /// therefore whether a stop is going to arrive at all
+    Pause,
+
+    /// stop when an exception is raised, or when one is about to leave the
+    /// program
+    ///
+    /// the whole setting rather than a delta, for the reason
+    /// [`FromEngine::SetBreakpoints`] is
+    SetExceptionBreakpoints {
+        /// stop where an exception is raised, whether or not it is caught
+        raised: bool,
+        /// stop where an exception leaves the outermost frame
+        uncaught: bool,
     },
 
     /// replace the whole breakpoint set

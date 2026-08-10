@@ -75,13 +75,17 @@ pub(crate) fn census(python: Python<'_>, settle: Duration) -> PyResult<FromAgent
 
 /// the threads that were running python and are not held by a stop
 ///
-/// what stopping the world has to wait for. a thread already held by a stop is
-/// held; a thread with no python frame at all does not exist as far as
-/// `sys._current_frames` is concerned and cannot be waited for
-pub(crate) fn running(python: Python<'_>, except: u64) -> PyResult<Vec<u64>> {
+/// what stopping the world has to wait for, and what a pause says it expects to
+/// hear from. a thread already held by a stop is held; a thread with no python
+/// frame at all does not exist as far as `sys._current_frames` is concerned and
+/// cannot be waited for
+///
+/// `except` is the thread asking, when one is asking. a pause is armed from a
+/// thread of the agent's own and excludes nothing
+pub(crate) fn running(python: Python<'_>, except: Option<u64>) -> PyResult<Vec<u64>> {
     Ok(sample(python)?
         .into_keys()
-        .filter(|thread| *thread != except && stops::held_for(*thread).is_none())
+        .filter(|thread| Some(*thread) != except && stops::held_for(*thread).is_none())
         .collect())
 }
 

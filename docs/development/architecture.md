@@ -95,26 +95,31 @@ and an offset behind it
 
 ## stepping
 
-stepping is expressed in terms of local events on the code object of the frame
-being stepped in, not global instrumentation:
-
-| step | events enabled |
-| --- | --- |
-| step over | `LINE` on the current code object, `PY_RETURN` and `PY_UNWIND` |
-| step in | the above, plus `PY_START` |
-| step out | `PY_RETURN` and `PY_UNWIND` on the current code object only |
-
-the events are cleared when the step completes, so the program returns to its
+stepping keeps as much of itself local as the interpreter allows: `LINE` and
+`PY_RETURN` go on the code object of the frame being stepped in, and the events
+are cleared when the step completes, so the program returns to its
 uninstrumented steady state between stops
 
-two traps worth knowing before touching this code:
+**two of the events this design wanted are not local events at all.**
+`set_local_events` refuses `PY_UNWIND`, `RAISE`, `RERAISE`,
+`EXCEPTION_HANDLED` and `PY_THROW`, so a step that has to know its frame was
+left by an exception arms `PY_UNWIND` for the whole program; and `PY_START` was
+never going to be local, because "some frame, somewhere, was entered" is what a
+step in waits for
+
+the traps, and what became of them:
 
 - `sys.monitoring.restart_events()` re-enables **every** location that was
     disabled, process wide. it is the correct tool when a breakpoint is added to
-    an already-running program, and the wrong tool for anything per-frame
-- generators and coroutines re-enter the same code object. `PY_RESUME` and
-    `PY_YIELD` distinguish a resumption from a fresh call, and a step that
-    ignores them steps into the wrong instance of a frame
+    an already-running program — and it turns out to be the correct tool for a
+    step too, because a line the step needs may have disabled itself on an
+    earlier pass and PEP 669 has no per-location undo
+- generators and coroutines re-enter the same code object, and so does a
+    recursive call. what a step follows is therefore a **frame**, held by a
+    strong reference, because the address of a freed frame is handed straight
+    back to the next one
+
+the whole of it is [stepping](stepping.md)
 
 ## the session core, and adapter parity
 

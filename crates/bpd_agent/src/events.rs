@@ -21,11 +21,20 @@ use pyo3::types::PyModule;
 use crate::DEBUGGER_TOOL_ID;
 
 /// everything the event path needs from python, bound once
+///
+/// the event masks are integers rather than the objects `sys.monitoring.events`
+/// holds, because arming is a decision about the **whole** mask and the bits
+/// have to be OR-ed together
 #[derive(Debug)]
 struct Handles {
     disable: Py<PyAny>,
-    line: Py<PyAny>,
-    py_start: Py<PyAny>,
+    line: u32,
+    py_start: u32,
+    py_return: u32,
+    py_resume: u32,
+    py_unwind: u32,
+    py_throw: u32,
+    raised: u32,
     set_events: Py<PyAny>,
     set_local_events: Py<PyAny>,
     restart_events: Py<PyAny>,
@@ -42,6 +51,97 @@ struct Handles {
 
 static HANDLES: OnceLock<Handles> = OnceLock::new();
 
+/// the native functions the interpreter calls, one per event bpd listens for
+///
+/// every one of them is registered at arm time whether or not the event is
+/// armed yet, because registering a callback is not arming an event and an
+/// event armed without one raises rather than being ignored
+#[derive(Debug)]
+pub(crate) struct Callbacks<'py> {
+    /// a python function begins
+    pub(crate) py_start: &'py Bound<'py, PyAny>,
+    /// a line is about to run
+    pub(crate) line: &'py Bound<'py, PyAny>,
+    /// a python function returns
+    pub(crate) py_return: &'py Bound<'py, PyAny>,
+    /// a generator or coroutine is resumed
+    pub(crate) py_resume: &'py Bound<'py, PyAny>,
+    /// a frame is left by an exception
+    pub(crate) py_unwind: &'py Bound<'py, PyAny>,
+    /// a generator or coroutine is resumed by `throw()`
+    pub(crate) py_throw: &'py Bound<'py, PyAny>,
+    /// an exception is raised
+    pub(crate) raised: &'py Bound<'py, PyAny>,
+}
+
+/// what is armed for the whole program
+///
+/// one struct rather than a call per event, because `set_events` **replaces**
+/// the whole mask: arming one bit on its own disarms every other. everything
+/// that changes any of these goes through one place that decides all of them
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one field per `sys.monitoring` event, which is the point: the \
+              mask is replaced wholesale, so every event that can be armed \
+              globally has to be decided in one place and none of them can be \
+              left out"
+)]
+pub(crate) struct Global {
+    /// how a code object is discovered at all, and how a step in catches the
+    /// frame it enters
+    ///
+    /// PEP 669 has no "code object created" event, so a session with
+    /// breakpoints pays one native call per code object first reached and a
+    /// session with none pays nothing
+    pub(crate) py_start: bool,
+    /// how a running thread is caught, for stopping the world and for a pause
+    pub(crate) line: bool,
+    /// how a frame left by an exception is seen
+    ///
+    /// `PY_UNWIND` **cannot be a local event** — `set_local_events` refuses it
+    /// — so a step that needs to know its frame was unwound arms it for the
+    /// whole program. it is also how an exception leaving the outermost frame
+    /// is found
+    pub(crate) py_unwind: bool,
+    /// how a generator resumed by `throw()` is seen, which a step in enters
+    pub(crate) py_throw: bool,
+    /// how a generator or coroutine resumption is seen, which a step in enters
+    pub(crate) py_resume: bool,
+    /// how a raise is seen, for the exception breakpoints
+    ///
+    /// `RAISE` cannot be a local event either
+    pub(crate) raised: bool,
+}
+
+/// what is armed for one code object
+///
+/// local rather than global: a program with three breakpoints in it
+/// instruments three code objects, and every other one in the process is
+/// untouched. the same replacement rule applies per code object, so the
+/// breakpoints and the steps that want events on one are decided together
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Local {
+    /// every line of it is reported
+    pub(crate) line: bool,
+    /// its return is reported
+    ///
+    /// a `yield` is deliberately not: it suspends a frame rather than finishing
+    /// it, and a step follows the frame it is in across a suspension
+    pub(crate) py_return: bool,
+}
+
+impl std::ops::BitOr for Local {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self {
+            line: self.line || other.line,
+            py_return: self.py_return || other.py_return,
+        }
+    }
+}
+
 /// resolve every handle and register the callbacks, before the program runs
 ///
 /// `_thread.get_ident` rather than `threading.get_ident`: `_thread` is builtin
@@ -53,24 +153,36 @@ static HANDLES: OnceLock<Handles> = OnceLock::new();
 pub(crate) fn install(
     python: Python<'_>,
     monitoring: &Bound<'_, PyAny>,
-    on_py_start: &Bound<'_, PyAny>,
-    on_line: &Bound<'_, PyAny>,
+    callbacks: &Callbacks<'_>,
 ) -> PyResult<()> {
     let all = monitoring.getattr("events")?;
-    let line = all.getattr("LINE")?;
-    let py_start = all.getattr("PY_START")?;
+    let bit = |name: &str| -> PyResult<u32> { all.getattr(name)?.extract() };
 
-    monitoring.call_method1(
-        "register_callback",
-        (DEBUGGER_TOOL_ID, &py_start, on_py_start),
-    )?;
-    monitoring.call_method1("register_callback", (DEBUGGER_TOOL_ID, &line, on_line))?;
+    for (name, callback) in [
+        ("PY_START", callbacks.py_start),
+        ("LINE", callbacks.line),
+        ("PY_RETURN", callbacks.py_return),
+        ("PY_RESUME", callbacks.py_resume),
+        ("PY_UNWIND", callbacks.py_unwind),
+        ("PY_THROW", callbacks.py_throw),
+        ("RAISE", callbacks.raised),
+    ] {
+        monitoring.call_method1(
+            "register_callback",
+            (DEBUGGER_TOOL_ID, bit(name)?, callback),
+        )?;
+    }
 
     let builtins = PyModule::import(python, "builtins")?;
     let handles = Handles {
         disable: monitoring.getattr("DISABLE")?.unbind(),
-        line: line.unbind(),
-        py_start: py_start.unbind(),
+        line: bit("LINE")?,
+        py_start: bit("PY_START")?,
+        py_return: bit("PY_RETURN")?,
+        py_resume: bit("PY_RESUME")?,
+        py_unwind: bit("PY_UNWIND")?,
+        py_throw: bit("PY_THROW")?,
+        raised: bit("RAISE")?,
         set_events: monitoring.getattr("set_events")?.unbind(),
         set_local_events: monitoring.getattr("set_local_events")?.unbind(),
         restart_events: monitoring.getattr("restart_events")?.unbind(),
@@ -112,24 +224,23 @@ pub(crate) fn disable(python: Python<'_>) -> Bound<'_, PyAny> {
 
 /// set the events armed for the whole program, in one call
 ///
-/// there are exactly two, and they are set together because `set_events`
-/// replaces the whole mask: turning one on by itself would turn the other off.
-/// a caller that knew about only one of them would silently disarm the other
-///
-/// - `py_start` is on exactly while there is a breakpoint set. it is how a code
-///   object is discovered at all — PEP 669 has no "code object created" event —
-///   so a session with breakpoints pays one native call per code object first
-///   reached, and a session with none pays nothing
-/// - `line` is on only while the world is stopped. it is how a running thread is
-///   caught at all, and it is the whole cost of that mode
-pub(crate) fn watch_globally(python: Python<'_>, py_start: bool, line: bool) -> PyResult<()> {
+/// they are set together because `set_events` replaces the whole mask: turning
+/// one on by itself would turn the others off, and a caller that knew about one
+/// of them would silently disarm the rest
+pub(crate) fn watch_globally(python: Python<'_>, wanted: Global) -> PyResult<()> {
     let handles = handles();
     let mut events: u32 = 0;
-    if py_start {
-        events |= handles.py_start.bind(python).extract::<u32>()?;
-    }
-    if line {
-        events |= handles.line.bind(python).extract::<u32>()?;
+    for (armed, bit) in [
+        (wanted.py_start, handles.py_start),
+        (wanted.line, handles.line),
+        (wanted.py_unwind, handles.py_unwind),
+        (wanted.py_throw, handles.py_throw),
+        (wanted.py_resume, handles.py_resume),
+        (wanted.raised, handles.raised),
+    ] {
+        if armed {
+            events |= bit;
+        }
     }
     handles
         .set_events
@@ -138,21 +249,26 @@ pub(crate) fn watch_globally(python: Python<'_>, py_start: bool, line: bool) -> 
     Ok(())
 }
 
-/// turn `LINE` on or off for one code object
+/// set the events armed for one code object, in one call
 ///
-/// local rather than global: a program with three breakpoints in it instruments
-/// three code objects, and every other one in the process is untouched
-pub(crate) fn watch_lines(
+/// the same replacement rule `set_events` has, per code object: a step that
+/// wanted returns on a code object a breakpoint already watches lines in has to
+/// ask for both, or arming its own would turn the breakpoint's off
+pub(crate) fn watch_locally(
     python: Python<'_>,
     code: &Bound<'_, PyAny>,
-    watching: bool,
+    wanted: Local,
 ) -> PyResult<()> {
     let handles = handles();
-    let events = if watching {
-        handles.line.bind(python).clone()
-    } else {
-        0i32.into_pyobject(python)?.into_any()
-    };
+    let mut events: u32 = 0;
+    for (armed, bit) in [
+        (wanted.line, handles.line),
+        (wanted.py_return, handles.py_return),
+    ] {
+        if armed {
+            events |= bit;
+        }
+    }
     handles
         .set_local_events
         .bind(python)
@@ -162,10 +278,18 @@ pub(crate) fn watch_lines(
 
 /// re-enable every location that returned `DISABLE`, process wide
 ///
-/// this is a blunt instrument and it is the right one here: a line that was
-/// reported once and disabled has to start firing again the moment a breakpoint
-/// lands on it, and there is no per-location undo. it is the wrong instrument
-/// for anything per-frame — see the stepping section of the architecture doc
+/// this is a blunt instrument and it is the right one in the two places it is
+/// used. a line that was reported once and disabled has to start firing again
+/// the moment a breakpoint lands on it, or the moment a step needs to be
+/// offered it, and PEP 669 has no per-location undo
+///
+/// there **is** a per-code-object one, and it is deliberately not used: taking
+/// a code object's local events to zero and setting them again re-enables every
+/// location in it, measured by
+/// `clearing_a_code_objects_local_events_undoes_its_disables`. it would be much
+/// cheaper than this, and on a free-threaded build another thread can execute
+/// that code object between the two calls and miss a breakpoint. a missed
+/// breakpoint is not a price this project pays for a faster step
 pub(crate) fn restart(python: Python<'_>) -> PyResult<()> {
     handles().restart_events.bind(python).call0()?;
     Ok(())

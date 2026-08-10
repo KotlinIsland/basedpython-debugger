@@ -35,7 +35,7 @@ use std::time::Duration;
 use bpd_protocol::message::{FromAgent, FromEngine, LogRecord, StopReason};
 use pyo3::prelude::*;
 
-use crate::{attach, breakpoints, events, frames, stops, threads, world};
+use crate::{attach, breakpoints, events, exceptions, frames, pause, steps, stops, threads, world};
 
 /// tell the engine what a logpoint had to say, and carry straight on
 ///
@@ -49,11 +49,51 @@ pub(crate) fn log(record: LogRecord) {
 
 /// put the global instrumentation back to what the session currently needs
 ///
-/// `set_events` replaces the whole mask, so the two things that can be armed
-/// globally are decided together. anything that changes either one comes
-/// through here rather than setting its own bit and disarming the other
+/// `set_events` replaces the whole mask, so everything that can be armed
+/// globally is decided here, together. anything that changes one of them comes
+/// through this rather than setting its own bit and disarming the rest
+///
+/// what wants what:
+///
+/// - `PY_START` discovers code objects while a breakpoint is set, and is how a
+///   step in catches the frame it enters
+/// - `LINE` catches a running thread, for stopping the world and for a pause
+/// - `PY_UNWIND` is how a step sees its frame left by an exception, and how an
+///   exception leaving the outermost frame is found. it **cannot** be a local
+///   event — `set_local_events` refuses it — so a step pays for it process wide
+/// - `PY_RESUME` and `PY_THROW` are the other two ways a frame is entered, which
+///   a step in follows
+/// - `RAISE` is the exception breakpoint, and cannot be local either
 pub(crate) fn refresh_events(python: Python<'_>) -> PyResult<()> {
-    events::watch_globally(python, breakpoints::any_set(), world::parking())
+    let stepping = steps::armed_anywhere();
+    let entering = steps::entering_anywhere();
+    events::watch_globally(
+        python,
+        events::Global {
+            py_start: breakpoints::any_set() || entering,
+            line: world::parking() || pause::pausing(),
+            py_unwind: stepping || exceptions::uncaught(),
+            py_throw: entering,
+            py_resume: entering,
+            raised: exceptions::raised(),
+        },
+    )
+}
+
+/// put one code object's instrumentation back to what the session needs
+///
+/// `set_local_events` replaces a code object's whole mask the way `set_events`
+/// replaces the program's, and two things want events on one: a breakpoint
+/// bound into it, and a step being made in it. arming either on its own would
+/// silently disarm the other — a step through a function that holds a
+/// breakpoint would turn the breakpoint off
+pub(crate) fn refresh_code(python: Python<'_>, code: &Bound<'_, PyAny>) -> PyResult<()> {
+    let address = code.as_ptr() as usize;
+    events::watch_locally(
+        python,
+        code,
+        breakpoints::local(address) | steps::local(address),
+    )
 }
 
 /// report a stop and hold this thread until the engine resumes it
@@ -63,6 +103,7 @@ pub(crate) fn refresh_events(python: Python<'_>) -> PyResult<()> {
 pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyResult<()> {
     let ticket = stops::enter(thread, reason, frames::holding(python)?);
     let mut stopped = frames::begin(python, ticket.stop);
+    let mut stepping = None;
 
     loop {
         // the GIL is given back for the whole of the wait. the rest of the
@@ -70,6 +111,10 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
         let command = python.detach(|| ticket.next());
         let request = match command {
             stops::Command::Resume => break,
+            stops::Command::Step(kind) => {
+                stepping = Some(kind);
+                break;
+            }
             stops::Command::Answer(request) => request,
         };
 
@@ -77,6 +122,11 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
             FromEngine::SetBreakpoints { breakpoints } => {
                 let resolved = breakpoints::apply(python, breakpoints)?;
                 attach::send(&FromAgent::BreakpointsResolved { resolved });
+            }
+            FromEngine::SetExceptionBreakpoints { raised, uncaught } => {
+                exceptions::watch(raised, uncaught);
+                refresh_events(python)?;
+                attach::send(&FromAgent::ExceptionBreakpointsSet { raised, uncaught });
             }
             FromEngine::Stack { top, .. } => {
                 let answer = stopped.stack(top)?;
@@ -132,6 +182,12 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
     // to be answered against
     drop(stopped);
 
+    // armed while this thread is still inside the callback, so the first event
+    // the program reaches after it returns is already being watched for
+    if let Some(kind) = stepping {
+        return steps::arm(python, thread, kind);
+    }
+
     // discovery costs a native call per code object first reached, and it buys
     // nothing once there is nothing left that could stop
     refresh_events(python)
@@ -144,7 +200,7 @@ fn stop_the_world(
     stop: u64,
     settle_ms: u32,
 ) -> PyResult<FromAgent> {
-    let targets = threads::running(python, thread)?;
+    let targets = threads::running(python, Some(thread))?;
     let stopped = world::stop(
         python,
         stop,
