@@ -25,9 +25,14 @@ fn succeeds(code: &str) -> String {
 #[test]
 fn the_agent_is_built_for_the_interpreter_that_imports_it() {
     let built_for = succeeds("import bpd_agent; print(bpd_agent.built_for())");
+    // the `t` matters: a free-threaded build reports the same `version_info`
+    // as the gil build of the same release and is a different abi, so a stamp
+    // of the version alone names two interpreters
     let running = bpd_test::eval(
         matching_interpreter(),
-        "import sys; print('%d.%d' % sys.version_info[:2])",
+        "import sys, sysconfig\n\
+         suffix = 't' if sysconfig.get_config_var('Py_GIL_DISABLED') else ''\n\
+         print('%d.%d%s' % (sys.version_info[0], sys.version_info[1], suffix))",
     );
 
     assert_eq!(built_for, running);
@@ -44,8 +49,10 @@ fn an_interpreter_it_was_not_built_for_never_proceeds_silently() {
 
     for interpreter in bpd_test::discovered().all() {
         let running = format!(
-            "{}.{}",
-            interpreter.version.major, interpreter.version.minor
+            "{}.{}{}",
+            interpreter.version.major,
+            interpreter.version.minor,
+            if interpreter.free_threaded { "t" } else { "" }
         );
         if running == built_for {
             continue;

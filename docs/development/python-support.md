@@ -56,7 +56,15 @@ implementation it found and stops
 ## free-threaded builds
 
 a `Py_GIL_DISABLED` build is a first-class target, not a variant to be handled
-later
+later — **from 3.14**. pyo3 does not support the free-threaded build of any
+cpython below that, so `3.13t` cannot be built against at all and the build
+fails saying so. free-threading is therefore a 3.14 feature here, and the
+minimum for it is not the minimum for the rest
+
+a free-threaded build is a **different abi**, not a variant of the same one, and
+`sys.version_info` reports the same `3.14` for both. so the stamp the agent
+refuses a mismatched interpreter with carries the build too — `3.14t` — because
+a version alone names two interpreters and would wave one of them through
 
 the practical consequence is on the agent: nothing in it may be correct only
 because the GIL serialised it. the registry of held threads, the breakpoint table

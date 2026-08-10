@@ -550,5 +550,17 @@ fn running_version(python: Python<'_>) -> PyResult<String> {
     let info = PyModule::import(python, "sys")?.getattr("version_info")?;
     let major: u8 = info.getattr("major")?.extract()?;
     let minor: u8 = info.getattr("minor")?.extract()?;
-    Ok(format!("{major}.{minor}"))
+
+    // a free-threaded interpreter reports the same `version_info` as the gil
+    // build of the same release and is a different abi. `Py_GIL_DISABLED` is
+    // the build flag that separates them, and it is what `EXT_SUFFIX` carries
+    let free_threaded: bool = PyModule::import(python, "sysconfig")?
+        .getattr("get_config_var")?
+        .call1(("Py_GIL_DISABLED",))?
+        .is_truthy()?;
+
+    Ok(format!(
+        "{major}.{minor}{}",
+        if free_threaded { "t" } else { "" }
+    ))
 }
