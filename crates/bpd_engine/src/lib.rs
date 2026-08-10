@@ -23,7 +23,10 @@ use std::time::{Duration, Instant};
 use bpd_protocol::message::{FromAgent, FromEngine, Refusal, Stop};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
-pub use launch::{Debuggee, Launched, Running, Stack, Threads, Variables, WorldStopped, launch};
+pub use launch::{
+    Debuggee, ExceptionBreakpoints, Launched, Running, Stack, Threads, Variables, WorldStopped,
+    launch,
+};
 
 /// the result type for engine operations
 pub type Result<T, E = Error> = std::result::Result<T, E>;

@@ -16,7 +16,7 @@ use pyo3::prelude::*;
 
 use crate::conditions::Plan;
 use crate::files::{self, FileId};
-use crate::{code, events};
+use crate::{code, events, session};
 
 /// one requested breakpoint, with the file it was resolved against
 ///
@@ -94,6 +94,17 @@ pub(crate) fn hit(address: usize, line: u32) -> Option<Vec<Arc<Plan>>> {
 /// whether anything is set, which is what decides if `PY_START` stays on
 pub(crate) fn any_set() -> bool {
     !read().pending.is_empty()
+}
+
+/// what the breakpoint set wants of one code object
+///
+/// half of what the interpreter is told about it — a step being made in the
+/// same code object wants the other half, and `set_local_events` takes one mask
+pub(crate) fn local(address: usize) -> events::Local {
+    events::Local {
+        line: read().armed.contains_key(&address),
+        py_return: false,
+    }
 }
 
 /// replace the whole breakpoint set and say how every one of them resolved
@@ -327,20 +338,28 @@ fn resolve(
 
 /// make the interpreter's instrumentation match the new `armed` set
 ///
-/// clearing first and then setting, rather than diffing, because
-/// `set_local_events` is a whole-set assignment per code object and a code
-/// object that keeps a breakpoint simply gets the same assignment twice
+/// every code object goes through [`crate::session::refresh_code`], which is
+/// the one place that decides a code object's whole local mask. assigning
+/// `LINE` here directly would disarm a step being made in the same code
+/// object, because `set_local_events` is a whole-set assignment
 fn arm(python: Python<'_>, previous: &BTreeMap<usize, Armed>) -> PyResult<()> {
-    let state = read();
-    for (address, stale) in previous {
-        if !state.armed.contains_key(address) {
-            events::watch_lines(python, stale.code.bind(python), false)?;
-        }
+    let stale: Vec<Py<PyAny>> = {
+        let state = read();
+        previous
+            .iter()
+            .filter(|(address, _)| !state.armed.contains_key(*address))
+            .map(|(_, armed)| armed.code.clone_ref(python))
+            .collect()
+    };
+    let live: Vec<Py<PyAny>> = read()
+        .armed
+        .values()
+        .map(|armed| armed.code.clone_ref(python))
+        .collect();
+
+    for code in stale.iter().chain(&live) {
+        session::refresh_code(python, code.bind(python))?;
     }
-    for live in state.armed.values() {
-        events::watch_lines(python, live.code.bind(python), true)?;
-    }
-    drop(state);
 
     // a line that has already run returned `DISABLE` and would never be
     // reported again. a breakpoint that lands on one has to undo that, and PEP

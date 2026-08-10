@@ -15,10 +15,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use bpd_protocol::message::{
-    FrameId, FromAgent, FromEngine, Holding, Refusal, Stop, StopReason, Which,
+    FrameId, FromAgent, FromEngine, Holding, Refusal, StepKind, Stop, StopReason, Which,
 };
 
-use crate::attach;
+use crate::{attach, pause};
 
 /// what a held thread is asked to do next
 #[derive(Debug)]
@@ -27,6 +27,8 @@ pub(crate) enum Command {
     Answer(FromEngine),
     /// stop being held
     Resume,
+    /// stop being held, and be held again where this step lands
+    Step(StepKind),
 }
 
 /// one held thread's queue of work
@@ -182,7 +184,23 @@ pub(crate) fn route(request: FromEngine) {
             resume(which);
             return;
         }
+        // a step is a resume with instrumentation, so it leaves the registry
+        // the way a resume does rather than being answered inside the stop
+        FromEngine::Step { stop, kind } => {
+            step(*stop, *kind);
+            return;
+        }
+        // the one request that is about a program with nothing held. it is
+        // armed on a thread of the agent's own, because there is no thread of
+        // the debuggee's waiting to be asked
+        FromEngine::Pause => {
+            pause::request();
+            return;
+        }
         FromEngine::SetBreakpoints { .. } => Address::Any("the breakpoints to resolve"),
+        FromEngine::SetExceptionBreakpoints { .. } => {
+            Address::Any("the exception breakpoints to set")
+        }
         FromEngine::Threads { .. } => Address::Any("what the threads are doing"),
         FromEngine::Stack { stop, .. } | FromEngine::StopTheWorld { stop, .. } => {
             Address::Stop(*stop)
@@ -234,6 +252,30 @@ fn deliver(address: Address, request: FromEngine) {
             attach::send(&FromAgent::Refused { reason });
         }
     }
+}
+
+/// let one held thread go, with a step armed on it
+///
+/// acknowledged as a resume of that thread, before it is woken, for the same
+/// reason a resume is: the landing is a stop of its own and must not arrive
+/// ahead of the acknowledgement that the thread was let go at all
+fn step(stop: u64, kind: StepKind) {
+    let mut registry = registry();
+    let Some(index) = registry.held.iter().position(|entry| entry.stop == stop) else {
+        let held = registry.stops();
+        drop(registry);
+        attach::send(&FromAgent::Refused {
+            reason: Refusal::NoSuchStop { stop, held },
+        });
+        return;
+    };
+
+    let entry = registry.held.remove(index);
+    drop(registry);
+    attach::send(&FromAgent::Resumed {
+        threads: vec![entry.thread],
+    });
+    entry.mailbox.post(Command::Step(kind));
 }
 
 /// let held threads go

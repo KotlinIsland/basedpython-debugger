@@ -48,14 +48,14 @@ breakpoint is not already solid
 
 **execution control**
 
-- [ ] step over, step in, step out, continue, and pause
-- [ ] stepping is correct across generators, coroutines, comprehensions,
+- [x] step over, step in, step out, continue, and pause
+- [x] stepping is correct across generators, coroutines, comprehensions,
       exception unwinding, and re-entrant calls
-- [ ] with several threads running, a stop holds **one** thread and the others
+- [x] with several threads running, a stop holds **one** thread and the others
       keep running, on every build, and the stop names the thread it holds
-- [ ] stop-the-world is available as an explicit mode, and a thread parked in a
+- [x] stop-the-world is available as an explicit mode, and a thread parked in a
       C call is reported as running in native code rather than counted as held
-- [ ] a stop that blocks other threads because the held thread owns a lock is
+- [x] a stop that blocks other threads because the held thread owns a lock is
       detected and reported, not left looking like `bpd` hanging
 
 **state**
@@ -137,13 +137,32 @@ exists to avoid
 
 see [breakpoints](docs/development/breakpoints.md)
 
-### M3 — stepping, frames and values
+### M3 — stepping, frames and values · done
 
 execution control and state, per the criteria above
 
-the stopped-state half is done: frames, the stack, scopes, values and
-evaluation — see [reading a stopped program](docs/development/state.md).
-stepping and exception breakpoints remain
+the stopped-state half is frames, the stack, scopes, values and evaluation — see
+[reading a stopped program](docs/development/state.md)
+
+**execution control is built.** step over, step in and step out, a pause that
+reaches a program with nothing held, and the two exception breakpoints. what a
+step follows is a **frame** rather than a code object, because a recursive call,
+a second generator of the same function and a coroutine awaited from two places
+all re-enter the same code object — and it holds the frame rather than its
+address, because cpython hands a freed frame's address straight back to the next
+one
+
+a `yield` is a suspension rather than a return, so a step over an `await` lands
+on the next line of the same coroutine instead of somewhere in the event loop.
+arming a step costs a `restart_events()`, because a line it has to be offered
+may have disabled itself on an earlier pass and PEP 669 has no per-location undo
+
+"break on raised" and "break on uncaught" are different questions and are
+answered at different moments. cpython raises its `RAISE` event again in every
+frame an exception propagates into, so one exception is one stop, reported where
+it was raised; and whether anything will catch it is only knowable at the unwind
+out of the outermost frame, so that is where it is answered rather than
+predicted. see [stepping](docs/development/stepping.md)
 
 **the thread model is built.** a stop holds **one thread**, and every other
 thread keeps running. gdb calls this non-stop mode and DAP exposes it as
@@ -180,8 +199,9 @@ what it costs is not hidden:
 the state half has landed too: frames and frame identity, the stack, the four
 scopes a frame really has, writing a variable the program then goes on to use,
 values, object graph expansion under a budget that says what it left out, and
-expression evaluation. execution control — stepping and exception breakpoints —
-has not. see [the stopped state](docs/development/state.md) and
+expression evaluation. so has execution control — stepping, pausing and the
+exception breakpoints. see [the stopped state](docs/development/state.md),
+[stepping](docs/development/stepping.md) and
 [threads](docs/development/threads.md)
 
 ### M4 — DAP

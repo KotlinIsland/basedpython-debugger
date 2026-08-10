@@ -244,7 +244,39 @@ suppression becomes the thing holding the line
 
 ## what is not covered yet
 
-stepping, exception breakpoints and the two adapters — none of them exist
+the two adapters — neither of them exists
+
+stepping, pausing and the exception breakpoints are covered by
+`crates/bpd_engine/tests/stepping.rs` and
+`crates/bpd_engine/tests/exceptions.rs`. every call a step might or might not
+enter writes a marker file, so a step over asserts the callee's marker **is**
+there and a step in asserts it is **not** — the same claim checked from both
+sides, with nothing taken from the agent
+
+the breaks they were checked against: taking the `restart_events()` off a step
+fails the disabled-line test, which then sees the program run to its end rather
+than land anywhere; following the code object rather than the frame fails the
+recursion test and the generator test; letting a line be disabled while another
+thread is stepping fails the held-open cross-thread test; not taking a step off
+when a breakpoint stops the thread fails the breakpoint-wins test; reporting a
+raise every time cpython raises the event fails the "one exception is one stop"
+test; and reporting an unwind before it reaches the outermost frame fails both
+uncaught tests
+
+three of their assertions are about **cpython** rather than about `bpd`, and are
+made in a bare interpreter: that one `raise` produces a raise event in every
+frame the exception passes through, that an exception escaping a thread's target
+is caught by `threading` itself, and that clearing a code object's local events
+undoes its disables — the cheaper instrument a step deliberately does not use
+
+**one guard here cannot be made to fail on a gil-enabled build**, and is written
+down rather than left looking like coverage. `PY_START` is not disabled while a
+step in is in flight, because a code object the interpreter has been told never
+to report again is one the step would never be offered — and a step in that was
+never offered the frame it entered behaves exactly like a step over. the window
+is a handful of bytecodes on the stepping thread, and no other thread runs in it
+while the GIL exists. on a free-threaded build it is a real window, which is why
+the guard is there
 
 the thread model does, and it is covered by `crates/bpd_engine/tests/threads.rs`.
 that file is the first place multi-threaded fixtures are the point rather than

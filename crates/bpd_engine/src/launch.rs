@@ -21,7 +21,7 @@ use bpd_core::python::Capabilities;
 use bpd_protocol::env;
 use bpd_protocol::message::{
     Detail, Entry, Evaluated, Frame, FrameId, FromAgent, FromEngine, LogRecord, Mode, Omitted,
-    Resolved, Scope, SourceBreakpoint, Stop, ThreadState, Value, Which,
+    Resolved, Scope, SourceBreakpoint, StepKind, Stop, ThreadState, Value, Which,
 };
 
 use crate::{Error, Listener, Result, Session, agent};
@@ -154,6 +154,71 @@ impl Debuggee {
         let request = FromEngine::SetBreakpoints { breakpoints };
         match self.ask(&request, EXPECTED)? {
             FromAgent::BreakpointsResolved { resolved } => Ok(resolved),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// stop where an exception is raised, or where one leaves the program
+    ///
+    /// the whole setting, not a delta, for the reason the breakpoint set is.
+    /// the answer is what is armed now, read back off the agent rather than
+    /// assumed from what was asked for
+    pub fn set_exception_breakpoints(
+        &mut self,
+        raised: bool,
+        uncaught: bool,
+    ) -> Result<ExceptionBreakpoints> {
+        const EXPECTED: &str = "the exception breakpoints to be set";
+
+        let request = FromEngine::SetExceptionBreakpoints { raised, uncaught };
+        match self.ask(&request, EXPECTED)? {
+            FromAgent::ExceptionBreakpointsSet { raised, uncaught } => {
+                Ok(ExceptionBreakpoints { raised, uncaught })
+            }
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// let one held thread go with a step armed on it
+    ///
+    /// a step is a resume of that one thread — every other thread in the
+    /// program goes on running while it happens, and this returns as soon as
+    /// the thread has been let go. where it landed arrives from [`Self::wait`],
+    /// as a stop of its own
+    pub fn step(&mut self, stop: u64, kind: StepKind) -> Result<Vec<u64>> {
+        const EXPECTED: &str = "the thread to be stepped";
+
+        match self.ask(&FromEngine::Step { stop, kind }, EXPECTED)? {
+            FromAgent::Resumed { threads } => {
+                self.held.retain(|stop| !threads.contains(&stop.thread));
+                Ok(threads)
+            }
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// step the only held thread
+    pub fn the_step(&mut self, kind: StepKind) -> Result<Vec<u64>> {
+        let stop = self.only("a step")?;
+        self.step(stop, kind)
+    }
+
+    /// hold the next thread of the debuggee that reaches a line
+    ///
+    /// the one request that is made to a program with **nothing held**, and the
+    /// one that cannot say in advance which thread it will get: nothing in
+    /// cpython suspends a thread, so what this does is arm `LINE` for the whole
+    /// program and hold whichever thread arrives first
+    ///
+    /// what comes back is the threads that were running python when it was
+    /// armed. an empty list means the pause is armed and nothing is going to
+    /// reach it until some thread runs python again — every one of them is
+    /// parked in a C call, where no monitoring event exists
+    pub fn pause(&mut self) -> Result<Vec<u64>> {
+        const EXPECTED: &str = "a pause to be armed";
+
+        match self.send_and_wait(&FromEngine::Pause, EXPECTED)? {
+            FromAgent::Pausing { running } => Ok(running),
             other => Err(unexpected(&other, EXPECTED)),
         }
     }
@@ -313,6 +378,17 @@ impl Debuggee {
         if self.held.is_empty() {
             return Err(Error::NotStopped { wanted: expected });
         }
+        self.send_and_wait(request, expected)
+    }
+
+    /// send one request and wait for the answer, of a program that may be
+    /// running
+    ///
+    /// only a pause reaches this without a held thread. everything else is
+    /// answered on a thread the agent is already holding, and asks through
+    /// [`Self::ask`] so that a request made to a running program is refused
+    /// here rather than waited on for ever
+    fn send_and_wait(&mut self, request: &FromEngine, expected: &'static str) -> Result<FromAgent> {
         self.session.send(request)?;
 
         loop {
@@ -455,6 +531,15 @@ impl Threads {
     pub fn get(&self, thread: u64) -> Option<&ThreadState> {
         self.threads.iter().find(|state| state.thread == thread)
     }
+}
+
+/// what the debuggee stops for, of the exceptions it raises
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExceptionBreakpoints {
+    /// stopping where an exception is raised, whether or not it is caught
+    pub raised: bool,
+    /// stopping where an exception leaves the outermost frame
+    pub uncaught: bool,
 }
 
 /// what stopping the world managed to stop
