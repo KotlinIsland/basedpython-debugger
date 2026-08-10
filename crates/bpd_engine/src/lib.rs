@@ -18,13 +18,14 @@ pub mod launch;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use bpd_core::Stop;
+use bpd_core::{Request, Stop};
 use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
-pub use launch::{Debuggee, Launched, launch};
+pub use launch::{Debuggee, Launched, launch, launch_piped};
 
 /// the result type for engine operations
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -137,6 +138,23 @@ pub enum Error {
         settle: Duration,
     },
 
+    /// a request that has to be waited for was sent on an [`Interrupt`]
+    ///
+    /// an interrupt reaches a program that is **running**, and everything the
+    /// agent answers is answered on a thread it is already holding. so there is
+    /// exactly one request it can carry, and the rest are refused here rather
+    /// than written into a socket nobody will answer them on
+    #[error(
+        "{request} cannot be sent to a running program: the agent answers a \
+         request on a thread it is holding, and there is none. a pause is the \
+         only request that reaches a running program, because arming one is how \
+         a thread becomes held"
+    )]
+    NotAnInterrupt {
+        /// what was asked for
+        request: &'static str,
+    },
+
     /// the agent said something the engine was not waiting for
     ///
     /// reachable only from an agent newer than this engine, which the handshake
@@ -239,28 +257,59 @@ impl Listener {
     }
 }
 
-/// the control connection to one attached agent
+/// the writing end of a control connection, and what has gone down it
+///
+/// behind a mutex and shared with every [`Interrupt`] taken from the session,
+/// because a frame written by two threads at once is two half frames. the count
+/// lives with the stream for the same reason: it is a statement about what was
+/// sent, and it has to be incremented by whoever sent it
 #[derive(Debug)]
-pub struct Session {
+pub(crate) struct Writing {
     stream: TcpStream,
-    buffer: Vec<u8>,
     requests: u64,
 }
 
+/// the control connection to one attached agent
+///
+/// the reading end belongs to the session and the writing end is shared, so
+/// that a pause can be delivered to a program the session is already waiting on
+#[derive(Debug)]
+pub struct Session {
+    reading: TcpStream,
+    writing: Arc<Mutex<Writing>>,
+    buffer: Vec<u8>,
+}
+
 impl Session {
-    fn attach(stream: TcpStream, token: &[u8; TOKEN_LEN]) -> Result<Self> {
+    fn attach(mut stream: TcpStream, token: &[u8; TOKEN_LEN]) -> Result<Self> {
         stream
             .set_nonblocking(false)
             .map_err(|source| Error::Listen { source })?;
 
-        let mut session = Self {
-            stream,
+        frame::read_handshake(&mut stream, token)?;
+        frame::write_handshake(&mut stream, token)?;
+
+        // one handle for reading and one for writing, on the same socket. the
+        // session blocks on the reading end for as long as the program runs,
+        // and a pause has to be able to reach the agent while it does
+        let reading = stream
+            .try_clone()
+            .map_err(|source| Error::Listen { source })?;
+
+        Ok(Self {
+            reading,
+            writing: Arc::new(Mutex::new(Writing {
+                stream,
+                requests: 0,
+            })),
             buffer: Vec::new(),
-            requests: 0,
-        };
-        frame::read_handshake(&mut session.stream, token)?;
-        frame::write_handshake(&mut session.stream, token)?;
-        Ok(session)
+        })
+    }
+
+    fn writing(&self) -> MutexGuard<'_, Writing> {
+        self.writing.lock().expect(
+            "nothing panics holding the writing end: every path through it is a frame write",
+        )
     }
 
     /// how many requests the engine has sent the agent since it attached
@@ -269,13 +318,13 @@ impl Session {
     /// number is also how many times the debuggee has waited on the debugger. a
     /// feature that claims to cost no round trips is a feature this can be
     /// counted against
-    pub const fn requests_sent(&self) -> u64 {
-        self.requests
+    pub fn requests_sent(&self) -> u64 {
+        self.writing().requests
     }
 
     /// the next thing the agent has to say, or `None` once it has hung up
     pub fn next_event(&mut self) -> Result<Option<FromAgent>> {
-        Ok(message::read(&mut self.stream, &mut self.buffer)?)
+        Ok(message::read(&mut self.reading, &mut self.buffer)?)
     }
 
     /// wait for the agent to report a stop, and say why it stopped
@@ -294,8 +343,95 @@ impl Session {
 
     /// tell the agent to do something
     pub fn send(&mut self, request: &FromEngine) -> Result<()> {
-        message::write(&mut self.stream, request)?;
-        self.requests += 1;
+        write_to(&mut self.writing(), request)
+    }
+
+    /// the shared writing end, for a handle that reaches a running program
+    pub(crate) fn writer(&self) -> Arc<Mutex<Writing>> {
+        Arc::clone(&self.writing)
+    }
+}
+
+fn write_to(writing: &mut Writing, request: &FromEngine) -> Result<()> {
+    message::write(&mut writing.stream, request)?;
+    writing.requests += 1;
+    Ok(())
+}
+
+/// a handle that reaches a debuggee while the engine is waiting for it
+///
+/// every other request the engine makes is answered on a thread the agent is
+/// already holding, so it is sent and waited for on the same thread. the two
+/// things that are about a program which is **running** cannot be: a
+/// [`Request::Pause`] exists precisely for one, and ending it is the answer
+/// when it will not stop on its own. a front end blocked waiting for the
+/// program is exactly the front end that needs both, so they are on a handle of
+/// their own that can be moved to another thread
+///
+/// a pause is *delivered*, not asked: the acknowledgement comes back on the
+/// reading end, where the wait is, and reaches the caller through
+/// [`bpd_core::Reporting::pausing`]
+#[derive(Debug)]
+pub struct Interrupt {
+    writing: Arc<Mutex<Writing>>,
+    child: Arc<Mutex<std::process::Child>>,
+}
+
+impl Interrupt {
+    pub(crate) const fn new(
+        writing: Arc<Mutex<Writing>>,
+        child: Arc<Mutex<std::process::Child>>,
+    ) -> Self {
+        Self { writing, child }
+    }
+
+    /// send a request without waiting for the answer to it
+    ///
+    /// only [`Request::Pause`] can be sent this way, and anything else is
+    /// refused rather than written: the agent answers on a thread it is
+    /// holding, so a request sent to a running program would be answered
+    /// whenever it next happened to stop
+    pub fn deliver(&mut self, request: &Request) -> Result<()> {
+        match request {
+            Request::Pause => write_to(
+                &mut self.writing.lock().expect(
+                    "nothing panics holding the writing end: every path through it is a frame write",
+                ),
+                &FromEngine::Pause,
+            ),
+            other => Err(Error::NotAnInterrupt {
+                request: other.name(),
+            }),
+        }
+    }
+
+    /// end the debuggee, whatever it is doing
+    ///
+    /// the last resort rather than a resume: a program that is running cannot
+    /// be asked anything, so a client that wants to be finished with one has
+    /// nothing else to say. the agent is not told, because there is no thread
+    /// of the debuggee's waiting to be told
+    pub fn terminate(&mut self) -> Result<()> {
+        let mut child = self.child.lock().expect(
+            "nothing panics holding the debuggee: every path through it is a kill or a wait",
+        );
+        // std refuses to signal a child it has already reaped, which is what a
+        // client disconnecting from a program that finished on its own does.
+        // that is the request already satisfied rather than a failure
+        match child.kill() {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::InvalidInput => return Ok(()),
+            Err(source) => {
+                return Err(Error::Spawn {
+                    interpreter: PathBuf::from("the debuggee"),
+                    source,
+                });
+            }
+        }
+        child.wait().map_err(|source| Error::Spawn {
+            interpreter: PathBuf::from("the debuggee"),
+            source,
+        })?;
         Ok(())
     }
 }

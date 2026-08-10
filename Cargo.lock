@@ -84,9 +84,11 @@ name = "bpd"
 version = "0.0.0"
 dependencies = [
  "bpd_core",
+ "bpd_dap",
  "bpd_engine",
  "bpd_test",
  "clap",
+ "serde_json",
 ]
 
 [[package]]
@@ -105,6 +107,16 @@ name = "bpd_core"
 version = "0.0.0"
 dependencies = [
  "bpd_test",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "bpd_dap"
+version = "0.0.0"
+dependencies = [
+ "bpd_core",
  "serde",
  "serde_json",
  "thiserror",

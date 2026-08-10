@@ -33,7 +33,8 @@ pub use exception::{PythonError, TracebackFrame};
 pub use frame::{Frame, FrameId, Scope};
 pub use refusal::Refusal;
 pub use session::{
-    ExceptionBreakpoints, Request, Response, Running, Stack, Threads, Variables, WorldStopped,
+    ExceptionBreakpoints, Reporting, Request, Response, Running, Stack, Threads, Variables,
+    WorldStopped,
 };
 pub use stop::{Holding, Mode, Part, StepKind, Stop, StopReason};
 pub use thread::{Progress, ThreadState, Where, Which};

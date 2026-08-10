@@ -1,6 +1,6 @@
 [package]
-name = "bpd"
-description = "a debugger for python and basedpython"
+name = "bpd_dap"
+description = "the debug adapter protocol front end, over the bpd session core"
 edition = { workspace = true }
 rust-version = { workspace = true }
 version = { workspace = true }
@@ -8,21 +8,12 @@ publish = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 
-[[bin]]
-name = "bpd"
-path = "src/main.rs"
-
 [dependencies]
 bpd_core = { workspace = true }
-bpd_dap = { workspace = true }
-bpd_engine = { workspace = true }
 
-clap = { workspace = true }
-
-[dev-dependencies]
-bpd_test = { workspace = true }
-
+serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true
