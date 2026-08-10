@@ -173,6 +173,26 @@ thread.join()
 touch("finished")
 "#;
 
+/// wait until `thread` has stopped making progress, or say that it never did
+///
+/// for a thread that is about to block in a C call this is the only sound way
+/// to know it has got there: it announces itself *before* the blocking call,
+/// so the announcement is not the event worth waiting for
+fn settled(debuggee: &mut Debuggee, thread: u64) {
+    for _ in 0..100 {
+        let census = debuggee
+            .threads(SETTLE)
+            .expect("the threads were reported on");
+        let state = census
+            .get(thread)
+            .unwrap_or_else(|| panic!("the census left out thread {thread}"));
+        if state.progress == Progress::Still {
+            return;
+        }
+    }
+    panic!("thread {thread} never stopped making progress, so it never parked");
+}
+
 #[test]
 fn another_thread_goes_on_running_while_one_thread_is_held() {
     let source = format!("{PRELUDE}{PROGRESS}");
@@ -629,12 +649,25 @@ fn stopping_the_world_holds_what_it_can_and_never_counts_a_native_thread_as_held
         .mode;
     assert_eq!(before, Mode::NonStop);
 
-    let stopped = debuggee
-        .stop_the_world(stop.stop, Duration::from_secs(10))
-        .expect("the world was stopped");
     let spinner = ident(&fixture, "spinner");
     let flipper = ident(&fixture, "flipper");
     let sleeper = ident(&fixture, "sleeper");
+
+    // `sleeper` touches its file and only *then* calls `gate.acquire()`, so
+    // `wait_for("sleeper_started")` returning does not mean it is parked yet —
+    // for a few bytecodes it is still executing python and stopping the world
+    // would legitimately hold it. that window made this test fail about one run
+    // in six
+    //
+    // the census is what closes it: a thread inside `gate.acquire()` has
+    // released the GIL and its frame cannot advance, so it settles on `Still`
+    // and stays there, while a thread in the window is `Moved`. this waits for
+    // the precondition rather than assuming it
+    settled(&mut debuggee, sleeper);
+
+    let stopped = debuggee
+        .stop_the_world(stop.stop, Duration::from_secs(10))
+        .expect("the world was stopped");
 
     for (name, thread) in [
         ("main", stop.thread),
