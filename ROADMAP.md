@@ -71,10 +71,13 @@ breakpoint is not already solid
 
 **the two front ends**
 
-- [ ] a DAP adapter that vs code drives end to end from a launch configuration.
-      the adapter is built and driven end to end by a test and by `nvim-dap`;
-      vs code needs an extension to contribute the configuration type, and that
-      is what is missing
+- [x] a DAP adapter a real client drives end to end — a breakpoint, the stack,
+      a variable read and written, a step, a resume. driven by a test and by
+      `nvim-dap`, which names the executable in its own configuration
+- [ ] the registration stub vs code needs to name the executable at all. it
+      resolves a configuration's `type` through an extension contributing a
+      `debuggers` entry and offers no way to point at a binary, so without one
+      no vs code user can run `bpd` however complete the adapter is
 - [ ] an MCP server exposing the same session
 - [ ] a parity test that enumerates the capabilities in `bpd_core` and fails if
       either adapter is missing one. the rule is enforced by CI, not by review
@@ -89,7 +92,14 @@ breakpoint is not already solid
 ### explicitly not in the MVP
 
 basedpython source maps, django templates, attach, restart frame, hot module
-reloading, and any editor integration beyond a launch configuration
+reloading, and editor integration beyond a launch configuration
+
+that last exclusion was written before anyone checked what vs code needs, and it
+ruled out the thing that makes a launch configuration work at all. **the
+registration stub is in scope**: an extension that contributes a `debuggers`
+entry naming the executable and nothing else. what stays out is everything
+built *on top* of that — panels, custom views, an inline value renderer, any UI
+of our own
 
 ## before the MVP
 
