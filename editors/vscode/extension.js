@@ -61,7 +61,9 @@ function searched() {
 function onPath(command) {
   const extensions =
     process.platform === "win32"
-      ? (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
+      ? (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD")
+          .split(";")
+          .filter(Boolean)
       : [""];
   for (const directory of searched()) {
     for (const extension of extensions) {

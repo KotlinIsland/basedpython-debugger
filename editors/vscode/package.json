@@ -10,12 +10,16 @@
     "url": "https://github.com/KotlinIsland/basedpythondebugger.git",
     "directory": "editors/vscode"
   },
-  "categories": ["Debuggers"],
+  "categories": [
+    "Debuggers"
+  ],
   "engines": {
     "vscode": "^1.74.0"
   },
   "main": "./extension.js",
-  "activationEvents": ["onDebugResolve:bpd"],
+  "activationEvents": [
+    "onDebugResolve:bpd"
+  ],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
@@ -46,10 +50,14 @@
       {
         "type": "bpd",
         "label": "bpd",
-        "languages": ["python"],
+        "languages": [
+          "python"
+        ],
         "configurationAttributes": {
           "launch": {
-            "required": ["program"],
+            "required": [
+              "program"
+            ],
             "properties": {
               "program": {
                 "type": "string",
