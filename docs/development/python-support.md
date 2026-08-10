@@ -59,11 +59,16 @@ a `Py_GIL_DISABLED` build is a first-class target, not a variant to be handled
 later
 
 the practical consequence is on the agent: nothing in it may be correct only
-because the GIL serialised it. stop coordination, the breakpoint table and the
-event counters are all explicitly synchronised. this is not extra work for
-free-threading — the GIL never protected against a callback running on another
-thread between two operations anyway. free-threading only makes the existing
-bug reproducible
+because the GIL serialised it. the registry of held threads, the breakpoint table
+and the event counters are all explicitly synchronised. this is not extra work
+for free-threading — the GIL never protected against a callback running on
+another thread between two operations anyway. free-threading only makes the
+existing bug reproducible
+
+the same reasoning is why a stop **releases** the GIL rather than holding it. a
+debugger whose threading behaviour depended on which build you had would be a
+capability ladder, and this is the page that says there is not one. see
+[threads](threads.md)
 
 ## what "no compromises" rules out, concretely
 

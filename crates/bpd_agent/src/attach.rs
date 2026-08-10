@@ -1,16 +1,34 @@
 //! the control connection to the engine
 //!
 //! this module is transport only: it connects, it holds the socket, and it
-//! serialises access to it. what a stop *means* is [`crate::session`]'s
-//! problem, because deciding it needs the interpreter and this does not
+//! serialises access to it. what a stop *means* is [`crate::stops`]'s problem,
+//! because deciding it needs the interpreter and this does not
+//!
+//! ## why a thread of its own reads it
+//!
+//! a stop holds one thread and leaves the rest of the program running, so
+//! several threads can be held at once and the engine has to be able to talk to
+//! any of them. if a held thread read the connection itself, a second held
+//! thread would have to wait for the first to be finished with it — and a
+//! thread waiting on the debugger is a thread that is not running, which is the
+//! opposite of what the model promises
+//!
+//! so a rust thread owns the reading end and routes each request to the thread
+//! it is addressed to. it never touches the interpreter: everything that needs
+//! the GIL is answered on a python thread that bpd is already holding, because
+//! evaluating an expression anywhere else would run the program's code on the
+//! wrong thread and quietly report another thread's `threading.current_thread()`
 
 use std::io;
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
+
+use crate::stops;
 
 /// the exit code used when the debugger disappears mid-session
 ///
@@ -19,18 +37,24 @@ use bpd_protocol::{TOKEN_LEN, frame, message};
 /// the thing that was supposed to be watching it has gone
 const ENGINE_LOST: i32 = 70;
 
-/// the live control connection, or nothing before `attach`
-static ATTACHED: Mutex<Option<Attached>> = Mutex::new(None);
+/// the writing end, or nothing before `attach`
+static WRITER: Mutex<Option<TcpStream>> = Mutex::new(None);
 
-#[derive(Debug)]
-struct Attached {
-    stream: TcpStream,
-    buffer: Vec<u8>,
-    target: PathBuf,
-    stopped_at_entry: bool,
-}
+/// the program this agent was asked to run
+static TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-/// connect to the engine and complete the handshake
+/// whether the entry stop has already happened
+static STOPPED_AT_ENTRY: AtomicBool = AtomicBool::new(false);
+
+/// whether the program has finished
+///
+/// the reader thread treats a closed connection as the debugger vanishing,
+/// which is right while the program is running and wrong once it has ended —
+/// the engine closes its end when the session is over, and exiting 70 for that
+/// would report a failure where there was none
+static FINISHED: AtomicBool = AtomicBool::new(false);
+
+/// connect to the engine, complete the handshake, and start reading
 pub(crate) fn attach(endpoint: &str, token_hex: &str, target: PathBuf) -> io::Result<()> {
     let token = decode_token(token_hex)?;
     let mut stream = TcpStream::connect(endpoint)?;
@@ -40,87 +64,84 @@ pub(crate) fn attach(endpoint: &str, token_hex: &str, target: PathBuf) -> io::Re
     frame::write_handshake(&mut stream, &token).map_err(|error| framing(&error))?;
     frame::read_handshake(&mut stream, &token).map_err(|error| framing(&error))?;
 
-    let mut attached = lock();
-    *attached = Some(Attached {
-        stream,
-        buffer: Vec::new(),
-        target,
-        stopped_at_entry: false,
-    });
+    // one handle for reading and one for writing, on the same socket. the
+    // reader blocks for the whole life of the session, and a held thread has to
+    // be able to answer while it does
+    let reading = stream.try_clone()?;
+    *writer() = Some(stream);
+    *lock(&TARGET) = Some(target);
+
+    std::thread::Builder::new()
+        .name("bpd-control".to_string())
+        .spawn(move || read_requests(reading))?;
     Ok(())
 }
 
-fn lock() -> MutexGuard<'static, Option<Attached>> {
-    ATTACHED
+fn lock<T>(mutex: &'static Mutex<T>) -> MutexGuard<'static, T> {
+    mutex
         .lock()
-        .expect("the attach lock is released by `Held` on every path, including the ones that exit")
+        .expect("nothing panics while holding an agent lock: every path through one is a send, a receive, or a field read")
+}
+
+fn writer() -> MutexGuard<'static, Option<TcpStream>> {
+    lock(&WRITER)
 }
 
 /// the program this agent was asked to run
 pub(crate) fn target() -> Option<PathBuf> {
-    lock().as_ref().map(|attached| attached.target.clone())
+    lock(&TARGET).clone()
 }
 
 /// whether the entry stop has already happened
 pub(crate) fn has_stopped_at_entry() -> bool {
-    lock()
-        .as_ref()
-        .is_some_and(|attached| attached.stopped_at_entry)
-}
-
-/// exclusive use of the control connection
-///
-/// held for the whole of a stop, so the engine sees one conversation at a time.
-/// a second thread reaching a breakpoint blocks here until the first is
-/// resumed, and then reports its own stop — which is the honest ordering, not a
-/// claim that both were held
-#[derive(Debug)]
-pub(crate) struct Held {
-    guard: MutexGuard<'static, Option<Attached>>,
-}
-
-/// take the control connection
-pub(crate) fn hold() -> Held {
-    Held { guard: lock() }
+    STOPPED_AT_ENTRY.load(Ordering::Relaxed)
 }
 
 /// record that the entry stop has happened, so it happens once
 pub(crate) fn mark_stopped_at_entry() {
-    let mut attached = lock();
-    let Some(attached) = attached.as_mut() else {
-        unreachable!("the entry stop cannot be reached before `attach` installed the connection");
-    };
-    attached.stopped_at_entry = true;
+    STOPPED_AT_ENTRY.store(true, Ordering::Relaxed);
 }
 
-impl Held {
-    fn attached(&mut self) -> &mut Attached {
-        let Some(attached) = self.guard.as_mut() else {
-            unreachable!("nothing holds the control connection before `attach` installed it");
-        };
-        attached
-    }
+/// the program has ended, so a connection that closes now is not a loss
+pub(crate) fn mark_finished() {
+    FINISHED.store(true, Ordering::Relaxed);
+}
 
-    /// tell the engine something
-    ///
-    /// a write that fails means the engine is gone, and the debuggee does not
-    /// carry on without it
-    pub(crate) fn send(&mut self, message: &FromAgent) {
-        let attached = self.attached();
-        if let Err(error) = message::write(&mut attached.stream, message) {
-            lost(&format!("the control connection failed: {error}"));
-        }
+/// tell the engine something
+///
+/// the connection is taken for the write and released, so nothing holds it
+/// across a stop. a write that fails means the engine is gone, and the debuggee
+/// does not carry on without it
+pub(crate) fn send(message: &FromAgent) {
+    let mut writer = writer();
+    let Some(stream) = writer.as_mut() else {
+        unreachable!("nothing sends on the control connection before `attach` installed it");
+    };
+    if let Err(error) = message::write(stream, message) {
+        drop(writer);
+        lost(&format!("the control connection failed: {error}"));
     }
+}
 
-    /// wait for the engine's next request
-    pub(crate) fn receive(&mut self) -> FromEngine {
-        let attached = self.attached();
-        match message::read::<_, FromEngine>(&mut attached.stream, &mut attached.buffer) {
-            Ok(Some(request)) => request,
+/// read requests for the life of the session and hand each to the thread it
+/// names
+fn read_requests(mut stream: TcpStream) {
+    let mut buffer = Vec::new();
+    loop {
+        match message::read::<_, FromEngine>(&mut stream, &mut buffer) {
+            Ok(Some(request)) => stops::route(request),
             Ok(None) => {
-                lost("the debugger closed the control connection while the program was stopped")
+                if FINISHED.load(Ordering::Relaxed) {
+                    return;
+                }
+                lost("the debugger closed the control connection while the program was running");
             }
-            Err(error) => lost(&format!("the control connection failed: {error}")),
+            Err(error) => {
+                if FINISHED.load(Ordering::Relaxed) {
+                    return;
+                }
+                lost(&format!("the control connection failed: {error}"));
+            }
         }
     }
 }

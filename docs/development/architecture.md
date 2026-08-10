@@ -149,13 +149,25 @@ and a debugger that can corrupt the program it is measuring is not a debugger
 
 ## threads and free-threading
 
-every thread hits callbacks independently. the stop coordination — "one thread
-hit a breakpoint, now suspend the others" — lives in the agent, in native code,
-behind a mutex and a condition variable that do not assume a GIL
+every thread hits callbacks independently, and **a stop holds one of them**. the
+rest of the program keeps running: gdb's non-stop mode, and `bpd`'s default
+
+the agent **releases the GIL for the duration of a stop**, so that is true on a
+gil-enabled build as well as a free-threaded one. otherwise the GIL would be the
+thing deciding the threading behaviour, and "threads keep running, except on the
+interpreter most people have" is a capability ladder. stop-the-world is a mode
+that is asked for explicitly, and it names the threads it could not stop
+
+the registry of held threads, their mailboxes and the parking are native, behind
+mutexes and condition variables that do not assume a GIL. the control connection
+is read by a rust thread that never takes one, because every answer has to be
+computed on the python thread the question is about
 
 free-threaded builds are a target, not a variant to be tested later. anything in
 the agent that would only be correct under the GIL is a bug on every build,
 because the GIL was never the guarantee it looked like
+
+the whole of it, and what it costs, is [threads](threads.md)
 
 ## the python layer
 

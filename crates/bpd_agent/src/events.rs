@@ -31,6 +31,7 @@ struct Handles {
     restart_events: Py<PyAny>,
     get_ident: Py<PyAny>,
     get_frame: Py<PyAny>,
+    get_frames: Py<PyAny>,
     compile: Py<PyAny>,
     eval: Py<PyAny>,
     int_repr: Py<PyAny>,
@@ -79,6 +80,9 @@ pub(crate) fn install(
         get_frame: PyModule::import(python, "sys")?
             .getattr("_getframe")?
             .unbind(),
+        get_frames: PyModule::import(python, "sys")?
+            .getattr("_current_frames")?
+            .unbind(),
         compile: builtins.getattr("compile")?.unbind(),
         eval: builtins.getattr("eval")?.unbind(),
         // the unbound slots, not `str()` and not `repr()`: a subclass is free
@@ -106,19 +110,27 @@ pub(crate) fn disable(python: Python<'_>) -> Bound<'_, PyAny> {
     handles().disable.bind(python).clone()
 }
 
-/// turn `PY_START` on or off for the whole program
+/// set the events armed for the whole program, in one call
 ///
-/// it is on exactly while there is a breakpoint set. it is how a code object is
-/// discovered at all — PEP 669 has no "code object created" event — so a
-/// session that has breakpoints pays one native call per code object first
-/// reached, and a session that has none pays nothing
-pub(crate) fn watch_every_call(python: Python<'_>, watching: bool) -> PyResult<()> {
+/// there are exactly two, and they are set together because `set_events`
+/// replaces the whole mask: turning one on by itself would turn the other off.
+/// a caller that knew about only one of them would silently disarm the other
+///
+/// - `py_start` is on exactly while there is a breakpoint set. it is how a code
+///   object is discovered at all — PEP 669 has no "code object created" event —
+///   so a session with breakpoints pays one native call per code object first
+///   reached, and a session with none pays nothing
+/// - `line` is on only while the world is stopped. it is how a running thread is
+///   caught at all, and it is the whole cost of that mode
+pub(crate) fn watch_globally(python: Python<'_>, py_start: bool, line: bool) -> PyResult<()> {
     let handles = handles();
-    let events = if watching {
-        handles.py_start.bind(python).clone()
-    } else {
-        0i32.into_pyobject(python)?.into_any()
-    };
+    let mut events: u32 = 0;
+    if py_start {
+        events |= handles.py_start.bind(python).extract::<u32>()?;
+    }
+    if line {
+        events |= handles.line.bind(python).extract::<u32>()?;
+    }
     handles
         .set_events
         .bind(python)
@@ -162,6 +174,15 @@ pub(crate) fn restart(python: Python<'_>) -> PyResult<()> {
 /// the interpreter's identity for the calling thread
 pub(crate) fn thread_ident(python: Python<'_>) -> PyResult<u64> {
     handles().get_ident.bind(python).call0()?.extract()
+}
+
+/// the innermost frame of every thread that has one
+///
+/// the only way to see a thread bpd is not holding. what it reports about one
+/// is a sample by construction: the thread is running, and it has moved on by
+/// the time the dictionary is built
+pub(crate) fn current_frames(python: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    handles().get_frames.bind(python).call0()
 }
 
 /// the python frame that is running right now

@@ -106,7 +106,7 @@ fn stop_at(debuggee: &mut Debuggee, file: &Path, line: u32) {
     bound(&resolved);
 
     match debuggee.run(unlogged).expect("the debuggee was resumed") {
-        Running::Stopped { reason, .. } => match reason {
+        Running::Stopped { stop, .. } => match stop.reason {
             StopReason::Breakpoint {
                 breakpoints,
                 line: at,
@@ -120,6 +120,9 @@ fn stop_at(debuggee: &mut Debuggee, file: &Path, line: u32) {
         Running::Exited { status, .. } => {
             panic!("it exited with {status} instead of stopping")
         }
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
+        }
     }
 }
 
@@ -130,7 +133,10 @@ fn to_exit(debuggee: &mut Debuggee) {
         .expect("the breakpoint set was cleared");
     match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Exited { status, .. } => assert!(status.success(), "it exited with {status}"),
-        Running::Stopped { reason, .. } => panic!("nothing is set, and it stopped for {reason:?}"),
+        Running::Stopped { stop, .. } => panic!("nothing is set, and it stopped for {stop:?}"),
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
+        }
     }
 }
 
@@ -181,7 +187,7 @@ fn the_stack_at_the_entry_stop_is_the_programs_own_and_holds_nothing_of_bpds() {
     let fixture = Fixture::new("state", STATE);
     let mut debuggee = launch(&fixture);
 
-    let stack = debuggee.stack(None).expect("the stack was answered");
+    let stack = debuggee.the_stack(None).expect("the stack was answered");
 
     // the interpreter was entered through `python -c "import bpd_agent;
     // bpd_agent.main()"`, so the module frame's `f_back` is that bootstrap.
@@ -209,7 +215,7 @@ fn a_stack_is_the_call_chain_of_the_thread_that_stopped() {
     let mut debuggee = launch(&fixture);
     stop_at(&mut debuggee, &fixture.path(), at_line);
 
-    let stack = debuggee.stack(None).expect("the stack was answered");
+    let stack = debuggee.the_stack(None).expect("the stack was answered");
     assert_eq!(
         stack
             .frames
@@ -235,7 +241,7 @@ fn a_stack_is_the_call_chain_of_the_thread_that_stopped() {
     }
 
     // asking for fewer never hides that there are more
-    let cut = debuggee.stack(Some(2)).expect("the stack was answered");
+    let cut = debuggee.the_stack(Some(2)).expect("the stack was answered");
     assert_eq!(cut.frames.len(), 2);
     assert_eq!(cut.depth, 4);
 
@@ -515,7 +521,11 @@ fn a_frame_id_from_a_stop_that_has_ended_is_refused() {
     let at_line = line_of(STATE, "marker = total");
     let mut debuggee = launch(&fixture);
 
-    let entry = debuggee.stack(None).expect("the stack was answered").frames[0].id;
+    let entry = debuggee
+        .the_stack(None)
+        .expect("the stack was answered")
+        .frames[0]
+        .id;
     stop_at(&mut debuggee, &fixture.path(), at_line);
 
     let refusal = debuggee
@@ -523,8 +533,9 @@ fn a_frame_id_from_a_stop_that_has_ended_is_refused() {
         .expect_err("that frame belonged to the entry stop");
     let said = refusal.to_string();
     assert!(
-        said.contains("frame 0 of stop 1") && said.contains("stop 2"),
-        "the refusal has to name both stops, and said {said}"
+        said.contains("frame 0 of stop 1") && said.contains("[2]"),
+        "the refusal has to name the stale frame and what is held now, and said \
+         {said}"
     );
 
     // and a depth that does not exist is refused rather than answered about
@@ -590,8 +601,11 @@ fn a_stack_holds_no_frame_of_bpds_even_where_an_expression_of_bpds_just_ran() {
         .expect("the breakpoint request was answered");
 
     let reason = match debuggee.run(unlogged).expect("the debuggee was resumed") {
-        Running::Stopped { reason, .. } => reason,
+        Running::Stopped { stop, .. } => stop.reason,
         Running::Exited { status, .. } => panic!("it ran to {status} instead of stopping"),
+        Running::Finishing { threads, .. } => {
+            panic!("nothing was held, and the debuggee ended holding {threads:?}")
+        }
     };
     let StopReason::EvaluationFailed { error, .. } = &reason else {
         panic!("expected the failure to be reported, got {reason:?}")
@@ -606,7 +620,7 @@ fn a_stack_holds_no_frame_of_bpds_even_where_an_expression_of_bpds_just_ran() {
         "the exception carries where the debugger's expression got to"
     );
 
-    let stack = debuggee.stack(None).expect("the stack was answered");
+    let stack = debuggee.the_stack(None).expect("the stack was answered");
     assert_eq!(
         stack
             .frames

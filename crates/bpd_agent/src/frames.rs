@@ -26,24 +26,30 @@
 //!
 //! ## what a stop claims about the other threads
 //!
-//! nothing. only the thread that hit the event is held, so the others still
-//! have frames of their own that are moving. there is no request here that
-//! reports them, because a stack read off a running thread is a description of
-//! a moment that has already gone
+//! a stop holds one thread, and every other thread in the process goes on
+//! running unless the world has been stopped explicitly. so the held thread's
+//! **stack** is a snapshot either way — it is inside a monitoring callback and
+//! cannot return, so its frames cannot go away underneath the walk — and
+//! everything the frames point *at* is a sample. every answer here carries the
+//! mode it was taken in for exactly that reason
+//!
+//! there is still no request here that walks a thread bpd is not holding: its
+//! frames are moving, and a stack read off one would be a description of a
+//! moment that has already gone. where a running thread is, stated as the
+//! sample it is, is [`crate::threads`]
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use bpd_protocol::message::{
-    Detail, Entry, Evaluated, Frame, FrameId, FromAgent, Omitted, Refusal, Scope,
+    Detail, Entry, Evaluated, Frame, FrameId, FromAgent, Holding, Omitted, Refusal, Scope, Where,
 };
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::conditions::{self, capture};
-use crate::events;
 use crate::values::Reader;
+use crate::{events, world};
 
 /// `CO_OPTIMIZED` — the frame keeps its locals in slots the compiler assigned
 ///
@@ -58,8 +64,21 @@ const CO_OPTIMIZED: u32 = 0x1;
 /// frame of the process and is alive for exactly that long anyway
 static BOOTSTRAP: OnceLock<Py<PyAny>> = OnceLock::new();
 
-/// how many stops there have been
-static STOPS: AtomicU64 = AtomicU64::new(0);
+/// the filenames cpython gives the import machinery's own frames
+///
+/// the import system is frozen into the interpreter and its code objects carry
+/// these names. matching on them is how the one lock cpython makes knowable is
+/// found — there is no api that says "this thread is importing" — and
+/// `the_import_machinery_runs_in_frames_named_after_itself` pins the names in a
+/// bare interpreter so a rename in cpython fails a test rather than silently
+/// turning the detection off
+const IMPORT_MACHINERY: [&str; 2] = [
+    "<frozen importlib._bootstrap>",
+    "<frozen importlib._bootstrap_external>",
+];
+
+/// the import machinery's own frame that knows which module is being imported
+const IMPORTING: &str = "_find_and_load";
 
 /// remember the frame the agent was entered from, so no stack ever reports it
 ///
@@ -83,13 +102,56 @@ pub(crate) struct Stopped<'py> {
     walked: Option<Vec<Bound<'py, PyAny>>>,
 }
 
-/// begin a stop, taking the next stop number
-pub(crate) fn begin(python: Python<'_>) -> Stopped<'_> {
+/// begin a stop against the number it was registered under
+pub(crate) const fn begin(python: Python<'_>, stop: u64) -> Stopped<'_> {
     Stopped {
         python,
-        stop: STOPS.fetch_add(1, Ordering::Relaxed) + 1,
+        stop,
         walked: None,
     }
+}
+
+/// whether a frame is the one the agent entered the program from
+pub(crate) fn is_bootstrap(frame: &Bound<'_, PyAny>) -> bool {
+    BOOTSTRAP
+        .get()
+        .is_some_and(|entry| frame.is(entry.bind(frame.py())))
+}
+
+/// what the thread about to be held is holding that others can wait for
+///
+/// walked once, at the stop, because that is when it is true. it costs a walk
+/// of a stack that is about to be walked anyway, and the stop is already a
+/// round trip to the engine, so it is not on any path that has to be cheap
+pub(crate) fn holding(python: Python<'_>) -> PyResult<Vec<Holding>> {
+    let mut holding = Vec::new();
+    let mut importing = None;
+    let mut inside_import = false;
+
+    for frame in walk(python)? {
+        let code = frame.getattr("f_code")?;
+        let file: String = code.getattr("co_filename")?.extract()?;
+        if !IMPORT_MACHINERY.contains(&file.as_str()) {
+            continue;
+        }
+        inside_import = true;
+
+        // the outermost `_find_and_load` of the walk is the import the program
+        // asked for, and the ones under it are its dependencies. the last one
+        // seen wins because the walk is innermost first
+        let qualname: String = code.getattr("co_qualname")?.extract()?;
+        if qualname == IMPORTING {
+            let named = frame.getattr("f_locals")?.get_item("name");
+            if let Ok(name) = named {
+                importing = name.extract::<String>().ok();
+            }
+        }
+    }
+
+    if inside_import {
+        holding.push(Holding::ImportSystem { module: importing });
+    }
+    Ok(holding)
 }
 
 impl<'py> Stopped<'py> {
@@ -121,17 +183,21 @@ impl<'py> Stopped<'py> {
         Ok(FromAgent::Stack {
             frames: described,
             depth,
+            mode: world::mode(),
         })
     }
 
     /// the frame an id names, or the refusal that says why there is none
+    ///
+    /// the stop half of the id is not checked here, because it is what decided
+    /// this stop would be asked at all: a request is routed to the thread the
+    /// id's stop is holding, and an id from a stop that has ended is refused
+    /// before it ever reaches one
     fn frame(&mut self, id: FrameId) -> PyResult<Result<Bound<'py, PyAny>, Refusal>> {
-        if id.stop != self.stop {
-            return Ok(Err(Refusal::StaleFrame {
-                frame: id,
-                stop: self.stop,
-            }));
-        }
+        debug_assert_eq!(
+            id.stop, self.stop,
+            "a request reached the stop it was not addressed to"
+        );
         let frames = self.frames()?;
         match frames.get(id.depth as usize) {
             Some(frame) => Ok(Ok(frame.clone())),
@@ -200,6 +266,7 @@ impl<'py> Stopped<'py> {
             unbound: read.unbound,
             unreadable: read.unreadable,
             omitted,
+            mode: world::mode(),
         })
     }
 
@@ -264,7 +331,10 @@ impl<'py> Stopped<'py> {
                 error: capture(self.python, &error),
             },
         };
-        Ok(FromAgent::Evaluated { result })
+        Ok(FromAgent::Evaluated {
+            result,
+            mode: world::mode(),
+        })
     }
 
     /// write a variable of a frame, and report what the frame holds afterwards
@@ -325,7 +395,10 @@ impl<'py> Stopped<'py> {
                 error: capture(self.python, &error),
             },
         };
-        Ok(FromAgent::Evaluated { result })
+        Ok(FromAgent::Evaluated {
+            result,
+            mode: world::mode(),
+        })
     }
 }
 
@@ -355,6 +428,19 @@ fn describe(frame: &Bound<'_, PyAny>, id: FrameId) -> PyResult<Frame> {
         line: frame.getattr("f_lineno")?.extract()?,
         function: code.getattr("co_qualname")?.extract()?,
         first_line: code.getattr("co_firstlineno")?.extract()?,
+    })
+}
+
+/// where one frame is, without a frame id — there is no stop behind it
+///
+/// what a thread bpd is **not** holding gets, because a frame id is a handle
+/// that stays valid for a stop and a running thread's frame has no such promise
+pub(crate) fn describe_where(frame: &Bound<'_, PyAny>) -> PyResult<Where> {
+    let code = frame.getattr("f_code")?;
+    Ok(Where {
+        file: code.getattr("co_filename")?.extract()?,
+        line: frame.getattr("f_lineno")?.extract()?,
+        function: code.getattr("co_qualname")?.extract()?,
     })
 }
 

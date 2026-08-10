@@ -18,7 +18,10 @@ mod files;
 mod frames;
 mod run;
 mod session;
+mod stops;
+mod threads;
 mod values;
+mod world;
 
 use bpd_protocol::message::StopReason;
 use pyo3::exceptions::PyImportError;
@@ -45,7 +48,7 @@ const TOOL_NAME: &str = "bpd";
 mod bpd_agent {
     use super::{
         BUILT_FOR, DEBUGGER_TOOL_ID, TOOL_NAME, arm, attach, frames, monitoring, run,
-        running_version,
+        running_version, session,
     };
     use pyo3::exceptions::{PyImportError, PyRuntimeError, PySystemExit};
     use pyo3::prelude::*;
@@ -91,10 +94,17 @@ mod bpd_agent {
         // frame to call one, so the frame running right now is the bootstrap's
         frames::remember_bootstrap(python)?;
 
-        match run::script(python, &as_given, &target) {
+        let outcome = match run::script(python, &as_given, &target) {
             Ok(()) => Ok(()),
             Err(error) => Err(run::report_uncaught(python, error)),
-        }
+        };
+
+        // the program is over on every path out of here, including the ones
+        // that exit. anything still held has to be named before the interpreter
+        // starts finalizing, because a held thread cannot be joined and the
+        // process would stop there with nothing having said why
+        session::finishing();
+        outcome
     }
 
     /// read a variable the launcher is contracted to have set
@@ -193,7 +203,7 @@ fn arm(python: Python<'_>) -> PyResult<()> {
         wrap_pyfunction!(on_py_start, python)?.as_any(),
         wrap_pyfunction!(on_line, python)?.as_any(),
     )?;
-    events::watch_every_call(python, true)
+    events::watch_globally(python, true, false)
 }
 
 /// the `PY_START` callback, called by the interpreter with no python frame in
@@ -226,7 +236,7 @@ fn on_py_start<'py>(
             // that also means a rebinding pass here would have nothing to say,
             // because the set was resolved with this file already registered
             attach::mark_stopped_at_entry();
-            session::stop(python, StopReason::Entry)?;
+            session::stop(python, events::thread_ident(python)?, StopReason::Entry)?;
             return Ok(events::disable(python));
         }
     }
@@ -258,6 +268,13 @@ fn on_line<'py>(
     }
 
     let Some(plans) = breakpoints::hit(code.as_ptr() as usize, line) else {
+        // the world is stopped, so this thread is caught here and held rather
+        // than told never to offer the line again: it is the only chance there
+        // is to catch it, and disabling the line would throw that away
+        if world::parking() {
+            world::park(python, events::thread_ident(python)?);
+            return Ok(python.None().into_bound(python));
+        }
         return Ok(events::disable(python));
     };
 
@@ -298,24 +315,31 @@ fn on_line<'py>(
     if let Some((breakpoint, raised)) = failure {
         session::stop(
             python,
+            thread,
             StopReason::EvaluationFailed {
                 breakpoint,
                 part: raised.part,
                 expression: raised.expression,
                 file,
                 line,
-                thread,
                 error: raised.error,
             },
         )?;
-    } else if !stopping.is_empty() {
+    } else if stopping.is_empty() {
+        // nothing on this line decided to stop, so a stopped world still has to
+        // catch the thread here — otherwise a line that holds a breakpoint
+        // whose condition was false would be the one place a thread escapes
+        if world::parking() {
+            world::park(python, thread);
+        }
+    } else {
         session::stop(
             python,
+            thread,
             StopReason::Breakpoint {
                 breakpoints: stopping,
                 file,
                 line,
-                thread,
             },
         )?;
     }

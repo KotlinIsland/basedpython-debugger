@@ -145,42 +145,44 @@ the stopped-state half is done: frames, the stack, scopes, values and
 evaluation — see [reading a stopped program](docs/development/state.md).
 stepping and exception breakpoints remain
 
-**the thread model is decided.** a stop stops **one thread**, and every other
+**the thread model is built.** a stop holds **one thread**, and every other
 thread keeps running. gdb calls this non-stop mode and DAP exposes it as
 `supportsSingleThreadExecutionRequests`; it is the mode that lets a live server
 keep serving while one handler is inspected
 
 it applies on **every build**, not only free-threaded ones. the agent releases
-the GIL while stopped, so a gil build behaves the same way rather than freezing
-the process by accident — this project does not ship a capability ladder, and
-"threads keep running, except on the interpreter most people have" is one
+the GIL for the duration of a stop, so a gil build behaves the same way rather
+than freezing the process by accident — this project does not ship a capability
+ladder, and "threads keep running, except on the interpreter most people have"
+is one
 
-stop-the-world stays available as an explicit mode, because a coherent view of a
-data structure needs it
+stop-the-world is available as an explicit mode, because a coherent view of a
+data structure needs it, and it names the threads it could not stop rather than
+counting a thread parked in a C call as held
 
-what that costs, and what has to be built around it:
+what it costs is not hidden:
 
-- **the stopped thread still holds its locks.** stopping inside `with lock:`,
-    inside `logging`, or mid-import blocks every other thread that wants the
-    same lock. "all threads keep running" quietly becomes "all threads are piled
-    up behind the debugger", and it looks like `bpd` hanging when it is the
-    debuggee deadlocked on itself. it has to be detected and reported, not
-    discovered
-- **a read is a sample, not a snapshot.** read a container's length and then its
-    contents while another thread mutates it, and the answer describes a state
-    the program was never in. every read carries the mode it was taken in, the
-    same rule already applied to a timed out control call
-- **the program can exit while a thread is stopped.** another thread finishing
-    starts interpreter finalization underneath the one being held
-- **concurrent stops need somewhere to go.** today a second thread reaching a
-    breakpoint blocks on the control connection, so it is not running either.
-    stops queue, and resume is per thread
+- **the held thread still holds its locks.** the import lock is the one cpython
+    makes knowable, because its machinery runs in python frames, and a stop
+    inside one says which module it is holding. cpython exposes **no owner for
+    any other lock**, so that is not claimed — what is reported instead is the
+    other end of it: a census saying which threads got nowhere between two
+    samples, and where
+- **a read is a sample, not a snapshot.** every read carries the mode it was
+    taken in. the one thing that is a snapshot in either mode is the held
+    thread's own stack, which cannot be torn down while it is held
+- **the program can end while a thread is held.** it cannot exit — finalization
+    joins non-daemon threads — so the agent says which threads are still held
+    rather than leaving a process that looks like a hang
+- **concurrent stops queue.** a second thread reaching a breakpoint reports its
+    own stop immediately, and resume names the threads it means
 
-the state half has landed: frames and frame identity, the stack, the four scopes
-a frame really has, writing a variable the program then goes on to use, values,
-object graph expansion under a budget that says what it left out, and expression
-evaluation. execution control — stepping and exception breakpoints — has not.
-see [the stopped state](docs/development/state.md)
+the state half has landed too: frames and frame identity, the stack, the four
+scopes a frame really has, writing a variable the program then goes on to use,
+values, object graph expansion under a budget that says what it left out, and
+expression evaluation. execution control — stepping and exception breakpoints —
+has not. see [the stopped state](docs/development/state.md) and
+[threads](docs/development/threads.md)
 
 ### M4 — DAP
 
