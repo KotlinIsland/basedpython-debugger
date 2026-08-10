@@ -222,8 +222,8 @@ fn a_query_answers_in_one_call_what_the_tree_walk_answers_in_four() {
         panic!("`total * 2` raised: {:?}", described.state.values[0])
     };
     assert_eq!(text_of(value), "20");
-    assert_eq!(described.state.frames[0].frame.function, "work");
-    assert_eq!(described.state.frames[1].frame.function, "main");
+    assert_eq!(described.state.frames[0].frame.name(), "work");
+    assert_eq!(described.state.frames[1].frame.name(), "main");
 
     assert_eq!(finish(&mut debuggee, &fixture), "60 70");
 }

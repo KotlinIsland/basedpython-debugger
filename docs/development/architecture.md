@@ -14,7 +14,7 @@ that was designed
   │  bpd_dap        │       bpd_mcp    │   adapters, no logic
   ├────────────────────────────────────┤
   │            bpd_core                │   the vocabulary, and Request/Response
-  │   bpd_sourcemap    bpd_django      │   locations in, locations out
+  │            bpd_sourcemap          │   locations in, locations out
   ├────────────────────────────────────┤
   │            bpd_engine              │   owns targets, answers requests
   └───────────────┬────────────────────┘

@@ -97,6 +97,11 @@ fn at(file: &Path, lines: &[(u32, u32)]) -> Vec<SourceBreakpoint> {
 fn bound(resolved: &Resolved) -> (u32, &[Site]) {
     match &resolved.binding {
         Binding::Bound { line, sites, .. } => (*line, sites),
+        Binding::BoundInTemplate { line, nodes, .. } => panic!(
+            "breakpoint {} bound to line {line} of a django template, in \
+             {nodes:?}, and this asked about a python binding",
+            resolved.id
+        ),
         Binding::Unbound { reason } => {
             panic!("breakpoint {} did not bind: {reason}", resolved.id)
         }
@@ -109,6 +114,11 @@ fn unbound(resolved: &Resolved) -> &Unbound {
         Binding::Unbound { reason } => reason,
         Binding::Bound { line, sites, .. } => panic!(
             "breakpoint {} bound to line {line} in {sites:?}, and was not supposed to",
+            resolved.id
+        ),
+        Binding::BoundInTemplate { line, nodes, .. } => panic!(
+            "breakpoint {} bound to line {line} of a django template, in \
+             {nodes:?}, and was not supposed to bind at all",
             resolved.id
         ),
     }
@@ -478,7 +488,7 @@ MARKS.write_text("after")
     // unbound, because nothing has compiled it yet
     let reason = unbound(&resolved[0]);
     assert!(
-        matches!(reason, Unbound::NotLoaded { file } if file == &late),
+        matches!(reason, Unbound::NotLoaded { file, .. } if file == &late),
         "expected the module to be reported as not loaded, got {reason}"
     );
 
@@ -570,7 +580,7 @@ fn a_file_the_interpreter_never_loads_binds_nothing_and_says_which() {
 
     let reason = unbound(&resolved[0]);
     assert!(
-        matches!(reason, Unbound::NotLoaded { file } if file == &never),
+        matches!(reason, Unbound::NotLoaded { file, .. } if file == &never),
         "a real file nothing imports is not loaded, and got {reason}"
     );
 
@@ -716,6 +726,9 @@ fn a_path_that_differs_only_in_case_is_never_bound_to_a_different_file() {
             matches!(reason, Unbound::Unresolvable { .. }),
             "the filesystem says that path is not there, and got {reason}"
         ),
+        Binding::BoundInTemplate { nodes, .. } => {
+            panic!("a python file bound as a django template, in {nodes:?}")
+        }
     }
 
     finish(debuggee);

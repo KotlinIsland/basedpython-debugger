@@ -123,7 +123,9 @@ fn unlogged(record: LogRecord) {
 /// how a breakpoint's condition will be answered, or the reason it did not bind
 fn evaluation(resolved: &Resolved) -> Evaluation {
     match &resolved.binding {
-        Binding::Bound { evaluation, .. } => *evaluation,
+        Binding::Bound { evaluation, .. } | Binding::BoundInTemplate { evaluation, .. } => {
+            *evaluation
+        }
         Binding::Unbound { reason } => {
             panic!("breakpoint {} did not bind: {reason}", resolved.id)
         }
@@ -134,7 +136,7 @@ fn evaluation(resolved: &Resolved) -> Evaluation {
 fn unbound(resolved: &Resolved) -> &Unbound {
     match &resolved.binding {
         Binding::Unbound { reason } => reason,
-        Binding::Bound { line, .. } => panic!(
+        Binding::Bound { line, .. } | Binding::BoundInTemplate { line, .. } => panic!(
             "breakpoint {} bound to line {line}, and was not supposed to",
             resolved.id
         ),

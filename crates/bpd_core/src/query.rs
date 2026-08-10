@@ -30,7 +30,7 @@
 //! different variables
 
 use crate::exception::PythonError;
-use crate::frame::{Frame, Scope};
+use crate::frame::{Frame, FrameKind, Scope};
 use crate::stop::{Mode, StopReason};
 use crate::thread::Where;
 use crate::value::{Content, Detail, Entry, Evaluated, Omitted, Value};
@@ -821,7 +821,7 @@ fn place(frame: &Frame) -> Where {
     Where {
         file: frame.file.clone(),
         line: frame.line,
-        function: frame.function.clone(),
+        function: frame.name().to_string(),
     }
 }
 
@@ -830,7 +830,26 @@ fn place(frame: &Frame) -> Where {
 /// the line is deliberately not part of it: a frame that has moved on to another
 /// line is the same frame, and that it moved is the whole point of a diff
 fn same_code(one: &Frame, other: &Frame) -> bool {
-    one.file == other.file && one.function == other.function && one.first_line == other.first_line
+    one.file == other.file
+        && match (&one.kind, &other.kind) {
+            (
+                FrameKind::Python {
+                    function,
+                    first_line,
+                },
+                FrameKind::Python {
+                    function: other_function,
+                    first_line: other_first_line,
+                },
+            ) => function == other_function && first_line == other_first_line,
+            // a template frame has no code object for two of them to be the
+            // same one. what makes it comparable across stops is the template it
+            // renders, which `file` has already said. the node is deliberately
+            // not part of it: moving from one node of a template to another is
+            // the movement a diff exists to report, not a different frame
+            (FrameKind::Template { .. }, FrameKind::Template { .. }) => true,
+            (FrameKind::Python { .. } | FrameKind::Template { .. }, _) => false,
+        }
 }
 
 fn compare_expressions(difference: &mut Difference, before: &State, after: &State) {
@@ -1100,8 +1119,10 @@ mod tests {
             id: FrameId { stop: 1, depth },
             file: "/tmp/a.py".to_string(),
             line,
-            function: function.to_string(),
-            first_line: 1,
+            kind: FrameKind::Python {
+                function: function.to_string(),
+                first_line: 1,
+            },
         }
     }
 

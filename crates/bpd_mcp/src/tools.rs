@@ -599,21 +599,57 @@ pub fn tools() -> Vec<Tool> {
             ),
         },
         Tool {
+            name: "template_context",
+            title: "read a django template frame's context, layer by layer",
+            description: "the template equivalent of `variables`, and the only \
+                thing that reads a django template frame — one is \
+                **synthesised**, the interpreter has no frame for it, and it \
+                has no python scopes at all. `stack` says which frames are \
+                which: a frame whose `kind` is `template` is one of these, and \
+                its `python_frame` is the frame underneath where python is \
+                read.\n\n\
+                `django.template.Context` is a **stack of dicts** and is \
+                reported as one, never merged: django resolves a name by \
+                walking the layers from the last backwards, so a name in two \
+                layers is a shadowing that decides what the template renders — \
+                and that is usually what is being debugged. layer 0 is django's \
+                builtins, layer 1 is the dictionary the render was given, and \
+                every `{% block %}`, `{% with %}`, `{% for %}` or \
+                `{% include ... with %}` that is open adds one."
+                .to_string(),
+            schema: object(
+                serde_json::json!({
+                    "stop": integer(STOP),
+                    "frame": integer(FRAME),
+                    "detail": detail(),
+                }),
+                &[],
+            ),
+        },
+        Tool {
             name: "evaluate",
-            title: "evaluate a python expression in a frame",
+            title: "evaluate an expression in a frame",
             description: "compiled at the request and evaluated against the \
                 frame's own globals and locals, which is what `LOAD_NAME` sees. \
                 **this runs the program's own code**, by request.\n\n\
                 an expression that raises, and one that does not compile, are \
                 both answers carrying the exception rather than failures: the \
                 interpreter is the authority on what an expression is. this \
-                thread's breakpoints are suppressed while it runs."
+                thread's breakpoints are suppressed while it runs.\n\n\
+                **the frame decides the language.** against a frame whose `kind` \
+                is `template` the text is django template syntax, not python, \
+                and django resolves it: `a.b` is a dictionary key before it is \
+                an attribute, a name holding a callable is **called**, and \
+                `x|upper` is a filter. that is what the same text means where \
+                the user is looking. for python in a template frame, name the \
+                `python_frame` the stack reports beside it."
                 .to_string(),
             schema: {
                 let mut properties = frame_properties();
                 properties["expression"] = serde_json::json!({
                     "type": "string",
-                    "description": "the expression, as python",
+                    "description": "the expression. python in a python frame, \
+                                    and django template syntax in a template one",
                 });
                 object(properties, &["expression"])
             },

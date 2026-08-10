@@ -205,6 +205,7 @@ pub(crate) fn route(request: FromEngine) {
             Address::Stop(*stop)
         }
         FromEngine::Variables { frame, .. }
+        | FromEngine::TemplateContext { frame, .. }
         | FromEngine::Evaluate { frame, .. }
         | FromEngine::Source { frame, .. }
         | FromEngine::SetVariable { frame, .. } => Address::Frame(*frame),

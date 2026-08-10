@@ -18,6 +18,7 @@
 pub mod agent;
 pub mod alloc;
 pub mod debuggee;
+pub mod django;
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;

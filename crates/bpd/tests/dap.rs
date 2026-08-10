@@ -441,6 +441,10 @@ fn an_editor_can_ask_what_changed_between_two_stops() {
         before["body"]["state"]["frames"][0]["frame"]["function"],
         "work"
     );
+    assert_eq!(
+        before["body"]["state"]["frames"][0]["frame"]["kind"], "python",
+        "a frame says what it is, so nothing reads a synthesised one as real"
+    );
 
     // one step, and the line the program is on has run: `doubled` was unbound
     // and now holds a number

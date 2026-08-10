@@ -49,6 +49,27 @@ pub enum Handle {
     /// a frame of a held thread's stack
     Frame(FrameId),
 
+    /// a django template frame of a held thread's stack
+    ///
+    /// a separate handle rather than a flag beside [`Handle::Frame`], because
+    /// what a client may do with one is different: it has no python scopes, its
+    /// variables are a layered template context, and an expression evaluated in
+    /// it is template syntax. DAP has one `frameId` for both, so the handle is
+    /// where the difference is kept
+    TemplateFrame(FrameId),
+
+    /// one layer of a template frame's django context
+    ///
+    /// `Context.dicts` is a stack, and each layer is offered as its own DAP
+    /// scope. merging them would hide which layer holds a name, which is what
+    /// decides the render
+    TemplateLayer {
+        /// which template frame
+        frame: FrameId,
+        /// which layer of its context, counting from zero at the outermost
+        index: u32,
+    },
+
     /// one scope of one frame
     Scope {
         /// which frame
@@ -90,9 +111,11 @@ impl Handle {
     /// anything the moment that thread is resumed
     pub const fn stop(&self) -> u64 {
         match self {
-            Self::Frame(frame) | Self::Scope { frame, .. } | Self::Nested { frame, .. } => {
-                frame.stop
-            }
+            Self::Frame(frame)
+            | Self::TemplateFrame(frame)
+            | Self::Scope { frame, .. }
+            | Self::Nested { frame, .. }
+            | Self::TemplateLayer { frame, .. } => frame.stop,
             Self::Stored { stop, .. } => *stop,
         }
     }

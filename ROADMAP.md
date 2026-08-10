@@ -382,11 +382,20 @@ emit a source map with provenance for generated lines and a hash of both
 artefacts. that work is in basedpython, not here. until it lands, `bpd` debugs
 the generated python and says that is what it is doing
 
-### M7 — django templates
+### M7 — django templates · done
 
 template frames, template context and template expression evaluation, per
-[django templates](docs/development/django-templates.md), with a loud refusal
-when the template engine is not in debug mode
+[django templates](docs/development/django-templates.md)
+
+there is **no debug-mode refusal**. the design expected one, and measuring
+django found nothing to refuse: `Parser.extend_nodelist` sets `node.token` and
+`node.origin` unconditionally, and the engine's `debug` option only chooses a
+lexer that additionally records a character position bpd never reads. the test
+suite runs the whole fixture with the option on and off and requires the same
+answer
+
+what is left out is named on that page. the largest is that stepping from a
+template frame steps the python underneath it rather than node to node
 
 ### M8 — attach
 

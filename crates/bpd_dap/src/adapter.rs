@@ -596,8 +596,14 @@ impl Adapter {
             .skip(start)
             .map(|frame| {
                 serde_json::json!({
-                    "id": self.handles.add(Handle::Frame(frame.id)),
-                    "name": frame.function,
+                    // which handle it gets is decided here, from the frame's own
+                    // kind, so nothing downstream has to guess whether a
+                    // `frameId` names a frame the interpreter really has
+                    "id": self.handles.add(match frame.kind {
+                        bpd_core::FrameKind::Python { .. } => Handle::Frame(frame.id),
+                        bpd_core::FrameKind::Template { .. } => Handle::TemplateFrame(frame.id),
+                    }),
+                    "name": frame.name(),
                     "line": frame.line,
                     "column": 1,
                     "source": source_of(&frame.file),
@@ -715,6 +721,10 @@ impl Adapter {
             .ok_or("a `scopes` request arrived with no `frameId`")?;
         let frame = match self.handles.get(reference) {
             Some(Handle::Frame(frame)) => *frame,
+            // a django template frame's scopes are the layers of its template
+            // context, one DAP scope each. it is the same tree walk a client
+            // already does, over the thing a template frame actually has
+            Some(Handle::TemplateFrame(frame)) => return self.template_scopes(message, *frame),
             Some(other) => {
                 return Err(Aborted::Refuse(format!(
                     "{reference} names {other:?}, not a frame"
@@ -745,6 +755,59 @@ impl Adapter {
             })
         })
         .collect();
+
+        self.respond(message, Some(serde_json::json!({ "scopes": scopes })))?;
+        Ok(())
+    }
+
+    /// the layers of a template frame's django context, as DAP scopes
+    ///
+    /// the context is read here rather than counted from somewhere else,
+    /// because how many layers there are is a fact about the render and there is
+    /// nowhere else it is written down. the values are read again when a client
+    /// opens one, exactly as a python scope's are
+    fn template_scopes(&mut self, message: &Incoming, frame: FrameId) -> Answered {
+        let detail = self.configuration().variables;
+        let context = match self.ask(Request::TemplateContext { frame, detail })? {
+            Response::TemplateContext(context) => context,
+            other => unreachable!("a template context was answered with {other:?}"),
+        };
+
+        let shadowed = context.shadowed();
+        let scopes: Vec<serde_json::Value> = context
+            .layers
+            .iter()
+            .map(|layer| {
+                let hidden: Vec<&str> = shadowed
+                    .iter()
+                    .filter(|name| {
+                        name.layers.contains(&layer.index)
+                            && name.layers.last() != Some(&layer.index)
+                    })
+                    .map(|name| name.name.as_str())
+                    .collect();
+                let named = if hidden.is_empty() {
+                    format!("template layer {}", layer.index)
+                } else {
+                    // a name an inner layer shadows is not the value the
+                    // template renders, and DAP has nowhere else to say so
+                    format!(
+                        "template layer {} — shadowed here: {}",
+                        layer.index,
+                        hidden.join(", ")
+                    )
+                };
+                serde_json::json!({
+                    "name": named,
+                    "presentationHint": "locals",
+                    "variablesReference": self.handles.add(Handle::TemplateLayer {
+                        frame,
+                        index: layer.index,
+                    }),
+                    "expensive": false,
+                })
+            })
+            .collect();
 
         self.respond(message, Some(serde_json::json!({ "scopes": scopes })))?;
         Ok(())
@@ -789,7 +852,8 @@ impl Adapter {
                 }
                 listed
             }
-            Handle::Frame(frame) => {
+            Handle::TemplateLayer { frame, index } => self.read_template_layer(frame, index)?,
+            Handle::Frame(frame) | Handle::TemplateFrame(frame) => {
                 return Err(Aborted::Refuse(format!(
                     "{reference} names {frame}, which is a frame. ask for its \
                      scopes and then for the variables of one of them"
@@ -807,6 +871,60 @@ impl Adapter {
     /// expansion is what decides how deep the read goes. a scope read at depth
     /// zero reports each name's type and size and opens nothing, which is what
     /// a collapsed tree shows
+    /// what one layer of a template frame's django context holds
+    ///
+    /// the context is read again rather than remembered, for the reason a
+    /// python scope is: the program is still running, and a value read at the
+    /// stop and shown a minute later is a value that may already be something
+    /// else
+    ///
+    /// a value inside a layer opens no further. django's context is not a scope
+    /// bpd can walk a path back into — `Request::TemplateContext` reads the
+    /// layers, and there is no request that re-reads one name of one of them —
+    /// so what a client gets is the layer as it was read, to the depth the
+    /// configured bounds allowed, and the answer says where that ran out
+    fn read_template_layer(
+        &mut self,
+        frame: FrameId,
+        index: u32,
+    ) -> Result<Vec<serde_json::Value>, Aborted> {
+        let detail = self.configuration().variables;
+        let context = match self.ask(Request::TemplateContext { frame, detail })? {
+            Response::TemplateContext(context) => context,
+            other => unreachable!("a template context was answered with {other:?}"),
+        };
+
+        let layer = context
+            .layers
+            .iter()
+            .find(|layer| layer.index == index)
+            .ok_or_else(|| {
+                Aborted::Refuse(format!(
+                    "the template context of {frame} no longer has a layer \
+                     {index}. it was read again to open it and the render has \
+                     moved on since"
+                ))
+            })?;
+
+        let mut listed = Vec::new();
+        for entry in &layer.entries {
+            let reference = if expandable(&entry.value) {
+                self.stored(frame.stop, &entry.value)
+            } else {
+                0
+            };
+            listed.push(variable(&entry.name, &entry.value, reference));
+        }
+        for omitted in &layer.omitted {
+            listed.push(serde_json::json!({
+                "name": "(left out)",
+                "value": omitted.to_string(),
+                "variablesReference": 0,
+            }));
+        }
+        Ok(listed)
+    }
+
     fn read_scope(
         &mut self,
         frame: FrameId,
@@ -977,8 +1095,11 @@ impl Adapter {
              expression **in a frame**, because that is what decides what a name \
              means — there is no frameless context to evaluate one in",
         )?;
+        // either kind of frame: a template frame is where template syntax is
+        // evaluated, and refusing one here would leave the capability with no
+        // DAP route at all
         let frame = match self.handles.get(reference) {
-            Some(Handle::Frame(frame)) => *frame,
+            Some(Handle::Frame(frame) | Handle::TemplateFrame(frame)) => *frame,
             Some(other) => {
                 return Err(Aborted::Refuse(format!(
                     "{reference} names {other:?}, not a frame"
@@ -1520,6 +1641,25 @@ fn rendered_breakpoint(resolved: &Resolved, requested: &SourceBreakpoint) -> ser
             }
             body
         }
+        Binding::BoundInTemplate { line, nodes, .. } => {
+            let mut body = serde_json::json!({
+                "id": resolved.id,
+                "verified": true,
+                "line": line,
+                "source": source_of(&requested.file.display().to_string()),
+            });
+            if *line != requested.line {
+                body["message"] = format!(
+                    "line {} renders no django node, so this moved to line \
+                     {line}, which does",
+                    requested.line
+                )
+                .into();
+            } else if nodes.len() > 1 {
+                body["message"] = format!("armed on {} django nodes", nodes.len()).into();
+            }
+            body
+        }
         Binding::Unbound { reason } => serde_json::json!({
             "id": resolved.id,
             "verified": false,
@@ -1834,6 +1974,7 @@ mod tests {
                 binding: Binding::Unbound {
                     reason: Unbound::NotLoaded {
                         file: PathBuf::from("/tmp/app.py"),
+                        templates_available: false,
                     },
                 },
             },

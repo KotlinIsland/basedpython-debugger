@@ -16,7 +16,7 @@ use pyo3::prelude::*;
 
 use crate::conditions::Plan;
 use crate::files::{self, FileId};
-use crate::{code, events, session};
+use crate::{code, events, session, templates};
 
 /// one requested breakpoint, with the file it was resolved against
 ///
@@ -104,6 +104,7 @@ pub(crate) fn local(address: usize) -> events::Local {
     events::Local {
         line: read().armed.contains_key(&address),
         py_return: false,
+        py_start: false,
     }
 }
 
@@ -161,7 +162,13 @@ pub(crate) fn rebind(python: Python<'_>, loaded: &FileId) -> PyResult<Vec<Resolv
         .pending
         .iter()
         .any(|pending| pending.identity.as_ref() == Ok(loaded));
-    if !relevant {
+
+    // django may have become importable with this file, and that changes the
+    // answer for every template breakpoint in the set at once. it is a
+    // `sys.modules` lookup, and it stops being asked the moment it succeeds
+    let django_arrived = !templates::available() && templates::resolve_hooks(python)?;
+
+    if !relevant && !django_arrived {
         return Ok(Vec::new());
     }
 
@@ -195,11 +202,25 @@ fn resolve_all(python: Python<'_>) -> PyResult<(Vec<Resolved>, Vec<Resolved>)> {
         })
         .collect();
 
+    // django's template machinery is only there once the program has imported
+    // it, and the answer changes when it does. asking `sys.modules` costs one
+    // dictionary lookup per resolution, and a resolution happens when the
+    // breakpoint set changes or a new file is loaded — never on an event path
+    templates::resolve_hooks(python)?;
+
     let mut all = Vec::with_capacity(pending.len());
     let mut armed: BTreeMap<usize, Armed> = BTreeMap::new();
+    let mut in_templates: BTreeMap<(FileId, u32), Vec<Arc<Plan>>> = BTreeMap::new();
 
     for (request, identity, plan) in pending {
-        let binding = resolve(python, &request, identity.as_ref(), &plan, &mut armed)?;
+        let binding = resolve(
+            python,
+            &request,
+            identity.as_ref(),
+            &plan,
+            &mut armed,
+            &mut in_templates,
+        )?;
         all.push(Resolved {
             id: request.id,
             binding,
@@ -210,6 +231,20 @@ fn resolve_all(python: Python<'_>) -> PyResult<(Vec<Resolved>, Vec<Resolved>)> {
         let mut state = write();
         std::mem::replace(&mut state.armed, armed)
     };
+    // the `Template.__init__` hook has to be armed *before* anything binds to a
+    // template, because it is the only thing that can make one bind. so it
+    // follows the breakpoints a template parse could still answer, not the ones
+    // already bound to a template
+    let watching_parses = all.iter().any(|resolution| {
+        matches!(
+            resolution.binding,
+            Binding::BoundInTemplate { .. }
+                | Binding::Unbound {
+                    reason: Unbound::NotLoaded { .. } | Unbound::NoRenderedNode { .. },
+                }
+        )
+    });
+    templates::rearm(in_templates, watching_parses);
     arm(python, &previous)?;
 
     let mut state = write();
@@ -234,6 +269,7 @@ fn resolve(
     identity: Result<&FileId, &String>,
     plan: &Result<Arc<Plan>, Unbound>,
     armed: &mut BTreeMap<usize, Armed>,
+    in_templates: &mut BTreeMap<(FileId, u32), Vec<Arc<Plan>>>,
 ) -> PyResult<Binding> {
     // before the file, because an expression that does not compile makes the
     // breakpoint impossible wherever the file turns out to be, and that answer
@@ -265,17 +301,18 @@ fn resolve(
     // a partial view of a file answers every question about it wrongly and
     // plausibly, so nothing is answered from one
     if !code::whole_file_seen(identity) {
-        return Ok(Binding::Unbound {
-            reason: if units.is_empty() {
-                Unbound::NotLoaded {
+        if !units.is_empty() {
+            return Ok(Binding::Unbound {
+                reason: Unbound::PartiallyLoaded {
                     file: request.file.clone(),
-                }
-            } else {
-                Unbound::PartiallyLoaded {
-                    file: request.file.clone(),
-                }
-            },
-        });
+                },
+            });
+        }
+        // the interpreter has compiled nothing from this file. the other thing
+        // it could be is a django template, and that is a binding of its own
+        // rather than a guess: a template is only bindable once django has
+        // parsed it, and bpd has seen it do so
+        return Ok(templates::resolve(request, identity, plan, in_templates));
     }
 
     let executable: BTreeSet<u32> = units
@@ -357,7 +394,12 @@ fn arm(python: Python<'_>, previous: &BTreeMap<usize, Armed>) -> PyResult<()> {
         .map(|armed| armed.code.clone_ref(python))
         .collect();
 
-    for code in stale.iter().chain(&live) {
+    // the django hooks are code objects of django's rather than of the
+    // program's, and they are refreshed alongside so that a template breakpoint
+    // arms them and the last one going away disarms them again
+    let hooks = templates::hook_codes(python);
+
+    for code in stale.iter().chain(&live).chain(&hooks) {
         session::refresh_code(python, code.bind(python))?;
     }
 

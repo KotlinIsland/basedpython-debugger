@@ -137,10 +137,36 @@ pub enum Request {
         detail: Detail,
     },
 
+    /// read the django template context of a template frame, layer by layer
+    ///
+    /// a template frame has no python scopes, so [`Request::Variables`] is not
+    /// what reads it. what it has is a `django.template.Context`, which is a
+    /// **stack of dicts**: the builtins django pushes, the dictionary the render
+    /// was given, and one more for every `{% with %}`, `{% for %}` or
+    /// `{% include ... with %}` that is open
+    ///
+    /// the layers are reported as layers rather than merged, because a name in
+    /// two of them is exactly what someone debugging a template is usually
+    /// looking at, and a merged mapping cannot show it
+    TemplateContext {
+        /// which template frame
+        frame: FrameId,
+        /// how much of each value to read
+        detail: Detail,
+    },
+
     /// evaluate a python expression in a frame
     ///
     /// this runs the program's own code, by request. an expression that raises
     /// is answered with the exception
+    ///
+    /// **what the expression means depends on the frame it is evaluated in.**
+    /// against a python frame it is python. against a django template frame it
+    /// is template syntax, resolved by django's own rules — dictionary key,
+    /// then attribute, then list index, with callables invoked and filters
+    /// applied — because that is what the same text means where the user is
+    /// looking. python in a template frame is reached by naming the python
+    /// frame underneath it, which [`crate::FrameKind::Template`] carries
     Evaluate {
         /// which frame it is evaluated in
         frame: FrameId,
@@ -242,6 +268,7 @@ impl Request {
             Self::StopTheWorld { .. } => "stopping the world",
             Self::Stack { .. } => "the stack",
             Self::Variables { .. } => "the variables of a scope",
+            Self::TemplateContext { .. } => "the template context of a frame",
             Self::Evaluate { .. } => "evaluating an expression",
             Self::RunScript { .. } => "running a debug script",
             Self::Query { .. } => "the state of a stop",
@@ -316,6 +343,9 @@ pub enum Response {
 
     /// what one scope of one frame holds
     Variables(Variables),
+
+    /// what a template frame's django context holds, layer by layer
+    TemplateContext(TemplateContext),
 
     /// what an expression did, or what a write left behind
     Evaluated(Evaluated),
@@ -482,6 +512,100 @@ impl Variables {
             .map(|entry| entry.name.as_str())
             .collect()
     }
+}
+
+/// a django template context, as the stack of dicts it really is
+///
+/// never flattened. django resolves a name by walking the layers from the last
+/// one backwards and taking the first that holds it, so two layers holding the
+/// same name is a shadowing that decides what the template renders — and a
+/// merged mapping is a report in which that has already happened invisibly
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateContext {
+    /// the layers, outermost first, in `Context.dicts` order
+    ///
+    /// the order django pushed them, so the **last** one wins a lookup
+    pub layers: Vec<ContextLayer>,
+    /// how the program was moving while this was taken
+    pub mode: Mode,
+}
+
+impl TemplateContext {
+    /// what a name resolves to, and which layer answers it
+    ///
+    /// the walk django's own `Context.__getitem__` does: from the last layer
+    /// backwards, the first that holds the name. it is here rather than in a
+    /// front end because two front ends deciding the direction separately is how
+    /// the same context comes to report two different values
+    pub fn resolve(&self, name: &str) -> Option<(&ContextLayer, &Value)> {
+        self.layers
+            .iter()
+            .rev()
+            .find_map(|layer| layer.get(name).map(|value| (layer, value)))
+    }
+
+    /// every name that more than one layer holds, with the layers that hold it
+    ///
+    /// reported rather than left to be worked out: shadowing is what a layered
+    /// context is read for
+    pub fn shadowed(&self) -> Vec<Shadowed> {
+        let mut names: Vec<&str> = self
+            .layers
+            .iter()
+            .flat_map(|layer| layer.entries.iter().map(|entry| entry.name.as_str()))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let layers: Vec<u32> = self
+                    .layers
+                    .iter()
+                    .filter(|layer| layer.get(name).is_some())
+                    .map(|layer| layer.index)
+                    .collect();
+                (layers.len() > 1).then(|| Shadowed {
+                    name: name.to_string(),
+                    layers,
+                })
+            })
+            .collect()
+    }
+}
+
+/// one dict of a django template context
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContextLayer {
+    /// how far up the stack it is, counting from zero at the outermost
+    ///
+    /// the index into `Context.dicts`, so a client can say which layer it means
+    /// back to django
+    pub index: u32,
+    /// what the layer holds
+    pub entries: Vec<Entry>,
+    /// everything this layer's answer left out, and why
+    pub omitted: Vec<Omitted>,
+}
+
+impl ContextLayer {
+    /// what one name holds in this layer, or `None` when it does not hold it
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| &entry.value)
+    }
+}
+
+/// a name more than one layer of a template context holds
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shadowed {
+    /// the name
+    pub name: String,
+    /// the layers holding it, outermost first. the **last** is the one that wins
+    pub layers: Vec<u32>,
 }
 
 /// what every thread of the debuggee was doing, as a sample

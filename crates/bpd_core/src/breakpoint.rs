@@ -152,6 +152,31 @@ pub enum Binding {
         evaluation: Evaluation,
     },
 
+    /// the interpreter will stop here, while a django template renders
+    ///
+    /// a separate variant rather than a [`Site`] with the python fields left
+    /// blank, because there is no code object and no offset behind a template
+    /// breakpoint and there never will be: django compiles a template to a tree
+    /// of `Node` objects, not to python. what is behind it is a node, reached
+    /// through `Node.render_annotated`
+    BoundInTemplate {
+        /// the template line it sits on
+        ///
+        /// not necessarily the line that was asked for. a line with no node
+        /// that renders through `Node.render_annotated` — a blank line, or one
+        /// that is nothing but literal text — moves to the next line that has
+        /// one, and this is where it went
+        line: u32,
+        /// the node classes django compiled that line to, in tree order
+        ///
+        /// more than one when a line holds more than one tag. reported for the
+        /// reason [`Site::offset`] is: the client can see what is really behind
+        /// its request rather than being told it worked
+        nodes: Vec<String>,
+        /// how the condition will be answered on every hit
+        evaluation: Evaluation,
+    },
+
     /// nothing will stop, and this is why
     Unbound {
         /// what stood in the way
@@ -216,10 +241,38 @@ pub enum Unbound {
         loaded_under_that_name: bool,
     },
 
-    /// the path is a file, but nothing the interpreter has loaded comes from it
+    /// the path is a file, and nothing in the process has read it as code
+    ///
+    /// there are two ways a file becomes bindable and neither has happened: the
+    /// interpreter has compiled no python from it, and no django template has
+    /// been parsed from it
     NotLoaded {
         /// the path as the client gave it
         file: PathBuf,
+        /// whether django's template machinery is loaded in this process
+        ///
+        /// it decides which of the two routes is worth naming. with django in
+        /// the process an unloaded `.html` is a template that has not been
+        /// rendered yet; without it, nothing in the process could ever have
+        /// parsed one
+        templates_available: bool,
+    },
+
+    /// django has parsed the template and no node of it renders at that line
+    ///
+    /// the analogue of [`Unbound::NoExecutableLine`], and a separate reason
+    /// because "executable" is not what a template line is. django compiles a
+    /// template to `Node` objects and renders each through
+    /// `Node.render_annotated` — but `TextNode` **overrides** that method, so a
+    /// line of nothing but literal text produces no event and cannot hold a
+    /// breakpoint
+    NoRenderedNode {
+        /// the path as the client gave it
+        file: PathBuf,
+        /// the line that was asked for
+        requested: u32,
+        /// the last line of the template a node renders on, if it has one
+        last_rendered: Option<u32>,
     },
 
     /// the interpreter has run code from the file, but never the file itself
@@ -266,6 +319,63 @@ pub enum Unbound {
     },
 }
 
+/// [`Unbound::NotLoaded`], which has two routes into a file and neither taken
+///
+/// a `.html` in a process that has django in it is a template that has not been
+/// rendered yet, and that binds later. the same file in a process without
+/// django is a file nothing could ever have parsed
+fn not_loaded(
+    formatter: &mut std::fmt::Formatter<'_>,
+    file: &std::path::Path,
+    templates_available: bool,
+) -> std::fmt::Result {
+    write!(
+        formatter,
+        "the interpreter has not loaded any code from `{}`. it will bind if \
+         that file is imported later",
+        file.display()
+    )?;
+    if templates_available {
+        formatter.write_str(
+            ". django is in this process and has not parsed a template from it \
+             either — a template breakpoint binds the first time django loads \
+             the template, so this one binds when something renders it",
+        )
+    } else {
+        Ok(())
+    }
+}
+
+/// [`Unbound::NoRenderedNode`], and the two ways a template line reaches no node
+fn no_rendered_node(
+    formatter: &mut std::fmt::Formatter<'_>,
+    file: &std::path::Path,
+    requested: u32,
+    last_rendered: Option<u32>,
+) -> std::fmt::Result {
+    write!(
+        formatter,
+        "django has parsed `{}` and no node of it renders at or after line \
+         {requested}",
+        file.display()
+    )?;
+    match last_rendered {
+        Some(last) => write!(
+            formatter,
+            ". the last line that renders one is line {last}. a line of nothing \
+             but literal text is not one of them, and neither is anything an \
+             `{{% extends %}}` puts out of reach: django renders neither \
+             through the method bpd watches"
+        ),
+        None => formatter.write_str(
+            ". no line of it renders through the method bpd watches. a template \
+             of nothing but literal text is one way that happens, and so is one \
+             whose `{% extends %}` leaves django rendering none of its own \
+             nodes",
+        ),
+    }
+}
+
 impl std::fmt::Display for Unbound {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -292,12 +402,15 @@ impl std::fmt::Display for Unbound {
                 }
                 Ok(())
             }
-            Self::NotLoaded { file } => write!(
-                formatter,
-                "the interpreter has not loaded any code from `{}`. it will \
-                 bind if that file is imported later",
-                file.display()
-            ),
+            Self::NotLoaded {
+                file,
+                templates_available,
+            } => not_loaded(formatter, file, *templates_available),
+            Self::NoRenderedNode {
+                file,
+                requested,
+                last_rendered,
+            } => no_rendered_node(formatter, file, *requested, *last_rendered),
             Self::PartiallyLoaded { file } => write!(
                 formatter,
                 "the interpreter has run code from `{}` but never the file \
@@ -363,7 +476,36 @@ mod tests {
                 },
                 "zip archive",
             ),
-            (Unbound::NotLoaded { file: file.clone() }, "imported later"),
+            (
+                Unbound::NotLoaded {
+                    file: file.clone(),
+                    templates_available: false,
+                },
+                "imported later",
+            ),
+            (
+                Unbound::NotLoaded {
+                    file: file.clone(),
+                    templates_available: true,
+                },
+                "when something renders it",
+            ),
+            (
+                Unbound::NoRenderedNode {
+                    file: file.clone(),
+                    requested: 4,
+                    last_rendered: Some(2),
+                },
+                "the last line that renders one is line 2",
+            ),
+            (
+                Unbound::NoRenderedNode {
+                    file: file.clone(),
+                    requested: 4,
+                    last_rendered: None,
+                },
+                "no line of it renders through the method bpd watches",
+            ),
             (
                 Unbound::PartiallyLoaded { file: file.clone() },
                 "never the file itself",

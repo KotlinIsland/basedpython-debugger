@@ -39,7 +39,7 @@ pub use breakpoint::{
 };
 pub use error::{Error, Result};
 pub use exception::{PythonError, TracebackFrame};
-pub use frame::{Frame, FrameId, Scope};
+pub use frame::{Frame, FrameId, FrameKind, Scope};
 pub use parity::{Facet, Reach, surface};
 pub use query::{
     Answer, Appeared, Changed, Difference, FrameState, Frames, Moved, NotCompared, NotRead,
@@ -52,8 +52,8 @@ pub use script::{
     Script, Step, Transcript,
 };
 pub use session::{
-    ExceptionBreakpoints, Reporting, Request, Response, Running, Stack, Threads, Variables,
-    WorldStopped, exit_code, only_stop,
+    ContextLayer, ExceptionBreakpoints, Reporting, Request, Response, Running, Shadowed, Stack,
+    TemplateContext, Threads, Variables, WorldStopped, exit_code, only_stop,
 };
 pub use stop::{Holding, Mode, Part, StepKind, Stop, StopReason};
 pub use thread::{Progress, ThreadState, Where, Which};

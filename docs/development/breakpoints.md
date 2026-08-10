@@ -136,6 +136,13 @@ is running. the client is told both times. this is the same path that binds code
 built by `exec`, because from the agent's point of view nothing distinguishes
 them
 
+a django template is the other thing that binds late, and by the same rule: it
+binds the first time django parses the template, which for a template reached
+through `{% include %}` happens in the middle of a render. everything about that
+is [django templates](django-templates.md), including the one place `Bound` is a
+different variant — there is no code object behind a template breakpoint, so
+`BoundInTemplate` carries the node classes rather than sites
+
 ## what changes when a breakpoint is added
 
 `sys.monitoring.restart_events()` re-enables every location that has been

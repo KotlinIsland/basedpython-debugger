@@ -40,7 +40,10 @@
 
 use std::sync::OnceLock;
 
-use bpd_core::{Detail, Entry, Evaluated, Frame, FrameId, Holding, Omitted, Refusal, Scope, Where};
+use bpd_core::{
+    ContextLayer, Detail, Entry, Evaluated, Frame, FrameId, FrameKind, Holding, Omitted, Refusal,
+    Scope, Where,
+};
 use bpd_protocol::message::FromAgent;
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
@@ -48,7 +51,7 @@ use pyo3::types::PyDict;
 
 use crate::conditions::{self, capture};
 use crate::values::Reader;
-use crate::{events, world};
+use crate::{events, templates, world};
 
 /// `CO_OPTIMIZED` — the frame keeps its locals in slots the compiler assigned
 ///
@@ -91,6 +94,34 @@ pub(crate) fn remember_bootstrap(python: Python<'_>) -> PyResult<()> {
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("the agent was entered twice"))
 }
 
+/// one entry of a stack, which is not always a frame the interpreter has
+///
+/// a django template is not compiled to python, so the only way a template line
+/// can appear in a stack at all is for bpd to synthesise an entry for it. the
+/// synthesis is not a guess: every `Node.render_annotated` frame in the walk is
+/// one template frame, over the node that frame was handed, so
+/// `{% include %}` and `{% extends %}` come out as the nested chain they really
+/// are
+///
+/// what must never happen is one being answered as the other, which is why the
+/// two are different shapes here and a different [`bpd_core::FrameKind`] in the
+/// answer
+#[derive(Debug)]
+pub(crate) enum Slot<'py> {
+    /// a frame the interpreter really has
+    Python(Bound<'py, PyAny>),
+
+    /// a django template frame, synthesised over the frame rendering it
+    Template {
+        /// the node being rendered
+        node: Bound<'py, PyAny>,
+        /// the `Context` it is being rendered against
+        context: Bound<'py, PyAny>,
+        /// how far down the stack the `Node.render_annotated` frame is
+        python: u32,
+    },
+}
+
 /// one stop, and everything that can be asked about it
 ///
 /// the frames are walked the first time something asks for one and dropped when
@@ -98,7 +129,7 @@ pub(crate) fn remember_bootstrap(python: Python<'_>) -> PyResult<()> {
 pub(crate) struct Stopped<'py> {
     python: Python<'py>,
     stop: u64,
-    walked: Option<Vec<Bound<'py, PyAny>>>,
+    walked: Option<Vec<Slot<'py>>>,
 }
 
 /// begin a stop against the number it was registered under
@@ -166,10 +197,10 @@ pub(crate) fn holding(python: Python<'_>) -> PyResult<Vec<Holding>> {
 }
 
 impl<'py> Stopped<'py> {
-    /// the frames of the thread that stopped, nearest first
-    fn frames(&mut self) -> PyResult<&[Bound<'py, PyAny>]> {
+    /// the stack of the thread that stopped, nearest first
+    fn frames(&mut self) -> PyResult<&[Slot<'py>]> {
         if self.walked.is_none() {
-            self.walked = Some(walk(self.python)?);
+            self.walked = Some(stack_of(self.python)?);
         }
         Ok(self.walked.as_ref().expect("the branch above filled it in"))
     }
@@ -182,9 +213,9 @@ impl<'py> Stopped<'py> {
         let wanted = top.map_or(depth, |top| depth.min(top as usize));
 
         let mut described = Vec::with_capacity(wanted);
-        for (index, frame) in frames.iter().take(wanted).enumerate() {
+        for (index, slot) in frames.iter().take(wanted).enumerate() {
             described.push(describe(
-                frame,
+                slot,
                 FrameId {
                     stop,
                     depth: u32::try_from(index).expect("a stack is not four billion frames deep"),
@@ -204,19 +235,43 @@ impl<'py> Stopped<'py> {
     /// this stop would be asked at all: a request is routed to the thread the
     /// id's stop is holding, and an id from a stop that has ended is refused
     /// before it ever reaches one
-    fn frame(&mut self, id: FrameId) -> PyResult<Result<Bound<'py, PyAny>, Refusal>> {
+    fn slot(&mut self, id: FrameId) -> PyResult<Result<&Slot<'py>, Refusal>> {
         debug_assert_eq!(
             id.stop, self.stop,
             "a request reached the stop it was not addressed to"
         );
         let frames = self.frames()?;
+        let depth = frames.len();
         match frames.get(id.depth as usize) {
-            Some(frame) => Ok(Ok(frame.clone())),
-            None => Ok(Err(Refusal::NoSuchFrame {
-                frame: id,
-                depth: frames.len(),
-            })),
+            Some(slot) => Ok(Ok(slot)),
+            None => Ok(Err(Refusal::NoSuchFrame { frame: id, depth })),
         }
+    }
+
+    /// the python frame an id names, refusing when the id names a template one
+    ///
+    /// a template frame is synthesised and the interpreter has no frame for it,
+    /// so there is nothing to read a python scope off and nothing to evaluate
+    /// python against. answering from the `Node.render_annotated` frame under
+    /// it instead would be reading a variable from another scope entirely,
+    /// which is the thing this project exists not to do
+    fn frame(
+        &mut self,
+        id: FrameId,
+        wanted: &'static str,
+    ) -> PyResult<Result<Bound<'py, PyAny>, Refusal>> {
+        Ok(match self.slot(id)? {
+            Ok(Slot::Python(frame)) => Ok(frame.clone()),
+            Ok(Slot::Template { python, .. }) => Err(Refusal::NotAPythonFrame {
+                frame: id,
+                wanted: wanted.to_string(),
+                python: FrameId {
+                    stop: id.stop,
+                    depth: *python,
+                },
+            }),
+            Err(reason) => Err(reason),
+        })
     }
 
     /// the source around one frame's current line
@@ -226,7 +281,7 @@ impl<'py> Stopped<'py> {
     /// **code object** is — which is what the file on disk has to be checked
     /// against before a line of it may be shown. see [`crate::source`]
     pub(crate) fn source(&mut self, id: FrameId, around: u32) -> PyResult<FromAgent> {
-        let frame = match self.frame(id)? {
+        let frame = match self.frame(id, "the source around a frame")? {
             Ok(frame) => frame,
             Err(reason) => return Ok(FromAgent::Refused { reason }),
         };
@@ -248,7 +303,7 @@ impl<'py> Stopped<'py> {
         scope: Scope,
         detail: Detail,
     ) -> PyResult<FromAgent> {
-        let frame = match self.frame(id)? {
+        let frame = match self.frame(id, "the variables of a scope")? {
             Ok(frame) => frame,
             Err(reason) => return Ok(FromAgent::Refused { reason }),
         };
@@ -337,6 +392,102 @@ impl<'py> Stopped<'py> {
         Ok(read)
     }
 
+    /// what a template frame's django context holds, layer by layer
+    ///
+    /// never merged. `django.template.Context` is a stack of dicts and django
+    /// resolves a name by walking them from the last backwards, so which layer
+    /// holds a name is what decides the render — and a merged mapping is a
+    /// report in which that has already happened invisibly
+    ///
+    /// the byte budget is one budget for the **whole** context rather than one
+    /// per layer, and it is retried shallower the same way a scope is: a
+    /// context whose outermost layer is large would otherwise spend the answer
+    /// there and report the layer the user is looking at as missing
+    pub(crate) fn template_context(&mut self, id: FrameId, detail: Detail) -> PyResult<FromAgent> {
+        let context = match self.slot(id)? {
+            Ok(Slot::Template { context, .. }) => context.clone(),
+            Ok(Slot::Python(frame)) => {
+                let function = frame.getattr("f_code")?.getattr("co_qualname")?.extract()?;
+                return Ok(FromAgent::Refused {
+                    reason: Refusal::NotATemplateFrame {
+                        frame: id,
+                        function,
+                    },
+                });
+            }
+            Err(reason) => return Ok(FromAgent::Refused { reason }),
+        };
+
+        let dicts = context.getattr("dicts")?;
+        let asked = detail.depth;
+        let mut used = asked;
+        let (mut layers, mut exhausted) = self.layers(&dicts, used, detail)?;
+        while exhausted && used > 0 {
+            used -= 1;
+            (layers, exhausted) = self.layers(&dicts, used, detail)?;
+        }
+
+        if used < asked || exhausted {
+            let last = layers
+                .last_mut()
+                .expect("a django context always has at least the builtins layer");
+            if used < asked {
+                last.omitted.push(Omitted::Shallower { asked, used });
+            }
+            if exhausted {
+                last.omitted.push(Omitted::Budget {
+                    limit: detail.budget,
+                });
+            }
+        }
+
+        Ok(FromAgent::TemplateContext {
+            frame: id,
+            layers,
+            mode: world::mode(),
+        })
+    }
+
+    /// one pass over every layer of a context, at one depth
+    fn layers(
+        &self,
+        dicts: &Bound<'py, PyAny>,
+        depth: u32,
+        detail: Detail,
+    ) -> PyResult<(Vec<ContextLayer>, bool)> {
+        let mut reader = Reader::new(self.python, detail);
+        let mut layers = Vec::new();
+
+        for (index, layer) in dicts.try_iter()?.enumerate() {
+            let layer = layer?;
+            let index = u32::try_from(index).expect("a context is not four billion layers deep");
+            let mut omitted = Vec::new();
+            let entries = match layer.cast::<PyDict>() {
+                Ok(mapping) => {
+                    let (entries, cut) = reader.named(&mapping.items(), "", depth)?;
+                    omitted.extend(cut);
+                    entries
+                }
+                // django pushes dicts, and a `RequestContext` processor that
+                // pushed something else would be read as the mapping it is not.
+                // saying so is the same answer a module namespace that is not a
+                // dictionary gets
+                Err(_) => {
+                    omitted.push(Omitted::NotADictionary);
+                    Vec::new()
+                }
+            };
+            layers.push(ContextLayer {
+                index,
+                entries,
+                omitted,
+            });
+        }
+
+        let exhausted = reader.exhausted();
+        Ok((layers, exhausted))
+    }
+
     /// evaluate an expression in a frame
     pub(crate) fn evaluate(
         &mut self,
@@ -344,7 +495,30 @@ impl<'py> Stopped<'py> {
         expression: &str,
         detail: Detail,
     ) -> PyResult<FromAgent> {
-        let frame = match self.frame(id)? {
+        // the frame decides the language. against a template frame the text is
+        // template syntax and django resolves it, because that is what the same
+        // text means where the user is looking — `user.profile.name` is a
+        // dictionary key before it is an attribute, and `called` is the result
+        // of calling it. python in a template frame is reached by naming the
+        // python frame underneath, which the template frame carries
+        if let Ok(Slot::Template { node, context, .. }) = self.slot(id)? {
+            let (node, context) = (node.clone(), context.clone());
+            let result =
+                match templates::resolve_expression(self.python, &node, &context, expression) {
+                    Ok(value) => Evaluated::Value {
+                        value: Reader::new(self.python, detail).read(&value, expression)?,
+                    },
+                    Err(error) => Evaluated::Raised {
+                        error: capture(self.python, &error),
+                    },
+                };
+            return Ok(FromAgent::Evaluated {
+                result,
+                mode: world::mode(),
+            });
+        }
+
+        let frame = match self.frame(id, "evaluating a python expression")? {
             Ok(frame) => frame,
             Err(reason) => return Ok(FromAgent::Refused { reason }),
         };
@@ -373,7 +547,7 @@ impl<'py> Stopped<'py> {
         value: &str,
         detail: Detail,
     ) -> PyResult<FromAgent> {
-        let frame = match self.frame(id)? {
+        let frame = match self.frame(id, "writing a variable")? {
             Ok(frame) => frame,
             Err(reason) => return Ok(FromAgent::Refused { reason }),
         };
@@ -429,6 +603,30 @@ impl<'py> Stopped<'py> {
     }
 }
 
+/// the stack as a client sees it: the python frames, with template frames over
+///
+/// a template frame goes immediately **above** the `Node.render_annotated`
+/// frame that renders it, so depth zero at a template breakpoint is the
+/// template line and the frame under it is the python that got there
+fn stack_of(python: Python<'_>) -> PyResult<Vec<Slot<'_>>> {
+    let frames = walk(python)?;
+    let mut slots = Vec::with_capacity(frames.len());
+
+    for frame in frames {
+        if templates::is_render_frame(&frame)? {
+            let (node, context) = templates::rendered(&frame)?;
+            slots.push(Slot::Template {
+                node,
+                context,
+                python: u32::try_from(slots.len() + 1)
+                    .expect("a stack is not four billion frames deep"),
+            });
+        }
+        slots.push(Slot::Python(frame));
+    }
+    Ok(slots)
+}
+
 /// walk the chain from the frame that stopped, stopping at the bootstrap
 fn walk(python: Python<'_>) -> PyResult<Vec<Bound<'_, PyAny>>> {
     let bootstrap = BOOTSTRAP.get().map(|frame| frame.bind(python));
@@ -446,16 +644,37 @@ fn walk(python: Python<'_>) -> PyResult<Vec<Bound<'_, PyAny>>> {
     Ok(frames)
 }
 
-/// read one frame's location
-fn describe(frame: &Bound<'_, PyAny>, id: FrameId) -> PyResult<Frame> {
-    let code = frame.getattr("f_code")?;
-    Ok(Frame {
-        id,
-        file: code.getattr("co_filename")?.extract()?,
-        line: frame.getattr("f_lineno")?.extract()?,
-        function: code.getattr("co_qualname")?.extract()?,
-        first_line: code.getattr("co_firstlineno")?.extract()?,
-    })
+/// read one stack entry's location
+fn describe(slot: &Slot<'_>, id: FrameId) -> PyResult<Frame> {
+    match slot {
+        Slot::Python(frame) => {
+            let code = frame.getattr("f_code")?;
+            Ok(Frame {
+                id,
+                file: code.getattr("co_filename")?.extract()?,
+                line: frame.getattr("f_lineno")?.extract()?,
+                kind: FrameKind::Python {
+                    function: code.getattr("co_qualname")?.extract()?,
+                    first_line: code.getattr("co_firstlineno")?.extract()?,
+                },
+            })
+        }
+        Slot::Template { node, python, .. } => {
+            let origin = node.getattr("origin")?;
+            Ok(Frame {
+                id,
+                file: origin.getattr("name")?.extract()?,
+                line: node.getattr("token")?.getattr("lineno")?.extract()?,
+                kind: FrameKind::Template {
+                    node: node.get_type().getattr("__name__")?.extract()?,
+                    python: FrameId {
+                        stop: id.stop,
+                        depth: *python,
+                    },
+                },
+            })
+        }
+    }
 }
 
 /// where one frame is, without a frame id — there is no stop behind it
