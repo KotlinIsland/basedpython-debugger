@@ -23,11 +23,13 @@ repos:
   - repo: https://github.com/rbubley/mirrors-prettier
     rev: 9337a74165b178ae2c766f60bee7252a0f06f3e8 # frozen: v3.9.5
     hooks:
-      # yaml only. prettier's markdown style — two space list continuation,
-      # `_emphasis_` — disagrees with the four space continuation used across
-      # basedpython's docs, and the docs are meant to read the same in both
+      # yaml, and the json and javascript the vs code extension is made of.
+      # **not markdown**: prettier's markdown style — two space list
+      # continuation, `_emphasis_` — disagrees with the four space continuation
+      # used across basedpython's docs, and the docs are meant to read the same
+      # in both
       - id: prettier
-        types: [yaml]
+        types_or: [yaml, json, javascript]
 
   - repo: local
     hooks:

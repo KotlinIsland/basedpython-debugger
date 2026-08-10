@@ -1,0 +1,173 @@
+{
+  "name": "bpd",
+  "displayName": "bpd",
+  "description": "registers bpd as a debug adapter, so a launch configuration can name it",
+  "version": "0.0.0",
+  "publisher": "kotlinisland",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KotlinIsland/basedpythondebugger.git",
+    "directory": "editors/vscode"
+  },
+  "categories": ["Debuggers"],
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": ["onDebugResolve:bpd"],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "a launch configuration names an interpreter and a program, and starting a session runs both"
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "bpd spawns a local interpreter and binds breakpoints against files on disk"
+    }
+  },
+  "contributes": {
+    "configuration": {
+      "title": "bpd",
+      "properties": {
+        "bpd.executable": {
+          "type": "string",
+          "default": "bpd",
+          "markdownDescription": "the `bpd` command to start `bpd dap` with. a bare name is looked up on `PATH`; anything else must be an absolute path. a relative path is refused rather than resolved against a directory nobody chose"
+        }
+      }
+    },
+    "breakpoints": [
+      {
+        "language": "python"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "bpd",
+        "label": "bpd",
+        "languages": ["python"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "the script to run"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [],
+                "description": "arguments for the program, exactly as it receives them"
+              },
+              "python": {
+                "type": "string",
+                "default": "python3",
+                "description": "the interpreter to run under, resolved on PATH like any other command"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": false,
+                "description": "stay stopped before the program's first statement. bpd holds every program there — it is how a breakpoint binds against a real interpreter — so this decides whether the client is told about it, not whether it happens"
+              },
+              "stopTheWorld": {
+                "type": "boolean",
+                "default": false,
+                "description": "hold every thread that can be held for the duration of each stop. off by default: a stop holds one thread and the rest of the program keeps running. a thread parked in a C call cannot be held and is named rather than counted as held"
+              },
+              "threadSettleMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295,
+                "default": 50,
+                "description": "how far apart the two samples a thread census compares are taken"
+              },
+              "variables": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "how much of a value to read, and what the debugger may run to read it. a value that hits one of these bounds says which one, so this is where it gets raised",
+                "properties": {
+                  "depth": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "default": 3,
+                    "description": "how many levels of container or object to open. zero reports a value's type and size and opens nothing"
+                  },
+                  "children": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "default": 100,
+                    "description": "how many children of one container to read"
+                  },
+                  "text": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "default": 1024,
+                    "description": "how many characters of one string, or bytes of one bytes, to read"
+                  },
+                  "budget": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "default": 8192,
+                    "description": "the byte budget for the whole answer. when it runs out the answer says so at the point it ran out"
+                  },
+                  "attributes": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "read an object's instance dictionary. it is storage rather than behaviour for an ordinary object, and never reaches __getattr__ or a property — turn it off for a program full of proxies, whose __dict__ is their own code"
+                  },
+                  "repr": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "call __repr__ on a value with no structural representation. off by default because __repr__ is arbitrary user code that bpd cannot interrupt once it has started"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "bpd",
+            "request": "launch",
+            "name": "debug this file with bpd",
+            "program": "${file}",
+            "python": "python3"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "bpd: debug the current file",
+            "description": "run the open file under bpd",
+            "body": {
+              "type": "bpd",
+              "request": "launch",
+              "name": "debug this file with bpd",
+              "program": "^\"\\${file}\"",
+              "python": "python3"
+            }
+          },
+          {
+            "label": "bpd: debug a program, stopped at entry",
+            "description": "run a program under bpd and stay stopped before its first statement",
+            "body": {
+              "type": "bpd",
+              "request": "launch",
+              "name": "debug with bpd, stopped at entry",
+              "program": "^\"\\${workspaceFolder}/${1:app.py}\"",
+              "python": "python3",
+              "stopOnEntry": true
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

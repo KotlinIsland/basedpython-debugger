@@ -19,13 +19,13 @@ and the difference is worth being blunt about:
 
 - **neovim, through `nvim-dap`** — works today. the adapter is named in the
   configuration itself, so nothing else has to be installed
-- **vs code** — **does not work yet**, and not for a reason on this page. vs
-  code resolves a configuration's `"type"` through an extension that contributes
-  a `debuggers` entry; there is no way to name an adapter executable from
-  `launch.json` alone. an extension that does nothing but contribute
-  `"type": "bpd"` is all that is missing, and it is not built. an editor
-  integration beyond a launch configuration is explicitly outside the MVP, and
-  this is where that line lands
+- **vs code** — needs an extension, because it resolves a configuration's
+  `"type"` through one and offers no way to name an adapter executable from
+  `launch.json` alone. `editors/vscode/` is that extension and it contributes
+  the type, the launch attributes and the lookup for the binary — and nothing
+  else, which is where the MVP's line on editor integration lands. it has
+  **not** been driven by hand in vs code, and
+  [the vs code extension](vscode.md) says exactly what that leaves unverified
 
 `nvim-dap`, which is the one that works:
 
@@ -54,8 +54,7 @@ set a breakpoint on a line, start the configuration, and the program stops
 there. the frame's locals are in the scopes pane, writing one writes it, and
 step over / step in / step out are the ordinary `nvim-dap` commands
 
-the same configuration body is what a vs code `launch.json` entry would hold,
-once something contributes the type:
+the same configuration body is what a vs code `launch.json` entry holds:
 
 ```json
 {
@@ -262,6 +261,9 @@ waits
   and the answer says when the bound bit
 - **`restart`**, **function breakpoints**, **data breakpoints**, **goto**,
   **step back**, and **`setExpression`**
-- a **vs code extension**, which is what stands between the adapter and a vs
-  code `launch.json` working at all — see above. it is the one thing on this
-  list that a user will notice first
+
+what is built but **unverified in the editor it is for**: the vs code extension.
+its schema is pinned to `bpd_dap::Configuration` by a test that fails if either
+side moves, and nobody has yet installed it and started a session — which is a
+different sentence from "it works", and [that page](vscode.md) is the one that
+says so
