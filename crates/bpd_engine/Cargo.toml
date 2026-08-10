@@ -13,8 +13,14 @@ bpd_core = { workspace = true }
 bpd_protocol = { workspace = true }
 
 getrandom = { workspace = true }
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+
+# std has no `geteuid`, and the agent cache is refused unless the directory
+# belongs to the user whose processes will load what is in it
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
 
 [dev-dependencies]
 bpd_test = { workspace = true }

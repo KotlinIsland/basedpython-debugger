@@ -55,14 +55,36 @@ pub enum Error {
         reason: String,
     },
 
-    /// the agent build could not be copied where the interpreter can import it
-    #[error("could not stage the agent from `{path}`")]
+    /// the agent build could not be put where the interpreter can import it
+    #[error("could not stage the agent: `{path}`")]
     StageAgent {
-        /// the artifact being staged
+        /// the file or directory the failure was about
         path: PathBuf,
         /// the underlying failure
         #[source]
         source: io::Error,
+    },
+
+    /// there is nowhere a per-user agent cache could go
+    #[error("bpd has nowhere to cache the agent: {reason}")]
+    NoAgentCache {
+        /// what was looked at, and what it would take to fix
+        reason: String,
+    },
+
+    /// the directory the agent is cached in cannot be trusted
+    ///
+    /// what is cached there is a shared object that gets loaded into the user's
+    /// own processes, so a directory somebody else can write to is somebody
+    /// else choosing what runs inside the debuggee. staging refuses rather than
+    /// quietly using a temporary directory instead, because a fallback would
+    /// turn a broken cache into a performance regression nobody notices
+    #[error("refusing to cache the agent in `{path}`: {reason}")]
+    UntrustedAgentCache {
+        /// the directory that was refused
+        path: PathBuf,
+        /// what is wrong with it, and what it would take to fix
+        reason: String,
     },
 
     /// the control plane could not be brought up

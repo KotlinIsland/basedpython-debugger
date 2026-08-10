@@ -83,8 +83,6 @@ pub struct Debuggee {
     /// so while the program runs. kept for the next wait rather than dropped,
     /// for the same reason a log record is
     pending_rebinds: Vec<Resolved>,
-    /// held so the staged agent outlives the debuggee that imported it
-    _staged: agent::Staged,
 }
 
 impl Debuggee {
@@ -918,6 +916,5 @@ fn start(
         session,
         pending_logs: Vec::new(),
         pending_rebinds: Vec::new(),
-        _staged: staged,
     }))
 }

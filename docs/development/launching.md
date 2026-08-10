@@ -19,7 +19,7 @@ a bare one
   bpd                                      the debuggee
    │
    ├─ probe the interpreter, refuse if it cannot be driven
-   ├─ stage the agent build into a directory
+   ├─ stage the agent build, from the cache after the first time
    ├─ bind loopback, generate a session token
    ├─ spawn ────────────────────────────▶  python -c "import bpd_agent;
    │                                                   bpd_agent.main()"
@@ -40,6 +40,94 @@ a bare one
 
 the agent connects **back** to the engine. that removes any race over who binds
 first, and means the debuggee never listens for anything
+
+## where the agent is staged
+
+the agent is a `cdylib`, and cargo names the artifact `libbpd_agent.dylib`,
+`libbpd_agent.so` or `bpd_agent.dll`. an interpreter imports a module by file
+name, so staging is that rename into a directory that goes on the debuggee's
+`PYTHONPATH`
+
+that directory is a **cache**, with one entry per distinct agent build:
+
+```text
+~/.cache/bpd/agents/<sha-256 of the artifact>/bpd_agent.so
+```
+
+`$XDG_CACHE_HOME` is used instead of `~/.cache` when it is set to an absolute
+path, and windows uses `%LOCALAPPDATA%\bpd\agents\…\bpd_agent.pyd`. macOS gets
+`~/.cache` rather than `~/Library/Caches`, because one rule is one thing to
+check and the directory is `bpd`'s own either way
+
+it used to be a fresh temporary directory per launch, and that was **119 ms of a
+150 ms attach**: on macOS the first load of a shared object the system has never
+seen is checked before it is mapped, and a copy written a moment ago is never a
+file the system has seen. [what bpd costs](overhead.md) has the measurement, and
+what it became
+
+### the name is the content
+
+a rebuilt agent has different bytes, so it has a different path, so no launch
+can be handed a stale copy of an agent that has since been rebuilt. an mtime, a
+version string or a build id each leave a case where the file changed and the
+name did not, and running against code that is not the code in front of you is
+the failure this project can least afford — the same class as `cargo test` not
+rebuilding the `cdylib`, which has already cost this project a day
+
+the entry is **checked rather than assumed**, too: its bytes are compared with
+the artifact's before it is used, so an entry that a full disk truncated is
+republished instead of imported. that read costs a fraction of a millisecond
+against the 119 ms the cache is there to save
+
+### publishing an entry
+
+the file is written under a temporary name in the cache, flushed to disk, and
+**renamed** into place. rename is atomic, so a second `bpd` launching at the
+same moment sees either no file or the whole file — never a partial shared
+object — and since the name is the content, whichever writer wins wrote the same
+bytes as the one that lost
+
+windows refuses to replace a file another process has loaded, which is exactly
+what a debuggee running this agent looks like. the rename failing is therefore
+not decisive: the entry is read, and a file that already holds the right bytes
+is the request already satisfied
+
+### the cache directory is a security boundary
+
+what is in it is a shared object that gets loaded into the user's **own**
+processes. a directory another user can write to is another user choosing what
+runs inside the debuggee. so before anything is read from it or written to it:
+
+| the directory | what happens |
+| --- | --- |
+| is not there | created, mode `0700` |
+| is a link | refused |
+| is not a directory | refused |
+| belongs to another user | refused, naming both uids |
+| is writable by group or other | refused, naming the mode |
+
+write rather than read: the agent is not a secret, and a rule that refused
+`0755` — what an ordinary umask produces — would be refusing directories nobody
+else can put a file in
+
+there is no fallback. a cache that cannot be trusted is a refusal naming the
+path and the reason, not a quiet return to staging per launch, because falling
+back would hide a broken cache behind a performance regression nobody notices
+
+**on windows the ownership and mode checks are not made.** reading an ACL needs
+a security descriptor walk that is not written here, and writing one against a
+platform nobody on this project can inspect by hand would be a check nobody
+could vouch for. what stands in for it is `%LOCALAPPDATA%`, which windows keeps
+per-user, and the refusal of a junction pointing out of it. that is weaker than
+the unix check, and this page says so rather than implying a check that does not
+happen
+
+### what removes an entry
+
+nothing does. each is one copy of the agent — about a megabyte — and a
+developer who rebuilds the agent leaves one behind every time. deleting the
+directory is always safe: the next launch republishes what it needs and pays the
+cold load once
 
 ## why a `-c` bootstrap and not a python file
 
