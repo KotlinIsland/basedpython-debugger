@@ -44,6 +44,10 @@ fn to_exit(mut debuggee: bpd_engine::Debuggee) -> ExitStatus {
         Running::Stopped { stop, .. } => {
             panic!("no breakpoints were set, and it stopped for {stop:?}")
         }
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }

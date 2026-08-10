@@ -130,6 +130,18 @@ mod tests {
     }
 
     #[test]
+    fn a_misspelled_bound_is_refused_rather_than_quietly_taking_its_default() {
+        // the omission a value carries names a bound and asks for a larger one.
+        // a `launch.json` that spells it wrong and is accepted anyway would go
+        // on being cut in the same place, with the same advice, for ever
+        let error = serde_json::from_str::<Configuration>(
+            r#"{"program": "a.py", "variables": {"dept": 9}}"#,
+        )
+        .expect_err("`dept` is not a bound on a value");
+        assert!(error.to_string().contains("dept"), "said {error}");
+    }
+
+    #[test]
     fn a_configuration_with_no_program_is_refused_rather_than_defaulted() {
         let error = serde_json::from_str::<Configuration>(r#"{"args": []}"#)
             .expect_err("there is nothing to run");

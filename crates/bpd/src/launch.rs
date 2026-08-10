@@ -76,6 +76,14 @@ pub(crate) fn run(args: &Args) -> ExitCode {
             }
             // the only stop `bpd launch` makes is the entry one, and it resumes
             // it before the program runs a line, so nothing can still be held
+            // `bpd launch` waits without a deadline: it has nothing to report a
+            // timeout to, and the program's own exit is what it is waiting for
+            Ok(Running::StillRunning { waited, .. }) => {
+                unreachable!(
+                    "this wait carries no deadline and was answered after \
+                     {waited:?} with the program still running"
+                )
+            }
             Ok(Running::Finishing { threads, .. }) => {
                 unreachable!("nothing was held, and the debuggee ended holding {threads:?}")
             }

@@ -117,6 +117,10 @@ fn to_stop(debuggee: &mut Debuggee) -> (Stop, Vec<Resolved>) {
         Running::Exited { status, .. } => {
             panic!("the debuggee exited with {status} instead of stopping")
         }
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("the debuggee ended holding {threads:?} instead of stopping")
         }
@@ -137,6 +141,10 @@ fn finish(mut debuggee: Debuggee) {
         Running::Stopped { stop, .. } => {
             panic!("every breakpoint was cleared, and it still stopped for {stop:?}")
         }
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -281,6 +289,10 @@ fn a_breakpoint_fires_on_every_pass_over_the_line() {
                 assert!(status.success(), "the program exited with {status}");
                 break;
             }
+            Running::StillRunning { waited, .. } => unreachable!(
+                "this wait carries no deadline and was answered after {waited:?} \
+                 with the program still running"
+            ),
             Running::Finishing { threads, .. } => {
                 panic!("nothing was held, and the debuggee ended holding {threads:?}")
             }
@@ -751,6 +763,10 @@ observe()
     match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Exited { status, .. } => assert!(status.success()),
         Running::Stopped { stop, .. } => panic!("it stopped again for {stop:?}"),
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -937,6 +953,10 @@ fn a_running_debuggee_refuses_a_request_rather_than_leaving_it_unanswered() {
     match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Exited { .. } => {}
         Running::Stopped { stop, .. } => panic!("nothing was set, got {stop:?}"),
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }

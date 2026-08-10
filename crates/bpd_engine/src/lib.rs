@@ -327,6 +327,65 @@ impl Session {
         Ok(message::read(&mut self.reading, &mut self.buffer)?)
     }
 
+    /// whether the agent has begun saying something by `deadline`
+    ///
+    /// this **peeks** rather than reading, and that is the whole of why it is
+    /// written this way. a read timeout that fired part way through a frame
+    /// would leave the stream desynchronised, and the next four bytes read as a
+    /// length prefix would be the middle of a message — which the frame limit
+    /// turns into a failure and could as easily turn into a 60 MiB allocation.
+    /// one byte visible means a frame has started, and it is then read to its
+    /// end with the timeout off
+    ///
+    /// `false` means the deadline passed with the agent silent. it says nothing
+    /// about what the program is doing: a program that is running answers
+    /// nothing, because everything the agent answers it answers on a thread it
+    /// is holding
+    pub fn readable_by(&mut self, deadline: Instant) -> Result<bool> {
+        let readable = self.peek_until(deadline);
+        // whatever came of it, the stream goes back to blocking before anything
+        // reads a frame off it
+        self.reading
+            .set_read_timeout(None)
+            .map_err(|source| Error::Control {
+                source: frame::Error::Io(source),
+            })?;
+        readable
+    }
+
+    fn peek_until(&mut self, deadline: Instant) -> Result<bool> {
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(false);
+            }
+            self.reading
+                .set_read_timeout(Some(left))
+                .map_err(|source| Error::Control {
+                    source: frame::Error::Io(source),
+                })?;
+
+            let mut first = [0u8; 1];
+            match self.reading.peek(&mut first) {
+                // zero bytes is the agent having hung up, which `next_event`
+                // reports as the end of the session rather than as a timeout
+                Ok(_) => return Ok(true),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(source) => {
+                    return Err(Error::Control {
+                        source: frame::Error::Io(source),
+                    });
+                }
+            }
+        }
+    }
+
     /// wait for the agent to report a stop, and say why it stopped
     pub fn expect_stop(&mut self) -> Result<Stop> {
         const EXPECTED: &str = "the debuggee to stop";

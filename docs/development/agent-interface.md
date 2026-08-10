@@ -66,6 +66,34 @@ useful — it is what a profiler gives you, and "it is still inside
 `socket.recv`" answers most of these questions. a sample presented as a stop is
 the debugger reporting a state the program was not in
 
+#### three things this section got wrong, found when it was built
+
+the control tools and their deadlines are built —
+[the MCP adapter](mcp.md) is what shipped. three claims above did not survive
+contact with the session:
+
+- **there is no sample at all.** everything the agent inside the debuggee
+    answers, it answers on a thread it is **holding** — including the thread
+    census. so a program with nothing held cannot be asked what its threads are
+    doing, and there is nothing to label. a timeout therefore carries no
+    location of any kind, and names the two things that can be done instead:
+    keep waiting, or `pause` and get a real stop. the paragraphs above are still
+    the right rule; they describe a capability the thread model does not offer
+- **`set_breakpoint` is not a control operation.** it does not resume anything
+    and nothing stops as a result of it, so there is no stop for it to return.
+    it is also the whole *set* rather than one breakpoint, because a debugger
+    that accumulates edits has two ideas of what is set
+- **`run_to` is not built, and it does not fit as written.** it is either a
+    composition a front end performs — arming a breakpoint of its own and
+    taking it off again, which is a decision about the program made in an
+    adapter — or a capability of the core that DAP has no request for at all,
+    which the parity rule below forbids. and under a deadline it is unsound: a
+    one-shot breakpoint cannot be removed while the program is running, so a
+    timed-out `run_to` leaves the program armed with something the agent did not
+    ask for. it belongs with `run_until` and `watch`, in the section after next,
+    where stop conditions are expressed as intent rather than as a temporary
+    breakpoint someone has to remember to remove
+
 ### state is queried declaratively, in one call
 
 instead of walking scopes and variables, the agent describes what it wants:
@@ -218,11 +246,24 @@ a capability is added to `bpd_core` once. both adapters expose it. a pull
 request that adds a DAP request without the MCP tool, or the reverse, is
 incomplete — the same way a feature without a test is incomplete
 
+it is a build failure rather than a review habit: `crates/bpd/tests/parity.rs`,
+over the two adapters' `reach_of`, both of which are exhaustive matches on
+`bpd_core::Request` with no catch-all arm. **enumerating the request variants
+was not enough** — a front end can implement every one of them and still not
+offer a capability carried in a *field*, which is what DAP's hit condition is —
+so `bpd_core::parity::Facet` enumerates those beside them, and a protocol that
+genuinely cannot carry one has to say so with the reason, in a list the test
+compares against by hand
+
 ## still open
 
 - whether the MCP interface should also expose a subscription for a program
     that stops on its own — an unhandled exception in a background thread — or
-    whether surfacing that on the next call is enough
+    whether surfacing that on the next call is enough. **surfacing it on the
+    next call is what shipped**, and it is not obviously a compromise: `wait`
+    touches the program in no way and returns whatever it did, so an agent that
+    wants to hear about a background stop asks for one. what is not answered is
+    the agent that is *not* asking
 - how a snapshot is addressed across turns without reintroducing DAP's stale
     handle problem. a content addressed id is the current thinking
 - what the right default byte budget is for an object graph, given that it is

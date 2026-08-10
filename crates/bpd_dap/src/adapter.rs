@@ -34,14 +34,13 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use bpd_core::{
     Binding, Detail, Evaluated, FrameId, LogRecord, Reporting, Request, Resolved, Response,
-    Running, Scope, SourceBreakpoint, StepKind, Stop, StopReason, Unbound, Value, Which,
+    Running, Scope, SourceBreakpoint, StepKind, Stop, StopReason, Unbound, Value, Which, exit_code,
 };
 
 use crate::capabilities::capabilities;
@@ -229,11 +228,14 @@ impl Adapter {
 
             if self.waiting() {
                 let mut events = Events::new(&self.output);
+                // no deadline: the answer to whatever resumed the program has
+                // already been sent, so nothing is waiting on this wait and a
+                // timeout would be the answer to no question
                 let waited = self
                     .session
                     .as_mut()
                     .expect("the adapter only waits once a program has been launched")
-                    .dispatch(Request::Wait, &mut events);
+                    .dispatch(Request::Wait { deadline: None }, &mut events);
                 let written = events.finish();
                 let outcome = match (waited, written) {
                     (_, Err(error)) => Err(Aborted::Wire(error)),
@@ -1022,11 +1024,18 @@ impl Adapter {
         let rebound = match &running {
             Running::Stopped { rebound, .. }
             | Running::Exited { rebound, .. }
-            | Running::Finishing { rebound, .. } => rebound.clone(),
+            | Running::Finishing { rebound, .. }
+            | Running::StillRunning { rebound, .. } => rebound.clone(),
         };
         self.rebound(&rebound)?;
 
         match running {
+            // only a wait that carried a deadline can be answered with this,
+            // and this adapter never sends one — see `coverage::reach_of`
+            Running::StillRunning { waited, .. } => unreachable!(
+                "a DAP wait carries no deadline and was answered after {waited:?} \
+                 with the program still running"
+            ),
             Running::Stopped { .. } => self.announce(),
             Running::Exited { status, .. } => {
                 self.exited = true;
@@ -1445,23 +1454,6 @@ fn source_of(file: &str) -> serde_json::Value {
     } else {
         serde_json::json!({ "name": file })
     }
-}
-
-/// the program's exit, as a number a client can show
-fn exit_code(status: ExitStatus) -> i64 {
-    if let Some(code) = status.code() {
-        return code.into();
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt as _;
-        if let Some(signal) = status.signal() {
-            // the number a shell reports for a signalled child, so a client
-            // showing it sees what a terminal would have
-            return i64::from(128 + signal);
-        }
-    }
-    unreachable!("an exit status is either a code or a signal, and this was {status}")
 }
 
 /// the program's own stdout and stderr, as the client sees them

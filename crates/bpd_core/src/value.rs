@@ -11,7 +11,13 @@ use crate::exception::PythonError;
 /// every field is a bound the answer is held to, and every bound that bites is
 /// named in the answer. there is no setting here that makes a value quietly
 /// incomplete
+/// deserialised with `deny_unknown_fields` because a client's spelling of one
+/// of these is the *only* way to raise a bound the answer told it to raise. a
+/// misspelled `dept` that quietly took the default would be an instruction the
+/// client followed and bpd ignored, and the next answer would be cut in the same
+/// place with the same advice
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Detail {
     /// how many levels of container or object to open
     ///

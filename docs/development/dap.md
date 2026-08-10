@@ -228,18 +228,26 @@ the adapter's stdout **is** the protocol, so the debuggee cannot share it: one
 program is launched with pipes and each line becomes an `output` event, `stdout`
 and `stderr` categorised separately
 
-## the parity rule, one-sided for now
+## the parity rule, both sided
 
-no capability may exist in one adapter and not the other. the two-sided test of
-that needs the MCP adapter and arrives with it — with one adapter there is
-nothing to compare against
+no capability may exist in one adapter and not the other, and the test of that
+arrived with [the MCP adapter](mcp.md): `crates/bpd/tests/parity.rs`
 
-what exists now is the half that bites. `bpd_dap::reach_of` matches
+what bites here is the half about DAP. `bpd_dap::reach_of` matches
 `bpd_core::Request` with **no catch-all arm**, so a capability added to the core
-does not compile until someone says how DAP gets at it. and
-`crates/bpd_dap/tests/coverage.rs` drives the adapter through a whole DAP
-conversation and asserts that every capability the table claims is reachable was
-really asked for — so an entry that reads well and is not true fails
+does not compile until someone says how DAP gets at it, and
+`bpd_dap::reach_of_facet` does the same for the capabilities carried *inside* a
+request — a front end can implement every variant and still not offer a hit
+condition. `crates/bpd_dap/tests/coverage.rs` then drives the adapter through a
+whole DAP conversation and asserts that every capability the table claims is
+reachable was really asked for, so an entry that reads well and is not true
+fails
+
+**one capability is out of DAP's reach**, and it is the hit condition — for the
+reason below, which is DAP's rather than bpd's. it is the only entry in the
+parity test's hand written list of justified exceptions, and it is only
+acceptable there because MCP does carry it. a capability neither front end can
+reach fails that test outright
 
 one capability is reachable only as its parts. `Request::Run` is a resume
 followed by a wait, and DAP needs those separately: a `continue` has to be

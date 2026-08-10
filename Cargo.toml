@@ -13,6 +13,7 @@ repository = "https://github.com/KotlinIsland/basedpythondebugger"
 [workspace.dependencies]
 bpd_core = { path = "crates/bpd_core" }
 bpd_dap = { path = "crates/bpd_dap" }
+bpd_mcp = { path = "crates/bpd_mcp" }
 bpd_protocol = { path = "crates/bpd_protocol" }
 bpd_engine = { path = "crates/bpd_engine" }
 bpd_test = { path = "crates/bpd_test" }

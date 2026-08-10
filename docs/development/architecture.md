@@ -158,14 +158,18 @@ implementation of every capability rather than one per front end
 
 the same enum then serves four consumers, which is the sign it is the right
 shape — DAP requests map onto it, MCP tools map onto it, the debug script is a
-*tree* of it, and the parity test enumerates it. the test arrives with the
-second adapter: a parity test with one adapter to check is a test with nothing
-to check
+*tree* of it, and the parity test enumerates it
 
-the first adapter is built, and the one-sided half of that test is with it:
-`bpd_dap::reach_of` matches `Request` with no catch-all arm, so a capability
-added to the core is a compile error until someone says how DAP reaches it. the
-whole of it is [the DAP adapter](dap.md)
+**both adapters are built and the test is written.** `bpd_dap::reach_of` and
+`bpd_mcp::reach_of` each match `Request` with no catch-all arm, so a capability
+added to the core is a compile error in both until someone says how each front
+end reaches it; `crates/bpd/tests/parity.rs` then compares the two answers. a
+capability enum alone would not have been enough — a front end can implement
+every variant and still not offer a capability carried in a *field*, so
+`bpd_core::parity::Facet` enumerates those too, and a front end whose protocol
+genuinely cannot carry one says so with the reason rather than leaving a gap.
+the whole of it is [the DAP adapter](dap.md) and
+[the MCP adapter](mcp.md)
 
 ### one definition, not two
 

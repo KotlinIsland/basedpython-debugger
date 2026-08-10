@@ -78,8 +78,8 @@ breakpoint is not already solid
       resolves a configuration's `type` through an extension contributing a
       `debuggers` entry and offers no way to point at a binary, so without one
       no vs code user can run `bpd` however complete the adapter is
-- [ ] an MCP server exposing the same session
-- [ ] a parity test that enumerates the capabilities in `bpd_core` and fails if
+- [x] an MCP server exposing the same session
+- [x] a parity test that enumerates the capabilities in `bpd_core` and fails if
       either adapter is missing one. the rule is enforced by CI, not by review
 
 **evidence**
@@ -263,23 +263,56 @@ there is no conversion layer between the domain and the wire, and that is
 deliberate — the reasoning is in
 [architecture](docs/development/architecture.md)
 
-### M5 — MCP
+### M5 — MCP · the server, the control tools and the parity test are built
 
-the agent interface from
-[agent interface](docs/development/agent-interface.md), and the parity test that
-makes the invariant structural
+`bpd mcp` speaks the model context protocol on stdin and stdout. `bpd_mcp`
+depends on `bpd_core` alone, and `crates/bpd/src/mcp.rs` is where `bpd_engine`
+is put behind it — the same shape as the DAP adapter, so nothing about how the
+agent reports something can shape what an ai agent sees
 
-this is also where the **debug script** lands: a schema-validated tree of steps
-with its own branching, submitted in one call, returning a transcript of what
-happened at every one. it collapses an investigation that would be fifty round
-trips into a single turn, and it is a capability rather than an MCP feature, so
-DAP gets it too
+**every control tool returns the stop it produced.** `continue_`, `step_over`,
+`step_in`, `step_out`, `wait` and `pause` each block until the program stops
+again and return why it stopped, which thread, and the top of its stack. the
+server writes nothing that is not the answer to something that was asked, so
+there is no event stream to correlate — stepping five times costs five tool
+calls, counted against a real interpreter in `crates/bpd/tests/mcp.rs`
 
-and where **how an agent learns bpd** is answered. only tools are
-model-controlled in MCP — resources are the host's choice and prompts are the
-user's — so the interface has to explain itself through schemas and errors
-first, with documents and canonical investigations layered on top rather than
-compensating for them
+**every one of them requires a deadline**, and what a timeout may say turned out
+to be narrower than the design assumed. everything the agent inside the debuggee
+answers, it answers on a thread it is *holding* — including the thread census —
+so a program with nothing held cannot be sampled at all. a timeout therefore
+reports that the program is still running and carries **no location of any
+kind**, and names what can be done instead: keep waiting, or pause and get a
+real stop. a sampled stack presented as a stopped one is the debugger reporting
+a state the program was not in, and a sample that cannot be taken is not one
+
+**the parity rule is now a build failure.** `crates/bpd/tests/parity.rs`
+enumerates `bpd_core`'s capabilities and compares what the two adapters claim
+about each. enumerating the request variants was not enough on its own: a front
+end can implement every one of them and still not offer a capability carried in
+a *field*, which is exactly what DAP's hit condition is — so those are
+enumerated beside them, and a protocol that genuinely cannot carry one says so
+with the reason, in a list the test checks by hand
+
+what is **not** built: `run_to`, which is either a decision an adapter makes
+about the program or a capability DAP has no request for, and whose one-shot
+breakpoint cannot be removed from a program that timed out still running; the
+declarative state query; snapshot and diff; the debug script; and MCP resources
+and prompts, which are the layers that must not be written to compensate for an
+interface that does not explain itself
+
+the whole of it is [the MCP adapter](docs/development/mcp.md)
+
+still to come in this milestone: the **debug script** — a schema-validated tree
+of steps with its own branching, submitted in one call, returning a transcript
+of what happened at every one. it collapses an investigation that would be fifty
+round trips into a single turn, and it is a capability rather than an MCP
+feature, so DAP gets it too
+
+and **how an agent learns bpd**, in order: tool schemas, then errors, then
+resources and prompts. the first two are what shipped, which is the order the
+design asks for — a document is not a reliable teaching surface and a tool
+result is
 
 **the MVP is M0 through M5**
 

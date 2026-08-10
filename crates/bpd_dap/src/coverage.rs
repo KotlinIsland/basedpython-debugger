@@ -1,40 +1,21 @@
 //! how every capability of the core reaches a DAP client
 //!
 //! the parity rule is that no capability exists in one adapter and not the
-//! other. the *test* of that rule needs two adapters and arrives with the
-//! second one. this is the half that can be written now, and it is the half
-//! that bites when someone adds a capability: [`reach_of`] matches
-//! [`Request`] with **no catch-all arm**, so a variant added to the core is a
-//! compile error here rather than a capability DAP silently does not have
+//! other. [`reach_of`] matches [`Request`] with **no catch-all arm**, so a
+//! variant added to the core is a compile error here rather than a capability
+//! DAP silently does not have, and [`reach_of_facet`] does the same for the
+//! capabilities that are carried *inside* a request rather than being one
 //!
-//! `crates/bpd_dap/tests/coverage.rs` is the other half. it drives the adapter
-//! with a real DAP conversation, records every request the session was actually
-//! asked, and checks this table against what happened — so an entry that claims
-//! a mapping the adapter does not make fails rather than reading well
+//! two tests read this table. `crates/bpd_dap/tests/coverage.rs` drives the
+//! adapter with a real DAP conversation and checks the table against what the
+//! session was actually asked — so an entry that claims a mapping the adapter
+//! does not make fails rather than reading well. `crates/bpd/tests/parity.rs`
+//! is the two-sided half, and compares this against the MCP adapter's answer
 
-use bpd_core::{Detail, FrameId, Request, Scope, SourceBreakpoint, StepKind, Threads, Which};
+use bpd_core::parity::{Facet, Reach};
+use bpd_core::session::Request;
 
-/// how a DAP client gets at one capability
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reach {
-    /// a DAP request maps onto it
-    Command(&'static str),
-
-    /// the adapter makes it without being asked, and this is when
-    OnItsOwn(&'static str),
-
-    /// DAP cannot use this form of it, because it is a composition
-    ///
-    /// not a gap. the capability is reachable — the *combination* is what an
-    /// event driven protocol cannot use, because it would mean not answering a
-    /// request until the program next stopped
-    Composed {
-        /// the capabilities it is a composition of, by [`Request::name`]
-        of: &'static [&'static str],
-        /// why the composed form is unusable here
-        why: &'static str,
-    },
-}
+pub use bpd_core::parity::surface;
 
 /// how one capability reaches a DAP client
 ///
@@ -42,10 +23,10 @@ pub enum Reach {
 /// of the function
 pub const fn reach_of(request: &Request) -> Reach {
     match request {
-        Request::SetBreakpoints { .. } => Reach::Command("setBreakpoints"),
-        Request::SetExceptionBreakpoints { .. } => Reach::Command("setExceptionBreakpoints"),
+        Request::SetBreakpoints { .. } => Reach::Direct("setBreakpoints"),
+        Request::SetExceptionBreakpoints { .. } => Reach::Direct("setExceptionBreakpoints"),
 
-        Request::Run => Reach::Composed {
+        Request::Run { .. } => Reach::Composed {
             of: &["resuming a thread", "waiting for the program"],
             why: "a `continue` has to be answered before the program stops \
                   again, and a run does not return until it does. the adapter \
@@ -53,15 +34,18 @@ pub const fn reach_of(request: &Request) -> Reach {
                   things in the order DAP needs them",
         },
 
-        Request::Wait => Reach::OnItsOwn(
+        Request::Wait { .. } => Reach::OnItsOwn(
             "whenever no thread is held, which is what the adapter does between \
-             a resume and the `stopped` event that follows it",
+             a resume and the `stopped` event that follows it. it never carries \
+             a deadline: the answer to a DAP `continue` has already been sent, \
+             so there is nothing waiting on the wait and nothing a timeout \
+             would be the answer to",
         ),
 
-        Request::Resume { .. } => Reach::Command("continue"),
-        Request::Step { .. } => Reach::Command("next, stepIn and stepOut"),
-        Request::Pause => Reach::Command("pause"),
-        Request::Threads { .. } => Reach::Command("threads"),
+        Request::Resume { .. } => Reach::Direct("continue"),
+        Request::Step { .. } => Reach::Direct("next, stepIn and stepOut"),
+        Request::Pause => Reach::Direct("pause"),
+        Request::Threads { .. } => Reach::Direct("threads"),
 
         Request::StopTheWorld { .. } => Reach::OnItsOwn(
             "at every stop, when `stopTheWorld` is set in the launch \
@@ -70,79 +54,47 @@ pub const fn reach_of(request: &Request) -> Reach {
              concept of a program that is only partly held",
         ),
 
-        Request::Stack { .. } => Reach::Command("stackTrace"),
-        Request::Variables { .. } => Reach::Command("variables"),
-        Request::Evaluate { .. } => Reach::Command("evaluate"),
-        Request::SetVariable { .. } => Reach::Command("setVariable"),
+        Request::Stack { .. } => Reach::Direct("stackTrace"),
+        Request::Variables { .. } => Reach::Direct("variables"),
+        Request::Evaluate { .. } => Reach::Direct("evaluate"),
+        Request::SetVariable { .. } => Reach::Direct("setVariable"),
     }
 }
 
-/// one request of every variant the core defines
+/// how one capability carried inside a request reaches a DAP client
 ///
-/// [`reach_of`] is what makes a new variant impossible to ignore; this list is
-/// what the coverage test drives the adapter against
-pub fn surface() -> Vec<Request> {
-    let frame = FrameId { stop: 1, depth: 0 };
-    vec![
-        Request::SetBreakpoints {
-            breakpoints: vec![SourceBreakpoint::at(1, "a.py", 1)],
+/// exhaustive, for the reason [`reach_of`] is
+pub const fn reach_of_facet(facet: Facet) -> Reach {
+    match facet {
+        // the one capability of the core that DAP cannot carry, and the reason
+        // is DAP's rather than bpd's: `hitCondition` is free text whose meaning
+        // is a per-client convention. `>5`, `=5`, `%5` and a bare `5` are read
+        // differently by different debuggers, so there is nothing to map
+        // `HitCondition` onto that would mean the same thing to two clients
+        Facet::HitCondition => Reach::Unreachable {
+            why: "DAP carries a hit condition as a **string** whose meaning is a \
+                  per-client convention — `>5`, `=5`, `%5` and a bare `5` are \
+                  read differently by different debuggers. \
+                  `bpd_core::HitCondition` is deliberately not that string, so \
+                  `supportsHitConditionalBreakpoints` is not advertised and a \
+                  client that sends one anyway is refused with the reason \
+                  rather than answered on whichever convention bpd guessed",
         },
-        Request::SetExceptionBreakpoints {
-            raised: false,
-            uncaught: true,
-        },
-        Request::Run,
-        Request::Wait,
-        Request::Resume { which: Which::All },
-        Request::Step {
-            stop: 1,
-            kind: StepKind::Over,
-        },
-        Request::Pause,
-        Request::Threads {
-            settle: Threads::SETTLE,
-        },
-        Request::StopTheWorld {
-            stop: 1,
-            settle: Threads::SETTLE,
-        },
-        Request::Stack { stop: 1, top: None },
-        Request::Variables {
-            frame,
-            scope: Scope::Local,
-            detail: Detail::default(),
-        },
-        Request::Evaluate {
-            frame,
-            expression: "1".to_string(),
-            detail: Detail::default(),
-        },
-        Request::SetVariable {
-            frame,
-            scope: Scope::Local,
-            name: "x".to_string(),
-            value: "1".to_string(),
-            detail: Detail::default(),
-        },
-    ]
+
+        // DAP has nowhere on a request to carry them, so they come from the
+        // launch configuration instead — one setting for the session rather
+        // than one per read. that is a narrower way to reach it, not a gap
+        Facet::ValueBounds => Reach::Direct(
+            "the `variables` object of the launch configuration, every field of \
+             which is a field of `bpd_core::Detail`",
+        ),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-
-    #[test]
-    fn the_surface_holds_one_request_of_every_kind_and_no_kind_twice() {
-        let names: Vec<&str> = surface().iter().map(Request::name).collect();
-        let distinct: BTreeSet<&str> = names.iter().copied().collect();
-
-        assert_eq!(
-            names.len(),
-            distinct.len(),
-            "the surface names a capability twice: {names:?}"
-        );
-    }
 
     #[test]
     fn every_composition_is_composed_of_capabilities_that_are_themselves_reachable() {
@@ -164,5 +116,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_capability_dap_cannot_carry_says_why_rather_than_being_left_out() {
+        let Reach::Unreachable { why } = reach_of_facet(Facet::HitCondition) else {
+            panic!("DAP has no route for a hit condition, and the table says it has")
+        };
+        assert!(
+            why.contains("per-client convention"),
+            "an unreachable capability has to say what stands in the way, and \
+             said {why}"
+        );
     }
 }

@@ -120,6 +120,10 @@ fn stop_at(debuggee: &mut Debuggee, file: &Path, line: u32) {
         Running::Exited { status, .. } => {
             panic!("it exited with {status} instead of stopping")
         }
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -134,6 +138,10 @@ fn to_exit(debuggee: &mut Debuggee) {
     match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Exited { status, .. } => assert!(status.success(), "it exited with {status}"),
         Running::Stopped { stop, .. } => panic!("nothing is set, and it stopped for {stop:?}"),
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -603,6 +611,10 @@ fn a_stack_holds_no_frame_of_bpds_even_where_an_expression_of_bpds_just_ran() {
     let reason = match debuggee.run(unlogged).expect("the debuggee was resumed") {
         Running::Stopped { stop, .. } => stop.reason,
         Running::Exited { status, .. } => panic!("it ran to {status} instead of stopping"),
+        Running::StillRunning { waited, .. } => unreachable!(
+            "this wait carries no deadline and was answered after {waited:?} \
+             with the program still running"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }

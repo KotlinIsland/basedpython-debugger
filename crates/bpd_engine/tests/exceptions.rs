@@ -288,6 +288,10 @@ fn one_raise_is_one_stop_however_many_frames_it_passes_through() {
                 assert!(status.success());
                 break;
             }
+            Running::StillRunning { waited, .. } => unreachable!(
+                "this wait carries no deadline and was answered after {waited:?} \
+                 with the program still running"
+            ),
             other @ Running::Finishing { .. } => {
                 panic!("expected a raise or the end, got {other:?}")
             }

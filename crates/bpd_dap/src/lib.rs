@@ -5,8 +5,8 @@
 //! **translation and nothing else**: a DAP request becomes a
 //! [`bpd_core::Request`], the answer is rendered, and no decision about the
 //! program is made on the way. a decision made here would be a decision the MCP
-//! adapter of M5 would make differently, and "an agent can do everything a
-//! human can" would stop being structural
+//! adapter makes differently, and "an agent can do everything a human can" would
+//! stop being structural
 //!
 //! ## the dependency, and why it is only on `bpd_core`
 //!
@@ -49,5 +49,5 @@ pub mod wire;
 pub use adapter::serve;
 pub use capabilities::capabilities;
 pub use configuration::Configuration;
-pub use coverage::{Reach, reach_of, surface};
+pub use coverage::{reach_of, reach_of_facet, surface};
 pub use session::{Failed, Interrupt, Launcher, ProgramOutput, Session, Started, Stream, describe};
