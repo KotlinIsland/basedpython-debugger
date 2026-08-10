@@ -23,7 +23,7 @@ core**, with the parity rule from [architecture](architecture.md) making
 ## what is wrong with DAP for an agent
 
 DAP is asynchronous and event driven, and it is *chatty by design*, because it
-was built for a ui that renders a tree the user expands one node at a time.
+was built for a ui that renders a tree the user expands one node at a time
 
 1. **the answer arrives as an event, not as a response.** `next` returns an
     acknowledgement. the actual result — where it stopped, and why — arrives
