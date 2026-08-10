@@ -1,0 +1,34 @@
+{
+  "$schema": "https://dprint.dev/schemas/v0.json",
+  // 80 columns and two space indents, so the same text reads the same way it
+  // does in `.editorconfig` — dprint reads neither that nor `.gitignore`
+  "lineWidth": 80,
+  "indentWidth": 2,
+  "useTabs": false,
+  // everything the plugins below claim, minus the trees nobody edits by hand.
+  // build output and the virtualenv are untracked, but `dprint fmt` with no
+  // arguments walks the working directory rather than the index
+  "excludes": [
+    "**/target",
+    "**/node_modules",
+    "**/.venv",
+    "**/.cache",
+    "**/.idea",
+    "site"
+  ],
+  // yaml, and the json and javascript the vs code extension is made of.
+  //
+  // **no markdown plugin**: dprint's markdown style — two space list
+  // continuation, `_emphasis_` — disagrees with the four space continuation
+  // used across basedpython's docs, and the docs are meant to read the same in
+  // both
+  //
+  // the `@` suffix is the sha-256 of the wasm, checked when dprint fetches it
+  // into its cache, so a url cannot serve different bytes under a version that
+  // did not change
+  "plugins": [
+    "https://plugins.dprint.dev/json-0.23.0.wasm@3e1f1b7c1427df6bd8981a11aaa2c466fde8d1115e9dde4c652130458539443c",
+    "https://plugins.dprint.dev/typescript-0.96.1.wasm@9c52244de2c25a33addc7ddacff4443234a2dc4b5d3f34131262d1e0df35007c",
+    "https://plugins.dprint.dev/g-plane/pretty_yaml-v0.6.0.wasm@40a2fdda7040317eb1b23520f3a00769a5571eedb049c4ca9175c1b9eeba01ae"
+  ]
+}
