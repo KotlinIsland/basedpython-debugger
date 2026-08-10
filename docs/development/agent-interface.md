@@ -106,6 +106,31 @@ the answer comes back in one response, already at the level of detail asked
 for. the DAP tree walk is still available underneath — the same session core
 answers both — but an agent never pays for it
 
+#### what it turned out to be
+
+built as `Request::Query`, the `state` tool and the custom DAP request
+`bpd/state` — [the state query](queries.md) is what shipped. the query is
+**composed of the requests the tree walk is made of**, so the two cannot
+disagree about a value; what it removes is the round trips
+
+three things this section did not say, which the build had to decide:
+
+- **the budget is one budget.** the paragraph above puts a byte budget beside a
+    depth as though it bounded each read. it bounds the *whole* query, or a query
+    of twenty parts under eight kilobytes would spend a hundred and sixty. a part
+    that did not fit is named rather than absent, and the order parts are read in
+    is fixed so that what a spent budget cuts is the open ended part
+- **"whether to include the source" is not a boolean, and it is not free.** the
+    file on disk is not evidence of what the interpreter compiled — files are
+    edited while programs run, and `linecache` has exactly this bug. so source is
+    read *in the debuggee* and **proved**: the file is compiled and the frame's
+    own code object has to be in what comes out, line table included. a file that
+    has been edited says so instead of showing a line one off
+- **a frame is not a scope.** the scopes and the source are read for the frames
+    the query describes, and `frames` therefore defaults to one — the frame the
+    program is in. every extra frame is a scope read nobody asked for, spending
+    the budget this section exists to protect
+
 ### stop conditions are expressed as intent
 
 an agent almost never wants "step 47 times". it wants *"run until this variable
@@ -124,6 +149,31 @@ interface supports capturing a state snapshot at one stop and asking for the
 **difference** against another, rather than shipping both states to the agent
 and making it compare them. the diff is the answer; the two states are raw
 material
+
+#### the open question below, answered
+
+**a snapshot is not a handle, so it does not go stale.** that is the whole of
+it, and it is why the question looked harder than it was. DAP's variable
+reference is a *promise to read something later*, and that promise is what the
+next resume breaks. a snapshot is the reading, already taken — nothing the
+program does afterwards can change it
+
+so an id stays valid for the life of the session, across any number of resumes,
+and content addressing earns its place for a different reason than expected: not
+to detect staleness, but so that the same state read twice **is one state**
+rather than two that happen to agree. the id carries the stop as well, following
+the [frame identity](state.md#a-frame-identity-says-which-stop-it-belongs-to)
+precedent, which makes it self-describing to a reader
+
+what does end with the stop is asking that stop anything more — the frame ids
+*inside* a snapshot name frames that have run on, and the existing rule refuses
+them. the snapshot goes on being true; what it points at cannot be asked again
+
+and one thing the section above does not say, which the diff cannot do without:
+**a value a bound cut short in either snapshot is reported as not compared**.
+"unchanged" is a claim, and half a list is not evidence for it. the same applies
+to a depth of the stack that is running different code in the two, and to
+anything only one of them read — see [the diff](queries.md#the-diff-is-the-answer)
 
 ### errors are never soft
 
@@ -299,8 +349,10 @@ compares against by hand
     touches the program in no way and returns whatever it did, so an agent that
     wants to hear about a background stop asks for one. what is not answered is
     the agent that is *not* asking
-- how a snapshot is addressed across turns without reintroducing DAP's stale
-    handle problem. a content addressed id is the current thinking
+- ~~how a snapshot is addressed across turns without reintroducing DAP's stale
+    handle problem~~. **answered**: a snapshot is a value rather than a handle
+    and does not go stale at all, so an id is valid for the session. content
+    addressing shipped, for the second reason above rather than the first
 - what the right default byte budget is for an object graph, given that it is
     spending someone's context window. the mechanism is built and its defaults
     are a placeholder — [the stopped

@@ -11,6 +11,12 @@ stepping, pausing and the exception breakpoints — is
 [stepping](stepping.md). none of this has a command line surface yet: it reaches
 a user through the adapters, which are not built
 
+everything on this page can be asked for one piece at a time, which is what a
+tree walking front end does, or **all of it in one call** — a set of expressions,
+the scopes of a chosen frame, the source around its line, under one byte budget.
+that is [the state query](queries.md), and it is composed of the requests on this
+page rather than being a second way of reading a value
+
 ## a frame identity says which stop it belongs to
 
 a frame id is `{stop, depth}`: the number of the stop it was minted at, and how
@@ -219,6 +225,11 @@ these defaults are a starting point rather than a settled answer. the byte budge
 is spending an agent's context window, and [what it is worth is an open
 question](agent-interface.md#still-open) that cannot be closed until there is an
 agent surface to measure it against
+
+`budget` means one more thing inside [a state query](queries.md#the-budget-is-one-budget),
+where it bounds the **whole** answer rather than each read in it. that is the
+same number doing the same job at a larger scope, and the parts it could not
+reach are named for the reason a cut value is
 
 the budget counts the text a value carries, its type name, and a fixed cost per
 value for the envelope around it. an answer can exceed it by the envelope of the

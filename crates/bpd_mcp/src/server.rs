@@ -402,6 +402,27 @@ impl<'a> Server<'a> {
                     other => unreachable!("a debug script was answered with {other:?}"),
                 }
             }
+            "state" => {
+                let args: StateArgs = parse(arguments)?;
+                let stop = self.stop_of(args.stop, "the state of a stop")?;
+                match self.ask(Request::Query {
+                    stop,
+                    query: args.query(),
+                })? {
+                    Response::State(snapshot) => Ok(render::state(&snapshot)),
+                    other => unreachable!("a state query was answered with {other:?}"),
+                }
+            }
+            "diff" => {
+                let args: DiffArgs = parse(arguments)?;
+                match self.ask(Request::Diff {
+                    before: args.before,
+                    after: args.after,
+                })? {
+                    Response::Difference(difference) => Ok(render::difference(&difference)),
+                    other => unreachable!("a difference was answered with {other:?}"),
+                }
+            }
             "terminate" => {
                 let _: Empty = parse(arguments)?;
                 let session = self
@@ -995,6 +1016,53 @@ struct RunScript {
     stop: Option<u64>,
     steps: Vec<bpd_core::Step>,
     budget: bpd_core::Budget,
+}
+
+/// a whole state query, as its own arguments
+///
+/// flat rather than a nested `query` object, because every field of it is a
+/// thing the agent is choosing and a level of nesting is a level of schema an
+/// agent has to hold in its head. what it builds is `bpd_core::StateQuery`, so
+/// there is one definition of what a query is
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateArgs {
+    #[serde(default)]
+    stop: Option<u64>,
+    #[serde(default = "one_frame")]
+    frames: u32,
+    #[serde(default)]
+    scopes: Vec<Scope>,
+    #[serde(default)]
+    expressions: Vec<bpd_core::Wanted>,
+    #[serde(default)]
+    source: Option<u32>,
+    #[serde(default)]
+    detail: Detail,
+}
+
+/// how many frames a state query describes when the client does not say
+fn one_frame() -> u32 {
+    bpd_core::StateQuery::default().frames
+}
+
+impl StateArgs {
+    fn query(self) -> bpd_core::StateQuery {
+        bpd_core::StateQuery {
+            frames: self.frames,
+            scopes: self.scopes,
+            expressions: self.expressions,
+            source: self.source,
+            detail: self.detail,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiffArgs {
+    before: bpd_core::SnapshotId,
+    after: bpd_core::SnapshotId,
 }
 
 #[derive(serde::Deserialize)]

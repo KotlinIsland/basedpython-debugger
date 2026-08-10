@@ -300,6 +300,35 @@ fn drive(asked: &Asked) -> Transcript {
         "evaluate",
         serde_json::json!({ "expression": "total + 1", "frameId": frame }),
     );
+    // the whole of a stop in one call, and the difference between two of them.
+    // DAP's own way of reading state is the tree walk above, and it keeps it —
+    // this is the same capability an agent's front end has, which is what the
+    // parity rule requires
+    let described = answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/state",
+        serde_json::json!({
+            "threadId": thread,
+            "query": {
+                "frames": 1,
+                "scopes": ["local"],
+                "expressions": [ { "expression": "total + 1" } ],
+                "detail": { "children": 7 },
+            },
+        }),
+    );
+    let id = described["body"]["id"]
+        .as_str()
+        .expect("a state carries the id it is kept under")
+        .to_string();
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/diff",
+        serde_json::json!({ "before": id, "after": id }),
+    );
+
     // a whole investigation in one call. DAP has no request of its own for
     // this and never will, so it is an extension — and the parity rule is why
     // it exists here at all: a capability an agent has and a person does not is
@@ -511,6 +540,60 @@ fn integer(text: &str) -> Value {
     }
 }
 
+/// what a fake session answers a state query with
+fn snapshot(stop: u64, query: &bpd_core::StateQuery) -> bpd_core::Snapshot {
+    bpd_core::Snapshot {
+        id: bpd_core::SnapshotId {
+            stop,
+            digest: format!("{stop}{stop}ff"),
+        },
+        state: bpd_core::State {
+            stop,
+            thread: THREAD,
+            reason: StopReason::Entry,
+            frames: vec![bpd_core::FrameState {
+                frame: Frame {
+                    id: FrameId { stop, depth: 0 },
+                    file: "/tmp/fake.py".to_string(),
+                    line: 3,
+                    function: "main".to_string(),
+                    first_line: 1,
+                },
+                source: None,
+                scopes: query
+                    .scopes
+                    .iter()
+                    .map(|scope| bpd_core::ScopeState {
+                        scope: *scope,
+                        entries: vec![Entry {
+                            name: "total".to_string(),
+                            value: integer("1"),
+                        }],
+                        unbound: Vec::new(),
+                        unreadable: Vec::new(),
+                        omitted: Vec::new(),
+                    })
+                    .collect(),
+            }],
+            depth: 1,
+            values: query
+                .expressions
+                .iter()
+                .map(|wanted| bpd_core::Answer {
+                    expression: wanted.expression.clone(),
+                    frame: wanted.frame,
+                    result: Evaluated::Value {
+                        value: integer("9"),
+                    },
+                })
+                .collect(),
+            left_out: Vec::new(),
+            mode: Mode::NonStop,
+            bytes: 120,
+        },
+    }
+}
+
 impl Session for FakeSession {
     fn held(&self) -> Vec<Stop> {
         self.held.clone()
@@ -539,6 +622,7 @@ impl Session for FakeSession {
                 Request::Variables { detail, .. }
                 | Request::Evaluate { detail, .. }
                 | Request::SetVariable { detail, .. } => recorder.details.push(*detail),
+                Request::Query { query, .. } => recorder.details.push(query.detail),
                 _ => {}
             }
         }
@@ -649,6 +733,15 @@ impl Session for FakeSession {
                     value: integer("9"),
                 })
             }
+            // the same two capabilities an agent's front end reaches, reached by
+            // an editor. that a query really reads a real interpreter is
+            // `crates/bpd_engine/tests/queries.rs`
+            Request::Query { stop, query } => Response::State(snapshot(stop, &query)),
+            Request::Diff { before, after } => Response::Difference(bpd_core::difference(
+                &snapshot(before.stop, &bpd_core::StateQuery::default()),
+                &snapshot(after.stop, &bpd_core::StateQuery::default()),
+                &self.held.iter().map(|stop| stop.stop).collect::<Vec<u64>>(),
+            )),
         })
     }
 }

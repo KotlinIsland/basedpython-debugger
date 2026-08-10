@@ -219,6 +219,22 @@ impl<'py> Stopped<'py> {
         }
     }
 
+    /// the source around one frame's current line
+    ///
+    /// read here rather than in the engine because this is the filesystem the
+    /// interpreter read the file from, and because it is the only place the
+    /// **code object** is — which is what the file on disk has to be checked
+    /// against before a line of it may be shown. see [`crate::source`]
+    pub(crate) fn source(&mut self, id: FrameId, around: u32) -> PyResult<FromAgent> {
+        let frame = match self.frame(id)? {
+            Ok(frame) => frame,
+            Err(reason) => return Ok(FromAgent::Refused { reason }),
+        };
+        Ok(FromAgent::Source {
+            source: crate::source::around(self.python, &frame, around)?,
+        })
+    }
+
     /// what one scope of one frame holds
     ///
     /// read at the deepest whole level the byte budget allows, rather than at

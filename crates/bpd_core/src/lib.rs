@@ -26,6 +26,7 @@ pub mod exception;
 pub mod frame;
 pub mod parity;
 pub mod python;
+pub mod query;
 pub mod refusal;
 pub mod script;
 pub mod session;
@@ -40,6 +41,11 @@ pub use error::{Error, Result};
 pub use exception::{PythonError, TracebackFrame};
 pub use frame::{Frame, FrameId, Scope};
 pub use parity::{Facet, Reach, surface};
+pub use query::{
+    Answer, Appeared, Changed, Difference, FrameState, Frames, Moved, NotCompared, NotRead,
+    QueryPart, ScopeState, Seen, Side, Snapshot, SnapshotId, Source, State, StateQuery, Subject,
+    Taken, Unverified, Wanted, WhyNot, difference,
+};
 pub use refusal::Refusal;
 pub use script::{
     Answered, At, Bound, Budget, Did, Disarmed, Halted, Landed, Outcome, Place, Predicate, Record,

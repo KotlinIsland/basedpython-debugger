@@ -20,6 +20,7 @@ mod frames;
 mod pause;
 mod run;
 mod session;
+mod source;
 mod steps;
 mod stops;
 mod threads;

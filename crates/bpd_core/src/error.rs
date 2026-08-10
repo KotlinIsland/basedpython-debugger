@@ -141,6 +141,25 @@ pub enum Error {
         reason: crate::script::Refused,
     },
 
+    /// a state was asked for under an id this session never gave out
+    ///
+    /// the one way a snapshot id fails. it does not go stale — it names a
+    /// reading that was already taken rather than a promise to take one — so an
+    /// id that resolves to nothing is one this session did not mint, and
+    /// answering it from whichever state happened to be nearest would be
+    /// comparing something nobody asked about
+    #[error(
+        "no state of this session is `{id}`. the states it holds are {held:?}. \
+         an id is given out by the state query and stays valid for the whole \
+         session, so one that resolves to nothing came from somewhere else"
+    )]
+    NoSuchSnapshot {
+        /// the id that was asked for
+        id: crate::query::SnapshotId,
+        /// the ids this session holds
+        held: Vec<String>,
+    },
+
     /// the agent understood the request and would not answer it
     ///
     /// not a failure of `bpd`'s machinery: answering would have meant guessing

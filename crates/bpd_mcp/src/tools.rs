@@ -729,6 +729,103 @@ pub fn tools() -> Vec<Tool> {
             },
         },
         Tool {
+            name: "state",
+            title: "describe a stop in one call",
+            description: "say what you want to know about a stop and get it in \
+                **one** answer: frames, the scopes of each of them, expressions \
+                evaluated in a frame, and the source around each frame's line. \
+                the tree walk — `stack`, then `variables` per scope, then \
+                `variables` again for each nested object — is still there and \
+                answers identically, because this is composed of the same \
+                requests. what it removes is the round trips.\n\n\
+                `detail.budget` bounds the **whole** query rather than each read \
+                in it, and anything it did not reach is named in `left_out` \
+                rather than being absent. the parts are read in this order: the \
+                stack, the expressions, then frame by frame the source and the \
+                scopes — so the open ended part is what a spent budget cuts.\n\n\
+                the answer carries a `snapshot` id. every state is kept, under a \
+                digest of itself, and `diff` compares two of them. an id does \
+                **not** go stale: it names a reading that was already taken, so \
+                it stays valid across any number of resumes — what ends with the \
+                stop is asking that stop anything more.\n\n\
+                `source` is only ever shown when bpd can prove it: the debuggee \
+                compiles the file and checks that this frame's own code object \
+                is in what came out. an edited file says so instead."
+                .to_string(),
+            schema: object(
+                serde_json::json!({
+                    "stop": integer(STOP),
+                    "frames": integer(
+                        "how many frames to describe, from the one that stopped. \
+                         the scopes and the source are read for these and no \
+                         others. defaults to 1, because every extra frame is a \
+                         scope read nobody asked for"
+                    ),
+                    "scopes": {
+                        "type": "array",
+                        "description": "which scopes of each described frame to \
+                                        read. omit for none — a query of \
+                                        expressions alone is often the whole \
+                                        question",
+                        "items": {
+                            "type": "string",
+                            "enum": ["local", "cell", "free", "global"],
+                        },
+                    },
+                    "expressions": {
+                        "type": "array",
+                        "description": "expressions to evaluate. **this runs the \
+                                        program's own code**, by request. one \
+                                        that raises is answered with the \
+                                        exception, which is what it did",
+                        "items": object(
+                            serde_json::json!({
+                                "expression": { "type": "string", "description":
+                                    "the expression, as python" },
+                                "frame": integer(FRAME),
+                            }),
+                            &["expression"],
+                        ),
+                    },
+                    "source": integer(
+                        "how many lines either side of each frame's current line. \
+                         omit for none. the window is clamped to the code object \
+                         that was verified, because nothing outside it was checked"
+                    ),
+                    "detail": detail(),
+                }),
+                &[],
+            ),
+        },
+        Tool {
+            name: "diff",
+            title: "what changed between two states",
+            description: "compare two `snapshot` ids and get back **the \
+                difference**, rather than both states to compare yourself.\n\n\
+                three things keep it from lying. a value that a bound cut short \
+                in either snapshot is in `not_compared`, never in `unchanged` — \
+                \"unchanged\" is a claim, and half a value is not evidence for \
+                it. a depth of the stack that is running different code in the \
+                two is not compared either, because depth is a position rather \
+                than an identity. and something only one of the two read is \
+                unknown rather than absent, so it is never reported as added or \
+                removed.\n\n\
+                a snapshot does not expire, so two stops any distance apart can \
+                be compared. what each side says is the mode it was read in: in \
+                non-stop mode the rest of the program was running, so each state \
+                is a sample and the difference is between two samples."
+                .to_string(),
+            schema: object(
+                serde_json::json!({
+                    "before": { "type": "string", "description":
+                        "the snapshot id to compare from, as `state` gave it out" },
+                    "after": { "type": "string", "description":
+                        "the snapshot id to compare to" },
+                }),
+                &["before", "after"],
+            ),
+        },
+        Tool {
             name: "terminate",
             title: "end the debuggee",
             description: "kill the program. the last resort rather than a \

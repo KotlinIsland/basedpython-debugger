@@ -193,6 +193,16 @@ pub enum FromAgent {
         mode: Mode,
     },
 
+    /// the source around one frame's current line, or why there is none
+    ///
+    /// read on the debuggee's own filesystem, which is the one the interpreter
+    /// read the file from, and shown only when the file still compiles to the
+    /// code object the frame is running
+    Source {
+        /// the lines, or what stood in the way
+        source: bpd_core::Source,
+    },
+
     /// the agent will not answer the request, and this is why
     Refused {
         /// what stood in the way
@@ -324,6 +334,21 @@ pub enum FromEngine {
         expression: String,
         /// how much of the result to read
         detail: Detail,
+    },
+
+    /// the source around one frame's current line
+    ///
+    /// the debuggee reads it rather than the engine, for two reasons: the
+    /// filesystem the interpreter read the file from is the debuggee's, and a
+    /// `co_filename` that is relative is relative to the debuggee's working
+    /// directory. it also **compiles** the file, to check that what is on disk
+    /// is still the code the frame is running — the file on disk is not evidence
+    /// on its own, because it is edited while a program runs
+    Source {
+        /// which frame
+        frame: FrameId,
+        /// how many lines either side of that frame's current line
+        around: u32,
     },
 
     /// write a variable of a frame

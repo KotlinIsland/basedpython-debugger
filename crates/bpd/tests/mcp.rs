@@ -451,6 +451,100 @@ fn a_whole_investigation_is_one_tool_call_and_the_transcript_is_the_answer() {
     client.finish();
 }
 
+#[test]
+fn one_call_describes_a_stop_and_one_more_says_what_changed_since() {
+    // the acceptance for M5.4 and M5.5: the tree walk is `stack`, `variables`
+    // per scope and `variables` again per nested object, and this is one call
+    // for all of it — then one more for the difference against an earlier stop
+    let fixture = Fixture::new("described", CHARGES);
+    let mut client = Client::start();
+
+    client.ask("initialize", &serde_json::json!({}));
+    client.call(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.call(
+        "set_breakpoints",
+        &serde_json::json!({
+            "breakpoints": [ {
+                "file": fixture.path(),
+                "line": line_of(CHARGES, "seen = amount"),
+                "condition": "amount < 0",
+            } ],
+        }),
+    );
+    client.call("continue_", &serde_json::json!({ "deadline_ms": 30000 }));
+
+    let before = client.said();
+    let first = client.call(
+        "state",
+        &serde_json::json!({
+            "frames": 2,
+            "scopes": ["local"],
+            "expressions": [ { "expression": "amount * 2" } ],
+            "source": 1,
+        }),
+    );
+    assert_eq!(
+        client.said() - before,
+        1,
+        "the whole of a stop took more than one answer: {first}"
+    );
+
+    assert_eq!(first["frames"][0]["function"], "charge", "{first}");
+    assert_eq!(first["frames"][1]["function"], "main", "{first}");
+    assert_eq!(
+        first["values"][0]["result"]["value"]["content"]["text"], "-2",
+        "the first negative amount is -1, so twice it is -2: {first}"
+    );
+    assert!(
+        first["frames"][0]["source"]["lines"]
+            .as_array()
+            .expect("the query asked for source")
+            .iter()
+            .any(|line| line
+                .as_str()
+                .is_some_and(|text| text.contains("seen = amount"))),
+        "the source of the line it is on: {first}"
+    );
+
+    // on to the next negative amount, and then the difference — which is the
+    // answer, rather than two states for the caller to compare
+    client.call("continue_", &serde_json::json!({ "deadline_ms": 30000 }));
+    let second = client.call("state", &serde_json::json!({ "scopes": ["local"] }));
+    let difference = client.call(
+        "diff",
+        &serde_json::json!({
+            "before": first["snapshot"],
+            "after": second["snapshot"],
+        }),
+    );
+
+    let changed = difference["changed"]
+        .as_array()
+        .expect("changed is an array");
+    assert!(
+        changed.iter().any(|change| {
+            change["subject"]["name"] == "amount"
+                && change["before"]["value"]["content"]["text"] == "-1"
+                && change["after"]["value"]["content"]["text"] == "-2"
+        }),
+        "the program charged -1 and then -2: {difference}"
+    );
+    assert_eq!(
+        difference["before"]["stop_has_ended"], true,
+        "the first stop was resumed and the state read at it is still an \
+         answer: {difference}"
+    );
+
+    // the program's own markers rather than the diff's word for it
+    assert!(fixture.directory().join("charged_-1").exists());
+    assert!(!fixture.directory().join("charged_-2").exists());
+
+    client.finish();
+}
+
 /// the interpreter the built agent matches
 fn interpreter() -> String {
     bpd_test::agent::matching_interpreter()

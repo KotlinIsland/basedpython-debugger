@@ -319,6 +319,12 @@ impl Adapter {
             // here: the capability is the core's, and a capability an agent has
             // and a person does not is the thing that rule exists to prevent
             Some("bpd/runScript") => self.run_script(message),
+            // the declarative state query and the difference between two of its
+            // answers. DAP has no request for either — its own way of reading
+            // state is the tree walk, which is still here and answers
+            // identically — so they are extensions, for the reason a script is
+            Some("bpd/state") => self.state(message),
+            Some("bpd/diff") => self.diff(message),
             Some(command) => Err(Aborted::Refuse(format!(
                 "bpd's DAP adapter does not implement `{command}`, and does not \
                  advertise a capability that would make a client send it"
@@ -642,6 +648,63 @@ impl Adapter {
         // script ended cannot tell why, for the same reason an agent cannot
         let body = serde_json::to_value(&ran)
             .expect("a transcript is built from types whose serde is derived");
+        self.respond(message, Some(body))?;
+        Ok(())
+    }
+
+    /// describe a stop in one call, the way an agent's front end does
+    ///
+    /// the parity rule is what puts it here: the capability is the core's, and
+    /// "what is the whole state at this stop" is a thing a person wants as much
+    /// as an agent. an editor that would rather walk the tree still can, and is
+    /// told the same values — the query is composed of the same requests
+    fn state(&mut self, message: &Incoming) -> Answered {
+        let stop = self.stop_of(message)?;
+        let query: bpd_core::StateQuery =
+            serde_json::from_value(message.arguments["query"].clone()).map_err(|error| {
+                Aborted::Refuse(format!(
+                    "this is not a state query: {error}. it takes `frames`, \
+                 `scopes`, `expressions`, `source` and a `detail` whose `budget` \
+                 bounds the whole of it"
+                ))
+            })?;
+
+        let snapshot = match self.ask(Request::Query { stop, query })? {
+            Response::State(snapshot) => snapshot,
+            other => unreachable!("a state query was answered with {other:?}"),
+        };
+        let body = serde_json::to_value(&snapshot)
+            .expect("a snapshot is built from types whose serde is derived");
+        self.respond(message, Some(body))?;
+        Ok(())
+    }
+
+    /// what changed between two states this session read
+    ///
+    /// it names no thread and touches no program: both states were read when
+    /// they were read, and the difference between them is data over data
+    fn diff(&mut self, message: &Incoming) -> Answered {
+        let parse = |field: &str| -> Result<bpd_core::SnapshotId, Aborted> {
+            message.arguments[field]
+                .as_str()
+                .ok_or_else(|| {
+                    Aborted::Refuse(format!(
+                        "a `bpd/diff` needs `{field}`, a snapshot id as \
+                         `bpd/state` gave it out"
+                    ))
+                })?
+                .parse()
+                .map_err(Aborted::Refuse)
+        };
+        let before = parse("before")?;
+        let after = parse("after")?;
+
+        let difference = match self.ask(Request::Diff { before, after })? {
+            Response::Difference(difference) => difference,
+            other => unreachable!("a difference was answered with {other:?}"),
+        };
+        let body = serde_json::to_value(&difference)
+            .expect("a difference is built from types whose serde is derived");
         self.respond(message, Some(body))?;
         Ok(())
     }
