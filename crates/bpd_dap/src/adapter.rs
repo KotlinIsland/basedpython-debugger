@@ -313,6 +313,12 @@ impl Adapter {
             Some("stepIn") => self.step(message, StepKind::In),
             Some("stepOut") => self.step(message, StepKind::Out),
             Some("exceptionInfo") => self.exception_info(message),
+            // DAP has no request for a debug script and never will, so this is
+            // an extension — which DAP provides for, and which a client sends
+            // with its own `customRequest`. the parity rule is what puts it
+            // here: the capability is the core's, and a capability an agent has
+            // and a person does not is the thing that rule exists to prevent
+            Some("bpd/runScript") => self.run_script(message),
             Some(command) => Err(Aborted::Refuse(format!(
                 "bpd's DAP adapter does not implement `{command}`, and does not \
                  advertise a capability that would make a client send it"
@@ -600,6 +606,43 @@ impl Adapter {
                 "totalFrames": stack.depth,
             })),
         )?;
+        Ok(())
+    }
+
+    /// run a whole investigation and answer with the transcript of it
+    ///
+    /// a custom request, because DAP has none of its own: a debug script is a
+    /// capability of the core, and the parity rule does not let it be an agent's
+    /// alone. for a person this is *run to the third call with a negative amount
+    /// and show me the stack* — a real thing to want, and no editor puts a
+    /// button on it yet
+    ///
+    /// the steps and the budget are `bpd_core`'s own types, read straight off
+    /// the request. an adapter that had its own shape for them would be a second
+    /// definition of a script, and the two would drift
+    fn run_script(&mut self, message: &Incoming) -> Answered {
+        let stop = self.stop_of(message)?;
+        let script: bpd_core::Script = serde_json::from_value(serde_json::json!({
+            "steps": message.arguments["steps"],
+            "budget": message.arguments["budget"],
+        }))
+        .map_err(|error| {
+            Aborted::Refuse(format!(
+                "this is not a debug script: {error}. it takes `steps`, a tree \
+                 of them, and a `budget` of `steps`, `wall_ms` and `bytes` — a \
+                 script without a budget is a session that can hang"
+            ))
+        })?;
+
+        let ran = match self.ask(Request::RunScript { stop, script })? {
+            Response::Transcript(ran) => ran,
+            other => unreachable!("a debug script was answered with {other:?}"),
+        };
+        // the transcript is the answer, whole. an editor given only where a
+        // script ended cannot tell why, for the same reason an agent cannot
+        let body = serde_json::to_value(&ran)
+            .expect("a transcript is built from types whose serde is derived");
+        self.respond(message, Some(body))?;
         Ok(())
     }
 

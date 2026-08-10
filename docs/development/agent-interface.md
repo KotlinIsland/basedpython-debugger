@@ -83,16 +83,16 @@ contact with the session:
     and nothing stops as a result of it, so there is no stop for it to return.
     it is also the whole *set* rather than one breakpoint, because a debugger
     that accumulates edits has two ideas of what is set
-- **`run_to` is not built, and it does not fit as written.** it is either a
-    composition a front end performs — arming a breakpoint of its own and
-    taking it off again, which is a decision about the program made in an
+- **`run_to` is not a control tool, and it does not fit as written.** it is
+    either a composition a front end performs — arming a breakpoint of its own
+    and taking it off again, which is a decision about the program made in an
     adapter — or a capability of the core that DAP has no request for at all,
     which the parity rule below forbids. and under a deadline it is unsound: a
     one-shot breakpoint cannot be removed while the program is running, so a
     timed-out `run_to` leaves the program armed with something the agent did not
-    ask for. it belongs with `run_until` and `watch`, in the section after next,
-    where stop conditions are expressed as intent rather than as a temporary
-    breakpoint someone has to remember to remove
+    ask for. **it is built as a step of the debug script**, where the engine owns
+    the whole composition including the removal — see
+    [the debug script](scripts.md#run_to-lives-here-and-nowhere-else)
 
 ### state is queried declaratively, in one call
 
@@ -202,6 +202,41 @@ per the parity rule below. for a human this is "run this investigation" — *run
 to the third call with a negative amount and show me the stack* is a thing
 people want and no debugger offers. the rule requires the capability in both
 adapters; it does not require an IDE to put a button on it
+
+### four things this section got wrong, found when it was built
+
+the script is built — [the debug script](scripts.md) is what shipped, with the
+step vocabulary and the transcript in full. four claims above did not survive
+contact with the session:
+
+- **it is not a tree of `Request`.** [architecture](architecture.md) says the
+    same enum serves four consumers and that the script is "a *tree* of it".
+    it cannot be: a `Request` names a stop and a frame by **absolute id**, and
+    the stop a step will run at does not exist when the script is written. so
+    the steps are a vocabulary of their own, relative to the stop the script is
+    currently at, which the engine turns into requests as it walks them. that is
+    not a loss — a step tree an agent writes in one call could never have carried
+    ids it has not been told yet
+- **there is no deadline per step.** the section above gives every control
+    operation its own, which is right for a *tool*, whose caller is waiting on it.
+    inside a script the wall clock budget is the one clock — a script waiting for
+    a program that never stops is spending exactly that — and a second deadline
+    per step would be a second place to say the same thing
+- **"the same script over the same run produces the same transcript" costs
+    something, and it is worth saying what.** nothing measured may be in a
+    transcript, so there is no duration anywhere in one; and what is comparable
+    between two *processes* stops short of the interpreter's identity for a
+    thread, which is the operating system's number rather than anything bpd may
+    claim. within one run it is exact, which is what the sentence meant
+- **a budget is not enough to make a `run_to` sound; a pause is.** the paragraph
+    above says a timed-out `run_to` "leaves the program armed with something the
+    agent did not ask for", and treats that as the reason it cannot be a tool. it
+    is the reason — but inside a script the engine can finish the composition: it
+    arms a **pause**, takes its own breakpoint off on whichever thread that holds,
+    and says in the transcript that it did. that is bpd touching the program
+    without being asked, and the honest resolution is to report it rather than to
+    pretend the problem is gone. the one case that survives — no thread reaches a
+    line at all — is answered with what is still armed and what to do about it
 
 ## how an agent learns any of this
 

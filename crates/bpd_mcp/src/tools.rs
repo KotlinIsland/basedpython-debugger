@@ -117,6 +117,181 @@ fn frame_properties() -> serde_json::Value {
     })
 }
 
+/// the steps of a debug script, as a schema that refers to itself
+///
+/// `if` and `while` carry blocks of steps, so the definition is recursive and
+/// goes across as a `$ref` — which is the whole reason the steps are **data**.
+/// an MCP tool takes JSON Schema input already, so a tree of them needs no
+/// parser, no grammar and no syntax errors, and this is the documentation an
+/// agent reads before writing one
+#[expect(
+    clippy::too_many_lines,
+    reason = "it is the step vocabulary, and the descriptions in it are what an \
+              agent writes a script from. splitting them into helpers would put \
+              a step's name and what it promises in two places"
+)]
+fn step_definition() -> serde_json::Value {
+    let step = |name: &str, what: &str, mut properties: serde_json::Value, required: &[&str]| {
+        properties["step"] = serde_json::json!({ "const": name });
+        let mut wanted = vec!["step"];
+        wanted.extend_from_slice(required);
+        let mut schema = object(properties, &wanted);
+        schema["description"] = what.into();
+        schema
+    };
+    let block = |what: &str| {
+        serde_json::json!({
+            "type": "array",
+            "description": what,
+            "items": { "$ref": "#/$defs/step" },
+        })
+    };
+    let predicate = serde_json::json!({
+        "type": "object",
+        "description": "a python expression, evaluated in a frame of the stop \
+                        the script is at. it has to produce a **`bool`**: \
+                        anything else halts the script naming the type it \
+                        produced, because truth-testing an object means running \
+                        the program's own `__bool__` or `__len__` and branching \
+                        on the result. write the comparison down — \
+                        `x is not None`, `len(items) > 0`",
+        "properties": {
+            "expression": { "type": "string", "description": "the expression, as python" },
+            "frame": integer(FRAME),
+        },
+        "required": ["expression"],
+        "additionalProperties": false,
+    });
+
+    serde_json::json!({ "oneOf": [
+        step("step_over", "step the script's thread to the next line of its frame", serde_json::json!({}), &[]),
+        step("step_in", "step the script's thread into the next frame it enters", serde_json::json!({}), &[]),
+        step("step_out", "run the script's thread's frame to its end", serde_json::json!({}), &[]),
+        step(
+            "continue",
+            "let the script's thread go until it stops again. only that thread: \
+             a script drives the one thread its starting stop holds",
+            serde_json::json!({}),
+            &[],
+        ),
+        step(
+            "run_to",
+            "run until the script's thread reaches a source location. the engine \
+             arms a breakpoint of its own, runs, and **takes it back off** — \
+             which is why this is a step of a script and not a tool. the record \
+             says the id it was armed under and what became of it. a location \
+             that does not bind halts the script rather than running to nothing",
+            serde_json::json!({
+                "file": { "type": "string", "description": "the file, as a path" },
+                "line": integer("the line to run to"),
+                "condition": { "type": "string", "description":
+                    "a python expression that has to be true for a hit to count \
+                     — the breakpoint condition machinery, unchanged" },
+                "hits": { "type": "object", "description":
+                    "which of the qualifying hits to stop on, which is how *the \
+                     third call with a negative amount* is written",
+                    "properties": {
+                        "hits": { "type": "string", "enum": ["exactly", "at_least", "every"] },
+                        "count": { "type": "integer", "minimum": 1 },
+                    },
+                    "required": ["hits", "count"],
+                    "additionalProperties": false },
+            }),
+            &["file", "line"],
+        ),
+        step(
+            "eval",
+            "evaluate a python expression and record what it produced. this runs \
+             the program's own code, by request. one that **raises halts the \
+             script**: carrying on past it would record an investigation that \
+             did not happen",
+            serde_json::json!({
+                "expression": { "type": "string", "description": "the expression, as python" },
+                "frame": integer(FRAME),
+                "detail": detail(),
+            }),
+            &["expression"],
+        ),
+        step(
+            "stack",
+            "record the script's thread's frame chain",
+            serde_json::json!({ "top": integer(
+                "how many frames, from the one that stopped. omit for all of them"
+            ) }),
+            &[],
+        ),
+        step(
+            "log",
+            "record a note of the script's own. nothing reaches the debuggee — \
+             it is text the script wrote, so that a transcript of fifty records \
+             says what the script thought it was doing. recording a *value* is \
+             `eval`, which costs the program an evaluation",
+            serde_json::json!({ "note": { "type": "string" } }),
+            &["note"],
+        ),
+        step(
+            "if",
+            "run one of two blocks, according to a python predicate",
+            serde_json::json!({
+                "predicate": predicate,
+                "then": block("what runs when it is true"),
+                "otherwise": block("what runs when it is false"),
+            }),
+            &["predicate"],
+        ),
+        step(
+            "while",
+            "run a block while a python predicate is true, at most `limit` \
+             times. reaching the limit with the predicate still true **stops \
+             the script**: the loop did not finish what it was for, and the \
+             steps after it would run somewhere they did not expect",
+            serde_json::json!({
+                "predicate": predicate,
+                "limit": { "type": "integer", "minimum": 1, "description":
+                    "the most passes of the body there may be. it is required \
+                     and cannot be zero — a loop without a bound is a hung \
+                     session, so a script that cannot be shown to terminate is \
+                     refused at submission rather than discovered at runtime" },
+                "body": block("what runs on each pass"),
+            }),
+            &["predicate", "limit"],
+        ),
+        step(
+            "finish",
+            "end the script here, with a reason",
+            serde_json::json!({ "because": { "type": "string" } }),
+            &["because"],
+        ),
+    ] })
+}
+
+/// what a script may spend
+fn budget() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "what the whole script may spend. there is no default and \
+                        no way to leave it out: a script without one is a \
+                        session that can hang. the **byte** budget is usually \
+                        the first to bite — a value read inside a loop spends it \
+                        long before fifty steps have run",
+        "properties": {
+            "steps": { "type": "integer", "minimum": 1, "description":
+                "how many steps may run — one per record, including the test of \
+                 an `if` and each test of a `while`" },
+            "wall_ms": { "type": "integer", "minimum": 1, "description":
+                "how long the whole script may take. it is also the deadline \
+                 every control step waits under, so a script waiting for a \
+                 program that never stops spends exactly this" },
+            "bytes": { "type": "integer", "minimum": 1, "description":
+                "how many bytes of transcript may be recorded. checked after \
+                 each record, so one record can carry the total past it — the \
+                 transcript says how many were really made either way" },
+        },
+        "required": ["steps", "wall_ms", "bytes"],
+        "additionalProperties": false,
+    })
+}
+
 /// one step tool, which differ only in which way they go
 fn step(name: &'static str, title: &'static str, what: &str) -> Tool {
     Tool {
@@ -511,6 +686,47 @@ pub fn tools() -> Vec<Tool> {
                 }),
                 &[],
             ),
+        },
+        Tool {
+            name: "run_script",
+            title: "run a whole investigation in one call",
+            description: "submit a tree of debugger steps and get back **what \
+                happened at every one of them**. this is what removes the round \
+                trip per *investigation* rather than per operation: `run to the \
+                third call with a negative amount, then step until the total \
+                changes, and tell me the frame where it did` is one call.\n\n\
+                the steps run in bpd, driving the session. only the predicates \
+                reach the debuggee — python expressions evaluated in a chosen \
+                frame, through the machinery a breakpoint condition uses — so \
+                the program is disturbed by exactly the evaluations that were \
+                asked for and nothing else.\n\n\
+                **the transcript is the answer, not the final state.** every \
+                record says which step of the tree it came from, where the held \
+                thread was when it ran, and for a branch which way it went. the \
+                same script over the same program produces the same transcript, \
+                so one can be re-run to confirm a reading — nothing in it is a \
+                wall clock reading.\n\n\
+                a script drives **one thread**: the one the stop it names holds. \
+                a step that fails halts it, and the rest does not run. a budget \
+                is required on all three axes, and exhausting one returns the \
+                transcript so far with `partial: true` and the bound that bit."
+                .to_string(),
+            schema: {
+                let mut schema = object(
+                    serde_json::json!({
+                        "stop": integer(STOP),
+                        "steps": {
+                            "type": "array",
+                            "description": "the steps, in the order they run",
+                            "items": { "$ref": "#/$defs/step" },
+                        },
+                        "budget": budget(),
+                    }),
+                    &["steps", "budget"],
+                );
+                schema["$defs"] = serde_json::json!({ "step": step_definition() });
+                schema
+            },
         },
         Tool {
             name: "terminate",

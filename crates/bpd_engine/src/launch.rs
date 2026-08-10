@@ -17,6 +17,8 @@
 //! which form is requested reaches the agent in the environment, beside the
 //! target, because `-c` leaves no room for anything structured
 
+mod script;
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus};
@@ -26,8 +28,8 @@ use std::time::{Duration, Instant};
 use bpd_core::python::Capabilities;
 use bpd_core::{
     Detail, Evaluated, ExceptionBreakpoints, FrameId, LogRecord, Reporting, Request, Resolved,
-    Response, Running, Scope, SourceBreakpoint, Stack, StepKind, Stop, Threads, Variables, Which,
-    WorldStopped,
+    Response, Running, Scope, Script, SourceBreakpoint, Stack, StepKind, Stop, Threads, Transcript,
+    Variables, Which, WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine};
@@ -74,6 +76,13 @@ pub struct Debuggee {
     session: Session,
     /// the stops held now, in the order the agent reported them
     held: Vec<Stop>,
+    /// the breakpoint set the client last asked for
+    ///
+    /// [`Request::SetBreakpoints`] replaces the whole set, so this is what is
+    /// armed. it is kept because a `run_to` inside a debug script has to arm a
+    /// breakpoint of its own **and put the set back**, and there is no delta
+    /// request to do either with
+    armed: Vec<SourceBreakpoint>,
     /// log records that arrived while the engine was waiting for an answer
     ///
     /// a thread that reaches a logpoint sends its record without waiting, so
@@ -138,9 +147,14 @@ impl Debuggee {
         reporting: &mut dyn Reporting,
     ) -> Result<Response> {
         match request {
-            Request::SetBreakpoints { breakpoints } => Ok(Response::BreakpointsResolved {
-                resolved: self.resolve_breakpoints(breakpoints, reporting)?,
-            }),
+            Request::SetBreakpoints { breakpoints } => {
+                let resolved = self.resolve_breakpoints(breakpoints.clone(), reporting)?;
+                // only once it was accepted. a set that was refused is not what
+                // is armed, and a `run_to` that put *that* back would be
+                // arming something nobody asked for
+                self.armed = breakpoints;
+                Ok(Response::BreakpointsResolved { resolved })
+            }
             Request::SetExceptionBreakpoints { raised, uncaught } => Ok(
                 Response::ExceptionBreakpoints(self.arm_exceptions(raised, uncaught, reporting)?),
             ),
@@ -194,7 +208,28 @@ impl Debuggee {
             } => Ok(Response::Evaluated(self.write_variable(
                 frame, scope, &name, &value, detail, reporting,
             )?)),
+            Request::RunScript { stop, script } => Ok(Response::Transcript(
+                self.execute(stop, &script, reporting)?,
+            )),
         }
+    }
+
+    /// run a whole debug script against the thread `stop` holds
+    ///
+    /// the transcript is the answer, and it is the answer whatever became of
+    /// the script — a caller given only where one ended cannot tell why, and
+    /// will guess
+    pub fn run_script(&mut self, stop: u64, script: Script) -> Result<Transcript> {
+        match self.ask_for(Request::RunScript { stop, script })? {
+            Response::Transcript(transcript) => Ok(transcript),
+            other => unreachable!("a debug script was answered with {other:?}"),
+        }
+    }
+
+    /// run a debug script against the only held thread
+    pub fn the_script(&mut self, script: Script) -> Result<Transcript> {
+        let stop = self.only("a debug script")?;
+        self.run_script(stop, script)
     }
 
     /// dispatch a request that cannot deliver a log record
@@ -970,6 +1005,7 @@ fn start(
 
     Ok(Launched::Stopped(Debuggee {
         held: vec![stop],
+        armed: Vec::new(),
         child: Arc::new(Mutex::new(child)),
         session,
         pending_logs: Vec::new(),

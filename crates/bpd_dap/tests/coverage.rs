@@ -19,9 +19,9 @@ use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 
 use bpd_core::{
-    Binding, Content, Entry, Evaluated, Evaluation, Facet, Frame, FrameId, Mode, Reach, Reporting,
-    Request, Resolved, Response, Running, Site, Stack, Stop, StopReason, Threads, Value, Variables,
-    WorldStopped,
+    At, Binding, Content, Did, Entry, Evaluated, Evaluation, Facet, Frame, FrameId, Mode, Outcome,
+    Reach, Record, Reporting, Request, Resolved, Response, Running, Site, Stack, Stop, StopReason,
+    Threads, Value, Variables, WorldStopped,
 };
 use bpd_dap::{
     Configuration, Failed, Interrupt, Launcher, ProgramOutput, Session, Started, reach_of,
@@ -300,6 +300,29 @@ fn drive(asked: &Asked) -> Transcript {
         "evaluate",
         serde_json::json!({ "expression": "total + 1", "frameId": frame }),
     );
+    // a whole investigation in one call. DAP has no request of its own for
+    // this and never will, so it is an extension — and the parity rule is why
+    // it exists here at all: a capability an agent has and a person does not is
+    // the thing that rule prevents
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/runScript",
+        serde_json::json!({
+            "threadId": thread,
+            "steps": [
+                { "step": "log", "note": "starting" },
+                {
+                    "step": "while",
+                    "predicate": { "expression": "total > 1" },
+                    "limit": 3,
+                    "body": [ { "step": "step_over" } ],
+                },
+            ],
+            "budget": { "steps": 8, "wall_ms": 500, "bytes": 4096 },
+        }),
+    );
+
     answer(
         &mut client_writes,
         &mut reader,
@@ -456,8 +479,8 @@ impl Launcher for Fake {
     ) -> Result<Started, Failed> {
         Ok(Started::Stopped(Box::new(FakeSession {
             asked: Arc::clone(&self.asked),
-            held: vec![stop(1, StopReason::Entry)],
-            remaining: vec![stop(
+            held: vec![stop_at(1, StopReason::Entry)],
+            remaining: vec![stop_at(
                 2,
                 StopReason::Stepped {
                     kind: bpd_core::StepKind::Over,
@@ -469,7 +492,7 @@ impl Launcher for Fake {
     }
 }
 
-fn stop(number: u64, reason: StopReason) -> Stop {
+fn stop_at(number: u64, reason: StopReason) -> Stop {
     Stop {
         stop: number,
         thread: THREAD,
@@ -499,6 +522,11 @@ impl Session for FakeSession {
         }))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per capability of the core, which is what makes a \
+                  capability the fake does not answer a compile error here too"
+    )]
     fn dispatch(
         &mut self,
         request: Request,
@@ -588,6 +616,23 @@ impl Session for FakeSession {
                 }],
                 depth: 1,
                 mode: Mode::NonStop,
+            }),
+            // the shape rather than the substance: that a script really drives
+            // a real interpreter is `crates/bpd_engine/tests/scripts.rs`. what
+            // is under test here is that a DAP client can reach the capability
+            // at all, and gets the whole transcript back
+            Request::RunScript { stop, script } => Response::Transcript(bpd_core::Transcript {
+                at_most: script.at_most(),
+                bytes: 120,
+                records: vec![Record {
+                    step: "1".to_string(),
+                    at: At::of(&stop_at(stop, StopReason::Entry)),
+                    did: Did::Logged {
+                        note: "the fake ran it".to_string(),
+                    },
+                }],
+                rebound: Vec::new(),
+                outcome: Outcome::Ran,
             }),
             Request::Variables { .. } => Response::Variables(Variables {
                 entries: vec![Entry {

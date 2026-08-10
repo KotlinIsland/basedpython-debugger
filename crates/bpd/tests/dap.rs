@@ -329,6 +329,80 @@ fn a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so() {
 }
 
 #[test]
+fn an_editor_can_run_a_whole_investigation_the_way_an_agent_can() {
+    // the parity rule, at the far end: a debug script is a capability of the
+    // core, so it is not an agent's alone. DAP has no request of its own for one
+    // and never will, so it is an extension — and a client sends it with the
+    // `customRequest` every DAP client has
+    let fixture = Fixture::new("scripted", PROGRAM);
+    let mut client = Client::start();
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line_of(PROGRAM, "total = seed + 1") } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let stopped = client.event("stopped");
+    let thread = stopped["body"]["threadId"].clone();
+
+    let ran = client.request(
+        "bpd/runScript",
+        &serde_json::json!({
+            "threadId": thread,
+            "steps": [
+                { "step": "step_over" },
+                {
+                    "step": "if",
+                    "predicate": { "expression": "total == 2" },
+                    "then": [ { "step": "eval", "expression": "total * 10" } ],
+                    "otherwise": [ { "step": "log", "note": "the seed was not 1" } ],
+                },
+            ],
+            "budget": { "steps": 10, "wall_ms": 30000, "bytes": 65536 },
+        }),
+    );
+
+    assert_eq!(ran["success"], true, "the script was refused: {ran}");
+    let records = ran["body"]["records"]
+        .as_array()
+        .expect("a transcript has records");
+    assert_eq!(records.len(), 3, "{ran}");
+    assert_eq!(
+        records[0]["did"]["landed"]["to"]["place"]["line"],
+        line_of(PROGRAM, "doubled = total * 2"),
+        "the step landed on the next line and the transcript says where: {ran}"
+    );
+    assert_eq!(records[1]["did"]["answered"]["value"], true);
+    assert_eq!(
+        records[2]["did"]["result"]["value"]["content"]["text"],
+        "20"
+    );
+    assert_eq!(ran["body"]["outcome"]["outcome"], "ran");
+
+    // a script ends leaving a thread held at a stop the client was never told
+    // about by an event, so the adapter announces it — the same rule as any
+    // other stop that arrives while a request is being answered
+    let announced = client.event("stopped");
+    assert_eq!(announced["body"]["reason"], "step", "{announced}");
+
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    client.event("exited");
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+#[test]
 fn a_capability_that_is_not_advertised_is_refused_rather_than_guessed_at() {
     let fixture = Fixture::new("hit", "x = 1\ny = 2\n");
     let mut client = Client::start();

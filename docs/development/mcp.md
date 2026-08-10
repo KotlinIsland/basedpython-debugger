@@ -107,7 +107,17 @@ shape of what bpd can see from here
 | `set_variable` | write a name of a frame's scope |
 | `threads` | what every thread is doing, as a sample |
 | `stop_the_world` | hold every thread that can be held |
+| `run_script` | run a whole investigation, and return what happened at every step |
 | `terminate` | end the debuggee |
+
+### the schema of a script is its documentation
+
+`run_script` is the one tool whose input is a **tree**, and it is why the steps
+are data rather than text. an MCP tool takes JSON Schema input already, so the
+step definition goes across as a `$ref` to itself and the agent needs no parser,
+no grammar and no syntax errors — and what it reads before writing one is the
+schema. the step vocabulary, the transcript and the budget are
+[the debug script](scripts.md)
 
 ### there are no handles
 
@@ -224,19 +234,20 @@ drift apart
 
 ## what is not built
 
-- **`run_to`**. the agent interface doc lists it among the control tools, and it
-  cannot be built under the parity rule as things stand. it is either a
+- **`run_to` as a *tool***, which is the shape it cannot take. it is either a
   composition the adapter performs — arming a breakpoint of its own and taking
   it off again, which is a decision about the program made in a front end — or a
   capability of the core that DAP has **no** request for, since a DAP client
   performs run-to-cursor itself by setting a temporary breakpoint. it also has
   an unsound failure mode under a deadline: a one-shot breakpoint cannot be
   taken off while the program is running, so a timed-out `run_to` would leave
-  the program armed with a breakpoint the agent did not ask for. it belongs with
-  `run_until` and `watch`, where stop conditions are expressed as intent
-- **the declarative state query**, **snapshot and diff**, and **the debug
-  script**. each is its own item, and each is a capability rather than an MCP
-  feature — so each arrives in both adapters
+  the program armed with a breakpoint the agent did not ask for. it is built as
+  a **step of `run_script`**, where the engine owns the whole composition
+  including the removal — that reasoning, and what became of the failure mode,
+  is [the debug script](scripts.md#run_to-lives-here-and-nowhere-else)
+- **the declarative state query** and **snapshot and diff**. each is its own
+  item, and each is a capability rather than an MCP feature — so each arrives in
+  both adapters
 - **resources and prompts**. only tools are model-controlled, so they are what
   has to explain the interface first. writing a document to explain an interface
   that does not explain itself is how the tool that needed fixing stays broken

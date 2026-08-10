@@ -253,6 +253,28 @@ followed by a wait, and DAP needs those separately: a `continue` has to be
 answered before the program stops again. the adapter resumes, answers, and then
 waits
 
+### one capability is reached through an extension
+
+`Request::RunScript` — [the debug script](scripts.md) — is a capability of the
+core, so the parity rule does not let it be an agent's alone. DAP has no request
+of its own for a whole investigation and will not grow one, so it is a **custom
+request**, which the protocol provides for and which every DAP client can send:
+
+```json
+{ "command": "bpd/runScript",
+  "arguments": { "threadId": 1, "steps": [ … ], "budget": { … } } }
+```
+
+it takes a `threadId` like every other DAP request that is about one thread, and
+the whole transcript comes back in the response body. that is the answer rather
+than the final state, for the same reason it is for an agent: a client given only
+where a script ended cannot tell why. a script that leaves a thread held at a new
+stop produces a `stopped` event for it, by the same reconciliation every other
+request goes through
+
+nothing advertises it. DAP has no capability flag for a custom request, and a
+client that does not know about it never sends one
+
 ## what is not built
 
 - **`attach`**, which is PEP 768 and needs 3.14

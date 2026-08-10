@@ -398,3 +398,24 @@ every thread that reaches its breakpoint, and there is still no test of two
 threads counting the same one — the harness for a deterministic threaded fixture
 now exists, in `threads.rs`, so the reason is that nobody has written it rather
 than that it cannot be written
+
+[the debug script](scripts.md) is covered by
+`crates/bpd_engine/tests/scripts.rs`, and it is the place a transcript's claims
+are the thing under test: a transcript is a claim about fifty things instead of
+one, so its fixture writes a marker from inside every call and where the program
+**really** got to is read off the filesystem rather than off the record that says
+so. one acceptance in each adapter — `crates/bpd/tests/mcp.rs` and
+`crates/bpd/tests/dap.rs` — drives the same investigation through a real process,
+because the parity rule is only true if both front ends really reach it
+
+the breaks those tests were checked against: leaving a `run_to`'s own breakpoint
+armed rather than pausing to take it off fails the timed-out `run_to` test, which
+then sees the program stop at a line nobody asked about; not halting on an
+expression that raised fails the raise test; letting a loop past its bound fails
+the bound test; never exhausting the step or byte budget fails the partial test;
+treating a non-`bool` predicate as true fails the truthiness test; dropping a
+`run_to`'s condition fails the marker assertions of the third-negative test;
+running an unbound `run_to` anyway fails the binding test; always taking the
+`then` block fails the conditional test; and putting a measured duration into a
+transcript fails the determinism test, which is exactly the regression that test
+exists for

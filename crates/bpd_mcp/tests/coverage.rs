@@ -16,9 +16,9 @@ use std::io::{BufRead as _, BufReader, Write};
 use std::sync::{Arc, Mutex};
 
 use bpd_core::{
-    Binding, Content, Detail, Entry, Evaluated, Evaluation, Facet, Frame, FrameId, HitCondition,
-    Mode, Reach, Reporting, Request, Resolved, Response, Running, Site, SourceBreakpoint, Stack,
-    Stop, StopReason, Threads, Value, Variables, WorldStopped,
+    At, Binding, Content, Detail, Did, Entry, Evaluated, Evaluation, Facet, Frame, FrameId,
+    HitCondition, Mode, Outcome, Reach, Record, Reporting, Request, Resolved, Response, Running,
+    Site, SourceBreakpoint, Stack, Stop, StopReason, Threads, Value, Variables, WorldStopped,
 };
 use bpd_mcp::{
     Configuration, Failed, Launcher, ProgramOutput, Session, Started, reach_of, reach_of_facet,
@@ -305,6 +305,23 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)]) -> Transcript 
         }),
     );
 
+    // a whole investigation in one call: a tree of steps, and a budget on all
+    // three axes because there is no default for one
+    client.call(
+        "run_script",
+        &serde_json::json!({
+            "steps": [
+                { "step": "log", "note": "starting" },
+                {
+                    "step": "if",
+                    "predicate": { "expression": "total > 1" },
+                    "then": [ { "step": "step_over" } ],
+                    "otherwise": [],
+                },
+            ],
+            "budget": { "steps": 8, "wall_ms": 500, "bytes": 4096 },
+        }),
+    );
     client.call("step_over", &serde_json::json!({ "deadline_ms": 500 }));
     client.call("step_in", &serde_json::json!({ "deadline_ms": 500 }));
     client.call("step_out", &serde_json::json!({ "deadline_ms": 500 }));
@@ -458,6 +475,7 @@ fn tool_order() -> Vec<&'static str> {
         "variables",
         "evaluate",
         "set_variable",
+        "run_script",
         "step_over",
         "step_in",
         "step_out",
@@ -540,17 +558,17 @@ impl Launcher for Fake {
     ) -> Result<Started, Failed> {
         Ok(Started::Stopped(Box::new(FakeSession {
             asked: Arc::clone(&self.asked),
-            held: vec![stop(1, StopReason::Entry)],
+            held: vec![stop_at(1, StopReason::Entry)],
             // innermost first, so `pop` hands them out in order
             remaining: vec![
-                stop(
+                stop_at(
                     6,
                     StopReason::Paused {
                         file: "/tmp/fake.py".to_string(),
                         line: 8,
                     },
                 ),
-                stop(
+                stop_at(
                     5,
                     StopReason::Breakpoint {
                         breakpoints: vec![1],
@@ -567,7 +585,7 @@ impl Launcher for Fake {
     }
 }
 
-fn stop(number: u64, reason: StopReason) -> Stop {
+fn stop_at(number: u64, reason: StopReason) -> Stop {
     Stop {
         stop: number,
         thread: THREAD,
@@ -577,7 +595,7 @@ fn stop(number: u64, reason: StopReason) -> Stop {
 }
 
 fn stepped(number: u64, kind: bpd_core::StepKind, line: u32) -> Stop {
-    stop(
+    stop_at(
         number,
         StopReason::Stepped {
             kind,
@@ -585,6 +603,28 @@ fn stepped(number: u64, kind: bpd_core::StepKind, line: u32) -> Stop {
             line,
         },
     )
+}
+
+/// what a fake session answers a debug script with
+///
+/// the shape rather than the substance: that a script really drives a real
+/// interpreter is `crates/bpd_engine/tests/scripts.rs`. what is under test here
+/// is that the tool reaches the session with the tree the client wrote, and
+/// that the whole transcript comes back
+fn transcript(stop: u64, script: &bpd_core::Script) -> bpd_core::Transcript {
+    bpd_core::Transcript {
+        at_most: script.at_most(),
+        bytes: 120,
+        records: vec![Record {
+            step: "1".to_string(),
+            at: At::of(&stop_at(stop, StopReason::Entry)),
+            did: Did::Logged {
+                note: "the fake ran it".to_string(),
+            },
+        }],
+        rebound: Vec::new(),
+        outcome: Outcome::Ran,
+    }
 }
 
 fn integer(text: &str) -> Value {
@@ -703,6 +743,7 @@ impl Session for FakeSession {
                     value: integer("9"),
                 })
             }
+            Request::RunScript { stop, script } => Response::Transcript(transcript(stop, &script)),
         })
     }
 }

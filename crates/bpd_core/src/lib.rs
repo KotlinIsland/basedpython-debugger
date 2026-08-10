@@ -27,6 +27,7 @@ pub mod frame;
 pub mod parity;
 pub mod python;
 pub mod refusal;
+pub mod script;
 pub mod session;
 pub mod stop;
 pub mod thread;
@@ -40,6 +41,10 @@ pub use exception::{PythonError, TracebackFrame};
 pub use frame::{Frame, FrameId, Scope};
 pub use parity::{Facet, Reach, surface};
 pub use refusal::Refusal;
+pub use script::{
+    Answered, At, Bound, Budget, Did, Disarmed, Halted, Landed, Outcome, Place, Predicate, Record,
+    Script, Step, Transcript,
+};
 pub use session::{
     ExceptionBreakpoints, Reporting, Request, Response, Running, Stack, Threads, Variables,
     WorldStopped, exit_code, only_stop,
