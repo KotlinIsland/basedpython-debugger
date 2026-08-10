@@ -322,8 +322,12 @@ record rather than a passing test
 
 ### the rest
 
-
-the two adapters — neither of them exists
+the two adapters are covered from both ends. `crates/bpd_dap/tests/coverage.rs`
+and `crates/bpd_mcp/tests/coverage.rs` drive each one over a pipe against a
+recording session and assert what it really asked for; `crates/bpd/tests/dap.rs`
+and `crates/bpd/tests/mcp.rs` spawn the front end as a real process against a
+real interpreter; and `crates/bpd/tests/parity.rs` fails when a capability is
+out of one adapter's reach and nobody has written down why
 
 stepping, pausing and the exception breakpoints are covered by
 `crates/bpd_engine/tests/stepping.rs` and
