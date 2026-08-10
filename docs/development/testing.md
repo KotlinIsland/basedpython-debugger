@@ -244,6 +244,19 @@ suppression becomes the thing holding the line
 
 ## what is not covered yet
 
+**frame address reuse on a free-threaded build.**
+`the_interpreter_hands_a_freed_frames_address_to_the_next_one` asserts on a gil
+build only. measured on 3.14t, whether a freed frame's address comes back
+depends on unrelated allocation history — the snippet the test uses reuses it 12
+runs out of 12, and the same snippet without its `import json` never does. so an
+address is a *sometimes* correct frame identity there, which is worse than a
+reliably wrong one and is the stronger reason a step holds a reference. an
+assertion either way would be flaky, so there is none, and this paragraph is the
+record rather than a passing test
+
+### the rest
+
+
 the two adapters — neither of them exists
 
 stepping, pausing and the exception breakpoints are covered by

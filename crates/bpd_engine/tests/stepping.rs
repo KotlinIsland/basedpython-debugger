@@ -792,6 +792,15 @@ fn the_interpreter_hands_a_freed_frames_address_to_the_next_one() {
     // cpython: two coroutines awaited one after another from the same function
     // get the same frame object address, so a step comparing addresses would
     // read the second as the first and land in the wrong instance of it
+    //
+    // asserted on a gil build only, and not because free-threading is safer.
+    // measured there, whether the address comes back depends on unrelated
+    // allocation history — this snippet reuses it 12 times out of 12, and the
+    // same snippet without its `import json` never does. an address is
+    // therefore a *sometimes* correct identity on a free-threaded build, which
+    // is worse than a wrong one and is the stronger reason the step holds a
+    // reference. it is not asserted because a nondeterministic expectation is a
+    // flaky test; it is recorded in `testing.md` instead
     let seen = bpd_test::eval(
         interpreter(),
         "import asyncio, json, sys\n\
@@ -809,6 +818,18 @@ fn the_interpreter_hands_a_freed_frames_address_to_the_next_one() {
     );
 
     let reused: bool = serde_json::from_str(&seen).expect("the snippet prints a json boolean");
+
+    // asserted on a gil build only, and not because free-threading is safer.
+    // measured on 3.14t, whether the address comes back depends on unrelated
+    // allocation history: this snippet reuses it 12 runs out of 12, and the
+    // same snippet without its `import json` never does. so an address is a
+    // *sometimes* correct frame identity there, which is worse than a reliably
+    // wrong one and is the stronger reason a step holds a reference. an
+    // expectation either way would be flaky, so the free-threaded case is
+    // recorded in `testing.md` rather than asserted here
+    if interpreter().free_threaded {
+        return;
+    }
     assert!(
         reused,
         "the first coroutine's frame was freed and the second was given its \

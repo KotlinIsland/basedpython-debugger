@@ -30,11 +30,23 @@ fn main() {
         return;
     }
 
+    // a free-threaded build is a **different abi**, not a variant of the same
+    // one: different struct layouts, a different `EXT_SUFFIX`, different
+    // reference counting. `sys.version_info` reports 3.14 for both, so a stamp
+    // of the version alone cannot tell them apart and the agent would wave
+    // through a load it must refuse. the `t` follows cpython's own suffix
+    let free_threaded = config
+        .build_flags()
+        .0
+        .contains(&pyo3_build_config::BuildFlag::Py_GIL_DISABLED);
+
     // recorded so the agent can refuse at import time when it is loaded by an
     // interpreter other than the one it was compiled for
     println!(
-        "cargo::rustc-env=BPD_AGENT_PYTHON={}.{}",
-        version.major, version.minor
+        "cargo::rustc-env=BPD_AGENT_PYTHON={}.{}{}",
+        version.major,
+        version.minor,
+        if free_threaded { "t" } else { "" }
     );
     println!("cargo::rerun-if-env-changed=PYO3_PYTHON");
 }
