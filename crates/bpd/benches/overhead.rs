@@ -769,15 +769,17 @@ fn run_cost(criterion: &mut Criterion) {
 
 /// where the fixed cost of attaching goes
 ///
-/// the `session` rows have `bpd` adding about 150 ms to a program that does
+/// the `session` rows have `bpd` adding a fixed cost to a program that does
 /// nothing at all, and the `run` rows have the event path adding nothing — so
-/// that 150 ms is the attaching itself, and this is where most of it is
+/// that fixed cost is the attaching itself, and this is where most of it was
 ///
-/// the agent is a `cdylib`, and every launch stages a **fresh copy** of it into
-/// a temporary directory for the debuggee to import. the first load of a newly
-/// written shared object costs far more than every load of the same file after
-/// it, and these two rows are the difference. the third row is the interpreter
-/// on its own, so the other two can be read against something
+/// the agent is a `cdylib`, and the first load of a shared object the system
+/// has never seen costs far more than every load of the same file after it.
+/// staging is a content-addressed cache because of these two rows: `staged
+/// once` is what a launch does now, and `staged fresh` is the control — a copy
+/// into a directory of its own, which is what every launch used to get. the
+/// third row is the interpreter on its own, so the other two can be read
+/// against something
 fn attaching(criterion: &mut Criterion) {
     let session = Session::discover();
     let mut group = criterion.benchmark_group("attach");
@@ -802,10 +804,12 @@ fn attaching(criterion: &mut Criterion) {
         bencher.iter_custom(|iterations| {
             (0..iterations)
                 .map(|_| {
-                    // the copy is outside the timed part: what is being asked is
-                    // what the *interpreter* pays for a file it has not seen,
-                    // not what a one megabyte copy costs
-                    let staged = bpd_engine::agent::stage()
+                    // a cache of its own per iteration, so every one of them is
+                    // a file the system has never seen. the copy is outside the
+                    // timed part: what is being asked is what the *interpreter*
+                    // pays for such a file, not what a one megabyte copy costs
+                    let cache = tempfile::tempdir().expect("a temporary directory can be made");
+                    let staged = bpd_engine::agent::stage_into(cache.path())
                         .unwrap_or_else(|error| panic!("could not stage the agent: {error}"));
                     let started = Instant::now();
                     snippet(

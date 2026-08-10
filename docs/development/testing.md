@@ -117,7 +117,11 @@ it was built for ever gets past it
 the agent's own tests drive a real interpreter with the built artifact staged on
 `PYTHONPATH`, because nothing in the workspace can link a `cdylib`.
 `bpd_test::agent::staged()` does the staging — the rename cargo's artifact name
-needs to become an importable module
+needs to become an importable module — through the same content-addressed cache
+a launch uses, so the whole suite runs over it rather than over a path of its
+own. an agent rebuilt between two `cargo test` runs has different bytes and
+therefore a different entry, which is what keeps a suite from testing a build it
+did not make. see [launching](launching.md)
 
 ## coverage
 

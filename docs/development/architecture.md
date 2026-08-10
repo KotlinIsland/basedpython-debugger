@@ -74,11 +74,13 @@ section rather than confirm it:
     cpython 3.12, so on every interpreter `bpd` supports both debuggers are
     native on this path. with no breakpoints set, both cost a program under 2%.
     what separates them is `DISABLE`, and it only shows once a breakpoint exists
-- **the event path is not where a session's cost is.** attaching costs 140–180
-    ms before the program's first statement, and about 120 ms of that is the
-    interpreter loading a freshly written copy of the agent's shared object.
-    nothing in this design document had a number for that, and it is larger than
-    everything this section is about
+- **the event path is not where a session's cost is.** attaching used to cost
+    140–180 ms before the program's first statement, and about 120 ms of that
+    was the interpreter loading a freshly written copy of the agent's shared
+    object. nothing in this design document had a number for that, and it was
+    larger than everything this section is about. it is now a content-addressed
+    cache and the cost is paid once per build of the agent rather than once per
+    launch — see [launching](launching.md)
 
 ### the callback does not get a frame
 

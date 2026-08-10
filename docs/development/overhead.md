@@ -54,11 +54,25 @@ bind would otherwise post the best number on the page
 | debugpy | 1.8.21 |
 | rust | 1.97.0, `--release` |
 
-taken on an otherwise idle machine. every figure is the **median of ten runs**,
-with the smallest and largest of the ten in brackets — ten whole processes, not
-ten iterations inside one, because what is being measured takes hundreds of
-milliseconds and the variation that matters in a process-level measurement is
-between processes
+every figure is the **median of ten runs**, with the smallest and largest of the
+ten in brackets — ten whole processes, not ten iterations inside one, because
+what is being measured takes hundreds of milliseconds and the variation that
+matters in a process-level measurement is between processes
+
+**two machine states, and the page says which is which.** the first set of these
+figures was taken on an otherwise idle machine. the staging change described in
+[launching](launching.md) was measured afterwards on the same machine, and it
+was **not** idle — other builds ran throughout, at a load average between 20 and
+90 on sixteen cores. so rather than read one row off a quiet run against another
+off a busy one, the `session` and `attach` tables were **re-measured whole**
+under those conditions, and the bare and debugpy columns are the calibration:
+`startup` bare is 17 ms in that table against 11 ms on the idle run, and every
+row in it pays the same tax
+
+the `run` tables below are the idle machine's and were not re-measured. they are
+the program's own clock over its own work, which the fixed cost of starting a
+session lands outside of, so where the agent is staged cannot reach them. that
+is an argument rather than a measurement, and it is written here as one
 
 **these are one machine's numbers.** nobody has run this on linux or windows,
 and the largest single component of the fixed cost below is a macOS behaviour
@@ -72,22 +86,30 @@ BPD_BENCH_DEBUGPY=/path/to/venv/bin/python cargo bench --bench overhead
 
 ## the whole session, in milliseconds
 
+on the busy machine — read a `bpd` figure against the `bare` one beside it:
+
 | workload | bare | bpd | debugpy |
 | --- | --- | --- | --- |
-| `startup` | 11 (10–11) | 163 (155–258) | 1030 (1009–1046) |
-| `lines` | 178 (177–179) | 354 (350–359) | 1043 (1021–1069) |
-| `calls` | 228 (225–233) | 403 (385–414) | 1251 (1220–1265) |
-| `imports` | 62 (62–63) | 204 (196–205) | 1015 (1002–1069) |
-| `mixed` | 264 (262–269) | 429 (426–441) | 1244 (1209–1250) |
+| `startup` | 17 (16–19) | 74 (66–84) | 1091 (1050–1137) |
+| `lines` | 181 (180–183) | 215 (214–216) | 1025 (1020–1032) |
+| `calls` | 230 (227–232) | 269 (263–279) | 1258 (1246–1272) |
+| `imports` | 83 (76–90) | 101 (100–103) | 1057 (1043–1071) |
+| `mixed` | 278 (276–281) | 326 (312–343) | 1256 (1240–1277) |
 
 and `lines` again, with one breakpoint in the function the loop is in:
 
 | | bpd | debugpy |
 | --- | --- | --- |
-| hit fifty times | 361 (337–399) | 11319 (11061–14178) |
-| never hit | 343 (336–347) | 11315 (11185–11591) |
+| hit fifty times | 230 (229–232) | 12984 (11646–14850) |
+| never hit | 219 (218–221) | 12033 (11691–12607) |
+
+the `bpd` column was 163, 354, 403, 204 and 429 before the agent was staged into
+a cache, on the idle machine where `bare` was 11, 178, 228, 62 and 264. the
+attach table below is where that went
 
 ## the program's own run, in milliseconds
+
+the idle machine's, and not re-measured — see [the machine](#the-machine):
 
 | workload | bare | bpd | debugpy |
 | --- | --- | --- | --- |
@@ -103,11 +125,19 @@ and `lines` again, with one breakpoint in the function the loop is in:
 
 ## attaching, in milliseconds
 
-| | |
-| --- | --- |
-| the interpreter alone, `python -c pass` | 9.5 (9.4–9.6) |
-| the agent imported, staged once | 10.2 (10.0–10.7) |
-| the agent imported, staged fresh | 129 (127–147) |
+three rows measured back to back in one run, so the machine's state cancels out
+of the differences between them:
+
+| | busy machine | idle machine, before the cache |
+| --- | --- | --- |
+| the interpreter alone, `python -c pass` | 15.9 (13.6–18.4) | 9.5 (9.4–9.6) |
+| the agent imported, staged once | 15.9 (15.0–16.8) | 10.2 (10.0–10.7) |
+| the agent imported, staged fresh | 144 (140–150) | 129 (127–147) |
+
+`staged once` is what a launch does now: the agent is staged into a per-user
+cache named after the sha-256 of its bytes, so every launch after the first
+imports a file the system has already seen. `staged fresh` is the control — a
+copy into a directory of its own, which is what every launch used to get
 
 ## what the numbers say
 
@@ -125,28 +155,43 @@ object as a live breakpoint is free. `calls` says the same thing about the
 global `PY_START` — ten million entries into three code objects, and the run is
 if anything slightly faster than bare
 
-### but "costs nothing" was never the whole cost, and the docs never said what the rest was
+### but "costs nothing" was never the whole cost, and 119 ms of it was staging
 
-attaching costs 140–180 ms before the program's first statement. that is not on
-the event path and it is not what `DISABLE` is about, but it is what somebody
-waits for, and no page said it
+attaching used to cost 140–180 ms before the program's first statement. that is
+not on the event path and it is not what `DISABLE` is about, but it is what
+somebody waits for, and no page said it
 
-the `attach` rows say where it goes. importing the agent costs **0.7 ms**. the
+the `attach` rows said where it went. importing the agent costs **0.7 ms**. the
 first load of a *freshly written* copy of it costs **119 ms more than the same
-file loaded again**. `bpd` stages a new copy of the agent into a new temporary
-directory on every launch, so it pays that on every launch
+file loaded again** — 128 ms more on the busier machine, which is the same
+finding measured twice. `bpd` staged a new copy of the agent into a new
+temporary directory on every launch, so it paid that on every launch
 
-it is a fix waiting to happen — staging to a stable, content-addressed path
-would turn a 150 ms attach into something near 30 ms — and it is written down in
-`ROADMAP.md` rather than fixed here, because measuring a thing and changing it
-in the same breath leaves nothing to compare against. **it is also macOS**,
-where a shared object the system has not seen is validated on first load; what
-linux and windows charge for the same thing is unmeasured
+it does not any more. the agent is staged into a per-user cache named after the
+sha-256 of its bytes, so the file a debuggee imports is one the system has
+already checked. against the `bare` row beside it, a `startup` session went from
+152 ms of `bpd` to **56 ms**, and the same thing timed outside criterion — five
+launches of `print("hi")` with the cache deleted each time, then five without —
+is 160–190 ms against a steady 40 ms
+
+the cost is **amortised, not gone**. the first launch after a `cargo build -p
+bpd_agent` writes a file the system has never seen and pays it in full; every
+launch after that does not. and **it is macOS**, where a shared object the
+system has not seen is checked before it is mapped — `syspolicyd` and
+`XprotectService` are visibly busy while it happens. what linux and windows
+charge for the same thing is still unmeasured, so on those the cache is a change
+that costs nothing and may buy nothing
+
+what it costs in trust, and what is checked before anything is loaded out of
+that directory, is in [launching](launching.md)
 
 ### with a breakpoint in a hot function, the architecture is the whole difference
 
-31× end to end: 361 ms against 11 319 ms, same program, same interpreter, same
-breakpoint, both hit fifty times
+56× end to end: 230 ms against 12 984 ms, same program, same interpreter, same
+breakpoint, both hit fifty times. it was 31× before the agent was cached — 361
+against 11 319 — and the gap widened for two reasons rather than one: `bpd`'s
+fixed cost fell, and the busy machine charges debugpy's eleven seconds about 15%
+more than the idle one did
 
 the never-hit row says where that comes from. with a breakpoint on a line the
 program **never reaches**, debugpy's run is 10 285 ms against 164 ms bare —
@@ -168,8 +213,8 @@ cython, and uses it on cpython 3.12 and newer. `PYDEVD_USE_SYS_MONITORING` is
 so on every interpreter `bpd` supports, debugpy is *also* a PEP 669 debugger
 with a native callback. and it shows: with no breakpoints set its run rows are
 within 2% of bare, exactly as `bpd`'s are. what separates the two is what
-happens once a breakpoint is set, and the fixed cost of a session — 1.0 s
-against 0.15 s
+happens once a breakpoint is set, and the fixed cost of a session — 1.1 s
+against 0.07 s
 
 `docs/index.md` used to say debugpy meant "a python callback on every line of
 every frame that is being traced". that is true of the interpreters debugpy

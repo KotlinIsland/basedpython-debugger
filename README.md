@@ -6,8 +6,9 @@ a debugger for python and [basedpython](https://github.com/KotlinIsland/basedpyt
     line with no breakpoint on it is `DISABLE`d the first time it is seen.
     measured: a loop that runs eighteen million line locations runs within 1% of
     its bare time with a breakpoint held in the same function, and 63× faster
-    than debugpy doing the same. attaching costs about 150 ms before the program
-    starts, and most of that is one fixable thing. one machine, ten runs a
+    than debugpy doing the same. attaching costs about 55 ms before the program
+    starts — it was 150 ms until the agent was staged into a content-addressed
+    cache instead of a fresh copy per launch. one machine, ten runs a
     figure, written down in
     [what bpd costs](docs/development/overhead.md)
 - **speaks DAP** — the debug adapter protocol, the same protocol vs code,

@@ -10,7 +10,7 @@ compatibility layer holding it back:
     is `DISABLE`d the first time the interpreter reaches it and is never
     reported again — [measured](development/overhead.md) at within 1% of a bare
     run, on a loop of eighteen million line locations with a breakpoint held in
-    the same function. what a session *does* cost is the 150 ms it takes to
+    the same function. what a session *does* cost is the 55 ms it takes to
     attach, and that is on the same page
 - **speaks DAP** — the [debug adapter
     protocol](https://microsoft.github.io/debug-adapter-protocol/), the same
@@ -65,5 +65,5 @@ that assumption changes the architecture, not just the implementation — see
 [architecture](development/architecture.md)
 
 starting a session costs something in both, and that is on the same page too:
-about 150 ms before the program's first statement under `bpd`, about 1.0 s under
+about 55 ms before the program's first statement under `bpd`, about 1.1 s under
 debugpy
