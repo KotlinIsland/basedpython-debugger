@@ -32,7 +32,7 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use bpd_protocol::message::{
+use bpd_core::{
     Evaluation, HitCondition, LogRecord, Part, PythonError, SourceBreakpoint, TracebackFrame,
     Unbound,
 };

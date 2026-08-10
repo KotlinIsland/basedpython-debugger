@@ -1,4 +1,12 @@
-//! every way `bpd` can refuse to do something
+//! every way a session can refuse to answer, of the reasons that are about the
+//! program rather than about `bpd`
+//!
+//! the split is what the failure *describes*. an interpreter that cannot be
+//! debugged, a program with nothing held, a request that names a stop when
+//! several are held — all of those describe the thing being debugged, so every
+//! front end has to render them and they belong here. a socket that failed, an
+//! agent artifact that could not be found, an interval that does not fit the
+//! wire — those describe `bpd`'s own machinery, and they live in `bpd_engine`
 //!
 //! there is deliberately no catch-all string variant and no `NotImplemented`.
 //! a variant exists because a real, reachable failure mode exists, and every
@@ -7,6 +15,7 @@
 use std::path::PathBuf;
 
 use crate::python::{Implementation, PythonVersion};
+use crate::refusal::Refusal;
 
 /// the result type used throughout `bpd`
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -76,5 +85,57 @@ pub enum Error {
         path: PathBuf,
         /// the version it reported
         found: PythonVersion,
+    },
+
+    /// two breakpoints in one request claimed the same id
+    ///
+    /// the id is how every later report — a rebinding, a stop — names which
+    /// breakpoint it is about. sharing one would mean the client is given one
+    /// answer for two questions and cannot tell which it belongs to
+    #[error(
+        "two breakpoints in the same request both have id {id}. an id names one \
+         breakpoint in every report about it, so it has to be unique within a set"
+    )]
+    DuplicateBreakpointId {
+        /// the id that was used twice
+        id: u32,
+    },
+
+    /// something was asked of a debuggee with no thread held
+    ///
+    /// the agent answers on a thread it is holding, so a request made to a
+    /// program with nothing held would be answered whenever it next happened to
+    /// stop. that is not an answer, and waiting for it looks exactly like a hang
+    #[error("no thread of the debuggee is held, so it cannot be asked for {wanted}")]
+    NotStopped {
+        /// what was asked for
+        wanted: &'static str,
+    },
+
+    /// a request that is about one stop was made while several were held
+    ///
+    /// a stop holds one thread and there can be more than one of them at a
+    /// time. answering from whichever happened to be first would be answering
+    /// about a thread the caller did not name
+    #[error(
+        "{wanted} is about one held thread and {} are held: {held:?}. name the \
+         stop it is about",
+        held.len()
+    )]
+    AmbiguousStop {
+        /// what was asked for
+        wanted: &'static str,
+        /// the stops that are held
+        held: Vec<u64>,
+    },
+
+    /// the agent understood the request and would not answer it
+    ///
+    /// not a failure of `bpd`'s machinery: answering would have meant guessing
+    /// what was meant about the program
+    #[error("{reason}")]
+    Refused {
+        /// what stood in the way
+        reason: Refusal,
     },
 }

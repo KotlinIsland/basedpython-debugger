@@ -1,4 +1,5 @@
-//! starting a debuggee with its agent already attached
+//! starting a debuggee with its agent already attached, and answering the
+//! session's requests against it
 //!
 //! the debuggee is entered through `python -c "import bpd_agent; bpd_agent.main()"`.
 //! everything after that — repairing `sys.argv` and `sys.path[0]`, building
@@ -18,11 +19,13 @@ use std::process::{Child, Command, ExitStatus};
 use std::time::Duration;
 
 use bpd_core::python::Capabilities;
-use bpd_protocol::env;
-use bpd_protocol::message::{
-    Detail, Entry, Evaluated, Frame, FrameId, FromAgent, FromEngine, LogRecord, Mode, Omitted,
-    Resolved, Scope, SourceBreakpoint, StepKind, Stop, ThreadState, Value, Which,
+use bpd_core::{
+    Detail, Evaluated, ExceptionBreakpoints, FrameId, LogRecord, Request, Resolved, Response,
+    Running, Scope, SourceBreakpoint, Stack, StepKind, Stop, Threads, Variables, Which,
+    WorldStopped,
 };
+use bpd_protocol::env;
+use bpd_protocol::message::{FromAgent, FromEngine};
 
 use crate::{Error, Listener, Result, Session, agent};
 
@@ -60,44 +63,6 @@ pub struct Debuggee {
     _staged: agent::Staged,
 }
 
-/// what a resumed debuggee did next
-///
-/// deliberately closed, like [`Launched`]: a third outcome is something every
-/// caller has to decide about, and a catch-all arm is how a debugger acquires a
-/// state nobody handles
-#[derive(Debug)]
-pub enum Running {
-    /// a thread stopped
-    Stopped {
-        /// which thread, where, and why
-        stop: Stop,
-        /// what loading a file changed about the breakpoint set on the way
-        rebound: Vec<Resolved>,
-    },
-
-    /// it finished
-    Exited {
-        /// how it exited
-        status: ExitStatus,
-        /// what loading a file changed about the breakpoint set on the way
-        rebound: Vec<Resolved>,
-    },
-
-    /// the program ran to its end with threads still held
-    ///
-    /// it cannot exit: the interpreter finalizes by joining the program's
-    /// non-daemon threads, and a held one cannot be joined. resuming the named
-    /// threads is what lets it finish, and until then the process is sitting
-    /// there — which is a fact rather than the hang it would otherwise look
-    /// like
-    Finishing {
-        /// the threads still held as the program ended
-        threads: Vec<u64>,
-        /// what loading a file changed about the breakpoint set on the way
-        rebound: Vec<Resolved>,
-    },
-}
-
 impl Debuggee {
     /// the stops held right now, in the order the agent reported them
     ///
@@ -116,6 +81,88 @@ impl Debuggee {
         self.session.requests_sent()
     }
 
+    /// answer one [`Request`] against this debuggee
+    ///
+    /// the capability surface is the enum, and this is the one place it is
+    /// answered. the ergonomic methods below build a request and come through
+    /// here, so there is a single implementation of every capability rather
+    /// than one per front end — which is what makes the adapters translations
+    /// rather than second opinions
+    ///
+    /// the match is exhaustive and has no catch-all arm. a capability added to
+    /// [`Request`] is a compile error here rather than a request nothing
+    /// answers
+    ///
+    /// `on_log` is a parameter of the call rather than a field of the request
+    /// because a log record is not an answer to anything: a logpoint fires
+    /// while the program runs, and only [`Request::Run`] and [`Request::Wait`]
+    /// are waiting when it does
+    pub fn dispatch(
+        &mut self,
+        request: Request,
+        on_log: &mut dyn FnMut(LogRecord),
+    ) -> Result<Response> {
+        match request {
+            Request::SetBreakpoints { breakpoints } => Ok(Response::BreakpointsResolved {
+                resolved: self.resolve_breakpoints(breakpoints)?,
+            }),
+            Request::SetExceptionBreakpoints { raised, uncaught } => Ok(
+                Response::ExceptionBreakpoints(self.arm_exceptions(raised, uncaught)?),
+            ),
+            Request::Run => {
+                self.let_go(Which::All)?;
+                Ok(Response::Ran(self.wait_for(on_log)?))
+            }
+            Request::Wait => Ok(Response::Ran(self.wait_for(on_log)?)),
+            Request::Resume { which } => Ok(Response::Resumed {
+                threads: self.let_go(which)?,
+            }),
+            Request::Step { stop, kind } => Ok(Response::Resumed {
+                threads: self.step_thread(stop, kind)?,
+            }),
+            Request::Pause => Ok(Response::Pausing {
+                running: self.arm_pause()?,
+            }),
+            Request::Threads { settle } => Ok(Response::Threads(self.census(settle)?)),
+            Request::StopTheWorld { stop, settle } => {
+                Ok(Response::WorldStopped(self.stop_world(stop, settle)?))
+            }
+            Request::Stack { stop, top } => Ok(Response::Stack(self.walk_stack(stop, top)?)),
+            Request::Variables {
+                frame,
+                scope,
+                detail,
+            } => Ok(Response::Variables(self.read_scope(frame, scope, detail)?)),
+            Request::Evaluate {
+                frame,
+                expression,
+                detail,
+            } => Ok(Response::Evaluated(self.evaluate_in(
+                frame,
+                &expression,
+                detail,
+            )?)),
+            Request::SetVariable {
+                frame,
+                scope,
+                name,
+                value,
+                detail,
+            } => Ok(Response::Evaluated(
+                self.write_variable(frame, scope, &name, &value, detail)?,
+            )),
+        }
+    }
+
+    /// dispatch a request that cannot deliver a log record
+    ///
+    /// a logpoint that fires while one of these is in flight is kept in
+    /// `pending_logs` for the next [`Self::wait`] rather than handed over here,
+    /// so there is nothing for a sink to receive
+    fn ask_for(&mut self, request: Request) -> Result<Response> {
+        self.dispatch(request, &mut drop)
+    }
+
     /// the one stop that is held, for a request that is about one thread
     ///
     /// refuses rather than picking when several are held. a debugger that
@@ -123,12 +170,13 @@ impl Debuggee {
     /// nobody asked
     fn only(&self, wanted: &'static str) -> Result<u64> {
         match self.held.as_slice() {
-            [] => Err(Error::NotStopped { wanted }),
+            [] => Err(bpd_core::Error::NotStopped { wanted }.into()),
             [stop] => Ok(stop.stop),
-            several => Err(Error::AmbiguousStop {
+            several => Err(bpd_core::Error::AmbiguousStop {
                 wanted,
                 held: several.iter().map(|stop| stop.stop).collect(),
-            }),
+            }
+            .into()),
         }
     }
 
@@ -139,6 +187,13 @@ impl Debuggee {
     /// request that is answered whenever it next happens to stop, which is not
     /// an answer
     pub fn set_breakpoints(&mut self, breakpoints: Vec<SourceBreakpoint>) -> Result<Vec<Resolved>> {
+        match self.ask_for(Request::SetBreakpoints { breakpoints })? {
+            Response::BreakpointsResolved { resolved } => Ok(resolved),
+            other => unreachable!("a breakpoint set was answered with {other:?}"),
+        }
+    }
+
+    fn resolve_breakpoints(&mut self, breakpoints: Vec<SourceBreakpoint>) -> Result<Vec<Resolved>> {
         const EXPECTED: &str = "the breakpoints to resolve";
 
         // every report about a breakpoint, and every stop it causes, names it by
@@ -147,7 +202,7 @@ impl Debuggee {
         let mut seen = std::collections::BTreeSet::new();
         for breakpoint in &breakpoints {
             if !seen.insert(breakpoint.id) {
-                return Err(Error::DuplicateBreakpointId { id: breakpoint.id });
+                return Err(bpd_core::Error::DuplicateBreakpointId { id: breakpoint.id }.into());
             }
         }
 
@@ -168,6 +223,13 @@ impl Debuggee {
         raised: bool,
         uncaught: bool,
     ) -> Result<ExceptionBreakpoints> {
+        match self.ask_for(Request::SetExceptionBreakpoints { raised, uncaught })? {
+            Response::ExceptionBreakpoints(armed) => Ok(armed),
+            other => unreachable!("an exception breakpoint set was answered with {other:?}"),
+        }
+    }
+
+    fn arm_exceptions(&mut self, raised: bool, uncaught: bool) -> Result<ExceptionBreakpoints> {
         const EXPECTED: &str = "the exception breakpoints to be set";
 
         let request = FromEngine::SetExceptionBreakpoints { raised, uncaught };
@@ -186,6 +248,19 @@ impl Debuggee {
     /// the thread has been let go. where it landed arrives from [`Self::wait`],
     /// as a stop of its own
     pub fn step(&mut self, stop: u64, kind: StepKind) -> Result<Vec<u64>> {
+        match self.ask_for(Request::Step { stop, kind })? {
+            Response::Resumed { threads } => Ok(threads),
+            other => unreachable!("a step was answered with {other:?}"),
+        }
+    }
+
+    /// step the only held thread
+    pub fn the_step(&mut self, kind: StepKind) -> Result<Vec<u64>> {
+        let stop = self.only("a step")?;
+        self.step(stop, kind)
+    }
+
+    fn step_thread(&mut self, stop: u64, kind: StepKind) -> Result<Vec<u64>> {
         const EXPECTED: &str = "the thread to be stepped";
 
         match self.ask(&FromEngine::Step { stop, kind }, EXPECTED)? {
@@ -195,12 +270,6 @@ impl Debuggee {
             }
             other => Err(unexpected(&other, EXPECTED)),
         }
-    }
-
-    /// step the only held thread
-    pub fn the_step(&mut self, kind: StepKind) -> Result<Vec<u64>> {
-        let stop = self.only("a step")?;
-        self.step(stop, kind)
     }
 
     /// hold the next thread of the debuggee that reaches a line
@@ -215,6 +284,13 @@ impl Debuggee {
     /// reach it until some thread runs python again — every one of them is
     /// parked in a C call, where no monitoring event exists
     pub fn pause(&mut self) -> Result<Vec<u64>> {
+        match self.ask_for(Request::Pause)? {
+            Response::Pausing { running } => Ok(running),
+            other => unreachable!("a pause was answered with {other:?}"),
+        }
+    }
+
+    fn arm_pause(&mut self) -> Result<Vec<u64>> {
         const EXPECTED: &str = "a pause to be armed";
 
         match self.send_and_wait(&FromEngine::Pause, EXPECTED)? {
@@ -228,6 +304,19 @@ impl Debuggee {
     /// `top` bounds how many frames come back, counting from the one that
     /// stopped. the answer says how deep the stack really is either way
     pub fn stack(&mut self, stop: u64, top: Option<u32>) -> Result<Stack> {
+        match self.ask_for(Request::Stack { stop, top })? {
+            Response::Stack(stack) => Ok(stack),
+            other => unreachable!("a stack walk was answered with {other:?}"),
+        }
+    }
+
+    /// walk the frame chain of the only held thread
+    pub fn the_stack(&mut self, top: Option<u32>) -> Result<Stack> {
+        let stop = self.only("the stack")?;
+        self.stack(stop, top)
+    }
+
+    fn walk_stack(&mut self, stop: u64, top: Option<u32>) -> Result<Stack> {
         const EXPECTED: &str = "the stack";
 
         match self.ask(&FromEngine::Stack { stop, top }, EXPECTED)? {
@@ -244,14 +333,19 @@ impl Debuggee {
         }
     }
 
-    /// walk the frame chain of the only held thread
-    pub fn the_stack(&mut self, top: Option<u32>) -> Result<Stack> {
-        let stop = self.only("the stack")?;
-        self.stack(stop, top)
-    }
-
     /// read one scope of one frame
     pub fn variables(&mut self, frame: FrameId, scope: Scope, detail: Detail) -> Result<Variables> {
+        match self.ask_for(Request::Variables {
+            frame,
+            scope,
+            detail,
+        })? {
+            Response::Variables(variables) => Ok(variables),
+            other => unreachable!("a scope read was answered with {other:?}"),
+        }
+    }
+
+    fn read_scope(&mut self, frame: FrameId, scope: Scope, detail: Detail) -> Result<Variables> {
         const EXPECTED: &str = "the variables of a scope";
 
         let request = FromEngine::Variables {
@@ -288,6 +382,22 @@ impl Debuggee {
         expression: &str,
         detail: Detail,
     ) -> Result<Evaluated> {
+        match self.ask_for(Request::Evaluate {
+            frame,
+            expression: expression.to_string(),
+            detail,
+        })? {
+            Response::Evaluated(result) => Ok(result),
+            other => unreachable!("an evaluation was answered with {other:?}"),
+        }
+    }
+
+    fn evaluate_in(
+        &mut self,
+        frame: FrameId,
+        expression: &str,
+        detail: Detail,
+    ) -> Result<Evaluated> {
         const EXPECTED: &str = "the value of an expression";
 
         let request = FromEngine::Evaluate {
@@ -303,6 +413,26 @@ impl Debuggee {
 
     /// write a variable of a frame, and read back what the frame holds after it
     pub fn set_variable(
+        &mut self,
+        frame: FrameId,
+        scope: Scope,
+        name: &str,
+        value: &str,
+        detail: Detail,
+    ) -> Result<Evaluated> {
+        match self.ask_for(Request::SetVariable {
+            frame,
+            scope,
+            name: name.to_string(),
+            value: value.to_string(),
+            detail,
+        })? {
+            Response::Evaluated(result) => Ok(result),
+            other => unreachable!("a variable write was answered with {other:?}"),
+        }
+    }
+
+    fn write_variable(
         &mut self,
         frame: FrameId,
         scope: Scope,
@@ -331,6 +461,13 @@ impl Debuggee {
     /// everything it says about a thread bpd is not holding is a sample, and
     /// `settle` is how far apart the two samples it compares were taken
     pub fn threads(&mut self, settle: Duration) -> Result<Threads> {
+        match self.ask_for(Request::Threads { settle })? {
+            Response::Threads(threads) => Ok(threads),
+            other => unreachable!("a thread census was answered with {other:?}"),
+        }
+    }
+
+    fn census(&mut self, settle: Duration) -> Result<Threads> {
         const EXPECTED: &str = "what the threads are doing";
 
         let settle_ms =
@@ -355,6 +492,13 @@ impl Debuggee {
     /// are parked in a C call and are still running — a whole-program snapshot
     /// is only what came back with that list empty
     pub fn stop_the_world(&mut self, stop: u64, settle: Duration) -> Result<WorldStopped> {
+        match self.ask_for(Request::StopTheWorld { stop, settle })? {
+            Response::WorldStopped(stopped) => Ok(stopped),
+            other => unreachable!("stopping the world was answered with {other:?}"),
+        }
+    }
+
+    fn stop_world(&mut self, stop: u64, settle: Duration) -> Result<WorldStopped> {
         const EXPECTED: &str = "the world to stop";
 
         let settle_ms =
@@ -376,7 +520,7 @@ impl Debuggee {
     /// running
     fn ask(&mut self, request: &FromEngine, expected: &'static str) -> Result<FromAgent> {
         if self.held.is_empty() {
-            return Err(Error::NotStopped { wanted: expected });
+            return Err(bpd_core::Error::NotStopped { wanted: expected }.into());
         }
         self.send_and_wait(request, expected)
     }
@@ -400,7 +544,9 @@ impl Debuggee {
                     self.pending_rebinds.extend(resolved);
                 }
                 Some(FromAgent::Stopped { stop }) => self.held.push(stop),
-                Some(FromAgent::Refused { reason }) => return Err(Error::Refused { reason }),
+                Some(FromAgent::Refused { reason }) => {
+                    return Err(bpd_core::Error::Refused { reason }.into());
+                }
                 Some(answer) => return Ok(answer),
                 None => return Err(Error::AgentGone { expected }),
             }
@@ -413,14 +559,21 @@ impl Debuggee {
     /// client would otherwise believe it had released something it had not, and
     /// the next thing it waited for would never come
     pub fn resume(&mut self, threads: &[u64]) -> Result<Vec<u64>> {
-        self.let_go(Which::Named {
+        self.resumed(Which::Named {
             threads: threads.to_vec(),
         })
     }
 
     /// let every held thread go, without waiting for what they do next
     pub fn resume_all(&mut self) -> Result<Vec<u64>> {
-        self.let_go(Which::All)
+        self.resumed(Which::All)
+    }
+
+    fn resumed(&mut self, which: Which) -> Result<Vec<u64>> {
+        match self.ask_for(Request::Resume { which })? {
+            Response::Resumed { threads } => Ok(threads),
+            other => unreachable!("a resume was answered with {other:?}"),
+        }
     }
 
     fn let_go(&mut self, which: Which) -> Result<Vec<u64>> {
@@ -442,6 +595,24 @@ impl Debuggee {
     /// accumulated a million of them before saying anything would be holding
     /// the program's history hostage to its own memory
     pub fn wait(&mut self, mut on_log: impl FnMut(LogRecord)) -> Result<Running> {
+        match self.dispatch(Request::Wait, &mut on_log)? {
+            Response::Ran(running) => Ok(running),
+            other => unreachable!("a wait was answered with {other:?}"),
+        }
+    }
+
+    /// let every held thread go and wait for what the debuggee does next
+    ///
+    /// the whole-program "continue". it resumes everything held rather than one
+    /// thread, and what it waits for is the program, not a particular thread
+    pub fn run(&mut self, mut on_log: impl FnMut(LogRecord)) -> Result<Running> {
+        match self.dispatch(Request::Run, &mut on_log)? {
+            Response::Ran(running) => Ok(running),
+            other => unreachable!("a run was answered with {other:?}"),
+        }
+    }
+
+    fn wait_for(&mut self, on_log: &mut dyn FnMut(LogRecord)) -> Result<Running> {
         for record in self.pending_logs.drain(..) {
             on_log(record);
         }
@@ -476,100 +647,6 @@ impl Debuggee {
                 }
             }
         }
-    }
-
-    /// let every held thread go and wait for what the debuggee does next
-    ///
-    /// the whole-program "continue". it resumes everything held rather than one
-    /// thread, and what it waits for is the program, not a particular thread
-    pub fn run(&mut self, mut on_log: impl FnMut(LogRecord)) -> Result<Running> {
-        self.resume_all()?;
-        self.wait(&mut on_log)
-    }
-}
-
-/// one held thread's stack
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Stack {
-    /// the frames, the one that stopped first
-    pub frames: Vec<Frame>,
-    /// how deep the stack is, which is more than `frames` when fewer were asked
-    /// for
-    pub depth: usize,
-    /// how the program was moving while this was taken
-    pub mode: Mode,
-}
-
-/// what one scope of one frame holds
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Variables {
-    /// the names it holds
-    pub entries: Vec<Entry>,
-    /// names of the scope that hold nothing at this line
-    pub unbound: Vec<String>,
-    /// names of the scope whose value the frame does not expose
-    pub unreadable: Vec<String>,
-    /// everything the answer left out, and why
-    pub omitted: Vec<Omitted>,
-    /// how the program was moving while this was taken
-    pub mode: Mode,
-}
-
-/// what every thread of the debuggee was doing, as a sample
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Threads {
-    /// one entry per thread the interpreter knows about
-    pub threads: Vec<ThreadState>,
-    /// how far apart the two samples were taken
-    pub settle: Duration,
-    /// how the program was moving while this was taken
-    pub mode: Mode,
-}
-
-impl Threads {
-    /// what one thread was doing, when the census saw it
-    pub fn get(&self, thread: u64) -> Option<&ThreadState> {
-        self.threads.iter().find(|state| state.thread == thread)
-    }
-}
-
-/// what the debuggee stops for, of the exceptions it raises
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExceptionBreakpoints {
-    /// stopping where an exception is raised, whether or not it is caught
-    pub raised: bool,
-    /// stopping where an exception leaves the outermost frame
-    pub uncaught: bool,
-}
-
-/// what stopping the world managed to stop
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorldStopped {
-    /// the threads that are held
-    pub held: Vec<u64>,
-    /// the threads parked in a C call, which are **running**
-    ///
-    /// nothing available here can stop one: it has released the GIL and
-    /// executes no python, so it reaches no monitoring event. an answer taken
-    /// with this list non-empty is not a whole-program snapshot, and says so
-    pub native: Vec<u64>,
-}
-
-impl Variables {
-    /// what one name holds, or `None` when the scope does not hold it
-    pub fn get(&self, name: &str) -> Option<&Value> {
-        self.entries
-            .iter()
-            .find(|entry| entry.name == name)
-            .map(|entry| &entry.value)
-    }
-
-    /// the names, in the order the interpreter keeps them
-    pub fn names(&self) -> Vec<&str> {
-        self.entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect()
     }
 }
 

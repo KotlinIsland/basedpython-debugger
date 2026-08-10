@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
-use bpd_engine::{Debuggee, Launched, Running};
-use bpd_protocol::message::{Holding, LogRecord, Mode, Progress, SourceBreakpoint, Stop};
+use bpd_core::{Holding, LogRecord, Mode, Progress, Running, SourceBreakpoint, Stop};
+use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
 
 /// how long a test waits for a side effect it expects to happen

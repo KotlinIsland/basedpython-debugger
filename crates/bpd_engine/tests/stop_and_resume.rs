@@ -11,8 +11,7 @@ use std::ffi::OsString;
 use std::process::ExitStatus;
 
 use bpd_core::python::Capabilities;
-use bpd_engine::Running;
-use bpd_protocol::message::StopReason;
+use bpd_core::{Running, StopReason};
 use bpd_test::debuggee::Fixture;
 
 /// the interpreter the built agent matches, or a failure saying how to get one

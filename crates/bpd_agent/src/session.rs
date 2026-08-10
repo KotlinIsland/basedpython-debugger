@@ -32,7 +32,8 @@
 
 use std::time::Duration;
 
-use bpd_protocol::message::{FromAgent, FromEngine, LogRecord, StopReason};
+use bpd_core::{LogRecord, StopReason};
+use bpd_protocol::message::{FromAgent, FromEngine};
 use pyo3::prelude::*;
 
 use crate::{attach, breakpoints, events, exceptions, frames, pause, steps, stops, threads, world};
@@ -233,7 +234,7 @@ fn stop_the_world(
 ///
 /// the program is running when this is sent, so it is an event rather than an
 /// answer
-pub(crate) fn announce_rebinding(resolved: Vec<bpd_protocol::message::Resolved>) {
+pub(crate) fn announce_rebinding(resolved: Vec<bpd_core::Resolved>) {
     if resolved.is_empty() {
         return;
     }

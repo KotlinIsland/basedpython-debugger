@@ -14,9 +14,8 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use bpd_protocol::message::{
-    FrameId, FromAgent, FromEngine, Holding, Refusal, StepKind, Stop, StopReason, Which,
-};
+use bpd_core::{FrameId, Holding, Refusal, StepKind, Stop, StopReason, Which};
+use bpd_protocol::message::{FromAgent, FromEngine};
 
 use crate::{attach, pause};
 

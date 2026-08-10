@@ -14,8 +14,8 @@
 use std::path::Path;
 
 use bpd_core::python::Capabilities;
-use bpd_engine::{Debuggee, Launched, Running};
-use bpd_protocol::message::{Binding, Resolved, Site, SourceBreakpoint, Stop, StopReason, Unbound};
+use bpd_core::{Binding, Resolved, Running, Site, SourceBreakpoint, Stop, StopReason, Unbound};
+use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
 
 /// a class, a method, an inlined comprehension and a generator expression
@@ -77,7 +77,7 @@ fn launch(fixture: &Fixture) -> Debuggee {
     reason = "it stands in for a `FnMut(LogRecord)` sink, which is handed the \
               record to own"
 )]
-fn unlogged(record: bpd_protocol::message::LogRecord) {
+fn unlogged(record: bpd_core::LogRecord) {
     panic!("no logpoint was set, and the agent sent {record:?}")
 }
 

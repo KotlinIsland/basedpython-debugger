@@ -17,11 +17,11 @@ use std::num::NonZeroU32;
 use std::path::Path;
 
 use bpd_core::python::Capabilities;
-use bpd_engine::{Debuggee, Launched, Running};
-use bpd_protocol::message::{
-    Binding, Evaluation, HitCondition, LogRecord, Part, Resolved, SourceBreakpoint, StopReason,
-    Unbound,
+use bpd_core::{
+    Binding, Evaluation, HitCondition, LogRecord, Part, Resolved, Running, SourceBreakpoint,
+    StopReason, Unbound,
 };
+use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
 
 /// a loop whose body has every kind of local a condition might read

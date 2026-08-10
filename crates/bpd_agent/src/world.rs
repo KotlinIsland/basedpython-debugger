@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use bpd_protocol::message::Mode;
+use bpd_core::Mode;
 use pyo3::prelude::*;
 
 /// whether a thread reaching a line should park
