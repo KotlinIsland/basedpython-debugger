@@ -141,6 +141,10 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
                 let answer = stopped.variables(frame, scope, detail)?;
                 attach::send(&answer);
             }
+            FromEngine::Source { frame, around } => {
+                let answer = stopped.source(frame, around)?;
+                attach::send(&answer);
+            }
             FromEngine::Evaluate {
                 frame,
                 expression,

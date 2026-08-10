@@ -52,6 +52,11 @@ pub const fn reach_of(request: &Request) -> Reach {
         Request::Evaluate { .. } => Reach::Direct("evaluate"),
         Request::SetVariable { .. } => Reach::Direct("set_variable"),
 
+        // the shape this front end exists for, in one call: an agent says what
+        // it wants to know and is answered with it, instead of walking a tree
+        Request::Query { .. } => Reach::Direct("state"),
+        Request::Diff { .. } => Reach::Direct("diff"),
+
         // the shape this whole front end exists for, taken one step further: an
         // MCP tool takes JSON Schema input, so a tree of steps goes across as
         // itself and the schema is the documentation an agent reads
@@ -73,8 +78,8 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         ),
 
         Facet::ValueBounds => Reach::Direct(
-            "the `detail` object of `variables`, `evaluate` and `set_variable`, \
-             which is per call rather than per session",
+            "the `detail` object of `variables`, `evaluate`, `set_variable` and \
+             `state`, which is per call rather than per session",
         ),
     }
 }

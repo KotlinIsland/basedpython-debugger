@@ -12,8 +12,8 @@
 //!   than one per front end
 
 use bpd_core::{
-    Binding, Evaluated, LogRecord, Resolved, SourceBreakpoint, Stack, Stop, Threads, Transcript,
-    Variables, WorldStopped,
+    Binding, Difference, Evaluated, LogRecord, Resolved, Snapshot, Source, SourceBreakpoint, Stack,
+    Stop, Threads, Transcript, Variables, WorldStopped,
 };
 
 /// one held thread, as the answer to a control tool
@@ -197,6 +197,139 @@ pub fn transcript(ran: &Transcript) -> serde_json::Value {
         // loading a file changes what a breakpoint resolves to, and it happened
         // while the script was running the program
         rendered["rebound"] = serde_json::json!(ran.rebound);
+    }
+    rendered
+}
+
+/// a stop's state, at the level of detail the query asked for
+///
+/// the id comes first because it is what a later `diff` is written against, and
+/// what did not fit the budget is named rather than being absent
+pub fn state(snapshot: &Snapshot) -> serde_json::Value {
+    let frames: Vec<serde_json::Value> = snapshot
+        .state
+        .frames
+        .iter()
+        .map(|described| {
+            let mut rendered = serde_json::json!({
+                "frame": described.frame.id.depth,
+                "file": described.frame.file,
+                "line": described.frame.line,
+                "function": described.frame.function,
+                "first_line": described.frame.first_line,
+                "scopes": described.scopes.iter().map(|read| serde_json::json!({
+                    "scope": read.scope,
+                    "entries": read.entries,
+                    "unbound": read.unbound,
+                    "unreadable": read.unreadable,
+                    "left_out": read
+                        .omitted
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<String>>(),
+                })).collect::<Vec<serde_json::Value>>(),
+            });
+            if let Some(source) = &described.source {
+                rendered["source"] = source_of(source);
+            }
+            rendered
+        })
+        .collect();
+
+    let mut rendered = serde_json::json!({
+        "snapshot": snapshot.id.to_string(),
+        "stop": snapshot.state.stop,
+        "thread": snapshot.state.thread,
+        "reason": snapshot.state.reason,
+        "frames": frames,
+        "depth": snapshot.state.depth,
+        "values": snapshot.state.values,
+        "mode": snapshot.state.mode.to_string(),
+        "bytes": snapshot.state.bytes,
+    });
+    if !snapshot.state.left_out.is_empty() {
+        // an agent cannot see the elision a person would. a part the budget cut
+        // says which part it was and what to raise
+        rendered["left_out"] = serde_json::json!(
+            snapshot
+                .state
+                .left_out
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<String>>()
+        );
+    }
+    rendered
+}
+
+/// the source around a frame's line, or the reason bpd will not claim any
+fn source_of(source: &Source) -> serde_json::Value {
+    match source {
+        Source::Lines {
+            first,
+            at,
+            lines,
+            total,
+        } => serde_json::json!({
+            "verified": true,
+            "first_line": first,
+            "at": at,
+            "lines": lines,
+            "file_lines": total,
+            "says": "the file was compiled in the debuggee and this frame's own \
+                     code object is in what came out, so these lines are the \
+                     lines that are running. they are clamped to that code \
+                     object, because nothing outside it was checked",
+        }),
+        Source::Unverified { why } => serde_json::json!({
+            "verified": false,
+            "says": why.to_string(),
+        }),
+    }
+}
+
+/// what changed between two states
+///
+/// the difference is the answer. `not_compared` is the part that keeps it
+/// honest: a reading a bound cut short is not evidence that something is
+/// unchanged, and it is never counted as though it were
+pub fn difference(difference: &Difference) -> serde_json::Value {
+    let side = |taken: &bpd_core::Taken| {
+        serde_json::json!({
+            "snapshot": taken.id.to_string(),
+            "stop": taken.stop,
+            "thread": taken.thread,
+            "mode": taken.mode.to_string(),
+            "stop_has_ended": taken.stop_has_ended,
+        })
+    };
+
+    let mut rendered = serde_json::json!({
+        "before": side(&difference.before),
+        "after": side(&difference.after),
+        "frames": difference.frames,
+        "changed": difference.changed,
+        "added": difference.added,
+        "removed": difference.removed,
+        "unchanged": difference
+            .unchanged
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<String>>(),
+        "not_compared": difference
+            .not_compared
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<String>>(),
+    });
+    let sampled = |mode: &bpd_core::Mode| matches!(mode, bpd_core::Mode::NonStop);
+    if sampled(&difference.before.mode) || sampled(&difference.after.mode) {
+        rendered["note"] = "at least one of these was read in non-stop mode, \
+             where a stop holds one thread and the rest of the program keeps \
+             running. each is a sample rather than a whole state, so what \
+             changed is what changed between two samples. `stop_the_world` is \
+             what makes a reading a whole-program one"
+            .into();
     }
     rendered
 }

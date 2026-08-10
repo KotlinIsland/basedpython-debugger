@@ -20,6 +20,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use crate::breakpoint::SourceBreakpoint;
 use crate::frame::{FrameId, Scope};
+use crate::query::{SnapshotId, StateQuery, Wanted};
 use crate::script::{Budget, Script, Step};
 use crate::session::{Request, Threads};
 use crate::stop::StepKind;
@@ -148,6 +149,28 @@ pub fn surface() -> Vec<Request> {
             name: "x".to_string(),
             value: "1".to_string(),
             detail: Detail::default(),
+        },
+        Request::Query {
+            stop: 1,
+            query: StateQuery {
+                scopes: vec![Scope::Local],
+                expressions: vec![Wanted {
+                    expression: "1".to_string(),
+                    frame: 0,
+                }],
+                source: Some(2),
+                ..StateQuery::default()
+            },
+        },
+        Request::Diff {
+            before: SnapshotId {
+                stop: 1,
+                digest: "00".to_string(),
+            },
+            after: SnapshotId {
+                stop: 2,
+                digest: "01".to_string(),
+            },
         },
         Request::RunScript {
             stop: 1,

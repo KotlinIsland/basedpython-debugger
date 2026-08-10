@@ -403,6 +403,95 @@ fn an_editor_can_run_a_whole_investigation_the_way_an_agent_can() {
 }
 
 #[test]
+fn an_editor_can_ask_what_changed_between_two_stops() {
+    // the parity rule again: the declarative query and the difference between
+    // two of its answers are capabilities of the core, so they are not an
+    // agent's alone. "what changed between here and there" is a thing a person
+    // wants, and no editor offers it
+    let fixture = Fixture::new("compared", PROGRAM);
+    let mut client = Client::start();
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line_of(PROGRAM, "doubled = total * 2") } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let stopped = client.event("stopped");
+    let thread = stopped["body"]["threadId"].clone();
+
+    let before = client.request(
+        "bpd/state",
+        &serde_json::json!({
+            "threadId": thread,
+            "query": { "frames": 1, "scopes": ["local"], "source": 1 },
+        }),
+    );
+    assert_eq!(before["success"], true, "the query was refused: {before}");
+    assert_eq!(
+        before["body"]["state"]["frames"][0]["frame"]["function"],
+        "work"
+    );
+
+    // one step, and the line the program is on has run: `doubled` was unbound
+    // and now holds a number
+    client.request("next", &serde_json::json!({ "threadId": thread }));
+    client.event("stopped");
+    let after = client.request(
+        "bpd/state",
+        &serde_json::json!({
+            "threadId": thread,
+            "query": { "frames": 1, "scopes": ["local"] },
+        }),
+    );
+
+    let difference = client.request(
+        "bpd/diff",
+        &serde_json::json!({
+            "before": before["body"]["id"],
+            "after": after["body"]["id"],
+        }),
+    );
+    assert_eq!(
+        difference["success"], true,
+        "the difference was refused: {difference}"
+    );
+
+    let changed = difference["body"]["changed"]
+        .as_array()
+        .expect("changed is an array");
+    assert!(
+        changed.iter().any(|change| {
+            change["subject"]["name"] == "doubled"
+                && change["before"]["seen"] == "unbound"
+                && change["after"]["value"]["content"]["text"] == "4"
+        }),
+        "the line assigned `doubled`, and it was unbound before it ran: \
+         {difference}"
+    );
+
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    client.event("exited");
+    // the program's own words, which is what says the numbers above were real
+    assert!(
+        client.output().contains("doubled 4"),
+        "the program printed what the diff said it computed"
+    );
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+#[test]
 fn a_capability_that_is_not_advertised_is_refused_rather_than_guessed_at() {
     let fixture = Fixture::new("hit", "x = 1\ny = 2\n");
     let mut client = Client::start();

@@ -238,6 +238,12 @@ fn drive(asked: &Asked) -> Transcript {
     drive_with(asked, &[])
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "it is one conversation covering the whole tool surface, and \
+              splitting it would put the calls and the order they are answered \
+              in in two places"
+)]
 fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)]) -> Transcript {
     let (to_server, client_writes) = std::io::pipe().expect("a pipe is available");
     let (client_reads, from_server) = std::io::pipe().expect("a pipe is available");
@@ -304,6 +310,30 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)]) -> Transcript 
             "detail": { "children": 7 },
         }),
     );
+
+    // the whole of a stop in one call, and the difference between two of them.
+    // the id comes back on the answer and is what a `diff` is written against
+    let described = client.call(
+        "state",
+        &serde_json::json!({
+            "frames": 1,
+            "scopes": ["local"],
+            "expressions": [ { "expression": "total + 1" } ],
+            "source": 2,
+            "detail": { "children": 7 },
+        }),
+    );
+    let described: serde_json::Value = serde_json::from_str(
+        described["result"]["content"][0]["text"]
+            .as_str()
+            .expect("`state` answered with text"),
+    )
+    .expect("`state` answered with json");
+    let id = described["snapshot"]
+        .as_str()
+        .expect("a state carries the id it is kept under")
+        .to_string();
+    client.call("diff", &serde_json::json!({ "before": id, "after": id }));
 
     // a whole investigation in one call: a tree of steps, and a budget on all
     // three axes because there is no default for one
@@ -475,6 +505,8 @@ fn tool_order() -> Vec<&'static str> {
         "variables",
         "evaluate",
         "set_variable",
+        "state",
+        "diff",
         "run_script",
         "step_over",
         "step_in",
@@ -627,6 +659,66 @@ fn transcript(stop: u64, script: &bpd_core::Script) -> bpd_core::Transcript {
     }
 }
 
+/// what a fake session answers a state query with
+///
+/// the shape rather than the substance: that a query really reads a real
+/// interpreter, and that it agrees with the tree walk, is
+/// `crates/bpd_engine/tests/queries.rs`. what is under test here is that the
+/// tool reaches the session with the query the client wrote, and that the whole
+/// answer including its id comes back
+fn snapshot(stop: u64, query: &bpd_core::StateQuery) -> bpd_core::Snapshot {
+    bpd_core::Snapshot {
+        id: bpd_core::SnapshotId {
+            stop,
+            digest: format!("{stop}{stop}ff"),
+        },
+        state: bpd_core::State {
+            stop,
+            thread: THREAD,
+            reason: StopReason::Entry,
+            frames: vec![bpd_core::FrameState {
+                frame: Frame {
+                    id: FrameId { stop, depth: 0 },
+                    file: "/tmp/fake.py".to_string(),
+                    line: 3,
+                    function: "main".to_string(),
+                    first_line: 1,
+                },
+                source: None,
+                scopes: query
+                    .scopes
+                    .iter()
+                    .map(|scope| bpd_core::ScopeState {
+                        scope: *scope,
+                        entries: vec![Entry {
+                            name: "total".to_string(),
+                            value: integer("1"),
+                        }],
+                        unbound: Vec::new(),
+                        unreadable: Vec::new(),
+                        omitted: Vec::new(),
+                    })
+                    .collect(),
+            }],
+            depth: 1,
+            values: query
+                .expressions
+                .iter()
+                .map(|wanted| bpd_core::Answer {
+                    expression: wanted.expression.clone(),
+                    frame: wanted.frame,
+                    result: Evaluated::Value {
+                        value: integer("9"),
+                    },
+                })
+                .collect(),
+            left_out: Vec::new(),
+            mode: Mode::NonStop,
+            bytes: 120,
+        },
+    }
+}
+
 fn integer(text: &str) -> Value {
     Value {
         kind: "int".to_string(),
@@ -662,6 +754,7 @@ impl Session for FakeSession {
                 Request::Variables { detail, .. }
                 | Request::Evaluate { detail, .. }
                 | Request::SetVariable { detail, .. } => recorder.details.push(*detail),
+                Request::Query { query, .. } => recorder.details.push(query.detail),
                 _ => {}
             }
         }
@@ -744,6 +837,12 @@ impl Session for FakeSession {
                 })
             }
             Request::RunScript { stop, script } => Response::Transcript(transcript(stop, &script)),
+            Request::Query { stop, query } => Response::State(snapshot(stop, &query)),
+            Request::Diff { before, after } => Response::Difference(bpd_core::difference(
+                &snapshot(before.stop, &bpd_core::StateQuery::default()),
+                &snapshot(after.stop, &bpd_core::StateQuery::default()),
+                &self.held.iter().map(|stop| stop.stop).collect::<Vec<u64>>(),
+            )),
         })
     }
 }

@@ -107,6 +107,8 @@ shape of what bpd can see from here
 | `set_variable` | write a name of a frame's scope |
 | `threads` | what every thread is doing, as a sample |
 | `stop_the_world` | hold every thread that can be held |
+| `state` | describe a whole stop in one call, and keep the answer |
+| `diff` | what changed between two of those answers |
 | `run_script` | run a whole investigation, and return what happened at every step |
 | `terminate` | end the debuggee |
 
@@ -119,6 +121,15 @@ no grammar and no syntax errors — and what it reads before writing one is the
 schema. the step vocabulary, the transcript and the budget are
 [the debug script](scripts.md)
 
+### `state` and `diff` are the same capability at two scopes
+
+`stack`, `variables` and `evaluate` are still here and still answer one question
+each — an editor's shape, and sometimes the right one. `state` asks all of them
+at once and keeps the answer under an id; `diff` says what changed between two of
+those ids, rather than handing back both. what an id claims, what a diff refuses
+to claim, and why source is only ever shown when it can be proved is
+[the state query](queries.md)
+
 ### there are no handles
 
 DAP hands a client an opaque `variablesReference` that looks the same before and
@@ -127,6 +138,11 @@ tool names a **stop number** and a **frame depth**, both of which are in the
 answer that produced them, and `bpd_core::FrameId` carries the stop it belongs
 to — so a frame from a stop that has ended is refused by name rather than
 resolved against whatever is at that depth now
+
+a snapshot id is the one thing here that outlives a stop, and it is not a handle
+either: it names a reading that has already been taken rather than a promise to
+take one, so nothing the program does can change what it resolves to — see
+[a snapshot is a value](queries.md#a-snapshot-is-a-value-and-does-not-go-stale)
 
 a tool that is about one held thread may leave `stop` out when exactly one is
 held. when several are, it is refused and the refusal lists them. that rule is
@@ -245,9 +261,6 @@ drift apart
   a **step of `run_script`**, where the engine owns the whole composition
   including the removal — that reasoning, and what became of the failure mode,
   is [the debug script](scripts.md#run_to-lives-here-and-nowhere-else)
-- **the declarative state query** and **snapshot and diff**. each is its own
-  item, and each is a capability rather than an MCP feature — so each arrives in
-  both adapters
 - **resources and prompts**. only tools are model-controlled, so they are what
   has to explain the interface first. writing a document to explain an interface
   that does not explain itself is how the tool that needed fixing stays broken

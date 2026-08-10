@@ -317,11 +317,29 @@ a *field*, which is exactly what DAP's hit condition is — so those are
 enumerated beside them, and a protocol that genuinely cannot carry one says so
 with the reason, in a list the test checks by hand
 
-what is **not** built: the declarative state query; snapshot and diff; and MCP
-resources and prompts, which are the layers that must not be written to
-compensate for an interface that does not explain itself
+what is **not** built: MCP resources and prompts, which are the layers that must
+not be written to compensate for an interface that does not explain itself
 
 the whole of it is [the MCP adapter](docs/development/mcp.md)
+
+**the declarative state query is built, and so is snapshot and diff.** one call
+says what is wanted about a stop — frames, the scopes of each, expressions
+evaluated in a frame, the source around each line, under one byte budget — and
+is answered with it. it is composed of the requests the tree walk is made of, so
+the two cannot disagree about a value; what it removes is the round trips
+
+the answer is kept under a content addressed id, and a second call says what
+**changed** between two of them rather than handing back both. a snapshot does
+not go stale — it is a reading already taken rather than a promise to take one,
+which is what DAP's variable reference is and why that one does. a value a bound
+cut short in either snapshot is reported as *not compared*, because "unchanged"
+is a claim and half a value is not evidence for it
+
+source is only ever shown when it can be **proved**: the debuggee compiles the
+file and requires the frame's own code object in what comes out, line table
+included. a file edited since the interpreter read it says so rather than showing
+a line one off, which is the bug every traceback's `linecache` has. the whole of
+it is [the state query](docs/development/queries.md)
 
 **the debug script is built.** a schema-validated tree of steps with its own
 branching — `step_over`, `run_to`, `eval`, `stack`, `log`, `if`, `while`,

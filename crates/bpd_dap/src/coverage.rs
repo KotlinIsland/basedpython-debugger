@@ -61,6 +61,13 @@ pub const fn reach_of(request: &Request) -> Reach {
         // where a script ended cannot tell why any more than an agent can
         Request::RunScript { .. } => Reach::Direct("bpd/runScript, a custom request"),
 
+        // DAP's own way of reading state is the tree walk, and it keeps it. the
+        // one call form is an extension for the same reason a script is: the
+        // capability is the core's, and "the whole state at this stop" is a
+        // thing a person wants as much as an agent does
+        Request::Query { .. } => Reach::Direct("bpd/state, a custom request"),
+        Request::Diff { .. } => Reach::Direct("bpd/diff, a custom request"),
+
         Request::Stack { .. } => Reach::Direct("stackTrace"),
         Request::Variables { .. } => Reach::Direct("variables"),
         Request::Evaluate { .. } => Reach::Direct("evaluate"),
@@ -93,7 +100,9 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // than one per read. that is a narrower way to reach it, not a gap
         Facet::ValueBounds => Reach::Direct(
             "the `variables` object of the launch configuration, every field of \
-             which is a field of `bpd_core::Detail`",
+             which is a field of `bpd_core::Detail` — and per call on the \
+             `detail` of a `bpd/state`, which is an extension and so has \
+             somewhere to carry one",
         ),
     }
 }

@@ -17,6 +17,7 @@
 //! which form is requested reaches the agent in the environment, beside the
 //! target, because `-c` leaves no room for anything structured
 
+mod query;
 mod script;
 
 use std::ffi::OsString;
@@ -27,9 +28,9 @@ use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Detail, Evaluated, ExceptionBreakpoints, FrameId, LogRecord, Reporting, Request, Resolved,
-    Response, Running, Scope, Script, SourceBreakpoint, Stack, StepKind, Stop, Threads, Transcript,
-    Variables, Which, WorldStopped,
+    Detail, Difference, Evaluated, ExceptionBreakpoints, FrameId, LogRecord, Reporting, Request,
+    Resolved, Response, Running, Scope, Script, Snapshot, SnapshotId, SourceBreakpoint, Stack,
+    StateQuery, StepKind, Stop, Threads, Transcript, Variables, Which, WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine};
@@ -96,6 +97,13 @@ pub struct Debuggee {
     /// so while the program runs. kept for the next wait rather than dropped,
     /// for the same reason a log record is
     pending_rebinds: Vec<Resolved>,
+    /// every state a query has read, under the id it was given out as
+    ///
+    /// nothing evicts one. a snapshot is a reading that was already taken rather
+    /// than a promise to take one, so it does not go stale when the program runs
+    /// on — and an id that resolved earlier in a session and not later would be
+    /// the stale handle problem this exists to avoid
+    snapshots: Vec<Snapshot>,
 }
 
 impl Debuggee {
@@ -211,6 +219,39 @@ impl Debuggee {
             Request::RunScript { stop, script } => Ok(Response::Transcript(
                 self.execute(stop, &script, reporting)?,
             )),
+            Request::Query { stop, query } => {
+                Ok(Response::State(self.describe(stop, &query, reporting)?))
+            }
+            // nothing of the program is touched: both states were read when
+            // they were read, and the difference between them is data over data
+            Request::Diff { before, after } => {
+                Ok(Response::Difference(self.compare(&before, &after)?))
+            }
+        }
+    }
+
+    /// describe one stop's state in one call, and keep the answer
+    pub fn query(&mut self, stop: u64, query: StateQuery) -> Result<Snapshot> {
+        match self.ask_for(Request::Query { stop, query })? {
+            Response::State(snapshot) => Ok(snapshot),
+            other => unreachable!("a state query was answered with {other:?}"),
+        }
+    }
+
+    /// describe the only held stop's state
+    pub fn the_query(&mut self, query: StateQuery) -> Result<Snapshot> {
+        let stop = self.only("the state of a stop")?;
+        self.query(stop, query)
+    }
+
+    /// what changed between two states this session read
+    pub fn diff(&mut self, before: &SnapshotId, after: &SnapshotId) -> Result<Difference> {
+        match self.ask_for(Request::Diff {
+            before: before.clone(),
+            after: after.clone(),
+        })? {
+            Response::Difference(difference) => Ok(difference),
+            other => unreachable!("a difference was answered with {other:?}"),
         }
     }
 
@@ -1010,5 +1051,6 @@ fn start(
         session,
         pending_logs: Vec::new(),
         pending_rebinds: Vec::new(),
+        snapshots: Vec::new(),
     }))
 }

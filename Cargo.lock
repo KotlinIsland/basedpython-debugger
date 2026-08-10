@@ -143,6 +143,7 @@ dependencies = [
  "bpd_test",
  "getrandom",
  "rustix",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",

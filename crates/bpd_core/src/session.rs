@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use crate::breakpoint::{LogRecord, Resolved, SourceBreakpoint};
 use crate::frame::{Frame, FrameId, Scope};
+use crate::query::{Difference, Snapshot, SnapshotId, StateQuery};
 use crate::script::{Script, Transcript};
 use crate::stop::{Mode, StepKind, Stop};
 use crate::thread::{ThreadState, Which};
@@ -169,6 +170,43 @@ pub enum Request {
         script: Script,
     },
 
+    /// describe a stop's state in one call, and keep the answer to compare later
+    ///
+    /// the declarative form of the tree walk. instead of a stack, then the
+    /// scopes of a frame, then the variables of a scope, then the variables
+    /// again for each nested object — four or more round trips — the query says
+    /// what is wanted and is answered with it
+    ///
+    /// it is **composed of the same requests** the walk is made of, so the two
+    /// cannot disagree about a value. what it removes is the round trips
+    ///
+    /// the answer is kept, under a content addressed id, so that
+    /// [`Request::Diff`] can compare two of them. every query is kept rather
+    /// than only the ones a client asks to keep: whether a state is worth
+    /// comparing is not knowable when it is read
+    Query {
+        /// the stop to describe
+        stop: u64,
+        /// what to describe about it
+        query: StateQuery,
+    },
+
+    /// what changed between two states this session read
+    ///
+    /// the difference is the answer. shipping both states and leaving the
+    /// comparison to the client is what this exists instead of
+    ///
+    /// a snapshot does not go stale. it is a reading that was already taken
+    /// rather than a promise to take one, so it stays true across any number of
+    /// resumes — what ends with its stop is the ability to ask that stop
+    /// anything more
+    Diff {
+        /// the state to compare from
+        before: SnapshotId,
+        /// the state to compare to
+        after: SnapshotId,
+    },
+
     /// write a variable of a frame, and read back what the frame holds after it
     SetVariable {
         /// which frame
@@ -206,6 +244,8 @@ impl Request {
             Self::Variables { .. } => "the variables of a scope",
             Self::Evaluate { .. } => "evaluating an expression",
             Self::RunScript { .. } => "running a debug script",
+            Self::Query { .. } => "the state of a stop",
+            Self::Diff { .. } => "the difference between two states",
             Self::SetVariable { .. } => "writing a variable",
         }
     }
@@ -282,6 +322,12 @@ pub enum Response {
 
     /// what a debug script did, step by step
     Transcript(Transcript),
+
+    /// a stop's state, at the level of detail the query asked for
+    State(Snapshot),
+
+    /// what changed between two of them
+    Difference(Difference),
 }
 
 /// what a resumed debuggee did next

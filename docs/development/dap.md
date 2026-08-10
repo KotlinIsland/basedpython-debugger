@@ -253,7 +253,7 @@ followed by a wait, and DAP needs those separately: a `continue` has to be
 answered before the program stops again. the adapter resumes, answers, and then
 waits
 
-### one capability is reached through an extension
+### three capabilities are reached through an extension
 
 `Request::RunScript` — [the debug script](scripts.md) — is a capability of the
 core, so the parity rule does not let it be an agent's alone. DAP has no request
@@ -272,8 +272,25 @@ where a script ended cannot tell why. a script that leaves a thread held at a ne
 stop produces a `stopped` event for it, by the same reconciliation every other
 request goes through
 
-nothing advertises it. DAP has no capability flag for a custom request, and a
-client that does not know about it never sends one
+`Request::Query` and `Request::Diff` — [the state query](queries.md) — are the
+other two, for the same reason. DAP's own way of reading state is the tree walk
+above and it keeps it; these are the whole of a stop in one request, and the
+difference between two of those answers:
+
+```json
+{ "command": "bpd/state",
+  "arguments": { "threadId": 1,
+                 "query": { "frames": 2, "scopes": ["local"], "source": 2 } } }
+{ "command": "bpd/diff", "arguments": { "before": "2:719f…", "after": "3:bf52…" } }
+```
+
+`bpd/diff` names no thread and touches no program: both states were read when
+they were read. "what changed between these two stops" is a thing a person wants
+as much as an agent, and no editor offers it — which is the parity rule earning
+its keep rather than being satisfied
+
+nothing advertises any of the three. DAP has no capability flag for a custom
+request, and a client that does not know about one never sends it
 
 ## what is not built
 

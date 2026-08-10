@@ -69,6 +69,7 @@ development = [
     "development/agent-interface.md",
     "development/mcp.md",
     "development/scripts.md",
+    "development/queries.md",
     "development/testing.md",
     "development/overhead.md",
     "development/python-support.md",
