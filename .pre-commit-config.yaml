@@ -31,7 +31,7 @@ repos:
         entry: dprint fmt
         language: node
         additional_dependencies: ["dprint@0.55.2"]
-        files: '\.(ya?ml|json|jsonc|m?js)$'
+        files: '\.(ya?ml|json|jsonc|m?js|toml|py)$'
         pass_filenames: false
 
       - id: rustfmt

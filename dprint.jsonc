@@ -5,6 +5,21 @@
   "lineWidth": 80,
   "indentWidth": 2,
   "useTabs": false,
+  // `.editorconfig` puts toml on four. `cargo.applyConventions` is off because
+  // it sorts keys and dependencies rather than laying them out — a formatter
+  // that moves a line somewhere else is doing a different job than this one
+  "toml": {
+    "indentWidth": 4,
+    "cargo.applyConventions": false
+  },
+  // ruff reads `lineLength`, not the `lineWidth` above, and given only the
+  // global it does not fall back to its own default — it joins statements onto
+  // lines of any length. so the width is stated here, at ruff's default, which
+  // is what the python already in the tree is formatted to
+  "ruff": {
+    "indentWidth": 4,
+    "lineLength": 88
+  },
   // everything the plugins below claim, minus the trees nobody edits by hand.
   // build output and the virtualenv are untracked, but `dprint fmt` with no
   // arguments walks the working directory rather than the index
@@ -16,17 +31,23 @@
     "**/.idea",
     "site"
   ],
-  // yaml, and the json and javascript the vs code extension is made of.
+  // toml, python, yaml, and the json and javascript the vs code extension is
+  // made of.
   //
-  // **no markdown plugin**: dprint's markdown style — two space list
-  // continuation, `_emphasis_` — disagrees with the four space continuation
-  // used across basedpython's docs, and the docs are meant to read the same in
-  // both
+  // **no markdown plugin**: dprint's markdown style pads every table cell to
+  // the width of its column, which the docs do not do, and the docs are meant
+  // to read the same as basedpython's
+  //
+  // **basedpython is not covered**: no plugin claims `.by`, and `buff` is not
+  // distributed as a binary this could shell out to. a `.by` file, or a `by`
+  // code block, passes through untouched
   //
   // the `@` suffix is the sha-256 of the wasm, checked when dprint fetches it
   // into its cache, so a url cannot serve different bytes under a version that
   // did not change
   "plugins": [
+    "https://plugins.dprint.dev/toml-0.7.0.wasm@0126c8112691542d30b52a639076ecc83e07bace877638cee7c6915fd36b8629",
+    "https://plugins.dprint.dev/ruff-0.8.2.wasm@d57e5c26a3f9786b478b637b9e29f9e564a5c235e100689081aab0a78f5d2099",
     "https://plugins.dprint.dev/json-0.23.0.wasm@3e1f1b7c1427df6bd8981a11aaa2c466fde8d1115e9dde4c652130458539443c",
     "https://plugins.dprint.dev/typescript-0.96.1.wasm@9c52244de2c25a33addc7ddacff4443234a2dc4b5d3f34131262d1e0df35007c",
     "https://plugins.dprint.dev/g-plane/pretty_yaml-v0.6.0.wasm@40a2fdda7040317eb1b23520f3a00769a5571eedb049c4ca9175c1b9eeba01ae"

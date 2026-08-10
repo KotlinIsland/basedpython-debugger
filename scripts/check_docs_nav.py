@@ -53,7 +53,9 @@ def main() -> int:
 
     if problems:
         print("\n\n".join(problems), file=sys.stderr)
-        print(f"\n{len(problems)} problem(s) — see {Path(__file__).name}", file=sys.stderr)
+        print(
+            f"\n{len(problems)} problem(s) — see {Path(__file__).name}", file=sys.stderr
+        )
         return 1
 
     print(f"{len(on_disk)} pages: the nav and the disk agree")
