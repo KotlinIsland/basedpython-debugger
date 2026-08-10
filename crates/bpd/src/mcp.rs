@@ -155,6 +155,10 @@ impl Session for Attached {
         self.0.held().to_vec()
     }
 
+    fn ended(&self) -> Option<i64> {
+        self.0.exited()
+    }
+
     fn terminate(&mut self) -> Result<(), Failed> {
         Ok(self.0.interrupt().terminate()?)
     }

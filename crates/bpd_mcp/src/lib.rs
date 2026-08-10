@@ -41,13 +41,17 @@
 //! adapters are visible at once, since neither may depend on the other
 
 pub mod coverage;
+pub mod prompts;
 pub mod render;
+pub mod resources;
 pub mod server;
 pub mod session;
 pub mod tools;
 pub mod wire;
 
 pub use coverage::{reach_of, reach_of_facet, surface};
+pub use prompts::{Prompt, prompts};
+pub use resources::{Resource, resources};
 pub use server::{PROTOCOL_VERSION, serve};
 pub use session::{
     Configuration, Failed, Launcher, ProgramOutput, Session, Started, Stream, describe,

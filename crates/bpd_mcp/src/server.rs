@@ -34,7 +34,9 @@ use bpd_core::{
     SourceBreakpoint, StepKind, Stop, Threads, Which, exit_code, only_stop,
 };
 
+use crate::prompts::prompts;
 use crate::render;
+use crate::resources::resources;
 use crate::session::{Configuration, Launcher, ProgramOutput, Session, Started, Stream, describe};
 use crate::tools::tools;
 use crate::wire::{Incoming, Reader, Writer, code};
@@ -139,8 +141,13 @@ pub fn serve(
 ///
 /// distinct from a **tool** that failed, which is a successful call whose
 /// content says what went wrong — that is the shape an agent actually reads. a
-/// `Refused` is for the protocol going wrong: a method that does not exist,
-/// arguments that are not the shape the schema says
+/// `Refused` is for the protocol going wrong: a method that does not exist, a
+/// `tools/call` with no `name`, a tool nobody offers
+///
+/// arguments that are not the shape the schema says are deliberately **not**
+/// here. they are the client's own mistake and the model is the one that has to
+/// correct it, so they are answered as a tool failure that the model is certain
+/// to see rather than down a channel a host is entitled to hide from it
 struct Refused {
     code: i64,
     reason: String,
@@ -187,13 +194,27 @@ impl<'a> Server<'a> {
                 "tools": tools().iter().map(crate::tools::Tool::listing).collect::<Vec<_>>(),
             })),
             "tools/call" => self.call(params),
+            "resources/list" => Ok(serde_json::json!({
+                "resources": resources()
+                    .iter()
+                    .map(crate::resources::Resource::listing)
+                    .collect::<Vec<_>>(),
+            })),
+            "resources/read" => read_resource(params),
+            "prompts/list" => Ok(serde_json::json!({
+                "prompts": prompts()
+                    .iter()
+                    .map(crate::prompts::Prompt::listing)
+                    .collect::<Vec<_>>(),
+            })),
+            "prompts/get" => get_prompt(params),
             other => Err(Refused {
                 code: code::METHOD_NOT_FOUND,
                 reason: format!(
                     "bpd's MCP server does not implement `{other}`. it offers \
-                     `initialize`, `ping`, `tools/list` and `tools/call`, and \
-                     declares only the `tools` capability — there are no \
-                     resources or prompts to list"
+                     `initialize`, `ping`, `tools/list`, `tools/call`, \
+                     `resources/list`, `resources/read`, `prompts/list` and \
+                     `prompts/get`"
                 ),
             }),
         }
@@ -246,15 +267,15 @@ impl<'a> Server<'a> {
     fn perform(&mut self, name: &str, arguments: &serde_json::Value) -> Answered {
         match name {
             "launch" => {
-                let args: Launch = parse(arguments)?;
+                let args: Launch = parse(name, arguments)?;
                 self.launch(args)
             }
             "set_breakpoints" => {
-                let args: SetBreakpoints = parse(arguments)?;
+                let args: SetBreakpoints = parse(name, arguments)?;
                 self.set_breakpoints(args)
             }
             "set_exception_breakpoints" => {
-                let args: ExceptionArgs = parse(arguments)?;
+                let args: ExceptionArgs = parse(name, arguments)?;
                 match self.ask(Request::SetExceptionBreakpoints {
                     raised: args.raised,
                     uncaught: args.uncaught,
@@ -269,24 +290,24 @@ impl<'a> Server<'a> {
                 }
             }
             "continue_" => {
-                let args: Waiting = parse(arguments)?;
+                let args: Waiting = parse(name, arguments)?;
                 let ran = self.ran(Request::Run {
                     deadline: Some(args.deadline()),
                 })?;
                 self.outcome(ran, args.frames)
             }
-            "step_over" => self.step(arguments, StepKind::Over),
-            "step_in" => self.step(arguments, StepKind::In),
-            "step_out" => self.step(arguments, StepKind::Out),
+            "step_over" => self.step(name, arguments, StepKind::Over),
+            "step_in" => self.step(name, arguments, StepKind::In),
+            "step_out" => self.step(name, arguments, StepKind::Out),
             "wait" => {
-                let args: Waiting = parse(arguments)?;
+                let args: Waiting = parse(name, arguments)?;
                 let ran = self.ran(Request::Wait {
                     deadline: Some(args.deadline()),
                 })?;
                 self.outcome(ran, args.frames)
             }
             "pause" => {
-                let args: Waiting = parse(arguments)?;
+                let args: Waiting = parse(name, arguments)?;
                 let running = match self.ask(Request::Pause)? {
                     Response::Pausing { running } => running,
                     other => unreachable!("a pause was answered with {other:?}"),
@@ -297,16 +318,35 @@ impl<'a> Server<'a> {
                 let mut answer = self.outcome(ran, args.frames)?;
                 answer["running"] = serde_json::json!(running);
                 if running.is_empty() {
-                    answer["note"] = "the pause is armed and nothing is going to \
-                         arrive until some thread runs python again: every \
-                         thread was parked in a C call, where there is no \
-                         monitoring event to hold one at"
-                        .into();
+                    // `running` is what the agent saw *excluding* what it is
+                    // holding, so an empty one has two causes and naming the
+                    // wrong one would tell a client its program is stuck in
+                    // native code when bpd is what is holding it still
+                    let held = self.held_stops();
+                    answer["note"] = if held.is_empty() {
+                        "the pause is armed and no thread was running python \
+                         when it went on. bpd is holding nothing either, so \
+                         every thread of the program is parked in a C call, \
+                         where there is no monitoring event to hold one at — \
+                         nothing will arrive until one of them comes back into \
+                         python"
+                            .into()
+                    } else {
+                        format!(
+                            "the pause is armed and no thread that bpd is not \
+                             already holding was running python. it is holding \
+                             {}, and a held thread reaches no line until it is \
+                             resumed — so `resume` one of them, or wait for a \
+                             thread parked in a C call to come back into python",
+                            held.len()
+                        )
+                        .into()
+                    };
                 }
                 Ok(answer)
             }
             "resume" => {
-                let args: Resume = parse(arguments)?;
+                let args: Resume = parse(name, arguments)?;
                 let which = match args.threads {
                     Some(threads) => Which::Named { threads },
                     None => Which::All,
@@ -320,7 +360,7 @@ impl<'a> Server<'a> {
                 }
             }
             "stack" => {
-                let args: StackArgs = parse(arguments)?;
+                let args: StackArgs = parse(name, arguments)?;
                 let stop = self.stop_of(args.stop, "the stack")?;
                 match self.ask(Request::Stack {
                     stop,
@@ -331,7 +371,7 @@ impl<'a> Server<'a> {
                 }
             }
             "variables" => {
-                let args: VariablesArgs = parse(arguments)?;
+                let args: VariablesArgs = parse(name, arguments)?;
                 let frame = self.frame_of(args.stop, args.frame, "the variables of a scope")?;
                 match self.ask(Request::Variables {
                     frame,
@@ -343,7 +383,7 @@ impl<'a> Server<'a> {
                 }
             }
             "evaluate" => {
-                let args: EvaluateArgs = parse(arguments)?;
+                let args: EvaluateArgs = parse(name, arguments)?;
                 let frame = self.frame_of(args.stop, args.frame, "evaluating an expression")?;
                 match self.ask(Request::Evaluate {
                     frame,
@@ -355,7 +395,7 @@ impl<'a> Server<'a> {
                 }
             }
             "set_variable" => {
-                let args: SetVariableArgs = parse(arguments)?;
+                let args: SetVariableArgs = parse(name, arguments)?;
                 let frame = self.frame_of(args.stop, args.frame, "writing a variable")?;
                 match self.ask(Request::SetVariable {
                     frame,
@@ -369,7 +409,7 @@ impl<'a> Server<'a> {
                 }
             }
             "threads" => {
-                let args: ThreadsArgs = parse(arguments)?;
+                let args: ThreadsArgs = parse(name, arguments)?;
                 match self.ask(Request::Threads {
                     settle: args.settle(),
                 })? {
@@ -378,7 +418,7 @@ impl<'a> Server<'a> {
                 }
             }
             "stop_the_world" => {
-                let args: WorldArgs = parse(arguments)?;
+                let args: WorldArgs = parse(name, arguments)?;
                 let stop = self.stop_of(args.stop, "stopping the world")?;
                 match self.ask(Request::StopTheWorld {
                     stop,
@@ -389,7 +429,7 @@ impl<'a> Server<'a> {
                 }
             }
             "run_script" => {
-                let args: RunScript = parse(arguments)?;
+                let args: RunScript = parse(name, arguments)?;
                 let stop = self.stop_of(args.stop, "running a debug script")?;
                 match self.ask(Request::RunScript {
                     stop,
@@ -403,7 +443,7 @@ impl<'a> Server<'a> {
                 }
             }
             "state" => {
-                let args: StateArgs = parse(arguments)?;
+                let args: StateArgs = parse(name, arguments)?;
                 let stop = self.stop_of(args.stop, "the state of a stop")?;
                 match self.ask(Request::Query {
                     stop,
@@ -414,7 +454,7 @@ impl<'a> Server<'a> {
                 }
             }
             "diff" => {
-                let args: DiffArgs = parse(arguments)?;
+                let args: DiffArgs = parse(name, arguments)?;
                 match self.ask(Request::Diff {
                     before: args.before,
                     after: args.after,
@@ -424,7 +464,7 @@ impl<'a> Server<'a> {
                 }
             }
             "terminate" => {
-                let _: Empty = parse(arguments)?;
+                let _: Empty = parse(name, arguments)?;
                 let session = self
                     .session
                     .as_mut()
@@ -519,8 +559,8 @@ impl<'a> Server<'a> {
         }
     }
 
-    fn step(&mut self, arguments: &serde_json::Value, kind: StepKind) -> Answered {
-        let args: Stepping = parse(arguments)?;
+    fn step(&mut self, name: &str, arguments: &serde_json::Value, kind: StepKind) -> Answered {
+        let args: Stepping = parse(name, arguments)?;
         let stop = self.stop_of(args.stop, "stepping a thread")?;
         match self.ask(Request::Step { stop, kind })? {
             Response::Resumed { .. } => {}
@@ -646,11 +686,17 @@ impl<'a> Server<'a> {
         self.held_stops().iter().map(render::stop).collect()
     }
 
+    /// what the program exited with, or `None` while there is one
+    fn ended(&self) -> Option<i64> {
+        self.session.as_ref().and_then(|session| session.ended())
+    }
+
     /// the stop a tool is about, or the rule for why it cannot be decided
     fn stop_of(&self, given: Option<u64>, wanted: &'static str) -> Result<u64, String> {
         match given {
             Some(stop) => Ok(stop),
-            None => only_stop(&self.held_stops(), wanted).map_err(|error| error.to_string()),
+            None => only_stop(&self.held_stops(), self.ended(), wanted)
+                .map_err(|error| error.to_string()),
         }
     }
 
@@ -714,17 +760,103 @@ fn initialize(params: &serde_json::Value) -> serde_json::Value {
 
     serde_json::json!({
         "protocolVersion": version,
-        // only `tools`. resources are pulled at the host's discretion and
-        // prompts are invoked by the user, so neither is a surface an agent can
-        // be relied on to see — declaring one that carried semantics would be
-        // documenting an interface that does not explain itself
-        "capabilities": { "tools": { "listChanged": false } },
+        // resources are pulled at the host's discretion and prompts are invoked
+        // by the user, so neither is a surface an agent can be relied on to
+        // see. they carry the deeper model and the canonical investigations,
+        // and nothing that is only said there — an agent that never receives
+        // one still has the tool schemas and the errors, which is where the
+        // semantics live
+        "capabilities": {
+            "tools": { "listChanged": false },
+            "resources": { "subscribe": false, "listChanged": false },
+            "prompts": { "listChanged": false },
+        },
         "serverInfo": {
             "name": "bpd",
             "title": "bpd — a debugger for python",
             "version": env!("CARGO_PKG_VERSION"),
         },
         "instructions": INSTRUCTIONS,
+    })
+}
+
+/// answer a `resources/read`
+///
+/// a uri nobody offers is a JSON-RPC failure rather than a document saying so:
+/// the host chose the uri, the model never sees it, and a page of prose in place
+/// of the page that was asked for is a thing an agent could read as true
+fn read_resource(params: &serde_json::Value) -> Result<serde_json::Value, Refused> {
+    let uri = params
+        .get("uri")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| Refused {
+            code: code::INVALID_PARAMS,
+            reason: "a `resources/read` arrived with no `uri`".to_string(),
+        })?;
+
+    let offered = resources();
+    let found = offered
+        .iter()
+        .find(|resource| resource.uri == uri)
+        .ok_or_else(|| Refused {
+            code: code::RESOURCE_NOT_FOUND,
+            reason: format!(
+                "bpd offers no resource at `{uri}`. it offers: {:?}",
+                offered
+                    .iter()
+                    .map(|resource| resource.uri)
+                    .collect::<Vec<_>>()
+            ),
+        })?;
+
+    Ok(serde_json::json!({ "contents": [found.contents()] }))
+}
+
+/// answer a `prompts/get`
+fn get_prompt(params: &serde_json::Value) -> Result<serde_json::Value, Refused> {
+    let name = params
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| Refused {
+            code: code::INVALID_PARAMS,
+            reason: "a `prompts/get` arrived with no `name`".to_string(),
+        })?;
+
+    let offered = prompts();
+    let found = offered
+        .iter()
+        .find(|prompt| prompt.name == name)
+        .ok_or_else(|| Refused {
+            code: code::INVALID_PARAMS,
+            reason: format!(
+                "bpd offers no prompt called `{name}`. it offers: {:?}",
+                offered.iter().map(|prompt| prompt.name).collect::<Vec<_>>()
+            ),
+        })?;
+
+    // an argument that is not a string is refused rather than rendered through
+    // `Display`, which would put `true` or `1.0` into an investigation as though
+    // someone had written it there
+    let mut given = std::collections::BTreeMap::new();
+    if let Some(arguments) = params.get("arguments")
+        && !arguments.is_null()
+    {
+        let arguments = arguments.as_object().ok_or_else(|| Refused {
+            code: code::INVALID_PARAMS,
+            reason: "the `arguments` of a `prompts/get` are an object of strings".to_string(),
+        })?;
+        for (key, value) in arguments {
+            let value = value.as_str().ok_or_else(|| Refused {
+                code: code::INVALID_PARAMS,
+                reason: format!("`{key}` is not a string, and a prompt argument is text"),
+            })?;
+            given.insert(key.clone(), value.to_string());
+        }
+    }
+
+    found.filled(&given).map_err(|reason| Refused {
+        code: code::INVALID_PARAMS,
+        reason,
     })
 }
 
@@ -741,13 +873,21 @@ fn text_of(value: &serde_json::Value) -> String {
 }
 
 /// read a tool's arguments, refusing one it does not name
-fn parse<T: serde::de::DeserializeOwned>(arguments: &serde_json::Value) -> Result<T, String> {
+///
+/// the tool is named in the refusal because an agent that made several calls in
+/// one turn is otherwise told which *argument* was wrong without being told
+/// which call it belonged to
+fn parse<T: serde::de::DeserializeOwned>(
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> Result<T, String> {
     serde_json::from_value(arguments.clone()).map_err(|error| {
         format!(
-            "these arguments are not what this tool takes: {error}. its schema \
-             is in `tools/list`, and it accepts no argument it does not name — a \
-             misspelled one that quietly took its default would be a setting \
-             asked for and never applied"
+            "`{tool}` was not called with the arguments it takes: {error}. its \
+             schema is in `tools/list`, it requires everything that schema \
+             lists under `required`, and it accepts nothing the schema does not \
+             name — a misspelled argument that quietly took its default would be \
+             a setting asked for and never applied"
         )
     })
 }
@@ -1097,6 +1237,8 @@ impl WorldArgs {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -1108,11 +1250,38 @@ mod tests {
         // speaks, rather than agreed to
         let unknown = initialize(&serde_json::json!({ "protocolVersion": "1999-01-01" }));
         assert_eq!(unknown["protocolVersion"], PROTOCOL_VERSION);
-        assert_eq!(
-            unknown["capabilities"]["resources"],
-            serde_json::Value::Null,
-            "only tools are model-controlled, and nothing is declared that is not implemented"
-        );
+        // a capability is declared because it is implemented, and for no other
+        // reason. an agent that asked for something advertised and got a
+        // "method not found" would be reading a manifest that is a lie
+        let mut nothing = Nothing;
+        let mut server = Server::new(&mut nothing);
+        for (capability, method) in [
+            ("tools", "tools/list"),
+            ("resources", "resources/list"),
+            ("prompts", "prompts/list"),
+        ] {
+            assert!(
+                unknown["capabilities"][capability].is_object(),
+                "`{capability}` is implemented and not declared"
+            );
+            assert!(
+                server.answer(method, &serde_json::json!({})).is_ok(),
+                "`{capability}` is declared and `{method}` is not answered"
+            );
+        }
+    }
+
+    /// a launcher that is never asked to launch anything
+    struct Nothing;
+
+    impl Launcher for Nothing {
+        fn launch(
+            &mut self,
+            configuration: &Configuration,
+            _output: Arc<dyn ProgramOutput>,
+        ) -> Result<Started, crate::session::Failed> {
+            panic!("nothing here launches a program, and one asked for {configuration:?}")
+        }
     }
 
     #[test]
@@ -1170,13 +1339,155 @@ mod tests {
         // `deadlineMs` instead of `deadline_ms` would otherwise be a call with
         // no deadline at all, which is the one thing this interface promises
         // cannot happen
-        let refused = parse::<Waiting>(&serde_json::json!({ "deadlineMs": 100 }))
+        let refused = parse::<Waiting>("continue_", &serde_json::json!({ "deadlineMs": 100 }))
             .expect_err("`deadlineMs` is not an argument of this tool");
         assert!(refused.contains("deadlineMs"), "said {refused}");
+        assert!(
+            refused.contains("`continue_`"),
+            "an agent that called several tools has to be told which one this \
+             was about, and it said {refused}"
+        );
 
-        let taken: Waiting =
-            parse(&serde_json::json!({ "deadline_ms": 100 })).expect("that is what it is called");
+        let taken: Waiting = parse("continue_", &serde_json::json!({ "deadline_ms": 100 }))
+            .expect("that is what it is called");
         assert_eq!(taken.deadline(), Duration::from_millis(100));
         assert_eq!(taken.frames, FRAMES_BY_DEFAULT);
+    }
+
+    /// the arguments one tool really parses, asked of serde rather than listed
+    ///
+    /// the same trick `crates/bpd_dap/tests/vscode.rs` uses on the vs code
+    /// manifest, for the same seam: a schema and a struct are two descriptions
+    /// of one thing, and nothing makes them agree
+    macro_rules! parsed_by {
+        ($($tool:literal => $args:ty),* $(,)?) => {
+            fn arguments_of(tool: &str) -> BTreeSet<String> {
+                match tool {
+                    $($tool => fields_of::<$args>(),)*
+                    other => panic!(
+                        "`{other}` is a tool this server offers and nothing here \
+                         says what it parses, so nothing checks that its schema \
+                         and its arguments agree"
+                    ),
+                }
+            }
+        };
+    }
+
+    parsed_by! {
+        "launch" => Launch,
+        "set_breakpoints" => SetBreakpoints,
+        "set_exception_breakpoints" => ExceptionArgs,
+        "continue_" => Waiting,
+        "step_over" => Stepping,
+        "step_in" => Stepping,
+        "step_out" => Stepping,
+        "wait" => Waiting,
+        "pause" => Waiting,
+        "resume" => Resume,
+        "stack" => StackArgs,
+        "variables" => VariablesArgs,
+        "evaluate" => EvaluateArgs,
+        "set_variable" => SetVariableArgs,
+        "threads" => ThreadsArgs,
+        "stop_the_world" => WorldArgs,
+        "run_script" => RunScript,
+        "state" => StateArgs,
+        "diff" => DiffArgs,
+        "terminate" => Empty,
+    }
+
+    #[test]
+    fn every_tools_schema_names_exactly_the_arguments_it_parses() {
+        // this is the seam the whole "tool schemas are the teaching surface"
+        // design rests on. an argument the struct reads and the schema omits is
+        // a capability no agent can find — `launch`'s `frames` was exactly that
+        // — and one the schema names and the struct does not read is a setting
+        // asked for and never applied
+        for tool in tools() {
+            let declared: BTreeSet<String> = tool.schema["properties"]
+                .as_object()
+                .expect("a tool schema declares its properties")
+                .keys()
+                .cloned()
+                .collect();
+            assert_eq!(
+                declared,
+                arguments_of(tool.name),
+                "`{}`'s schema and its arguments disagree",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_bounds_on_a_value_are_offered_exactly_as_the_core_reads_them() {
+        // `detail` is nested inside four schemas rather than being one of them,
+        // so the check above never reaches it
+        let detail = crate::tools::detail();
+        let declared: BTreeSet<String> = detail["properties"]
+            .as_object()
+            .expect("the detail schema declares its properties")
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(declared, fields_of::<Detail>());
+    }
+
+    /// the field names a `Deserialize` implementation reads
+    ///
+    /// asked of serde rather than written down, so a struct that gains a field
+    /// gains an entry here without anyone remembering to add one
+    fn fields_of<'de, T: serde::Deserialize<'de>>() -> BTreeSet<String> {
+        let mut found = Vec::new();
+        let Err(error) = T::deserialize(Fields { found: &mut found }) else {
+            panic!("this deserializer answers a struct with an error, always")
+        };
+        assert_eq!(
+            error.to_string(),
+            CAPTURED,
+            "the field list was never asked for, so `{}` is not a struct serde reads by name",
+            std::any::type_name::<T>()
+        );
+        found.into_iter().collect()
+    }
+
+    /// what the capturing deserializer says once it has the field list
+    const CAPTURED: &str = "the field list is the whole of what this wanted";
+
+    /// a deserializer that answers nothing and records the field list it is
+    /// offered
+    struct Fields<'a> {
+        found: &'a mut Vec<String>,
+    }
+
+    impl<'de> serde::Deserializer<'de> for Fields<'_> {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_struct<V: serde::de::Visitor<'de>>(
+            self,
+            _name: &'static str,
+            fields: &'static [&'static str],
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            self.found
+                .extend(fields.iter().map(|field| (*field).to_owned()));
+            Err(serde::de::Error::custom(CAPTURED))
+        }
+
+        fn deserialize_any<V: serde::de::Visitor<'de>>(
+            self,
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            Err(serde::de::Error::custom(
+                "this deserializer only answers structs, and was asked for something else",
+            ))
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map enum identifier ignored_any
+        }
     }
 }

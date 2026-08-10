@@ -156,7 +156,8 @@ impl std::fmt::Display for Refusal {
                 formatter,
                 "no thread is held, so there is nothing to answer {wanted} on. \
                  the agent runs the interpreter's own api on a thread it is \
-                 holding and at no other time"
+                 holding and at no other time — hold one first, by letting the \
+                 program run to a breakpoint or by pausing it"
             ),
         }
     }
@@ -225,7 +226,13 @@ mod tests {
                 Refusal::NothingHeld {
                     wanted: "the breakpoints to resolve".to_string(),
                 },
-                vec!["no thread is held", "the breakpoints to resolve"],
+                vec![
+                    "no thread is held",
+                    "the breakpoints to resolve",
+                    // a cause without an action leaves an agent to work out
+                    // that it has to hold something first
+                    "pausing it",
+                ],
             ),
         ];
 

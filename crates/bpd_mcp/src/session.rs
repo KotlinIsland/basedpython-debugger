@@ -45,6 +45,14 @@ pub trait Session {
     /// against this through [`bpd_core::only_stop`]
     fn held(&self) -> Vec<Stop>;
 
+    /// what the program exited with, or `None` while it is still there
+    ///
+    /// a program with nothing held is in one of two states that need opposite
+    /// things done about them: running, and therefore to be paused, or over, and
+    /// therefore not. [`bpd_core::only_stop`] cannot tell them apart from the
+    /// stops alone, so the session says which
+    fn ended(&self) -> Option<i64>;
+
     /// end the debuggee
     ///
     /// the last resort rather than a resume: a program that is running cannot be

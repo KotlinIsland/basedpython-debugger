@@ -122,9 +122,16 @@ pub enum Mode {
 impl std::fmt::Display for Mode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // the held thread's own frame chain really is a snapshot, and
+            // saying "this is a sample" flatly would be reporting a stack as
+            // less than it is. what the rest of the program can move underneath
+            // is every *value* reached through those frames
             Self::NonStop => formatter.write_str(
                 "non-stop: one thread was held and the rest of the program kept \
-                 running, so this is a sample rather than a snapshot",
+                 running. the held thread's own frame chain is a snapshot — it \
+                 is inside a monitoring callback and cannot return — and every \
+                 value read through it is a sample, because another thread can \
+                 change one between two reads",
             ),
             Self::StopTheWorld { native } if native.is_empty() => {
                 formatter.write_str("stop-the-world: nothing else in the program was running")
@@ -313,7 +320,10 @@ mod tests {
     #[test]
     fn a_mode_says_what_was_moving_while_the_answer_was_taken() {
         let cases = [
-            (Mode::NonStop, vec!["sample", "kept running"]),
+            (
+                Mode::NonStop,
+                vec!["sample", "kept running", "frame chain is a snapshot"],
+            ),
             (
                 Mode::StopTheWorld { native: Vec::new() },
                 vec!["nothing else in the program was running"],
@@ -330,6 +340,25 @@ mod tests {
                 assert!(said.contains(wanted), "expected {wanted:?} in {said:?}");
             }
         }
+    }
+
+    #[test]
+    fn non_stop_does_not_call_a_held_threads_own_stack_a_sample() {
+        // this sentence is carried on a `stack` answer as well as on a value
+        // read, and the frame chain of a held thread really is a snapshot: it
+        // is inside a monitoring callback and cannot return. saying "this is a
+        // sample" flatly would report a stack as less than it is, and the
+        // `stack` tool says the opposite in the same session
+        let said = Mode::NonStop.to_string();
+        assert!(
+            !said.contains("this is a sample"),
+            "the whole answer is not a sample, and it said {said:?}"
+        );
+        assert!(
+            said.contains("value read through it is a sample"),
+            "what the rest of the program can move underneath is the values, \
+             and it said {said:?}"
+        );
     }
 
     #[test]

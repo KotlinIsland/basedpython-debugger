@@ -21,8 +21,13 @@
 //! shortfall of it, and which thread it turns out to be belongs to the
 //! operating system — so the acknowledgement says which threads were running
 //! python when the pause was armed, and a client can tell whether a stop is
-//! coming at all. an empty list means every thread is parked in a C call and
-//! nothing will reach a line until one of them comes back
+//! coming at all
+//!
+//! [`threads::running`] leaves out what this agent is already holding, so an
+//! empty list has **two** causes: every other thread is parked in a C call, or
+//! the threads that would reach a line are the ones bpd is holding. a client
+//! that read it as only the first would think a program bpd itself has stopped
+//! is stuck in native code
 //!
 //! ## the thread that arms it
 //!

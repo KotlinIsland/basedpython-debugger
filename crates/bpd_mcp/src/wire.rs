@@ -199,6 +199,11 @@ pub mod code {
     pub const INVALID_PARAMS: i64 = -32602;
     /// the message is not a valid JSON-RPC request
     pub const INVALID_REQUEST: i64 = -32600;
+    /// no resource is served at that uri
+    ///
+    /// MCP's own code rather than a generic one, so that a host can tell a uri
+    /// it should stop asking for from a request it got wrong
+    pub const RESOURCE_NOT_FOUND: i64 = -32002;
 }
 
 /// the writing end of an MCP connection

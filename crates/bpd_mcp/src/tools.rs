@@ -47,8 +47,8 @@ const DEADLINE: &str = "how long to wait for the program to stop, in \
 
 /// what every control tool says about the frames it returns
 const FRAMES: &str = "how many frames of the resulting stop to return, counting \
-    from the one that stopped. 0 for none. the answer says how deep the stack \
-    really is either way";
+    from the one that stopped. 0 for none, and 5 when it is left out. the answer \
+    says how deep the stack really is either way";
 
 /// what a tool that is about one held thread says about naming it
 const STOP: &str = "which stop this is about. a stop holds one thread and the \
@@ -80,7 +80,7 @@ fn integer(description: &str) -> serde_json::Value {
 ///
 /// every field is a field of `bpd_core::Detail`, and every one of them that
 /// bites is named in the answer with what it cut and which of these to raise
-fn detail() -> serde_json::Value {
+pub(crate) fn detail() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "description": "how much of a value to read. every bound that bites is \
@@ -338,11 +338,15 @@ pub fn tools() -> Vec<Tool> {
                         "path to the script to run" },
                     "python": { "type": "string", "description":
                         "the interpreter, resolved on PATH like any command. \
-                         cpython 3.13 or newer; anything else is refused by \
-                         name rather than limped along" },
+                         `python3` when it is left out, which on a great many \
+                         machines is older than bpd's minimum — name the one \
+                         the program is meant to run under. cpython 3.13 or \
+                         newer; anything else is refused by name rather than \
+                         limped along" },
                     "args": { "type": "array", "items": { "type": "string" },
                         "description": "arguments for the program, exactly as it \
                                         receives them" },
+                    "frames": integer(FRAMES),
                 }),
                 &["program"],
             ),
@@ -514,9 +518,12 @@ pub fn tools() -> Vec<Tool> {
                 holds whichever thread arrives first — which thread that is \
                 belongs to the operating system, and the answer says which \
                 threads were running python when it went on.\n\n\
-                an empty `running` means nothing will arrive until some thread \
-                runs python again: every one of them is parked in a C call, \
-                where there is no monitoring event to hold one at."
+                `running` counts only threads bpd is **not** already holding, \
+                because a held thread reaches no line until it is resumed. so an \
+                empty `running` means nothing will arrive until either a held \
+                thread is let go or a thread parked in a C call — where there is \
+                no monitoring event to hold one at — comes back into python, and \
+                the answer's `note` says which of those two it is."
                 .to_string(),
             schema: object(
                 serde_json::json!({

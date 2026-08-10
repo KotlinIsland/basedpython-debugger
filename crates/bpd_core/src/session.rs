@@ -420,9 +420,17 @@ pub fn exit_code(status: ExitStatus) -> i64 {
 /// and several can be held at once — so *every* front end has to decide what a
 /// request that names no stop means, and two front ends deciding it separately
 /// is how the same call comes to mean two things
-pub fn only_stop(held: &[Stop], wanted: &'static str) -> crate::Result<u64> {
+///
+/// `ended` is what the program exited with, when it has. nothing held has two
+/// causes that need opposite things done about them — the program is running and
+/// has to be stopped, or it is over and there is nothing to stop — and a caller
+/// that knows which has to say so, because this cannot tell from `held` alone
+pub fn only_stop(held: &[Stop], ended: Option<i64>, wanted: &'static str) -> crate::Result<u64> {
     match held {
-        [] => Err(crate::Error::NotStopped { wanted }),
+        [] => Err(match ended {
+            Some(code) => crate::Error::ProgramExited { code, wanted },
+            None => crate::Error::NotStopped { wanted },
+        }),
         [stop] => Ok(stop.stop),
         several => Err(crate::Error::AmbiguousStop {
             wanted,
@@ -546,21 +554,53 @@ mod tests {
     #[test]
     fn a_request_that_names_no_stop_is_refused_rather_than_answered_about_one_of_several() {
         assert_eq!(
-            only_stop(&[held_at(3)], "the stack").expect("one is held"),
+            only_stop(&[held_at(3)], None, "the stack").expect("one is held"),
             3
         );
 
-        let nothing = only_stop(&[], "the stack").expect_err("nothing is held");
+        let nothing = only_stop(&[], None, "the stack").expect_err("nothing is held");
+        let said = nothing.to_string();
         assert!(
-            nothing.to_string().contains("the stack"),
-            "the refusal has to name what was asked for, and said {nothing}"
+            said.contains("the stack"),
+            "the refusal has to name what was asked for, and said {said}"
+        );
+        // an agent told only the cause is left to work out that a debugger with
+        // nothing held is a debugger that has to hold something first
+        assert!(
+            said.contains("breakpoint") && said.contains("pausing it"),
+            "the refusal has to name what to do about it, and said {said}"
         );
 
         // answering from whichever stop came first would be answering about a
         // thread the caller did not name
-        let several = only_stop(&[held_at(3), held_at(4)], "the stack").expect_err("two are held");
+        let several =
+            only_stop(&[held_at(3), held_at(4)], None, "the stack").expect_err("two are held");
         let said = several.to_string();
         assert!(said.contains("[3, 4]"), "said {said}");
         assert!(said.contains("name the stop"), "said {said}");
+    }
+
+    #[test]
+    fn nothing_held_because_the_program_ended_is_not_the_same_refusal() {
+        // "nothing is held" invites holding something. a program that has ended
+        // cannot be held at all, and a client told the first would go on pausing
+        // a process that is not there
+        let over = only_stop(&[], Some(3), "the stack").expect_err("nothing is held");
+        let said = over.to_string();
+        assert!(
+            said.contains("exited with 3"),
+            "the refusal has to name what became of the program, and said {said}"
+        );
+        assert!(
+            !said.contains("pausing it"),
+            "there is nothing left to pause, and it said {said}"
+        );
+
+        // and an exit is only ever the reason when nothing is held. a stop that
+        // is held is a thread that is still there to answer
+        assert_eq!(
+            only_stop(&[held_at(3)], Some(0), "the stack").expect("one is held"),
+            3
+        );
     }
 }
