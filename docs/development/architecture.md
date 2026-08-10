@@ -59,6 +59,27 @@ handful of functions that hold breakpoints, not by the number of lines
 executed. that is not an optimisation applied to a tracing debugger. it is a
 different machine
 
+**this is now measured rather than argued.** a loop whose six-line body runs
+three million times, with a breakpoint held on a line inside the same function
+that the program never reaches, runs in 165 ms against 164 ms bare — eighteen
+million line locations, six of them ever reported. debugpy, given the same
+program and the same breakpoint, takes 10 285 ms. the figures, the machine, and
+what *else* they turned up are in [what bpd costs](overhead.md)
+
+two things that page says are worth carrying here, because they qualify this
+section rather than confirm it:
+
+- **the native callback is not what separates `bpd` from debugpy today.**
+    debugpy's pydevd has used `sys.monitoring` with a cython callback since
+    cpython 3.12, so on every interpreter `bpd` supports both debuggers are
+    native on this path. with no breakpoints set, both cost a program under 2%.
+    what separates them is `DISABLE`, and it only shows once a breakpoint exists
+- **the event path is not where a session's cost is.** attaching costs 140–180
+    ms before the program's first statement, and about 120 ms of that is the
+    interpreter loading a freshly written copy of the agent's shared object.
+    nothing in this design document had a number for that, and it is larger than
+    everything this section is about
+
 ### the callback does not get a frame
 
 a PEP 669 callback is handed the code object and an instruction offset. it is

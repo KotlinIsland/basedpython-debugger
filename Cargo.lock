@@ -89,6 +89,7 @@ dependencies = [
  "bpd_mcp",
  "bpd_test",
  "clap",
+ "criterion",
  "serde_json",
 ]
 

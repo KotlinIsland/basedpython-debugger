@@ -2,9 +2,14 @@
 
 a debugger for python and [basedpython](https://github.com/KotlinIsland/basedpython), written in rust
 
-- **PEP 669 native** — `sys.monitoring` callbacks run in rust, not python. a
-    line with no breakpoint on it costs nothing, because the location is
-    `DISABLE`d the first time it is seen
+- **PEP 669 native** — `sys.monitoring` callbacks run in rust, not python, and a
+    line with no breakpoint on it is `DISABLE`d the first time it is seen.
+    measured: a loop that runs eighteen million line locations runs within 1% of
+    its bare time with a breakpoint held in the same function, and 63× faster
+    than debugpy doing the same. attaching costs about 150 ms before the program
+    starts, and most of that is one fixable thing. one machine, ten runs a
+    figure, written down in
+    [what bpd costs](docs/development/overhead.md)
 - **speaks DAP** — the debug adapter protocol, the same protocol vs code,
     pycharm, neovim and the rest already know how to drive. `bpd` is a debug
     adapter, so an editor needs a launch configuration, not a bespoke plugin
