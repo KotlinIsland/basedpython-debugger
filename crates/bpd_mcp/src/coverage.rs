@@ -51,6 +51,11 @@ pub const fn reach_of(request: &Request) -> Reach {
         Request::Variables { .. } => Reach::Direct("variables"),
         Request::Evaluate { .. } => Reach::Direct("evaluate"),
         Request::SetVariable { .. } => Reach::Direct("set_variable"),
+
+        // the shape this whole front end exists for, taken one step further: an
+        // MCP tool takes JSON Schema input, so a tree of steps goes across as
+        // itself and the schema is the documentation an agent reads
+        Request::RunScript { .. } => Reach::Direct("run_script"),
     }
 }
 

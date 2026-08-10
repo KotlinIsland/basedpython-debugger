@@ -54,6 +54,13 @@ pub const fn reach_of(request: &Request) -> Reach {
              concept of a program that is only partly held",
         ),
 
+        // DAP has no request of its own for a whole investigation and will not
+        // grow one, so this is an extension — which the protocol provides for,
+        // and which a client sends with its own `customRequest`. the answer is
+        // the transcript, in the response body, because an editor given only
+        // where a script ended cannot tell why any more than an agent can
+        Request::RunScript { .. } => Reach::Direct("bpd/runScript, a custom request"),
+
         Request::Stack { .. } => Reach::Direct("stackTrace"),
         Request::Variables { .. } => Reach::Direct("variables"),
         Request::Evaluate { .. } => Reach::Direct("evaluate"),

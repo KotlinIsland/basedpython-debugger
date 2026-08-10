@@ -272,16 +272,21 @@ capability added to `Request` is a compile error rather than a silent gap
 
 what forced it was not tidiness: a capability used to be a *method*, rust
 cannot enumerate methods, and the parity test this repository promises could
-not be written at all. as data, the same enum serves four consumers — DAP maps
-onto it, MCP tools map onto it, the debug script of M5.7 is a *tree* of it, and
-the parity test enumerates it. `bpd_dap` and `bpd_mcp` depend on `bpd_core`
-alone
+not be written at all. as data, the same enum serves three consumers — DAP maps
+onto it, MCP tools map onto it, and the parity test enumerates it. `bpd_dap` and
+`bpd_mcp` depend on `bpd_core` alone
+
+it was going to serve a fourth: the debug script was to be a *tree* of
+`Request`, and when M5.7 was built that turned out to be impossible — a
+`Request` names a stop and a frame by absolute id, and the stop a step will run
+at does not exist when the script is written. the script is one more variant,
+and its steps are a vocabulary of their own
 
 there is no conversion layer between the domain and the wire, and that is
 deliberate — the reasoning is in
 [architecture](docs/development/architecture.md)
 
-### M5 — MCP · the server, the control tools and the parity test are built
+### M5 — MCP · the server, the control tools, the debug script and the parity test are built
 
 `bpd mcp` speaks the model context protocol on stdin and stdout. `bpd_mcp`
 depends on `bpd_core` alone, and `crates/bpd/src/mcp.rs` is where `bpd_engine`
@@ -312,20 +317,34 @@ a *field*, which is exactly what DAP's hit condition is — so those are
 enumerated beside them, and a protocol that genuinely cannot carry one says so
 with the reason, in a list the test checks by hand
 
-what is **not** built: `run_to`, which is either a decision an adapter makes
-about the program or a capability DAP has no request for, and whose one-shot
-breakpoint cannot be removed from a program that timed out still running; the
-declarative state query; snapshot and diff; the debug script; and MCP resources
-and prompts, which are the layers that must not be written to compensate for an
-interface that does not explain itself
+what is **not** built: the declarative state query; snapshot and diff; and MCP
+resources and prompts, which are the layers that must not be written to
+compensate for an interface that does not explain itself
 
 the whole of it is [the MCP adapter](docs/development/mcp.md)
 
-still to come in this milestone: the **debug script** — a schema-validated tree
-of steps with its own branching, submitted in one call, returning a transcript
-of what happened at every one. it collapses an investigation that would be fifty
-round trips into a single turn, and it is a capability rather than an MCP
-feature, so DAP gets it too
+**the debug script is built.** a schema-validated tree of steps with its own
+branching — `step_over`, `run_to`, `eval`, `stack`, `log`, `if`, `while`,
+`finish` — submitted in one call and answered with a transcript of what happened
+at every one. it is a capability of `bpd_core`, so DAP has it too, through the
+custom request `bpd/runScript`
+
+the steps run in the engine; only the predicates reach the debuggee, through the
+machinery a breakpoint condition already uses. the **transcript is the return
+value** rather than the final state, because a client given only where a script
+ended cannot tell why. a budget is required on three axes and exhausting one
+returns the transcript so far labelled partial; a step that fails halts the
+script; every loop carries a bound, so a script that cannot be shown to
+terminate does not deserialise
+
+`run_to` lands here rather than among the control tools, and that was M5.2's
+finding: as a tool it is either a decision an adapter makes about the program or
+a capability DAP has no request for, and its one-shot breakpoint cannot be
+removed from a program that timed out still running. as a *step* the engine owns
+the whole composition — including arming a pause to take its own breakpoint off
+a program that is still running, which the transcript says it did
+
+the whole of it is [the debug script](docs/development/scripts.md)
 
 and **how an agent learns bpd**, in order: tool schemas, then errors, then
 resources and prompts. the first two are what shipped, which is the order the

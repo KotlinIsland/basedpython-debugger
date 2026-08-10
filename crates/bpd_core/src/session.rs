@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use crate::breakpoint::{LogRecord, Resolved, SourceBreakpoint};
 use crate::frame::{Frame, FrameId, Scope};
+use crate::script::{Script, Transcript};
 use crate::stop::{Mode, StepKind, Stop};
 use crate::thread::{ThreadState, Which};
 use crate::value::{Detail, Entry, Evaluated, Omitted, Value};
@@ -148,6 +149,26 @@ pub enum Request {
         detail: Detail,
     },
 
+    /// run a whole investigation against a session, and return what happened
+    ///
+    /// a tree of debugger steps with its own branching, executed **here** —
+    /// only the predicates inside it reach the debuggee, through the machinery
+    /// a breakpoint condition already uses. so the program under test is
+    /// disturbed by exactly the evaluations that were asked for and nothing else
+    ///
+    /// the answer is the [`Transcript`], not the final state: a client given
+    /// only where a script ended cannot tell **why**, and will guess
+    RunScript {
+        /// the stop whose thread the script drives
+        ///
+        /// a script drives **one thread**, for the reason a stop holds one. it
+        /// resumes that thread and no other, so a script never lets go of a
+        /// thread nobody named
+        stop: u64,
+        /// the steps, and what they may spend
+        script: Script,
+    },
+
     /// write a variable of a frame, and read back what the frame holds after it
     SetVariable {
         /// which frame
@@ -184,6 +205,7 @@ impl Request {
             Self::Stack { .. } => "the stack",
             Self::Variables { .. } => "the variables of a scope",
             Self::Evaluate { .. } => "evaluating an expression",
+            Self::RunScript { .. } => "running a debug script",
             Self::SetVariable { .. } => "writing a variable",
         }
     }
@@ -257,6 +279,9 @@ pub enum Response {
 
     /// what an expression did, or what a write left behind
     Evaluated(Evaluated),
+
+    /// what a debug script did, step by step
+    Transcript(Transcript),
 }
 
 /// what a resumed debuggee did next

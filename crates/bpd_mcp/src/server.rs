@@ -388,6 +388,20 @@ impl<'a> Server<'a> {
                     other => unreachable!("stopping the world was answered with {other:?}"),
                 }
             }
+            "run_script" => {
+                let args: RunScript = parse(arguments)?;
+                let stop = self.stop_of(args.stop, "running a debug script")?;
+                match self.ask(Request::RunScript {
+                    stop,
+                    script: bpd_core::Script {
+                        steps: args.steps,
+                        budget: args.budget,
+                    },
+                })? {
+                    Response::Transcript(ran) => Ok(render::transcript(&ran)),
+                    other => unreachable!("a debug script was answered with {other:?}"),
+                }
+            }
             "terminate" => {
                 let _: Empty = parse(arguments)?;
                 let session = self
@@ -967,6 +981,20 @@ struct SetVariableArgs {
     value: String,
     #[serde(default)]
     detail: Detail,
+}
+
+/// a whole investigation, submitted as data
+///
+/// the steps and the budget are `bpd_core`'s own types, so what the schema
+/// documents and what the engine walks are one definition. a misspelled field
+/// inside a step is refused by name for the reason every other argument is
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunScript {
+    #[serde(default)]
+    stop: Option<u64>,
+    steps: Vec<bpd_core::Step>,
+    budget: bpd_core::Budget,
 }
 
 #[derive(serde::Deserialize)]

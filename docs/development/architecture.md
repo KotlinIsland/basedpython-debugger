@@ -179,9 +179,17 @@ in the engine rather than a request nothing answers. the ergonomic methods on
 `Debuggee` build a request and come through that match, so there is a single
 implementation of every capability rather than one per front end
 
-the same enum then serves four consumers, which is the sign it is the right
-shape — DAP requests map onto it, MCP tools map onto it, the debug script is a
-*tree* of it, and the parity test enumerates it
+the same enum then serves three consumers, which is the sign it is the right
+shape — DAP requests map onto it, MCP tools map onto it, and the parity test
+enumerates it
+
+**it does not serve a fourth, and this page used to say it did.** the debug
+script was going to be "a *tree* of it", and it cannot be: a `Request` names a
+stop and a frame by **absolute id**, and the stop a step will run at does not
+exist when the script is written. so `bpd_core::script::Step` is a vocabulary of
+its own, relative to the stop the script is at, which the engine turns into
+requests as it walks the tree. the script itself is one more `Request` variant,
+and the parity test enumerates that — see [the debug script](scripts.md)
 
 **both adapters are built and the test is written.** `bpd_dap::reach_of` and
 `bpd_mcp::reach_of` each match `Request` with no catch-all arm, so a capability

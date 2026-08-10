@@ -13,6 +13,10 @@ bpd_core = { workspace = true }
 bpd_protocol = { workspace = true }
 
 getrandom = { workspace = true }
+# a debug script's byte budget is measured as the json one record serialises
+# to. the unit has to be something, both front ends render json, and json is
+# what spends the context window the budget exists to protect
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }

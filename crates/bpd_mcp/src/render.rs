@@ -12,8 +12,8 @@
 //!   than one per front end
 
 use bpd_core::{
-    Binding, Evaluated, LogRecord, Resolved, SourceBreakpoint, Stack, Stop, Threads, Variables,
-    WorldStopped,
+    Binding, Evaluated, LogRecord, Resolved, SourceBreakpoint, Stack, Stop, Threads, Transcript,
+    Variables, WorldStopped,
 };
 
 /// one held thread, as the answer to a control tool
@@ -175,6 +175,30 @@ pub fn breakpoints(
             rendered
         })
         .collect()
+}
+
+/// what a debug script did, step by step
+///
+/// the whole transcript, because the transcript **is** the answer — an agent
+/// given only where a script ended cannot tell why, and will guess. the
+/// structure is the core type's own serde and the sentence beside it is the
+/// core type's own `Display`, so there is one wording of what happened rather
+/// than one per front end
+pub fn transcript(ran: &Transcript) -> serde_json::Value {
+    let mut rendered = serde_json::json!({
+        "at_most": ran.at_most,
+        "bytes": ran.bytes,
+        "records": ran.records,
+        "outcome": ran.outcome,
+        "says": ran.outcome.to_string(),
+        "partial": ran.partial(),
+    });
+    if !ran.rebound.is_empty() {
+        // loading a file changes what a breakpoint resolves to, and it happened
+        // while the script was running the program
+        rendered["rebound"] = serde_json::json!(ran.rebound);
+    }
+    rendered
 }
 
 /// one logpoint record

@@ -129,6 +129,18 @@ pub enum Error {
         held: Vec<u64>,
     },
 
+    /// a debug script was refused before any of it ran
+    ///
+    /// examined rather than attempted: a script that cannot be walked, or one
+    /// with nowhere to arm its own breakpoint, is answered without touching the
+    /// program at all. that is the whole advantage of a step tree over
+    /// submitted python — it can be read before it runs
+    #[error("this debug script was not run: {reason}")]
+    ScriptRefused {
+        /// what stood in the way
+        reason: crate::script::Refused,
+    },
+
     /// the agent understood the request and would not answer it
     ///
     /// not a failure of `bpd`'s machinery: answering would have meant guessing

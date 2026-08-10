@@ -16,8 +16,11 @@
 //! to the core is a compile error there rather than a capability that front end
 //! silently does not have — and the parity test compares the two answers
 
+use std::num::{NonZeroU32, NonZeroU64};
+
 use crate::breakpoint::SourceBreakpoint;
 use crate::frame::{FrameId, Scope};
+use crate::script::{Budget, Script, Step};
 use crate::session::{Request, Threads};
 use crate::stop::StepKind;
 use crate::thread::Which;
@@ -145,6 +148,17 @@ pub fn surface() -> Vec<Request> {
             name: "x".to_string(),
             value: "1".to_string(),
             detail: Detail::default(),
+        },
+        Request::RunScript {
+            stop: 1,
+            script: Script {
+                steps: vec![Step::StepOver],
+                budget: Budget {
+                    steps: NonZeroU32::new(1).expect("1 is not zero"),
+                    wall_ms: NonZeroU64::new(1).expect("1 is not zero"),
+                    bytes: NonZeroU32::new(1024).expect("1024 is not zero"),
+                },
+            },
         },
     ]
 }

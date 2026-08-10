@@ -340,6 +340,117 @@ fn a_hit_condition_the_dap_adapter_cannot_carry_reaches_the_agent_typed() {
     client.finish();
 }
 
+/// a program that charges five amounts, three of them negative, writing a
+/// marker from inside each call
+const CHARGES: &str = r#"import pathlib
+
+HERE = pathlib.Path(__file__).parent
+
+
+def charge(amount):
+    seen = amount
+    (HERE / ("charged_" + str(amount))).write_text("x")
+    return seen
+
+
+def main():
+    total = 0
+    for amount in (5, -1, 7, -2, -3):
+        total += charge(amount)
+    return total
+
+
+main()
+"#;
+
+#[test]
+fn a_whole_investigation_is_one_tool_call_and_the_transcript_is_the_answer() {
+    // the acceptance for the debug script: *run to the third call with a
+    // negative amount and show me the stack* is one call, and what comes back is
+    // what happened at every step rather than where it ended up
+    let fixture = Fixture::new("investigated", CHARGES);
+    let mut client = Client::start();
+
+    client.ask("initialize", &serde_json::json!({}));
+    client.call(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+
+    let before = client.said();
+    let ran = client.call(
+        "run_script",
+        &serde_json::json!({
+            "steps": [
+                {
+                    "step": "run_to",
+                    "file": fixture.path(),
+                    "line": line_of(CHARGES, "seen = amount"),
+                    "condition": "amount < 0",
+                    "hits": { "hits": "exactly", "count": 3 },
+                },
+                { "step": "eval", "expression": "amount" },
+                {
+                    "step": "if",
+                    "predicate": { "expression": "amount < 0" },
+                    "then": [ { "step": "stack", "top": 2 } ],
+                    "otherwise": [ { "step": "log", "note": "not negative" } ],
+                },
+            ],
+            "budget": { "steps": 20, "wall_ms": 30000, "bytes": 65536 },
+        }),
+    );
+
+    // one call. the whole point of a script is that an investigation costs one
+    // round trip rather than one per operation
+    assert_eq!(
+        client.said() - before,
+        1,
+        "the investigation took more than one answer: {ran}"
+    );
+
+    assert_eq!(ran["outcome"]["outcome"], "ran", "the script gave {ran}");
+    assert_eq!(ran["partial"], false);
+    assert!(
+        ran["at_most"].as_u64().expect("a script says its bound") >= 3,
+        "a submitted tree can be answered with how many steps it can run: {ran}"
+    );
+
+    let records = ran["records"].as_array().expect("records are an array");
+    assert_eq!(records.len(), 4, "{ran}");
+    assert_eq!(records[0]["did"]["did"], "ran_to");
+    assert_eq!(
+        records[0]["did"]["disarmed"]["disarmed"], "removed",
+        "a run_to takes its own breakpoint back off: {ran}"
+    );
+    assert_eq!(
+        records[1]["did"]["result"]["value"]["content"]["text"], "-3",
+        "the third negative amount is -3: {ran}"
+    );
+    assert_eq!(records[2]["step"], "3");
+    assert_eq!(records[2]["did"]["answered"]["value"], true);
+    assert_eq!(
+        records[3]["step"], "3.then.1",
+        "a record says which branch it was in: {ran}"
+    );
+    assert_eq!(records[3]["did"]["frames"][0]["function"], "charge");
+
+    // the program's own markers, not the transcript's word for it: it charged
+    // the fourth amount and is held before the fifth writes its marker
+    assert!(fixture.directory().join("charged_-2").exists());
+    assert!(
+        !fixture.directory().join("charged_-3").exists(),
+        "the program ran past the line the transcript says it is at"
+    );
+
+    // and the script left the session where the transcript says it did, so the
+    // ordinary tools carry on from there
+    let stack = client.call("stack", &serde_json::json!({ "top": 1 }));
+    assert_eq!(stack["frames"][0]["function"], "charge", "{stack}");
+
+    client.finish();
+}
+
 /// the interpreter the built agent matches
 fn interpreter() -> String {
     bpd_test::agent::matching_interpreter()
