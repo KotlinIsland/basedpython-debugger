@@ -17,8 +17,8 @@ const SETTING = "bpd.executable";
 
 /** what a failure to find it should tell someone to do about it */
 const REMEDY =
-  `put \`bpd\` on PATH, or set \`${SETTING}\` in your settings to its ` +
-  `absolute path`;
+  `put \`bpd\` on PATH, or set \`${SETTING}\` in your settings to its `
+  + `absolute path`;
 
 /**
  * whether a path is a file this platform would run
@@ -59,12 +59,11 @@ function searched() {
  * "the debug adapter exited unexpectedly" a failed spawn produces
  */
 function onPath(command) {
-  const extensions =
-    process.platform === "win32"
-      ? (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD")
-          .split(";")
-          .filter(Boolean)
-      : [""];
+  const extensions = process.platform === "win32"
+    ? (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD")
+      .split(";")
+      .filter(Boolean)
+    : [""];
   for (const directory of searched()) {
     for (const extension of extensions) {
       const candidate = path.join(directory, command + extension);
@@ -90,9 +89,9 @@ function resolve(folder) {
   const named = typeof configured === "string" ? configured.trim() : "";
   if (named === "") {
     throw new Error(
-      `\`${SETTING}\` is empty, so there is no command to start the bpd debug ` +
-        `adapter with. set it to \`bpd\` to look on PATH, or to the absolute ` +
-        `path of the binary`,
+      `\`${SETTING}\` is empty, so there is no command to start the bpd debug `
+        + `adapter with. set it to \`bpd\` to look on PATH, or to the absolute `
+        + `path of the binary`,
     );
   }
 
@@ -100,15 +99,15 @@ function resolve(folder) {
   if (!bare) {
     if (!path.isAbsolute(named)) {
       throw new Error(
-        `\`${SETTING}\` is \`${named}\`, which is a relative path. bpd will ` +
-          `not resolve it against a directory nobody chose — give an absolute ` +
-          `path, or a bare command name to look up on PATH`,
+        `\`${SETTING}\` is \`${named}\`, which is a relative path. bpd will `
+          + `not resolve it against a directory nobody chose — give an absolute `
+          + `path, or a bare command name to look up on PATH`,
       );
     }
     if (!runnable(named)) {
       throw new Error(
-        `\`${SETTING}\` is \`${named}\`, and there is no file there this ` +
-          `machine would run. ${REMEDY}`,
+        `\`${SETTING}\` is \`${named}\`, and there is no file there this `
+          + `machine would run. ${REMEDY}`,
       );
     }
     return named;
@@ -118,10 +117,10 @@ function resolve(folder) {
   if (found === undefined) {
     const directories = searched().length;
     throw new Error(
-      `\`${named}\` is not on PATH, so vs code cannot start the bpd debug ` +
-        `adapter — bpd is its own adapter, run as \`${named} dap\`. ` +
-        `${directories} director${directories === 1 ? "y" : "ies"} on PATH ` +
-        `were searched and none has it. ${REMEDY}`,
+      `\`${named}\` is not on PATH, so vs code cannot start the bpd debug `
+        + `adapter — bpd is its own adapter, run as \`${named} dap\`. `
+        + `${directories} director${directories === 1 ? "y" : "ies"} on PATH `
+        + `were searched and none has it. ${REMEDY}`,
     );
   }
   return found;

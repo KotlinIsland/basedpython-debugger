@@ -20,19 +20,20 @@ repos:
     hooks:
       - id: typos
 
-  - repo: https://github.com/rbubley/mirrors-prettier
-    rev: 9337a74165b178ae2c766f60bee7252a0f06f3e8 # frozen: v3.9.5
-    hooks:
-      # yaml, and the json and javascript the vs code extension is made of.
-      # **not markdown**: prettier's markdown style — two space list
-      # continuation, `_emphasis_` — disagrees with the four space continuation
-      # used across basedpython's docs, and the docs are meant to read the same
-      # in both
-      - id: prettier
-        types_or: [yaml, json, javascript]
-
   - repo: local
     hooks:
+      # yaml, and the json and javascript the vs code extension is made of.
+      # what it formats, and why markdown is not part of it, is in
+      # `dprint.jsonc` — that file is the scope, so this runs the whole set
+      # rather than the changed files, and the two cannot disagree
+      - id: dprint
+        name: dprint
+        entry: dprint fmt
+        language: node
+        additional_dependencies: ["dprint@0.55.2"]
+        files: '\.(ya?ml|json|jsonc|m?js)$'
+        pass_filenames: false
+
       - id: rustfmt
         name: rustfmt
         entry: cargo fmt --all --
