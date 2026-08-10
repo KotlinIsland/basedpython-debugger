@@ -242,11 +242,13 @@ fn held_at(debuggee: &mut Debuggee, file: &Path, line: u32) -> Stop {
         .set_breakpoints(vec![SourceBreakpoint::at(1, file, line)])
         .expect("the breakpoint request was answered");
     match &resolved[0].binding {
-        Binding::Bound { line: bound, .. } => assert_eq!(
-            *bound, line,
-            "the fixture line has to be executable, or the test is about a \
+        Binding::Bound { line: bound, .. } | Binding::BoundInTemplate { line: bound, .. } => {
+            assert_eq!(
+                *bound, line,
+                "the fixture line has to be executable, or the test is about a \
              different line than it says"
-        ),
+            );
+        }
         Binding::Unbound { reason } => panic!("the breakpoint did not bind: {reason}"),
     }
 
@@ -280,7 +282,7 @@ fn landing(stop: &Stop) -> (StepKind, &str, u32) {
 /// `co_qualname` of the frame the held thread is in
 fn function(debuggee: &mut Debuggee) -> String {
     let stack = debuggee.the_stack(Some(1)).expect("the stack was answered");
-    stack.frames[0].function.clone()
+    stack.frames[0].name().to_string()
 }
 
 /// what an expression is worth in the frame that is held
@@ -877,7 +879,7 @@ fn a_pause_holds_the_first_thread_that_reaches_a_line() {
     let stack = debuggee.the_stack(None).expect("the stack was answered");
     let outermost = stack.frames.last().expect("a held thread has a stack");
     assert_eq!(Path::new(&outermost.file), fixture.path());
-    assert_eq!(outermost.function, "<module>");
+    assert_eq!(outermost.name(), "<module>");
     assert!(
         !ran(&fixture, "finished"),
         "the thread is held inside the loop"

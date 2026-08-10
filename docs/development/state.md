@@ -62,6 +62,11 @@ expression ran in are a separate thing that the stop carries as a traceback.
 `a_stack_holds_no_frame_of_bpds_even_where_an_expression_of_bpds_just_ran`
 asserts both halves
 
+everything on this page is about a frame the interpreter really has. a django
+template frame is synthesised and has no python scopes at all — asking for one
+is refused with the python frame that answers, and what it has instead is a
+layered template context. that is [django templates](django-templates.md)
+
 ## the scopes are four things, not one mapping
 
 `f_locals` merges a frame's own locals, the cells a nested function captures from

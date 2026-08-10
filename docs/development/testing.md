@@ -65,6 +65,21 @@ CI gives each interpreter its own job rather than expecting one machine to hold
 the whole matrix, so a version specific failure names the version in the job
 title
 
+### django, which is a third-party version to pin as well
+
+the django tests need a real django, and django's template internals are not a
+stable API — `Node.render_annotated`, `Parser.extend_nodelist` and
+`ExtendsNode.render` are all read by `bpd` and none of them is documented as
+something django will keep
+
+so the version is pinned in `bpd_test::django::VERSION` and **asserted inside
+the debuggee**, exactly the way an interpreter version is. `bpd_test::django`
+installs that version with `uv` into a tree beside the built agent, once, and
+the fixture puts it on its own `sys.path` rather than being handed a
+`PYTHONPATH` — so a fixture launched under `bpd` and one launched directly see
+the same import state. a machine without `uv` fails and says so rather than
+skipping
+
 ## running the suite
 
 ```sh
@@ -289,7 +304,11 @@ line table is written down in rust and compared against itself
 **the tests are checked against the regressions they exist to catch.** removing
 the `co_consts` recursion fails nine of them; removing the `restart_events()`
 call after a breakpoint change fails exactly one, which is the one written for
-it; keeping cpython's line 0 in the line table fails the line table test. for
+it; keeping cpython's line 0 in the line table fails the line table test;
+walking a django template without tracking what its `{% extends %}` makes
+unrenderable reports three breakpoints bound on lines django never renders, and
+fails `nothing_an_extends_stops_django_rendering_is_reported_bound` with the
+program having run to completion without stopping. for
 what a breakpoint carries: treating a condition that raised as false fails two,
 counting hits the condition rejected fails one, answering a name that is not a
 local as false instead of handing it to the interpreter fails the differential

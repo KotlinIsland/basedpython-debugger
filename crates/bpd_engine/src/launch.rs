@@ -30,7 +30,8 @@ use bpd_core::python::Capabilities;
 use bpd_core::{
     Detail, Difference, Evaluated, ExceptionBreakpoints, FrameId, LogRecord, Reporting, Request,
     Resolved, Response, Running, Scope, Script, Snapshot, SnapshotId, SourceBreakpoint, Stack,
-    StateQuery, StepKind, Stop, Threads, Transcript, Variables, Which, WorldStopped,
+    StateQuery, StepKind, Stop, TemplateContext, Threads, Transcript, Variables, Which,
+    WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine};
@@ -196,6 +197,9 @@ impl Debuggee {
                 detail,
             } => Ok(Response::Variables(
                 self.read_scope(frame, scope, detail, reporting)?,
+            )),
+            Request::TemplateContext { frame, detail } => Ok(Response::TemplateContext(
+                self.read_template_context(frame, detail, reporting)?,
             )),
             Request::Evaluate {
                 frame,
@@ -504,6 +508,33 @@ impl Debuggee {
                 omitted,
                 mode,
             }),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// read a template frame's django context, layer by layer
+    ///
+    /// what [`Self::variables`] is for a python frame. a django template frame
+    /// has no python scopes — the interpreter has no frame for it at all — and
+    /// asking for one is refused with the python frame that does answer
+    pub fn template_context(&mut self, frame: FrameId, detail: Detail) -> Result<TemplateContext> {
+        match self.ask_for(Request::TemplateContext { frame, detail })? {
+            Response::TemplateContext(context) => Ok(context),
+            other => unreachable!("a template context was answered with {other:?}"),
+        }
+    }
+
+    fn read_template_context(
+        &mut self,
+        frame: FrameId,
+        detail: Detail,
+        reporting: &mut dyn Reporting,
+    ) -> Result<TemplateContext> {
+        const EXPECTED: &str = "the template context of a frame";
+
+        let request = FromEngine::TemplateContext { frame, detail };
+        match self.ask(&request, EXPECTED, reporting)? {
+            FromAgent::TemplateContext { layers, mode, .. } => Ok(TemplateContext { layers, mode }),
             other => Err(unexpected(&other, EXPECTED)),
         }
     }

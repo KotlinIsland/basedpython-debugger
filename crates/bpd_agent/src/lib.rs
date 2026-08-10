@@ -23,6 +23,7 @@ mod session;
 mod source;
 mod steps;
 mod stops;
+mod templates;
 mod threads;
 mod values;
 mod world;
@@ -289,6 +290,16 @@ fn on_py_start<'py>(
     code: &Bound<'py, PyAny>,
     _offset: i32,
 ) -> PyResult<Bound<'py, PyAny>> {
+    // the one code object this event is armed *locally* on, and the one place
+    // in the agent where deciding needs the frame — the question is which
+    // django node is about to render, and the node is only reachable there.
+    // it is answered first and returns without disabling, because disabling is
+    // per location and would take the hook off for the rest of the process
+    if templates::is_render_hook(code.as_ptr() as usize) {
+        rendering_a_template_node(python)?;
+        return Ok(python.None().into_bound(python));
+    }
+
     let newly_loaded = code::register(code)?;
 
     if !run::has_stopped_at_entry() && run::is_the_program(python, code)? {
@@ -442,11 +453,83 @@ fn on_line<'py>(
     Ok(python.None().into_bound(python))
 }
 
+/// hold this thread if a breakpoint is bound to the template line about to render
+///
+/// everything about the hit is decided here, in the agent, the same way a
+/// python breakpoint's is: the condition, the hit count and the log message all
+/// come from the same [`conditions::Plan`], evaluated against the
+/// `Node.render_annotated` frame — where `context` is django's `Context` and
+/// `self` is the node
+fn rendering_a_template_node(python: Python<'_>) -> PyResult<()> {
+    if conditions::evaluating() {
+        return Ok(());
+    }
+    let Some(hit) = templates::rendering(python)? else {
+        return Ok(());
+    };
+
+    let thread = events::thread_ident(python)?;
+    let at = conditions::Location {
+        file: &hit.file,
+        line: hit.line,
+        thread,
+    };
+
+    let mut stopping = Vec::new();
+    let mut failure = None;
+    {
+        let _suppressed = conditions::suppress();
+        let mut place = conditions::Place::unfetched(python);
+        for plan in &hit.plans {
+            match plan.fire(python, &mut place, &at)? {
+                conditions::Fired::Nothing => {}
+                conditions::Fired::Stop => stopping.push(plan.id),
+                conditions::Fired::Logged(record) => session::log(record),
+                conditions::Fired::Failed(raised) => {
+                    failure = Some((plan.id, raised));
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some((breakpoint, raised)) = failure {
+        return session::stop(
+            python,
+            thread,
+            StopReason::EvaluationFailed {
+                breakpoint,
+                part: raised.part,
+                expression: raised.expression,
+                file: hit.file,
+                line: hit.line,
+                error: raised.error,
+            },
+        );
+    }
+    if stopping.is_empty() {
+        return Ok(());
+    }
+    session::stop(
+        python,
+        thread,
+        StopReason::Breakpoint {
+            breakpoints: stopping,
+            file: hit.file,
+            line: hit.line,
+        },
+    )
+}
+
 /// the `PY_RETURN` callback, armed on the code objects a step is following
 ///
 /// a return finishes a frame. the step that was in it moves to the caller and
 /// lands at its next line, which is what makes stepping over the last statement
 /// of a function land where the call came from
+///
+/// it is also how a django template becomes visible: `Template.__init__`
+/// compiles its nodelist as its last act, so the frame that is returning holds
+/// a template bpd can bind breakpoints against
 ///
 /// the returned value is part of the signature PEP 669 requires. reading it
 /// would be reading the program's state to decide whether to stop, which is the
@@ -454,12 +537,22 @@ fn on_line<'py>(
 #[pyfunction]
 fn on_py_return<'py>(
     python: Python<'py>,
-    _code: &Bound<'py, PyAny>,
+    code: &Bound<'py, PyAny>,
     _offset: i32,
     _returned: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
     if steps::armed_here() {
         steps::left_frame(python)?;
+    }
+
+    // a template parsed while a condition of ours is running is not one the
+    // program parsed, and registering it would rebind from inside a callback
+    // that is already inside a callback
+    if !conditions::evaluating()
+        && templates::is_init_hook(code.as_ptr() as usize)
+        && let Some(loaded) = templates::registered(python)?
+    {
+        session::announce_rebinding(breakpoints::rebind(python, &loaded)?);
     }
     Ok(python.None().into_bound(python))
 }

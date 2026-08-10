@@ -32,21 +32,42 @@ pub fn stop(stopped: &Stop) -> serde_json::Value {
     })
 }
 
+/// where one frame is, and **what kind of frame it is**
+///
+/// the kind is rendered rather than flattened away, because not every frame in
+/// a stack is one the interpreter has: a django template frame is synthesised
+/// from the node django is rendering, and an agent that read it as python would
+/// go looking for a `.html` file's local variables. so `kind` is always present,
+/// and the fields that belong to only one kind appear only for that kind
+fn located(frame: &bpd_core::Frame) -> serde_json::Value {
+    let mut rendered = serde_json::json!({
+        "frame": frame.id.depth,
+        "file": frame.file,
+        "line": frame.line,
+    });
+    match &frame.kind {
+        bpd_core::FrameKind::Python {
+            function,
+            first_line,
+        } => {
+            rendered["kind"] = serde_json::json!("python");
+            rendered["function"] = serde_json::json!(function);
+            rendered["first_line"] = serde_json::json!(first_line);
+        }
+        bpd_core::FrameKind::Template { node, python } => {
+            rendered["kind"] = serde_json::json!("template");
+            rendered["node"] = serde_json::json!(node);
+            // the frame that is really running. python is evaluated there, and
+            // its scopes are read there
+            rendered["python_frame"] = serde_json::json!(python.depth);
+        }
+    }
+    rendered
+}
+
 /// one held thread's stack
 pub fn stack(walked: &Stack) -> serde_json::Value {
-    let frames: Vec<serde_json::Value> = walked
-        .frames
-        .iter()
-        .map(|frame| {
-            serde_json::json!({
-                "frame": frame.id.depth,
-                "file": frame.file,
-                "line": frame.line,
-                "function": frame.function,
-                "first_line": frame.first_line,
-            })
-        })
-        .collect();
+    let frames: Vec<serde_json::Value> = walked.frames.iter().map(located).collect();
 
     let mut rendered = serde_json::json!({
         "frames": frames,
@@ -83,6 +104,50 @@ pub fn variables(read: &Variables) -> serde_json::Value {
             .map(ToString::to_string)
             .collect::<Vec<String>>(),
         "mode": read.mode.to_string(),
+    })
+}
+
+/// what a template frame's django context holds, layer by layer
+///
+/// the layers stay layers, and the shadowing between them is named rather than
+/// left to be worked out: which layer holds a name is what decides the render,
+/// and an agent handed a merged mapping cannot see that at all
+pub fn template_context(context: &bpd_core::TemplateContext) -> serde_json::Value {
+    let layers: Vec<serde_json::Value> = context
+        .layers
+        .iter()
+        .map(|layer| {
+            serde_json::json!({
+                "layer": layer.index,
+                "entries": layer.entries,
+                "left_out": layer
+                    .omitted
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<String>>(),
+            })
+        })
+        .collect();
+
+    let shadowed: Vec<serde_json::Value> = context
+        .shadowed()
+        .iter()
+        .map(|name| {
+            serde_json::json!({
+                "name": name.name,
+                "layers": name.layers,
+                "wins": name.layers.last(),
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "layers": layers,
+        "shadowed": shadowed,
+        "mode": context.mode.to_string(),
+        "note": "django resolves a name by walking the layers from the last \
+                 backwards and taking the first that holds it, so the **last** \
+                 layer holding a name is the one the template renders",
     })
 }
 
@@ -166,6 +231,28 @@ pub fn breakpoints(
                         .into();
                     }
                 }
+                Binding::BoundInTemplate {
+                    line,
+                    nodes,
+                    evaluation,
+                } => {
+                    rendered["bound"] = true.into();
+                    rendered["line"] = (*line).into();
+                    rendered["evaluation"] = serde_json::json!(evaluation);
+                    // a template has no code object and no offset. what is
+                    // behind the breakpoint is a django node, reached through
+                    // `Node.render_annotated`, and saying so is what stops this
+                    // reading as a python binding
+                    rendered["template_nodes"] = serde_json::json!(nodes);
+                    if asked.is_some_and(|asked| asked.line != *line) {
+                        rendered["moved"] = format!(
+                            "line {} renders no django node, so this moved to \
+                             line {line}, which does",
+                            asked.map_or(0, |asked| asked.line)
+                        )
+                        .into();
+                    }
+                }
                 Binding::Unbound { reason } => {
                     rendered["bound"] = false.into();
                     rendered["unbound"] = serde_json::json!(reason);
@@ -211,24 +298,24 @@ pub fn state(snapshot: &Snapshot) -> serde_json::Value {
         .frames
         .iter()
         .map(|described| {
-            let mut rendered = serde_json::json!({
-                "frame": described.frame.id.depth,
-                "file": described.frame.file,
-                "line": described.frame.line,
-                "function": described.frame.function,
-                "first_line": described.frame.first_line,
-                "scopes": described.scopes.iter().map(|read| serde_json::json!({
-                    "scope": read.scope,
-                    "entries": read.entries,
-                    "unbound": read.unbound,
-                    "unreadable": read.unreadable,
-                    "left_out": read
-                        .omitted
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<String>>(),
-                })).collect::<Vec<serde_json::Value>>(),
-            });
+            let mut rendered = located(&described.frame);
+            rendered["scopes"] = serde_json::json!(
+                described
+                    .scopes
+                    .iter()
+                    .map(|read| serde_json::json!({
+                        "scope": read.scope,
+                        "entries": read.entries,
+                        "unbound": read.unbound,
+                        "unreadable": read.unreadable,
+                        "left_out": read
+                            .omitted
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<String>>(),
+                    }))
+                    .collect::<Vec<serde_json::Value>>()
+            );
             if let Some(source) = &described.source {
                 rendered["source"] = source_of(source);
             }
@@ -356,8 +443,10 @@ mod tests {
             id: bpd_core::FrameId { stop: 1, depth },
             file: "/tmp/app.py".to_string(),
             line: 4,
-            function: "work".to_string(),
-            first_line: 1,
+            kind: bpd_core::FrameKind::Python {
+                function: "work".to_string(),
+                first_line: 1,
+            },
         }
     }
 
@@ -413,6 +502,7 @@ mod tests {
                     binding: Binding::Unbound {
                         reason: Unbound::NotLoaded {
                             file: "/tmp/later.py".into(),
+                            templates_available: false,
                         },
                     },
                 },

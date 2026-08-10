@@ -18,8 +18,8 @@
 use std::io::{Read, Write};
 
 use bpd_core::{
-    Detail, Entry, Evaluated, Frame, FrameId, LogRecord, Mode, Omitted, Refusal, Resolved, Scope,
-    SourceBreakpoint, StepKind, Stop, ThreadState, Which,
+    ContextLayer, Detail, Entry, Evaluated, Frame, FrameId, LogRecord, Mode, Omitted, Refusal,
+    Resolved, Scope, SourceBreakpoint, StepKind, Stop, ThreadState, Which,
 };
 
 use crate::frame::{self, Result};
@@ -181,6 +181,20 @@ pub enum FromAgent {
         mode: Mode,
     },
 
+    /// what a template frame's django context holds, layer by layer
+    ///
+    /// never merged. `django.template.Context` is a stack of dicts and django
+    /// resolves a name from the last one backwards, so which layer holds a name
+    /// decides what the template renders
+    TemplateContext {
+        /// which frame it was read from
+        frame: FrameId,
+        /// the layers, outermost first, in `Context.dicts` order
+        layers: Vec<ContextLayer>,
+        /// how the program was moving while this was taken
+        mode: Mode,
+    },
+
     /// what an expression did, or what a write left behind
     ///
     /// a write answers with the value read back **out of the frame** after it,
@@ -319,6 +333,18 @@ pub enum FromEngine {
         frame: FrameId,
         /// which scope of it
         scope: Scope,
+        /// how much of each value to read
+        detail: Detail,
+    },
+
+    /// read the django template context of a template frame
+    ///
+    /// a template frame has no python scopes to read, so this is what
+    /// [`FromEngine::Variables`] is for a python one. the answer is the layers
+    /// of `Context.dicts`, unmerged
+    TemplateContext {
+        /// which template frame
+        frame: FrameId,
         /// how much of each value to read
         detail: Detail,
     },
@@ -509,6 +535,7 @@ mod tests {
                     binding: Binding::Unbound {
                         reason: Unbound::NotLoaded {
                             file: PathBuf::from("/tmp/other.py"),
+                            templates_available: false,
                         },
                     },
                 },

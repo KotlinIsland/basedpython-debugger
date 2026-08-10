@@ -70,6 +70,11 @@ pub const fn reach_of(request: &Request) -> Reach {
 
         Request::Stack { .. } => Reach::Direct("stackTrace"),
         Request::Variables { .. } => Reach::Direct("variables"),
+        // a template frame's `scopes` are the layers of its django context, one
+        // DAP scope each, and `variables` on one reads that layer. DAP has no
+        // idea what a template is and does not need one: a stack of dicts maps
+        // onto a list of scopes exactly
+        Request::TemplateContext { .. } => Reach::Direct("scopes, then variables"),
         Request::Evaluate { .. } => Reach::Direct("evaluate"),
         Request::SetVariable { .. } => Reach::Direct("setVariable"),
     }

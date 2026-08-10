@@ -94,7 +94,7 @@ fn unlogged(record: LogRecord) {
 fn bound(resolved: &[Resolved]) {
     for resolution in resolved {
         match &resolution.binding {
-            Binding::Bound { .. } => {}
+            Binding::Bound { .. } | Binding::BoundInTemplate { .. } => {}
             Binding::Unbound { reason } => {
                 panic!("breakpoint {} did not bind: {reason}", resolution.id)
             }
@@ -209,7 +209,7 @@ fn the_stack_at_the_entry_stop_is_the_programs_own_and_holds_nothing_of_bpds() {
         stack
             .frames
             .iter()
-            .map(|frame| (frame.function.as_str(), frame.file.as_str()))
+            .map(|frame| (frame.name(), frame.file.as_str()))
             .collect::<Vec<_>>(),
         [("<module>", fixture.path().to_str().expect("a utf8 path"))],
         "the program has run nothing, so its own module frame is the whole stack"
@@ -232,7 +232,7 @@ fn a_stack_is_the_call_chain_of_the_thread_that_stopped() {
         stack
             .frames
             .iter()
-            .map(|frame| frame.function.as_str())
+            .map(bpd_core::Frame::name)
             .collect::<Vec<_>>(),
         ["outer.<locals>.inner", "outer", "main", "<module>"]
     );
@@ -641,7 +641,7 @@ fn a_stack_holds_no_frame_of_bpds_even_where_an_expression_of_bpds_just_ran() {
         stack
             .frames
             .iter()
-            .map(|frame| frame.function.as_str())
+            .map(bpd_core::Frame::name)
             .collect::<Vec<_>>(),
         ["visit", "caller", "<module>"],
         "the stack is where the program is, and holds nothing the debugger ran"

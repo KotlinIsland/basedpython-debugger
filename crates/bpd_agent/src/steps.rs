@@ -319,6 +319,10 @@ fn watch(python: Python<'_>, step: &mut Step, code: &Bound<'_, PyAny>) -> PyResu
     let wanted = events::Local {
         line: step.landing,
         py_return: true,
+        // a step never wants a start on a code object it is following: a frame
+        // being entered is caught globally, because "some frame, somewhere"
+        // cannot be scoped to a code object that has not been reached yet
+        py_start: false,
     };
     if let Some(interest) = interests().get_mut(&step.thread) {
         interest.watching.insert(code.as_ptr() as usize, wanted);

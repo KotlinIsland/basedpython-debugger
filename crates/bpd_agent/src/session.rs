@@ -36,7 +36,9 @@ use bpd_core::{LogRecord, StopReason};
 use bpd_protocol::message::{FromAgent, FromEngine};
 use pyo3::prelude::*;
 
-use crate::{attach, breakpoints, events, exceptions, frames, pause, steps, stops, threads, world};
+use crate::{
+    attach, breakpoints, events, exceptions, frames, pause, steps, stops, templates, threads, world,
+};
 
 /// tell the engine what a logpoint had to say, and carry straight on
 ///
@@ -93,7 +95,7 @@ pub(crate) fn refresh_code(python: Python<'_>, code: &Bound<'_, PyAny>) -> PyRes
     events::watch_locally(
         python,
         code,
-        breakpoints::local(address) | steps::local(address),
+        breakpoints::local(address) | steps::local(address) | templates::local(address),
     )
 }
 
@@ -139,6 +141,10 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
                 detail,
             } => {
                 let answer = stopped.variables(frame, scope, detail)?;
+                attach::send(&answer);
+            }
+            FromEngine::TemplateContext { frame, detail } => {
+                let answer = stopped.template_context(frame, detail)?;
                 attach::send(&answer);
             }
             FromEngine::Source { frame, around } => {

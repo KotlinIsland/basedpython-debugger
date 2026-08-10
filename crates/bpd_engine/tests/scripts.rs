@@ -255,10 +255,7 @@ fn a_script_runs_to_the_third_negative_amount_and_the_program_really_is_there() 
         panic!("the stack was not walked: {:#?}", transcript.records[2])
     };
     assert_eq!(
-        frames
-            .iter()
-            .map(|frame| frame.function.as_str())
-            .collect::<Vec<_>>(),
+        frames.iter().map(bpd_core::Frame::name).collect::<Vec<_>>(),
         vec!["charge", "main", "<module>"],
         "no frame of bpd's own is in the stack"
     );

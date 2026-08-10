@@ -382,6 +382,18 @@ impl<'a> Server<'a> {
                     other => unreachable!("a scope read was answered with {other:?}"),
                 }
             }
+            "template_context" => {
+                let args: TemplateContextArgs = parse(name, arguments)?;
+                let frame =
+                    self.frame_of(args.stop, args.frame, "the template context of a frame")?;
+                match self.ask(Request::TemplateContext {
+                    frame,
+                    detail: args.detail,
+                })? {
+                    Response::TemplateContext(context) => Ok(render::template_context(&context)),
+                    other => unreachable!("a template context was answered with {other:?}"),
+                }
+            }
             "evaluate" => {
                 let args: EvaluateArgs = parse(name, arguments)?;
                 let frame = self.frame_of(args.stop, args.frame, "evaluating an expression")?;
@@ -1120,6 +1132,17 @@ struct VariablesArgs {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TemplateContextArgs {
+    #[serde(default)]
+    stop: Option<u64>,
+    #[serde(default)]
+    frame: u32,
+    #[serde(default)]
+    detail: Detail,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EvaluateArgs {
     #[serde(default)]
     stop: Option<u64>,
@@ -1387,6 +1410,7 @@ mod tests {
         "resume" => Resume,
         "stack" => StackArgs,
         "variables" => VariablesArgs,
+        "template_context" => TemplateContextArgs,
         "evaluate" => EvaluateArgs,
         "set_variable" => SetVariableArgs,
         "threads" => ThreadsArgs,

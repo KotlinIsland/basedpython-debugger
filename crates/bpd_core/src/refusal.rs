@@ -57,6 +57,30 @@ pub enum Refusal {
         name: String,
     },
 
+    /// the request is about a python frame and that frame is a template frame
+    ///
+    /// a django template frame is synthesised: the interpreter has no frame for
+    /// it, so it has no python scopes to read or write and no source bpd can
+    /// prove is the code that is running. answering from the
+    /// `Node.render_annotated` frame underneath it instead would be reading a
+    /// variable from another scope entirely
+    NotAPythonFrame {
+        /// what was asked about
+        frame: FrameId,
+        /// what was asked for
+        wanted: String,
+        /// the python frame underneath it, which does answer
+        python: FrameId,
+    },
+
+    /// the request is about a template frame and that frame is a python frame
+    NotATemplateFrame {
+        /// what was asked about
+        frame: FrameId,
+        /// what it is running instead
+        function: String,
+    },
+
     /// no thread is held under that stop number
     ///
     /// several threads can be held at once, so a request that names a stop
@@ -140,6 +164,25 @@ impl std::fmt::Display for Refusal {
                  function around it. writing it into the frame's namespace would \
                  leave a value the compiled code never reads"
             ),
+            Self::NotAPythonFrame {
+                frame,
+                wanted,
+                python,
+            } => write!(
+                formatter,
+                "{frame} is a django template frame, and {wanted} is about a \
+                 python frame. bpd synthesised it from the template node django \
+                 is rendering — the interpreter has no frame for it, so it has \
+                 no python scopes. its variables are the template context: ask \
+                 for that. for the python underneath it, ask about {python}"
+            ),
+            Self::NotATemplateFrame { frame, function } => write!(
+                formatter,
+                "{frame} is a python frame running `{function}`, not a django \
+                 template frame, so it has no template context. a template frame \
+                 appears in the stack above the `Node.render_annotated` frame \
+                 that renders it — ask for the stack and pick one"
+            ),
             Self::NoSuchStop { stop, held } => write!(
                 formatter,
                 "stop {stop} is not held — the stops held now are {held:?}. a \
@@ -207,6 +250,26 @@ mod tests {
                     name: "captured".to_string(),
                 },
                 vec!["`captured`", "free scope", "class body"],
+            ),
+            (
+                Refusal::NotAPythonFrame {
+                    frame,
+                    wanted: "the variables of a scope".to_string(),
+                    python: FrameId { stop: 1, depth: 3 },
+                },
+                vec![
+                    "frame 2 of stop 1",
+                    "django template frame",
+                    "the template context",
+                    "frame 3 of stop 1",
+                ],
+            ),
+            (
+                Refusal::NotATemplateFrame {
+                    frame,
+                    function: "render".to_string(),
+                },
+                vec!["frame 2 of stop 1", "`render`", "no template context"],
             ),
             (
                 Refusal::NoSuchStop {

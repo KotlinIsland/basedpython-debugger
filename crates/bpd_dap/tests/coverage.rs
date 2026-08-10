@@ -272,7 +272,31 @@ fn drive(asked: &Asked) -> Transcript {
         "stackTrace",
         serde_json::json!({ "threadId": thread }),
     );
-    let frame = stack["body"]["stackFrames"][0]["id"].clone();
+    // frame 0 is the django template frame and frame 1 is the python one it is
+    // rendered by. both are driven, because what a client may do with the two
+    // is different and the adapter decides which from the frame's own kind
+    let template_frame = stack["body"]["stackFrames"][0]["id"].clone();
+    let frame = stack["body"]["stackFrames"][1]["id"].clone();
+
+    let layers = answer(
+        &mut client_writes,
+        &mut reader,
+        "scopes",
+        serde_json::json!({ "frameId": template_frame }),
+    );
+    let layer = layers["body"]["scopes"][0]["variablesReference"].clone();
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "variables",
+        serde_json::json!({ "variablesReference": layer }),
+    );
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "evaluate",
+        serde_json::json!({ "expression": "greeting|upper", "frameId": template_frame }),
+    );
 
     let scopes = answer(
         &mut client_writes,
@@ -556,8 +580,10 @@ fn snapshot(stop: u64, query: &bpd_core::StateQuery) -> bpd_core::Snapshot {
                     id: FrameId { stop, depth: 0 },
                     file: "/tmp/fake.py".to_string(),
                     line: 3,
-                    function: "main".to_string(),
-                    first_line: 1,
+                    kind: bpd_core::FrameKind::Python {
+                        function: "main".to_string(),
+                        first_line: 1,
+                    },
                 },
                 source: None,
                 scopes: query
@@ -690,15 +716,32 @@ impl Session for FakeSession {
                 held: vec![THREAD],
                 native: Vec::new(),
             }),
+            // two frames, and deliberately one of each kind: a client has to be
+            // able to tell a frame the interpreter has from one bpd synthesised
+            // over a django template node, and the only place that shows is a
+            // stack with both in it
             Request::Stack { stop, .. } => Response::Stack(Stack {
-                frames: vec![Frame {
-                    id: FrameId { stop, depth: 0 },
-                    file: "/tmp/fake.py".to_string(),
-                    line: 3,
-                    function: "main".to_string(),
-                    first_line: 1,
-                }],
-                depth: 1,
+                frames: vec![
+                    Frame {
+                        id: FrameId { stop, depth: 0 },
+                        file: "/tmp/page.html".to_string(),
+                        line: 2,
+                        kind: bpd_core::FrameKind::Template {
+                            node: "VariableNode".to_string(),
+                            python: FrameId { stop, depth: 1 },
+                        },
+                    },
+                    Frame {
+                        id: FrameId { stop, depth: 1 },
+                        file: "/tmp/fake.py".to_string(),
+                        line: 3,
+                        kind: bpd_core::FrameKind::Python {
+                            function: "main".to_string(),
+                            first_line: 1,
+                        },
+                    },
+                ],
+                depth: 2,
                 mode: Mode::NonStop,
             }),
             // the shape rather than the substance: that a script really drives
@@ -728,6 +771,29 @@ impl Session for FakeSession {
                 omitted: Vec::new(),
                 mode: Mode::NonStop,
             }),
+            Request::TemplateContext { .. } => {
+                Response::TemplateContext(bpd_core::TemplateContext {
+                    layers: vec![
+                        bpd_core::ContextLayer {
+                            index: 0,
+                            entries: vec![Entry {
+                                name: "greeting".to_string(),
+                                value: integer("1"),
+                            }],
+                            omitted: Vec::new(),
+                        },
+                        bpd_core::ContextLayer {
+                            index: 1,
+                            entries: vec![Entry {
+                                name: "greeting".to_string(),
+                                value: integer("2"),
+                            }],
+                            omitted: Vec::new(),
+                        },
+                    ],
+                    mode: Mode::NonStop,
+                })
+            }
             Request::Evaluate { .. } | Request::SetVariable { .. } => {
                 Response::Evaluated(Evaluated::Value {
                     value: integer("9"),

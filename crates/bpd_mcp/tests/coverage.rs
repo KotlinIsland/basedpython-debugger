@@ -154,8 +154,15 @@ fn a_control_tool_returns_the_stop_it_produced_and_nothing_arrives_as_an_event()
     assert_eq!(stepped["stop"], 2);
     // the frames come with it. an agent that had to ask again for where it
     // stopped would be paying the round trip this interface exists to remove
-    assert_eq!(stepped["frames"][0]["function"], "main");
+    // and every frame says which kind it is. frame 0 of this stack is a django
+    // template frame, which the interpreter has no frame for at all — an agent
+    // that read it as python would go looking for a `.html` file's locals
+    assert_eq!(stepped["frames"][0]["kind"], "template");
+    assert_eq!(stepped["frames"][0]["node"], "VariableNode");
+    assert_eq!(stepped["frames"][0]["python_frame"], 1);
     assert_eq!(stepped["frames"][0]["frame"], 0);
+    assert_eq!(stepped["frames"][1]["kind"], "python");
+    assert_eq!(stepped["frames"][1]["function"], "main");
 }
 
 #[test]
@@ -298,6 +305,10 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)]) -> Transcript 
     client.call(
         "variables",
         &serde_json::json!({ "scope": "local", "detail": { "children": 7 } }),
+    );
+    client.call(
+        "template_context",
+        &serde_json::json!({ "frame": 0, "detail": { "children": 7 } }),
     );
     client.call(
         "evaluate",
@@ -503,6 +514,7 @@ fn tool_order() -> Vec<&'static str> {
         "stop_the_world",
         "stack",
         "variables",
+        "template_context",
         "evaluate",
         "set_variable",
         "state",
@@ -681,8 +693,10 @@ fn snapshot(stop: u64, query: &bpd_core::StateQuery) -> bpd_core::Snapshot {
                     id: FrameId { stop, depth: 0 },
                     file: "/tmp/fake.py".to_string(),
                     line: 3,
-                    function: "main".to_string(),
-                    first_line: 1,
+                    kind: bpd_core::FrameKind::Python {
+                        function: "main".to_string(),
+                        first_line: 1,
+                    },
                 },
                 source: None,
                 scopes: query
@@ -751,20 +765,7 @@ impl Session for FakeSession {
         request: Request,
         _reporting: &mut dyn Reporting,
     ) -> Result<Response, Failed> {
-        {
-            let mut recorder = self.asked.lock().expect("the recorder is not poisoned");
-            recorder.requests.push(request.name());
-            match &request {
-                Request::SetBreakpoints { breakpoints } => {
-                    recorder.breakpoints.extend(breakpoints.iter().cloned());
-                }
-                Request::Variables { detail, .. }
-                | Request::Evaluate { detail, .. }
-                | Request::SetVariable { detail, .. } => recorder.details.push(*detail),
-                Request::Query { query, .. } => recorder.details.push(query.detail),
-                _ => {}
-            }
-        }
+        self.record(&request);
 
         Ok(match request {
             Request::SetBreakpoints { breakpoints } => Response::BreakpointsResolved {
@@ -817,17 +818,8 @@ impl Session for FakeSession {
                 held: vec![THREAD],
                 native: Vec::new(),
             }),
-            Request::Stack { stop, .. } => Response::Stack(Stack {
-                frames: vec![Frame {
-                    id: FrameId { stop, depth: 0 },
-                    file: "/tmp/fake.py".to_string(),
-                    line: 3,
-                    function: "main".to_string(),
-                    first_line: 1,
-                }],
-                depth: 1,
-                mode: Mode::NonStop,
-            }),
+            Request::Stack { stop, .. } => Response::Stack(stack(stop)),
+            Request::TemplateContext { .. } => Response::TemplateContext(template_context()),
             Request::Variables { .. } => Response::Variables(Variables {
                 entries: vec![Entry {
                     name: "total".to_string(),
@@ -854,7 +846,80 @@ impl Session for FakeSession {
     }
 }
 
+/// one frame of each kind
+///
+/// an agent has to be able to tell a frame the interpreter really has from one
+/// bpd synthesised over a django template node, and only a stack with both in
+/// it shows that it can
+fn stack(stop: u64) -> Stack {
+    Stack {
+        frames: vec![
+            Frame {
+                id: FrameId { stop, depth: 0 },
+                file: "/tmp/page.html".to_string(),
+                line: 2,
+                kind: bpd_core::FrameKind::Template {
+                    node: "VariableNode".to_string(),
+                    python: FrameId { stop, depth: 1 },
+                },
+            },
+            Frame {
+                id: FrameId { stop, depth: 1 },
+                file: "/tmp/fake.py".to_string(),
+                line: 3,
+                kind: bpd_core::FrameKind::Python {
+                    function: "main".to_string(),
+                    first_line: 1,
+                },
+            },
+        ],
+        depth: 2,
+        mode: Mode::NonStop,
+    }
+}
+
+/// two layers holding the same name, which is what a rendering has to show
+fn template_context() -> bpd_core::TemplateContext {
+    bpd_core::TemplateContext {
+        layers: vec![
+            bpd_core::ContextLayer {
+                index: 0,
+                entries: vec![Entry {
+                    name: "greeting".to_string(),
+                    value: integer("1"),
+                }],
+                omitted: Vec::new(),
+            },
+            bpd_core::ContextLayer {
+                index: 1,
+                entries: vec![Entry {
+                    name: "greeting".to_string(),
+                    value: integer("2"),
+                }],
+                omitted: Vec::new(),
+            },
+        ],
+        mode: Mode::NonStop,
+    }
+}
+
 impl FakeSession {
+    /// note what was asked, for the assertions that are about the asking
+    fn record(&self, request: &Request) {
+        let mut recorder = self.asked.lock().expect("the recorder is not poisoned");
+        recorder.requests.push(request.name());
+        match request {
+            Request::SetBreakpoints { breakpoints } => {
+                recorder.breakpoints.extend(breakpoints.iter().cloned());
+            }
+            Request::Variables { detail, .. }
+            | Request::Evaluate { detail, .. }
+            | Request::SetVariable { detail, .. } => recorder.details.push(*detail),
+            Request::Query { query, .. } => recorder.details.push(query.detail),
+            _ => {}
+        }
+    }
+
     /// the next stop, or the timeout shape once there are none left
     fn next_stop(&mut self) -> Running {
         match self.remaining.pop() {

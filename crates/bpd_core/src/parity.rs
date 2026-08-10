@@ -138,6 +138,10 @@ pub fn surface() -> Vec<Request> {
             scope: Scope::Local,
             detail: Detail::default(),
         },
+        Request::TemplateContext {
+            frame,
+            detail: Detail::default(),
+        },
         Request::Evaluate {
             frame,
             expression: "1".to_string(),

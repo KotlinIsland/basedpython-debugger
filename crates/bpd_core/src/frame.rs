@@ -26,18 +26,94 @@ impl std::fmt::Display for FrameId {
 }
 
 /// one frame of the stopped thread's stack
+///
+/// not every frame in a stack is a frame the interpreter has. a django template
+/// is not compiled to python, so the only way a template line can appear at all
+/// is for `bpd` to **synthesise** a frame for it — and a synthesised frame that
+/// looked like a python frame would be the debugger inventing something the
+/// program does not have. [`Frame::kind`] is how a client tells them apart, and
+/// everything that is true of only one of them lives in there rather than in a
+/// field the other has to fill in with something
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Frame {
     /// how to ask about this frame, for as long as this stop lasts
     pub id: FrameId,
-    /// the `co_filename` of the code it is running
+    /// the file the frame is running code from
+    ///
+    /// `co_filename` for a python frame, and the template's own path for a
+    /// template frame
     pub file: String,
-    /// the line it is on now, as `f_lineno` reports it
+    /// the line of that file the frame is on now
     pub line: u32,
-    /// `co_qualname`
-    pub function: String,
-    /// `co_firstlineno`, which separates two code objects with the same name
-    pub first_line: u32,
+    /// what the frame is, and what only that kind of frame has
+    ///
+    /// flattened on the wire, so a frame is one object carrying a `kind`
+    /// discriminator beside the fields that kind has — rather than a `kind`
+    /// holding a `kind`
+    #[serde(flatten)]
+    pub kind: FrameKind,
+}
+
+impl Frame {
+    /// what to call this frame in one word
+    ///
+    /// `co_qualname` for a python frame, and the django node class for a
+    /// template frame. it exists so a front end that has one place to put a
+    /// name does not have to decide what a template frame's is, and it is
+    /// **not** a substitute for reading [`Frame::kind`] — the two frames are
+    /// different things and a client that shows only this cannot tell
+    pub fn name(&self) -> &str {
+        match &self.kind {
+            FrameKind::Python { function, .. } => function,
+            FrameKind::Template { node, .. } => node,
+        }
+    }
+
+    /// the python frame this one is, or the one that renders it
+    ///
+    /// a template frame is synthesised over the `Node.render_annotated` frame
+    /// that is really running, and that frame is where python can be evaluated
+    /// and where python scopes can be read
+    pub const fn python(&self) -> FrameId {
+        match &self.kind {
+            FrameKind::Python { .. } => self.id,
+            FrameKind::Template { python, .. } => *python,
+        }
+    }
+}
+
+/// what a frame is
+///
+/// deliberately closed. a client that absorbed an unknown kind into a catch-all
+/// arm would be rendering a synthesised frame as a real one, which is the whole
+/// thing this enum exists to prevent
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FrameKind {
+    /// a frame the interpreter really has
+    Python {
+        /// `co_qualname`
+        function: String,
+        /// `co_firstlineno`, which separates two code objects with the same name
+        first_line: u32,
+    },
+
+    /// a frame `bpd` synthesised from a django template node
+    ///
+    /// the interpreter has no frame for it. django walks a tree of `Node`
+    /// objects and calls `Node.render_annotated` once per node, so what is
+    /// really running is that method — and the template line it is running is
+    /// only knowable from the node it was handed
+    Template {
+        /// the django node class the tag compiled to — `VariableNode`, `IfNode`
+        node: String,
+        /// the `Node.render_annotated` frame underneath this one
+        ///
+        /// python is evaluated there, and its scopes are read there. it is
+        /// always the frame one deeper than this one, and it is carried rather
+        /// than left to be worked out
+        python: FrameId,
+    },
 }
 
 /// where a name lives, which is not a detail a debugger may round off

@@ -129,6 +129,13 @@ pub(crate) struct Local {
     /// a `yield` is deliberately not: it suspends a frame rather than finishing
     /// it, and a step follows the frame it is in across a suspension
     pub(crate) py_return: bool,
+    /// every entry into it is reported
+    ///
+    /// `PY_START` is armed globally for code object discovery, and **locally**
+    /// for the two code objects the django template hooks are on — where the
+    /// question is not "has this code object been seen" but "which node is
+    /// about to render", which is a different question about every call
+    pub(crate) py_start: bool,
 }
 
 impl std::ops::BitOr for Local {
@@ -138,6 +145,7 @@ impl std::ops::BitOr for Local {
         Self {
             line: self.line || other.line,
             py_return: self.py_return || other.py_return,
+            py_start: self.py_start || other.py_start,
         }
     }
 }
@@ -264,6 +272,7 @@ pub(crate) fn watch_locally(
     for (armed, bit) in [
         (wanted.line, handles.line),
         (wanted.py_return, handles.py_return),
+        (wanted.py_start, handles.py_start),
     ] {
         if armed {
             events |= bit;

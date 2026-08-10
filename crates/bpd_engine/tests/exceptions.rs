@@ -254,7 +254,7 @@ fn a_raise_stops_in_the_frame_that_raised_it() {
         stack
             .frames
             .iter()
-            .map(|frame| frame.function.as_str())
+            .map(bpd_core::Frame::name)
             .collect::<Vec<_>>(),
         ["library", "main", "<module>"]
     );
