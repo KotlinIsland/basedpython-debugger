@@ -61,7 +61,11 @@ fn interpreter() -> &'static Capabilities {
 
 /// launch a fixture and require that it stopped before running anything
 fn launch(fixture: &Fixture) -> Debuggee {
-    match bpd_engine::launch(interpreter(), &fixture.path(), &[]) {
+    match bpd_engine::launch(
+        interpreter(),
+        &bpd_engine::Program::Script(fixture.path()),
+        &[],
+    ) {
         Ok(Launched::Stopped(debuggee)) => debuggee,
         Ok(Launched::ExitedBeforeStopping(status)) => {
             panic!("the debuggee exited with {status} instead of stopping")

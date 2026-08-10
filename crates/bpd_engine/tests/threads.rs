@@ -75,7 +75,11 @@ fn unlogged(record: LogRecord) {
 }
 
 fn launch(fixture: &Fixture) -> Debuggee {
-    match bpd_engine::launch(interpreter(), &fixture.path(), &[] as &[OsString]) {
+    match bpd_engine::launch(
+        interpreter(),
+        &bpd_engine::Program::Script(fixture.path()),
+        &[] as &[OsString],
+    ) {
         Ok(Launched::Stopped(debuggee)) => debuggee,
         Ok(Launched::ExitedBeforeStopping(status)) => {
             panic!("the debuggee exited with {status} instead of stopping")

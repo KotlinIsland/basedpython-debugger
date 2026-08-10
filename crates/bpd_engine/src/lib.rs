@@ -25,7 +25,7 @@ use bpd_core::{Request, Stop};
 use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
-pub use launch::{Debuggee, Launched, launch, launch_piped};
+pub use launch::{Debuggee, Launched, Program, launch, launch_piped};
 
 /// the result type for engine operations
 pub type Result<T, E = Error> = std::result::Result<T, E>;

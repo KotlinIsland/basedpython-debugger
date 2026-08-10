@@ -105,6 +105,16 @@ as a compatibility exercise. what has to be checked, every time:
     source line. the bytecode offsets a line covers differ between every release
     measured so far, which is why no test writes one down — the expected values
     come from `co_lines()` on the interpreter under test
+- **the names the interpreter puts in `__main__`**, for each of the three
+    launch forms. this has changed in each of the last three releases: 3.13
+    gives `__main__` an `__annotations__` and 3.14 does not, and 3.15 removed
+    `__cached__` from module namespaces entirely — from a script's `__main__`,
+    from runpy's, and from every imported module. `bpd` builds the program's
+    `__main__` and so has to match. it does it by **copying** what the
+    interpreter already put in its own, and by asking the running interpreter
+    whether a module it loaded from source carries `__cached__` — so what has to
+    be checked here is whether a new release moved a name that neither of those
+    two rules covers. `crates/bpd/tests/launch_parity.rs` fails when it has
 - the PEP 768 debug offsets, which are version specific by design
 - whether anything in the release makes a previously-required workaround
     unnecessary. removing one is as much a part of the upgrade as adding

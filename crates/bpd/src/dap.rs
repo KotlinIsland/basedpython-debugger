@@ -17,7 +17,7 @@ use std::sync::Arc;
 use bpd_core::python::Capabilities;
 use bpd_core::{Reporting, Request, Response, Stop};
 use bpd_dap::{Configuration, Failed, Launcher, ProgramOutput, Session, Started, Stream};
-use bpd_engine::{Debuggee, Launched};
+use bpd_engine::{Debuggee, Launched, Program};
 
 use crate::report_error;
 
@@ -66,7 +66,7 @@ impl Launcher for Engine {
 
         let launched = bpd_engine::launch_piped(
             &interpreter,
-            &configuration.program,
+            &Program::Script(configuration.program.clone()),
             &arguments,
             move |stdout, stderr| {
                 forward(stdout, Stream::Stdout, &output);

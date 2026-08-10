@@ -21,7 +21,6 @@
 
 use std::io;
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -40,12 +39,6 @@ const ENGINE_LOST: i32 = 70;
 /// the writing end, or nothing before `attach`
 static WRITER: Mutex<Option<TcpStream>> = Mutex::new(None);
 
-/// the program this agent was asked to run
-static TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
-
-/// whether the entry stop has already happened
-static STOPPED_AT_ENTRY: AtomicBool = AtomicBool::new(false);
-
 /// whether the program has finished
 ///
 /// the reader thread treats a closed connection as the debugger vanishing,
@@ -55,7 +48,7 @@ static STOPPED_AT_ENTRY: AtomicBool = AtomicBool::new(false);
 static FINISHED: AtomicBool = AtomicBool::new(false);
 
 /// connect to the engine, complete the handshake, and start reading
-pub(crate) fn attach(endpoint: &str, token_hex: &str, target: PathBuf) -> io::Result<()> {
+pub(crate) fn attach(endpoint: &str, token_hex: &str) -> io::Result<()> {
     let token = decode_token(token_hex)?;
     let mut stream = TcpStream::connect(endpoint)?;
 
@@ -69,7 +62,6 @@ pub(crate) fn attach(endpoint: &str, token_hex: &str, target: PathBuf) -> io::Re
     // be able to answer while it does
     let reading = stream.try_clone()?;
     *writer() = Some(stream);
-    *lock(&TARGET) = Some(target);
 
     std::thread::Builder::new()
         .name("bpd-control".to_string())
@@ -85,21 +77,6 @@ fn lock<T>(mutex: &'static Mutex<T>) -> MutexGuard<'static, T> {
 
 fn writer() -> MutexGuard<'static, Option<TcpStream>> {
     lock(&WRITER)
-}
-
-/// the program this agent was asked to run
-pub(crate) fn target() -> Option<PathBuf> {
-    lock(&TARGET).clone()
-}
-
-/// whether the entry stop has already happened
-pub(crate) fn has_stopped_at_entry() -> bool {
-    STOPPED_AT_ENTRY.load(Ordering::Relaxed)
-}
-
-/// record that the entry stop has happened, so it happens once
-pub(crate) fn mark_stopped_at_entry() {
-    STOPPED_AT_ENTRY.store(true, Ordering::Relaxed);
 }
 
 /// the program has ended, so a connection that closes now is not a loss

@@ -26,7 +26,7 @@ breakpoint is not already solid
 
 **launching**
 
-- [ ] `bpd` runs a script, a module (`-m`), and a package the same way the
+- [x] `bpd` runs a script, a module (`-m`), and a package the same way the
       interpreter would: same `__main__` identity, same `sys.argv`, same
       `sys.path[0]`, same exit code, same stdout and stderr interleaving
 - [ ] it runs on cpython 3.13 and 3.14, on linux, macos and windows, on gil and

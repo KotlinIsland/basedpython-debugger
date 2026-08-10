@@ -104,9 +104,42 @@ impl Fixture {
         path
     }
 
+    /// write a file anywhere under the fixture's directory, making the
+    /// directories above it
+    ///
+    /// what a package needs: `-m pkg` runs `pkg/__main__.py`, and a package is
+    /// not a module with a longer name — it is a directory the import system
+    /// treats differently
+    ///
+    /// # panics
+    ///
+    /// if the file cannot be written. a fixture that does not exist would make
+    /// every test over it assert against nothing
+    pub fn beside(&self, relative: &str, source: &str) -> PathBuf {
+        let path = self.directory().join(relative);
+        let parent = path
+            .parent()
+            .unwrap_or_else(|| panic!("{relative} names a file and so has a directory above it"));
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|error| panic!("could not create {}: {error}", parent.display()));
+        std::fs::write(&path, source)
+            .unwrap_or_else(|error| panic!("could not write {}: {error}", path.display()));
+        path
+    }
+
     /// the directory the program lives in, resolved
     pub fn directory(&self) -> &Path {
         &self.canonical
+    }
+
+    /// the name the program is importable by, which is what `-m` is given
+    pub fn module(&self) -> &str {
+        &self.module
+    }
+
+    /// the program's source, which is what `-c` is given
+    pub fn source(&self) -> &str {
+        &self.source
     }
 
     /// the program's path on disk
@@ -250,4 +283,25 @@ pub struct Observed {
     pub spec: Option<String>,
     /// `sys.executable`, which a re-exec would change
     pub executable: String,
+    /// every dunder name in `__main__.__dict__`
+    ///
+    /// the set differs by form, and it is the field that catches a `__main__`
+    /// built by hand missing something the interpreter's own leaves behind
+    pub dunders: Vec<String>,
+    /// every other name in `__main__.__dict__`
+    ///
+    /// the program's own, and nothing else. a `__main__` the debugger reused
+    /// from the module it bootstrapped through would carry the agent in here
+    pub globals: Vec<String>,
+    /// `__main__.__cached__`, which `-m` fills and the other two leave `None`
+    pub cached: Option<String>,
+    /// the name of `__main__.__loader__`, or `None` when there is not one
+    pub loader: Option<String>,
+    /// the type of `__main__.__builtins__`, which cpython makes the module
+    pub builtins: String,
+    /// whether `-P` or `PYTHONSAFEPATH` was in force
+    ///
+    /// carried so a test of safe path can assert that it really was on. one
+    /// that silently ran without it would prove nothing
+    pub safe_path: bool,
 }

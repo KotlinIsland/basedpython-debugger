@@ -7,14 +7,18 @@
 //! in rust. a python bootstrap file would be a second place for launch
 //! semantics to be subtly wrong, and would leave its own name in `sys.modules`
 //!
-//! the `-c` form is what makes this possible and is also its one hazard: it sets
-//! `sys.path[0]` to the empty string, which is not what a script wants. the
-//! agent repairs it before any user code runs, and
+//! the `-c` form is what makes this possible and is also its one hazard: it
+//! sets `sys.path[0]` to the empty string and `sys.argv[0]` to `-c`, which is
+//! what a command wants and is wrong for the other two. the agent repairs what
+//! the requested form needs before any user code runs, and
 //! `crates/bpd/tests/launch_parity.rs` compares the result against a bare
-//! interpreter rather than trusting that
+//! interpreter of each form rather than trusting that
+//!
+//! which form is requested reaches the agent in the environment, beside the
+//! target, because `-c` leaves no room for anything structured
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -797,14 +801,55 @@ pub enum Launched {
     ExitedBeforeStopping(ExitStatus),
 }
 
-/// launch a script under the debugger and stop before its first statement
+/// what the debuggee is asked to run, and how the interpreter should enter it
+///
+/// the three forms are not variations of one another. `sys.argv[0]`,
+/// `sys.path[0]` and `__main__` differ between them, and a launcher that treats
+/// one as a special case of another gets at least one of them wrong — so the
+/// choice is a closed enum a caller has to make, not a path with two optional
+/// flags beside it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Program {
+    /// `python <path>`, with the path exactly as it was typed
+    Script(PathBuf),
+    /// `python -m <module>`
+    Module(String),
+    /// `python -c <source>`
+    Command(String),
+}
+
+impl Program {
+    /// how the interpreter is entered
+    fn form(&self) -> env::Form {
+        match self {
+            Self::Script(_) => env::Form::Script,
+            Self::Module(_) => env::Form::Module,
+            Self::Command(_) => env::Form::Command,
+        }
+    }
+
+    /// what the agent is handed, which the form says how to read
+    fn target(&self) -> &std::ffi::OsStr {
+        match self {
+            Self::Script(path) => path.as_os_str(),
+            Self::Module(module) => module.as_ref(),
+            Self::Command(source) => source.as_ref(),
+        }
+    }
+}
+
+/// launch a program under the debugger and stop before its first statement
 ///
 /// returns once the agent has reported that it is stopped, so the caller holds a
 /// debuggee that has run none of the program yet. the debuggee's own stdout and
 /// stderr are bpd's, untouched — which is what makes a run under bpd
 /// indistinguishable from a bare one
-pub fn launch(interpreter: &Capabilities, script: &Path, args: &[OsString]) -> Result<Launched> {
-    start(interpreter, script, args, None)
+pub fn launch(
+    interpreter: &Capabilities,
+    program: &Program,
+    args: &[OsString],
+) -> Result<Launched> {
+    start(interpreter, program, args, None)
 }
 
 /// launch with the debuggee's own output in pipes rather than on bpd's streams
@@ -820,11 +865,11 @@ pub fn launch(interpreter: &Capabilities, script: &Path, args: &[OsString]) -> R
 /// on any program that says more than a pipe buffer holds
 pub fn launch_piped(
     interpreter: &Capabilities,
-    script: &Path,
+    program: &Program,
     args: &[OsString],
     on_spawn: impl FnOnce(std::process::ChildStdout, std::process::ChildStderr) + 'static,
 ) -> Result<Launched> {
-    start(interpreter, script, args, Some(Box::new(on_spawn)))
+    start(interpreter, program, args, Some(Box::new(on_spawn)))
 }
 
 /// what to do with the debuggee's own output the moment it exists
@@ -832,7 +877,7 @@ type OnSpawn = Box<dyn FnOnce(std::process::ChildStdout, std::process::ChildStde
 
 fn start(
     interpreter: &Capabilities,
-    script: &Path,
+    program: &Program,
     args: &[OsString],
     piped: Option<OnSpawn>,
 ) -> Result<Launched> {
@@ -853,8 +898,21 @@ fn start(
         .args(args)
         .env(env::ENDPOINT, endpoint.to_string())
         .env(env::TOKEN, listener.token_hex())
-        .env(env::TARGET, script)
-        .env("PYTHONPATH", staged.python_path());
+        .env(env::TARGET, program.target())
+        .env(env::FORM, program.form().as_str());
+
+    // the agent is imported by putting its staged directory in front of
+    // whatever `PYTHONPATH` this process inherited. **in front of** and not
+    // instead of: overwriting it would take away search path the program was
+    // given, which is a debugger changing what the program imports. the
+    // original goes along so the agent can put it back
+    let mut import_path = OsString::from(staged.python_path());
+    if let Some(inherited) = std::env::var_os("PYTHONPATH") {
+        import_path.push(if cfg!(windows) { ";" } else { ":" });
+        import_path.push(&inherited);
+        command.env(env::PYTHON_PATH, inherited);
+    }
+    command.env("PYTHONPATH", import_path);
 
     if piped.is_some() {
         command
