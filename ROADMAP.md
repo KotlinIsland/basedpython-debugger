@@ -208,6 +208,35 @@ exception breakpoints. see [the stopped state](docs/development/state.md),
 
 the adapter, and an editor driving it end to end
 
+**one move comes first, as its own change.** the contract says `bpd_core` owns
+the debug session and knows nothing about any wire format, and the tree has
+drifted: the session lives in `bpd_engine`, the whole domain vocabulary sits in
+`bpd_protocol::message`, and `bpd_core` holds only interpreter capabilities
+
+what forces the decision is not tidiness. **the parity rule is unenforceable as
+things stand.** the rule is that no capability exists in one adapter and not the
+other, and this page says a test enumerates the capabilities in `bpd_core` and
+fails when either adapter misses one — but a capability today is a *method*, and
+rust cannot enumerate methods. so capabilities become **data**: a
+`Request`/`Response` pair in `bpd_core` naming everything a client can ask
+
+the same enum then serves four consumers, which is the sign it is the right
+shape — DAP maps onto it, MCP tools map onto it, the debug script of M5.7 is a
+*tree* of it, and the parity test enumerates it
+
+- `bpd_core` — the domain vocabulary and the capability surface
+- `bpd_protocol` — depends on `bpd_core`; keeps only what is genuinely wire:
+    framing, the handshake, the token, the env names, the agent envelopes
+- `bpd_engine` — processes and the connection, implementing the session
+- `bpd_dap` and `bpd_mcp` — depend on `bpd_core` alone
+
+**there is no conversion layer between domain and wire types**, and that is
+deliberate. two models are worth it when the wire has to stay stable
+independently of the domain; here the agent and engine are built and shipped
+together and the handshake already refuses a mismatch outright. a mapping layer
+would buy a stability nobody needs at the price of a seam where a field can be
+dropped — which is the quiet wrongness the contract bans
+
 ### M5 — MCP
 
 the agent interface from
