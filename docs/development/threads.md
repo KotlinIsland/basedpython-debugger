@@ -59,7 +59,7 @@ is running different from the agent's, with nothing saying which is right
 ## the held thread still holds its locks
 
 this is the one that will be reported as a bug in `bpd`, so it is stated first
-and plainly.
+and plainly
 
 stop a thread inside `with lock:`, inside `logging`, or mid-import, and every
 other thread that wants the same lock piles up behind it. "all threads keep
@@ -68,7 +68,7 @@ from the outside it looks exactly like `bpd` hanging when it is the debuggee
 deadlocked on itself
 
 what `bpd` does about it is split in two, because what is knowable is split in
-two.
+two
 
 ### what is knowable: the import system
 
