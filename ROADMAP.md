@@ -60,7 +60,10 @@ breakpoint is not already solid
 
 **state**
 
-- [ ] the stack, with each frame's source location, on every thread
+- [x] the stack, with each frame's source location, for every **held** thread
+- [x] a thread that is not held has no stack reported for it, because reading
+      one off a running thread describes a moment that has gone. what it gets
+      instead is a census saying whether it moved, labelled as the sample it is
 - [x] locals, globals and closure variables read from the scope that was asked
       for
 - [x] a local can be **written**, and the write is visible to the program
