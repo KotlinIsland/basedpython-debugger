@@ -488,11 +488,20 @@ establishing it, both about which lines produce an event:
 
 that second one also means **restart frame is reachable for the topmost frame**
 by the same mechanism: jump to the first statement and write the original
-arguments back through the PEP 667 proxy. measured working. what it does not
-give is the DAP operation's other half — discarding the frames *above* a chosen
-one — because nothing in cpython pops a frame from outside it. so the two halves
-of this milestone are not equally reachable, and the entry should not imply they
-are
+arguments back through the PEP 667 proxy. measured working
+
+what it does not give is the DAP operation's other half — discarding the frames
+*above* a chosen one. that was checked rather than assumed: there is no public C
+API that pops a frame, `frame.clear()` answers `RuntimeError: cannot clear an
+executing frame`, and pydevd does not implement it either — `supportsRestartFrame`
+is `False` in the capabilities it advertises, and the only `restartFrame` in the
+whole vendored tree is the DAP schema's own definition
+
+the only remaining route is making each intervening frame **return**, and the
+honest ways to do that all run `finally` and `except` blocks on the way out —
+which is a different operation from discarding a frame and has to be described as
+one. so the two halves of this milestone are not equally reachable, and the entry
+should not imply they are
 
 both refuse loudly rather than approximating: a jump into a different block,
 into or out of a `try`, or across a `with` is either correct or rejected
