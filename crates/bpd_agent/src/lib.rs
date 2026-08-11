@@ -185,6 +185,19 @@ mod bpd_agent {
         BUILT_FOR
     }
 
+    /// the `major.minor` of the interpreter that imported this artifact, with a
+    /// `t` for a free-threaded build
+    ///
+    /// the other half of what [`verify_interpreter`] compares, and the half that
+    /// is **computed rather than stamped in**. it is exposed because a computed
+    /// value needs a test that reaches the same fact by another route, and the
+    /// other route is `sysconfig` in a separate process — the expensive answer
+    /// the agent deliberately does not ask for inside a debuggee
+    #[pyfunction]
+    fn running_on(python: Python<'_>) -> PyResult<String> {
+        running_version(python)
+    }
+
     /// the tool id this agent claims
     #[pyfunction]
     const fn debugger_tool_id() -> u8 {
@@ -689,16 +702,55 @@ fn running_version(python: Python<'_>) -> PyResult<String> {
     let major: u8 = info.getattr("major")?.extract()?;
     let minor: u8 = info.getattr("minor")?.extract()?;
 
-    // a free-threaded interpreter reports the same `version_info` as the gil
-    // build of the same release and is a different abi. `Py_GIL_DISABLED` is
-    // the build flag that separates them, and it is what `EXT_SUFFIX` carries
-    let free_threaded: bool = PyModule::import(python, "sysconfig")?
-        .getattr("get_config_var")?
-        .call1(("Py_GIL_DISABLED",))?
-        .is_truthy()?;
-
     Ok(format!(
         "{major}.{minor}{}",
-        if free_threaded { "t" } else { "" }
+        if free_threaded(python, major, minor)? {
+            "t"
+        } else {
+            ""
+        }
     ))
+}
+
+/// whether this interpreter is a `Py_GIL_DISABLED` build
+///
+/// a free-threaded interpreter reports the same `version_info` as the gil build
+/// of the same release and is a different abi, so this is half of what
+/// identifies the interpreter an agent may be loaded by
+///
+/// it is read off the **extension suffix**, which is built from `SOABI` and
+/// carries the interpreter tag — `cpython-314t-darwin` where a gil build has
+/// `cpython-314-darwin`, and `cp314t` where windows has `cp314`. that is the
+/// same build flag `sysconfig.get_config_var("Py_GIL_DISABLED")` reports, from a
+/// module every interpreter has already imported: asking `sysconfig` instead
+/// pulls **twenty-nine** modules into the debuggee that a bare run does not
+/// have, `re`, `enum`, `collections`, `functools` and `threading` among them.
+/// see [launching](../../../docs/development/launching.md)
+///
+/// `sys._is_gil_enabled()` is not the answer, and neither is `sys.flags.gil`.
+/// both report the gil as *on* for a free-threaded build that re-enabled it —
+/// which is exactly what importing an extension that has not declared itself
+/// free-threading safe does, and a mismatched agent is precisely such an
+/// extension. they would answer this wrongly in the one case it is asked for
+fn free_threaded(python: Python<'_>, major: u8, minor: u8) -> PyResult<bool> {
+    let suffix: String = PyModule::import(python, "_imp")?
+        .getattr("extension_suffixes")?
+        .call0()?
+        .get_item(0)?
+        .extract()?;
+
+    let tag = format!("{major}{minor}");
+    if suffix.contains(&format!("{tag}t")) {
+        return Ok(true);
+    }
+    if suffix.contains(&tag) {
+        return Ok(false);
+    }
+    Err(PyImportError::new_err(format!(
+        "this interpreter's extension suffix is `{suffix}`, which does not \
+         carry the `{tag}` tag every cpython build puts in it. that tag is how \
+         a free-threaded build is told apart from a gil one, and the two are \
+         different abis — so there is nothing to check this agent against and \
+         guessing would mean running against a layout it was not compiled for"
+    )))
 }

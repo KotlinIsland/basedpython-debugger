@@ -129,6 +129,22 @@ is the check that actually decides, and
 `crates/bpd_agent/tests/loads.rs` asserts that no interpreter other than the one
 it was built for ever gets past it
 
+what it compares is a stamp from `build.rs` against a value **computed at
+runtime**, so the computed half needs ground truth of its own:
+`the_interpreter_the_agent_is_running_on_is_the_one_sysconfig_reports` puts
+`bpd_agent.running_on()` beside `sysconfig.get_config_var("Py_GIL_DISABLED")` in
+a separate process. that is the expensive answer the agent deliberately does not
+ask for inside a debuggee — see [launching](launching.md) — which is exactly what
+makes it the right route to the same fact
+
+**half of that guard can only be made to fail on a free-threaded build**, and
+that is written down rather than left looking like coverage. on a gil build the
+right answer and "always a gil build" are the same answer, so collapsing the
+detection changes nothing there. built with `PYO3_PYTHON=python3.14t` it fails
+immediately, and takes the rest of `loads.rs` with it — `matching_interpreter()`
+selects on `verify_interpreter` succeeding, so an agent that misreports the
+interpreter it is running on matches nothing. CI gives `3.14t` its own job
+
 the agent's own tests drive a real interpreter with the built artifact staged on
 `PYTHONPATH`, because nothing in the workspace can link a `cdylib`.
 `bpd_test::agent::staged()` does the staging — the rename cargo's artifact name
@@ -193,6 +209,15 @@ letting runpy skip the `argv[0]` rewrite, not copying `__main__` from the one
 the interpreter built, spelling the working directory out under `-c`, or taking
 the module's own directory instead of the working one each fail between two and
 thirteen
+
+one of them is not a comparison of two values but of two **sets**.
+`the_only_modules_a_debuggee_gains_are_the_ones_written_down` prints
+`sys.modules` from the same program bare and under `bpd` and takes the
+difference, which is the whole of the fingerprint the debugger leaves behind. the
+names that survive are written down in the test with the reason each one is
+there, and both directions fail: a module that appears and is not on the list, or
+a name on the list that no form produces any more. see
+[launching](launching.md) — the delta was 32 names and is 2
 
 **one of those guards can only be made to fail on an interpreter this project
 does not support yet**, and that is written down rather than left looking like
