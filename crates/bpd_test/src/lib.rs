@@ -33,6 +33,10 @@ use bpd_core::python::{Capabilities, MINIMUM_SUPPORTED};
 /// ordered most specific first, so the deduplication below keeps `python3.14`
 /// rather than whichever `python3` happens to point at the same binary
 const CANDIDATES: &[&str] = &[
+    // below the minimum on purpose. a test that asserts on a refusal needs an
+    // interpreter to be refused, and 3.12 is the newest release bpd turns away
+    // — the one whose refusal a user is most likely to meet
+    "python3.12",
     "python3.13",
     "python3.13t",
     "python3.14",
@@ -62,6 +66,25 @@ impl Interpreters {
     /// refusal needs one
     pub fn all(&self) -> &[Capabilities] {
         &self.found
+    }
+
+    /// the interpreters `bpd` refuses to debug
+    ///
+    /// the other half of [`Self::supported`], and not the same as "everything
+    /// else": an interpreter that never answered the probe is in neither,
+    /// because nothing is known about it to assert on
+    ///
+    /// there is no `require_unsupported` beside [`Self::require`]. the tests
+    /// that use this prove nothing on a machine with no interpreter older than
+    /// the minimum, and that is written down in `docs/development/testing.md`
+    /// rather than made into a failure — making it one would put an extra
+    /// interpreter in the way of every `cargo test` on every platform, and one
+    /// of those platforms has no name a probe could find it by
+    pub fn unsupported(&self) -> Vec<&Capabilities> {
+        self.found
+            .iter()
+            .filter(|capabilities| capabilities.require_debuggable().is_err())
+            .collect()
     }
 
     /// the interpreters `bpd` can actually drive
