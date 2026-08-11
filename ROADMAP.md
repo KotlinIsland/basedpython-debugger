@@ -481,6 +481,18 @@ name one, and one that names none is the only session there is — refused rathe
 than picked when there is more than one. there is still one session; see
 [sessions](docs/development/sessions.md)
 
+the **transport** a second session would need is built too, and it is a complete
+feature on its own: `bpd dap --listen` speaks the protocol on a loopback socket
+instead of stdin and stdout, which is what a client that did not spawn the
+adapter needs. `startDebugging` only does the signalling — the client it asks to
+start a second session has to be able to reach a second adapter, and this is how.
+none of the child half is in it: one session, one connection, exactly what
+`bpd dap` already does, reachable a second way. what it does add is an attack
+surface, since reaching that port is running code as whoever started `bpd`, so it
+binds loopback with no address to widen and refuses a connection that cannot
+present the session token it printed when it bound. see
+[the two transports](docs/development/dap.md#the-two-transports)
+
 ### M8 — attach
 
 PEP 768, implemented as the wire protocol in rust rather than through

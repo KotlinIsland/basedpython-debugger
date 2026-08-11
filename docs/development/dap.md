@@ -1,8 +1,8 @@
 # the DAP adapter
 
 DAP is how an editor plugs into a debugger — vs code, pycharm and neovim all
-speak it. `bpd dap` is the whole of what `bpd` says to one, over stdin and
-stdout with `Content-Length` framing
+speak it. `bpd dap` is the whole of what `bpd` says to one, with
+`Content-Length` framing on stdin and stdout, or on a loopback socket
 
 it is a **translation and nothing else**. a DAP request becomes a
 `bpd_core::Request`, the answer is rendered, and no decision about the program
@@ -10,6 +10,112 @@ is made on the way. `bpd_dap` depends on `bpd_core` alone; the `bpd` binary is
 where `bpd_engine` is put behind it. an adapter that could reach the engine
 would be an adapter shaped by how the agent happens to report something, and
 how the agent reports something would become what a DAP client sees
+
+## the two transports
+
+DAP defines two, and this speaks both. they end at the same `bpd_dap::serve`: a
+transport is where a client's bytes come from, and nothing past that point knows
+which one it was
+
+- **stdin and stdout**, with no flag. the adapter is spawned by its client,
+    which is what an editor does
+- **a loopback socket**, with `--listen`, for a client that did **not** spawn the
+    adapter. a script, a tooling integration, and the second session a
+    `startDebugging` reverse request has a client start
+
+a transport is not a capability of `bpd_core`, so this adds nothing to the parity
+table and nothing to MCP. `bpd_core::Request` is unchanged, `surface()` is
+unchanged, and `reach_of` answers the same for every capability whichever socket
+the bytes arrived on. "an agent can do everything a human can" is about what can
+be **asked**; how the asking arrives is below that line — see
+[the parity rule](#the-parity-rule-both-sided)
+
+```sh
+bpd dap --listen 0
+{"listening":{"header":"x-bpd-token","host":"127.0.0.1","port":51241,"token":"5b1c…"}}
+```
+
+one line of json on stdout, before anything is accepted, and then stdout is
+never written to again. `--listen` is the one transport where stdout is not the
+protocol, which is what makes reporting the port possible at all
+
+`0` binds a port the operating system chooses and the line says which one it
+got. that is the point of it: a client that had to pick a number would be racing
+every other program on the machine for it, and a client that had to guess when
+the adapter was ready would be racing the adapter
+
+one client at a time. a session **is** the connection — that is DAP's own model,
+and it is why a second debuggee is a second session rather than a second field on
+a request. a second connection is **answered**, with an `output` event saying so
+and then a close, rather than queued: a queue is indistinguishable from a hang
+at the other end
+
+### why a socket needs a token and stdin does not
+
+a pipe has exactly one writer and whoever spawned the adapter chose it. a
+listening socket has whoever gets there first, and **a DAP message runs the
+debuggee's own code** — a breakpoint condition is an expression evaluated in the
+program. reaching this port is code execution as whoever started `bpd`. so:
+
+- **loopback, and only loopback.** `--listen` takes a *port*. there is no
+    address to widen, no flag that would offer one, and no default that something
+    else could change: a wildcard bind is not expressible rather than merely
+    defaulted away from
+- **a token, checked before anything on the connection is acted on.** loopback is
+    not a trust boundary. every local user reaches it, and so does every container
+    sharing the network namespace. the sharper case is a browser tab: a page can
+    `fetch` a `text/plain` POST at `127.0.0.1` with no preflight, and this framing
+    is HTTP shaped enough that a request line with a colon in its path parses as
+    an ordinary header — so the body after it would be a whole DAP message. what
+    the page cannot do is obtain the token, because the same origin policy stops
+    it reading anything back
+
+a client presents it as one header line on its first message, alongside the
+`Content-Length` it was going to send anyway:
+
+```text
+Content-Length: 76
+X-Bpd-Token: 5b1c…
+
+{"seq":1,"type":"request","command":"initialize","arguments":{}}
+```
+
+it authenticates the *connection*, so it goes on the first message and only the
+first. the check is constant time across the token's bytes, and a refusal never
+quotes back what was presented — something on loopback is guessing, and telling
+it how close it got would be absurd
+
+a connection that fails to authenticate is told why and closed, and **the
+listener carries on waiting**. that is deliberate: if a bad connection ended the
+adapter, or took the one client slot, then anything that could reach the port
+could stop the session someone was starting. a connection that presents nothing
+at all is dropped after ten seconds for the same reason. every refusal is
+printed on the adapter's stderr, naming the peer — a refusal nobody sees is a
+session that mysteriously never starts
+
+what this does **not** defend against is a local process that connects, stalls,
+and repeats: authentication is serialised, so a client can be kept waiting ten
+seconds at a time. that is a denial of service against a session the person is
+watching start, with the reason on stderr each time, and it is not code
+execution
+
+### is this `bpd_protocol`'s handshake?
+
+it is the same *problem* — a loopback listener whose peer gets to run code — and
+a deliberately different answer, because the peer is different
+
+`bpd_protocol` connects `bpd` to `bpd`. both ends are the same build, so the
+handshake can be magic bytes, an exact protocol version and 32 raw bytes, and a
+peer that is not this session's agent is refused before it sends a frame. here
+the peer is a **third party** that speaks DAP and nothing else, so the token
+rides in the framing the transport already has and a client adds one header line
+rather than learning a second protocol. the sizes match on purpose: 32 bytes of
+the operating system's randomness, hex encoded
+
+the two tokens are separate values with separate lifetimes. this one
+authenticates a client to the adapter; the agent's authenticates the debuggee to
+the engine. one shared between them would make a DAP client that has this token
+able to open the debuggee's control plane directly
 
 ## setting it up in an editor
 
@@ -241,7 +347,10 @@ nobody asked about gets its own `stopped` event
 the adapter's stdout **is** the protocol, so the debuggee cannot share it: one
 `print` in the middle of a message and every message after it is unreadable. the
 program is launched with pipes and each line becomes an `output` event, `stdout`
-and `stderr` categorised separately
+and `stderr` categorised separately. that is unconditional rather than a thing
+`--listen` relaxes — under it stdout carries the line saying where the adapter
+bound, and a `print` landing in the middle of *that* is a client that cannot
+find the port
 
 what `bpd` itself has to say goes on the **`console`** category instead, and the
 one thing that currently does is a python child the program started. `console`

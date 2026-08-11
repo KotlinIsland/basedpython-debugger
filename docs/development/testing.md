@@ -404,6 +404,15 @@ and `crates/bpd/tests/mcp.rs` spawn the front end as a real process against a
 real interpreter; and `crates/bpd/tests/parity.rs` fails when a capability is
 out of one adapter's reach and nobody has written down why
 
+`bpd dap` has [two transports](dap.md#the-two-transports), and every scenario in
+`crates/bpd/tests/dap.rs` is a function taking which one — a macro gives each
+scenario a `#[test]` on stdio and one on a loopback socket. so the assertions
+that prove a session works exist **once** and are run over both. two copies kept
+in step by hand would be a second transport nobody is testing, quietly answering
+something else, and there is no way to add a scenario here without both entries
+appearing. what is the socket's alone — what it prints when it binds, and the
+connections it refuses — is tested on its own at the bottom of that file
+
 stepping, pausing and the exception breakpoints are covered by
 `crates/bpd_engine/tests/stepping.rs` and
 `crates/bpd_engine/tests/exceptions.rs`. every call a step might or might not

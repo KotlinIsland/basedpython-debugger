@@ -16,6 +16,23 @@ use std::io::{BufRead, BufReader, Read, Write};
 /// header rules and a client is entitled to spell it `content-length`
 const CONTENT_LENGTH: &str = "content-length";
 
+/// the header a client presents this session's token in
+///
+/// a header rather than a field of the `initialize` request, because it
+/// authenticates the **connection** and so has to be checked before anything
+/// that arrived on it is acted on. the framing is the language server
+/// protocol's, whose header block is `Name: value` lines and which says nothing
+/// about `Content-Length` being the only one — see [`authenticate`], and
+/// `docs/development/dap.md` for why a socket needs one at all
+pub const TOKEN_HEADER: &str = "x-bpd-token";
+
+/// the most a header block may occupy before the connection is refused
+///
+/// a peer that streams header lines and never sends the blank one would
+/// otherwise grow this process's memory until it died. eight kilobytes is
+/// enormous for two headers
+const MAX_HEADER_BYTES: usize = 8 << 10;
+
 /// a message that could not be read from or written to the client
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -64,6 +81,44 @@ pub enum Error {
         expected: usize,
     },
 
+    /// the headers went on past [`MAX_HEADER_BYTES`] without ending
+    #[error(
+        "a message's headers passed {MAX_HEADER_BYTES} bytes without the blank \
+         line that ends them. the headers began: {headers}"
+    )]
+    HeadersTooLong {
+        /// the headers as far as they were read
+        headers: String,
+    },
+
+    /// the connection closed before it presented anything
+    #[error("the connection closed before it presented a `{TOKEN_HEADER}` header")]
+    Silent,
+
+    /// the connection sent a message carrying no token
+    ///
+    /// this adapter is listening on a socket when it asks for one, and a
+    /// message that reaches it is a message that runs the debuggee's own code —
+    /// a breakpoint condition is an expression evaluated in the program
+    #[error(
+        "the connection sent a message with no `{TOKEN_HEADER}` header, and a \
+         socket needs one: reaching this port is running code as whoever \
+         started bpd. the token is the `token` field `bpd dap --listen` printed \
+         when it bound"
+    )]
+    NoToken,
+
+    /// the connection presented a token that is not this session's
+    ///
+    /// what was presented is never quoted back. something on loopback is
+    /// guessing, and telling it how close it got would be absurd
+    #[error(
+        "the connection presented an `{TOKEN_HEADER}` that is not this \
+         session's token. the token is the `token` field `bpd dap --listen` \
+         printed when it bound"
+    )]
+    WrongToken,
+
     /// the body was not a DAP message
     #[error("a {length} byte message body was not a DAP message: {text}")]
     Body {
@@ -101,11 +156,119 @@ pub struct Incoming {
     pub arguments: serde_json::Value,
 }
 
+/// one message's header block, as it arrived
+#[derive(Debug, Default)]
+struct Block {
+    /// how long the body is, when a `Content-Length` was given
+    length: Option<usize>,
+    /// the token the connection presented, when one was given
+    token: Option<String>,
+    /// every header line, for a failure to quote back
+    seen: String,
+}
+
+/// read one header block, leaving its bytes in `raw`
+///
+/// `raw` is byte exact and the caller owns it, which is what lets
+/// [`authenticate`] check a connection's token and then hand the untouched
+/// message on to the framing. `Ok(None)` means nothing at all arrived, which is
+/// the one clean way for a connection to end
+fn read_header_block<R: BufRead>(input: &mut R, raw: &mut Vec<u8>) -> Result<Option<Block>, Error> {
+    raw.clear();
+    let mut block = Block::default();
+
+    loop {
+        let start = raw.len();
+        let read = input
+            .read_until(b'\n', raw)
+            .map_err(|source| Error::Connection { source })?;
+        if read == 0 {
+            // the peer hung up between messages, which is how a session ends.
+            // hanging up part way through the headers is not, and is what the
+            // `start` check separates
+            return if start == 0 {
+                Ok(None)
+            } else {
+                Err(Error::NoContentLength {
+                    headers: block.seen,
+                })
+            };
+        }
+        if raw.len() > MAX_HEADER_BYTES {
+            return Err(Error::HeadersTooLong {
+                headers: block.seen,
+            });
+        }
+
+        let line = String::from_utf8_lossy(&raw[start..]);
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            return Ok(Some(block));
+        }
+
+        block.seen.push_str(line);
+        block.seen.push_str("; ");
+
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(Error::Header {
+                line: line.to_string(),
+            });
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if name.eq_ignore_ascii_case(CONTENT_LENGTH) {
+            block.length = Some(value.parse().map_err(|_| Error::BadContentLength {
+                value: value.to_string(),
+            })?);
+        } else if name.eq_ignore_ascii_case(TOKEN_HEADER) {
+            block.token = Some(value.to_string());
+        }
+    }
+}
+
+/// check the token a connection presents, without consuming its first message
+///
+/// the header block it read comes back, so the caller can put those bytes in
+/// front of the rest of the stream and let [`Reader`] frame the message whole.
+/// nothing on the connection is acted on before this returns
+///
+/// the comparison is constant time across the token's bytes. the **length** is
+/// compared first and separately, which leaks only how long this build's tokens
+/// are — a compiled-in constant that is already public
+pub fn authenticate<R: BufRead>(input: &mut R, expected: &str) -> Result<Vec<u8>, Error> {
+    assert!(
+        !expected.is_empty(),
+        "a session token is what separates this adapter's client from any other \
+         local process, and an empty one separates nothing"
+    );
+
+    let mut raw = Vec::new();
+    let Some(block) = read_header_block(input, &mut raw)? else {
+        return Err(Error::Silent);
+    };
+    let Some(presented) = block.token else {
+        return Err(Error::NoToken);
+    };
+
+    if presented.len() != expected.len() {
+        return Err(Error::WrongToken);
+    }
+    let mut difference = 0u8;
+    for (presented, expected) in presented.bytes().zip(expected.bytes()) {
+        difference |= presented ^ expected;
+    }
+    if difference != 0 {
+        return Err(Error::WrongToken);
+    }
+
+    Ok(raw)
+}
+
 /// the reading end of a DAP connection
 #[derive(Debug)]
 pub struct Reader<R> {
     input: BufReader<R>,
-    headers: String,
+    headers: Vec<u8>,
     body: Vec<u8>,
 }
 
@@ -114,15 +277,20 @@ impl<R: Read> Reader<R> {
     pub fn new(input: R) -> Self {
         Self {
             input: BufReader::new(input),
-            headers: String::new(),
+            headers: Vec::new(),
             body: Vec::new(),
         }
     }
 
     /// the next message, or `None` once the client has hung up
     pub fn next_message(&mut self) -> Result<Option<Incoming>, Error> {
-        let Some(length) = self.read_headers()? else {
+        let Some(block) = read_header_block(&mut self.input, &mut self.headers)? else {
             return Ok(None);
+        };
+        let Some(length) = block.length else {
+            return Err(Error::NoContentLength {
+                headers: block.seen,
+            });
         };
 
         self.body.clear();
@@ -150,53 +318,6 @@ impl<R: Read> Reader<R> {
                 text: text.chars().take(QUOTED).collect(),
                 source,
             })
-    }
-
-    /// the `Content-Length` of the next message, or `None` at a clean end
-    fn read_headers(&mut self) -> Result<Option<usize>, Error> {
-        let mut length = None;
-        let mut seen = String::new();
-
-        loop {
-            self.headers.clear();
-            let read = self
-                .input
-                .read_line(&mut self.headers)
-                .map_err(|source| Error::Connection { source })?;
-            if read == 0 {
-                // the client hung up between messages, which is how a session
-                // ends. hanging up part way through the headers is not, and is
-                // what the empty-`seen` check separates
-                return if seen.is_empty() {
-                    Ok(None)
-                } else {
-                    Err(Error::NoContentLength { headers: seen })
-                };
-            }
-
-            let line = self.headers.trim_end_matches(['\r', '\n']);
-            if line.is_empty() {
-                return match length {
-                    Some(length) => Ok(Some(length)),
-                    None => Err(Error::NoContentLength { headers: seen }),
-                };
-            }
-
-            seen.push_str(line);
-            seen.push_str("; ");
-
-            let Some((name, value)) = line.split_once(':') else {
-                return Err(Error::Header {
-                    line: line.to_string(),
-                });
-            };
-            if name.trim().eq_ignore_ascii_case(CONTENT_LENGTH) {
-                let value = value.trim();
-                length = Some(value.parse().map_err(|_| Error::BadContentLength {
-                    value: value.to_string(),
-                })?);
-            }
-        }
     }
 }
 
@@ -341,6 +462,80 @@ mod tests {
     fn a_length_that_is_not_a_number_says_what_it_was() {
         let error = read("Content-Length: soon\r\n\r\n").expect_err("`soon` is not a length");
         assert!(error.to_string().contains("soon"), "said {error}");
+    }
+
+    /// a token of the shape [`crate::listen`] mints, so the tests below compare
+    /// something the same length as the real thing
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn presenting(header: &str) -> Result<Vec<u8>, Error> {
+        let body = r#"{"seq":1,"type":"request","command":"initialize"}"#;
+        let framed = format!("Content-Length: {}\r\n{header}\r\n{body}", body.len());
+        authenticate(&mut BufReader::new(framed.as_bytes()), TOKEN)
+    }
+
+    #[test]
+    fn an_authenticated_connection_keeps_the_message_it_was_authenticated_by() {
+        let raw = presenting(&format!("X-Bpd-Token: {TOKEN}\r\n"))
+            .expect("the connection presented this session's token");
+
+        // the point of handing the bytes back: the framing reads the first
+        // message whole, so authenticating costs the client nothing
+        let mut replayed = Vec::new();
+        replayed.extend_from_slice(&raw);
+        replayed
+            .extend_from_slice(br#"{"seq":1,"type":"request","command":"initialize"}"#.as_slice());
+        let message = Reader::new(replayed.as_slice())
+            .next_message()
+            .expect("the frame is whole")
+            .expect("there is a message");
+        assert_eq!(message.command.as_deref(), Some("initialize"));
+    }
+
+    #[test]
+    fn the_token_header_is_matched_the_way_every_other_header_is() {
+        presenting(&format!("x-BPD-token:   {TOKEN}  \r\n"))
+            .expect("a header name is case insensitive and a value is trimmed");
+    }
+
+    #[test]
+    fn a_connection_with_no_token_or_the_wrong_one_is_refused_and_told_where_to_get_it() {
+        let missing = presenting("").expect_err("nothing presented a token");
+        assert!(matches!(missing, Error::NoToken), "got {missing:?}");
+        assert!(
+            missing.to_string().contains("--listen"),
+            "the refusal has to say where the token comes from, and said {missing}"
+        );
+
+        let wrong = presenting("X-Bpd-Token: 0000\r\n").expect_err("that is not the token");
+        assert!(matches!(wrong, Error::WrongToken), "got {wrong:?}");
+
+        // one byte out, and the same length, which is the case a length check
+        // alone would let through
+        let near = format!("X-Bpd-Token: {}0\r\n", &TOKEN[..TOKEN.len() - 1]);
+        let close = presenting(&near).expect_err("one byte out is out");
+        assert!(matches!(close, Error::WrongToken), "got {close:?}");
+        assert!(
+            !close.to_string().contains(&TOKEN[..8]),
+            "a refusal must not quote the token back at whoever is guessing: {close}"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_says_nothing_at_all_is_named_as_that() {
+        let silent = authenticate(&mut BufReader::new("".as_bytes()), TOKEN)
+            .expect_err("a peer that connects and hangs up presented nothing");
+        assert!(matches!(silent, Error::Silent), "got {silent:?}");
+    }
+
+    #[test]
+    fn headers_that_never_end_are_bounded_rather_than_read_forever() {
+        let endless = "X-Filler: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n".repeat(1000);
+        let error = read(&endless).expect_err("the header block never ends");
+        assert!(
+            matches!(error, Error::HeadersTooLong { .. }),
+            "got {error:?}"
+        );
     }
 
     #[test]
