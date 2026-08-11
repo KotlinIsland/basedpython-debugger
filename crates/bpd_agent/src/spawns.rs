@@ -187,9 +187,22 @@ thread_local! {
 
 /// cpython's C audit hook signature
 ///
-/// a non-zero return makes the audited operation **fail**, which is the only
-/// influence a hook has over what the program does — there is no way to rewrite
-/// the arguments, and this one always returns success
+/// a non-zero return makes the audited operation **fail**. this one always
+/// returns success
+///
+/// the return value is not the only influence a hook has, and it is worth
+/// writing down that it was checked rather than assumed. the argument tuple is
+/// immutable but its *contents* are not, and `subprocess.Popen` raises the
+/// event with the argument list it then goes on to use — measured on 3.13, 3.14
+/// and 3.15, appending to that list puts the extra argument in the child, and
+/// the caller's own list is untouched because what is audited is already a copy
+///
+/// so a hook could rewrite a spawn invisibly, and this one must not. it is not
+/// a channel for propagating a session into a child either: it works only
+/// because of where cpython happens to raise the event relative to where it
+/// reads the list, which is an implementation detail no document promises. a
+/// debugger that changed a program's child process on the strength of that
+/// would be guessing, in the one place a wrong guess is unrecoverable
 type AuditHook = unsafe extern "C" fn(
     event: *const c_char,
     args: *mut pyo3::ffi::PyObject,
