@@ -493,6 +493,48 @@ binds loopback with no address to widen and refuses a connection that cannot
 present the session token it printed when it bound. see
 [the two transports](docs/development/dap.md#the-two-transports)
 
+**the reconnect itself is scoped and deliberately parked**, and the scoping is
+the useful artefact. it was attempted twice and abandoned twice before any code
+was written, which was the right answer both times: what it needs is five pieces,
+of which the one originally asked for is about a fifth
+
+1. **the agent's shared statics made fork-replaceable.** the child must keep the
+    stop counter it inherited — resetting it to one, the obvious hygiene move,
+    makes frame ids collide across sessions immediately — and that counter lives
+    *inside* a mutex it must not take, because on a free-threaded build a program
+    thread can hold it at the instant of a fork. today's disarm path is safe
+    precisely because it locks nothing: it is atomics and closing descriptors by
+    number. a reconnect cannot be
+1. **the engine holding two sessions** — the listener kept alive rather than
+    dropped with the local it is bound to, a poll across sockets, a `Running`
+    outcome for "the connection closed and the exit is not mine to read" because
+    bpd is not a forked child's parent and cannot reap it, and `terminate`
+    refusing by name on a child session rather than silently doing nothing
+    through a `std::process::Child` that does not exist
+1. **the child reconnecting** — opt-in, decided at fork time from a flag the
+    engine set earlier, because the child forks before anyone could be asked
+1. **MCP's `sessions` tool and a session argument**
+1. **DAP's mediator and multi-connection listener.** this is the one that is a
+    transport rewrite rather than a feature: the run loop parks inside the engine
+    with no deadline, so two connections over one debuggee means one of them is
+    holding it while the other cannot ask anything — including the resume. and
+    the listener as built serves exactly one client by design, refusing the rest
+    with a message that says a second session is a second `bpd dap --listen`
+
+it cannot ship in halves. MCP alone would be a capability DAP lacks, and the
+justification for that would have to claim DAP's protocol cannot carry it, which
+is false — `startDebugging` exists. **a child that can stop and cannot be
+resumed is a hung program**, which is why the front ends are not optional and why
+neither attempt shipped the engine half on its own
+
+one decision is taken in advance so it is not re-argued: the second connection
+uses the **parent's listener and token**, and the busy refusal goes. one lifetime
+to get right, and a client that reached the port is already authenticated to this
+adapter
+
+until this is built `--noreload` is the answer for django, and it is documented
+rather than implied
+
 ### M8 — attach
 
 PEP 768, implemented as the wire protocol in rust rather than through
