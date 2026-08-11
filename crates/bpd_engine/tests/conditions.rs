@@ -998,6 +998,10 @@ impl bpd_core::Reporting for Counted {
     fn spawned(&mut self, child: bpd_core::Spawn) {
         panic!("this program starts no child, and it started {child}")
     }
+
+    fn blind_to(&mut self, blindspot: bpd_core::Blindspot) {
+        panic!("this interpreter announced a blind spot nothing here is about: {blindspot}")
+    }
 }
 
 /// a program whose condition is the first thing to run another module

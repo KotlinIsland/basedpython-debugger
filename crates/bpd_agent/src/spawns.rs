@@ -27,31 +27,45 @@
 //! is hotter than it looks: importing `multiprocessing` alone raises over two
 //! hundred of them
 //!
-//! ## which events, measured rather than assumed
+//! ## which events, measured rather than assumed — **and they differ by release**
 //!
-//! against 3.13, 3.14 and 3.15, watching everything:
+//! recorded by a hook that kept every event of every name, on 3.13.15, 3.14.7
+//! and 3.15, on posix:
 //!
-//! | what the program does             | what it raises                          |
-//! | --------------------------------- | --------------------------------------- |
-//! | `subprocess.run([...])`           | `subprocess.Popen`, **and** `_posixsubprocess.fork_exec` |
-//! | `multiprocessing`, `spawn`        | `_posixsubprocess.fork_exec` **only**   |
-//! | `multiprocessing`, `fork`         | `os.fork`                               |
-//! | `os.execv`                        | `os.exec`                               |
-//! | `os.posix_spawn`                  | `os.posix_spawn`                        |
-//! | `os.spawnv`                       | `os.fork`, then `os.exec` in the child  |
+//! | what the program does                   | 3.13                  | 3.14 and 3.15                            |
+//! | --------------------------------------- | --------------------- | ---------------------------------------- |
+//! | `subprocess.run([...])`                 | `subprocess.Popen`    | `subprocess.Popen`, `_posixsubprocess.fork_exec` |
+//! | `subprocess.run(..., close_fds=False)`  | `subprocess.Popen`, `os.posix_spawn` | `subprocess.Popen`, `os.posix_spawn` |
+//! | `multiprocessing`, `spawn`              | **nothing at all**    | `_posixsubprocess.fork_exec`             |
+//! | `multiprocessing`, `forkserver`         | **nothing at all**    | `_posixsubprocess.fork_exec`, `os.fork`  |
+//! | `multiprocessing`, `fork`               | `os.fork`             | `os.fork`                                |
+//! | `os.fork()`                             | `os.fork`             | `os.fork`                                |
+//! | `os.execv`                              | `os.exec`             | `os.exec`                                |
+//! | `os.posix_spawn`                        | `os.posix_spawn`      | `os.posix_spawn`                         |
+//! | `os.spawnv`                             | `os.fork`, then `os.exec` in the child | the same                |
 //!
-//! two things follow, and neither is obvious:
+//! **`_posixsubprocess.fork_exec` only became an audit event in 3.14.** that is
+//! the whole reason there are two lists below, and it is the same kind of
+//! release-to-release change as 3.14 splitting `BRANCH` into `BRANCH_LEFT` and
+//! `BRANCH_RIGHT` — the capability is the same, and the name the interpreter
+//! raises it under is not. it is not a capability ladder: what `bpd` reports is
+//! identical on both, except for the one thing 3.13 genuinely cannot say
 //!
-//! - **`subprocess.Popen` is not watched.** it fires for the same child as
-//!   `_posixsubprocess.fork_exec` does, so watching both reports every ordinary
-//!   subprocess twice
-//! - **`_posixsubprocess.fork_exec` cannot be left out.** `multiprocessing` with
-//!   the `spawn` start method goes through `multiprocessing.util.spawnv_passfds`
-//!   and raises *nothing else at all* — no `subprocess.Popen`, no `os.*`. a
-//!   watch list of the `subprocess` and `os` events would miss every one of them
+//! three things follow, and none of them is obvious:
 //!
-//! what is left is the set below: the events that actually make a process. each
-//! child raises exactly one of them
+//! - **on 3.14 and later, `subprocess.Popen` is not watched.** it fires for the
+//!   same child as `_posixsubprocess.fork_exec`, so watching both reports every
+//!   ordinary subprocess twice
+//! - **on 3.13 it has to be**, because it is the only event a `subprocess` child
+//!   raises there. that reopens the double against `os.posix_spawn`, which fires
+//!   beside it whenever `close_fds=False` lets `subprocess` take that path — so
+//!   the pair is deduplicated, by `AFTER_SUBPROCESS_POPEN`, and
+//!   `a_child_started_the_posix_spawn_way_is_reported_once` is what proves it
+//! - **`multiprocessing`'s `spawn` and `forkserver` cannot be seen at all on
+//!   3.13.** it reaches a child through `multiprocessing.util.spawnv_passfds`,
+//!   which calls `_posixsubprocess.fork_exec` — silent there. this is a blind
+//!   spot on a supported interpreter, and the one thing this feature must never
+//!   do is be quietly silent, so it is **announced**: see [`announce_blindspot`]
 //!
 //! ## why only the process that attached reports
 //!
@@ -66,44 +80,69 @@
 //! stated limit rather than a silence: an `os.exec` inside a forked child is
 //! not reported, and `scratch.subprocess.md` is where closing it is designed
 
+use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
 
-use bpd_core::{Spawn, Verdict};
+use bpd_core::{Blindspot, Spawn, Verdict};
 use bpd_protocol::message::FromAgent;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString};
 
 use crate::attach;
 
-/// the audit events that make a process on this platform, and nothing else
+/// the audit events that make a process, on 3.14 and later
 ///
-/// the list is per platform because the events are: nothing on windows raises
-/// `_posixsubprocess.fork_exec`, and nothing on posix raises
-/// `_winapi.CreateProcess`. watching both everywhere would be watching for
-/// something that cannot happen, and — worse — on windows `subprocess.Popen`
-/// and `_winapi.CreateProcess` fire for the same child, so a single list that
-/// covered both platforms would report every windows subprocess twice
-///
-/// `subprocess.Popen` is deliberately absent from both, because on either
-/// platform the event beneath it fires for the same child. `os.system` is
-/// absent for a different reason: it hands a whole command line to a shell, and
-/// what a shell does with one is not knowable from the vector
+/// `subprocess.Popen` is deliberately absent: the event beneath it fires for
+/// the same child, so watching both reports every ordinary subprocess twice.
+/// `os.system` is absent for a different reason — it hands a whole command line
+/// to a shell, and what a shell does with one is not knowable from the vector
 #[cfg(not(windows))]
-const WATCHED: [&CStr; 4] = [
+const MAKING_A_PROCESS: &[&CStr] = &[
     c"_posixsubprocess.fork_exec",
     c"os.posix_spawn",
     c"os.exec",
     c"os.fork",
 ];
 
-/// the same on windows, where a process is made by `CreateProcess`
+/// the same on 3.13, where `_posixsubprocess.fork_exec` raises nothing
 ///
-/// there is no `os.fork` here and there cannot be one
+/// `subprocess.Popen` takes its place, because there it is the only event a
+/// `subprocess` child raises at all. `import` is watched for one reason and one
+/// only — [`announce_blindspot`], which needs to know when `multiprocessing`
+/// arrives
+#[cfg(not(windows))]
+const MAKING_A_PROCESS_BEFORE_314: &[&CStr] = &[
+    c"subprocess.Popen",
+    c"os.posix_spawn",
+    c"os.exec",
+    c"os.fork",
+    c"import",
+];
+
+/// the events that make a process on windows, on every supported release
+///
+/// the list is per platform because the events are: nothing on windows raises
+/// `_posixsubprocess.fork_exec`, and nothing on posix raises
+/// `_winapi.CreateProcess`. there is no `os.fork` here and there cannot be one,
+/// and `subprocess.Popen` is absent for the reason it is on posix — windows
+/// raises it beside `_winapi.CreateProcess` for the same child
+///
+/// it does not change with the release, because `_winapi.CreateProcess` has
+/// been an audit event since PEP 578 landed in 3.8 — long before this project's
+/// minimum. `multiprocessing`'s spawn method goes through it here, so the 3.13
+/// blind spot below is a posix one
 #[cfg(windows)]
-const WATCHED: [&CStr; 2] = [c"_winapi.CreateProcess", c"os.exec"];
+const MAKING_A_PROCESS: &[&CStr] = &[c"_winapi.CreateProcess", c"os.exec"];
+
+/// the same on 3.13, which on windows is the same list
+#[cfg(windows)]
+const MAKING_A_PROCESS_BEFORE_314: &[&CStr] = MAKING_A_PROCESS;
+
+/// the events this interpreter is watched for, chosen once at attach
+static WATCHED: OnceLock<&'static [&'static CStr]> = OnceLock::new();
 
 /// the process the agent attached to
 ///
@@ -117,6 +156,34 @@ static ATTACHED: AtomicU32 = AtomicU32::new(0);
 /// running interpreter reports it, resolved through links, so a child named by
 /// a different path to the same file is still recognised
 static INTERPRETER: OnceLock<Option<String>> = OnceLock::new();
+
+/// the blind spot this interpreter has, and whether it has still to be said
+///
+/// `None` on an interpreter that has none. it is taken out when it is said, so
+/// it is said once — a program that imports `multiprocessing` in fifty modules
+/// has one blind spot, not fifty
+static BLINDSPOT: Mutex<Option<Blindspot>> = Mutex::new(None);
+
+thread_local! {
+    /// whether the last watched event on this thread was `subprocess.Popen`
+    ///
+    /// this is the deduplication, and it exists only for 3.13. there,
+    /// `subprocess.Popen` is watched because it is the only event an ordinary
+    /// `subprocess` child raises — but `subprocess` takes a `posix_spawn` path
+    /// when `close_fds=False` lets it, and then `os.posix_spawn` fires **as
+    /// well**, for the same child
+    ///
+    /// `subprocess.py` raises its event and then calls one of the two, on the
+    /// same thread, with nothing else watched in between. so "the previous
+    /// watched event on this thread" identifies the pair exactly, and no
+    /// counting or matching of arguments is needed. per thread rather than
+    /// global, because two threads each starting a child would otherwise
+    /// suppress each other's
+    ///
+    /// on 3.14 and later `subprocess.Popen` is not watched at all, so this is
+    /// never set and the whole path is inert
+    static AFTER_SUBPROCESS_POPEN: Cell<bool> = const { Cell::new(false) };
+}
 
 /// cpython's C audit hook signature
 ///
@@ -147,13 +214,17 @@ unsafe extern "C" {
 /// up — the hook reports through it and there would be nowhere to send to
 /// before that
 pub(crate) fn install(python: Python<'_>) -> PyResult<()> {
-    let executable: String = PyModule::import(python, "sys")?
-        .getattr("executable")?
-        .extract()?;
+    let sys = PyModule::import(python, "sys")?;
+    let executable: String = sys.getattr("executable")?.extract()?;
     INTERPRETER
         .set(resolve(&executable))
         .unwrap_or_else(|_| unreachable!("the agent installs the audit hook once"));
     ATTACHED.store(std::process::id(), Ordering::Relaxed);
+
+    let version = sys.getattr("version_info")?;
+    let major: u8 = version.getattr("major")?.extract()?;
+    let minor: u8 = version.getattr("minor")?.extract()?;
+    watch_what_this_interpreter_raises(major, minor);
 
     // SAFETY: called with the GIL held on an initialised interpreter, which is
     // what this expects. `saw` is a `'static` function and the user pointer is
@@ -169,6 +240,67 @@ pub(crate) fn install(python: Python<'_>) -> PyResult<()> {
         ));
     }
     Ok(())
+}
+
+/// choose the watch list, and the blind spot that comes with it
+///
+/// the split is at 3.14, where `_posixsubprocess.fork_exec` became an audit
+/// event. below it that event is silent, so `subprocess.Popen` is watched in
+/// its place — which covers `subprocess` and does **not** cover
+/// `multiprocessing`, because `multiprocessing` never goes near `subprocess`
+///
+/// the blind spot that leaves is recorded here rather than discovered later, so
+/// that the thing which says it cannot see a child is set up at the same moment
+/// as the thing that sees them
+fn watch_what_this_interpreter_raises(major: u8, minor: u8) {
+    let before_314 = (major, minor) < (3, 14);
+
+    WATCHED
+        .set(if before_314 {
+            MAKING_A_PROCESS_BEFORE_314
+        } else {
+            MAKING_A_PROCESS
+        })
+        .unwrap_or_else(|_| unreachable!("the agent installs the audit hook once"));
+
+    // windows reaches a `multiprocessing` spawn child through
+    // `_winapi.CreateProcess`, which has been an audit event since 3.8 — so the
+    // blind spot is a posix one and claiming it anywhere else would be bpd
+    // reporting a limit it does not have
+    #[cfg(not(windows))]
+    if before_314 {
+        *lock() = Some(Blindspot::MultiprocessingSpawn {
+            interpreter: format!("{major}.{minor}"),
+        });
+    }
+}
+
+/// the blind spot still to be announced
+fn lock() -> std::sync::MutexGuard<'static, Option<Blindspot>> {
+    BLINDSPOT
+        .lock()
+        .expect("nothing panics holding the blind spot: every path through it is a take or a set")
+}
+
+/// say, once, that this interpreter hides a whole way of starting a child
+///
+/// the trigger is `multiprocessing` being imported, and that is the whole point
+/// of it. announcing at attach would put a warning on every 3.13 launch of every
+/// program, most of which never start a child at all — and a warning everybody
+/// learns to skip is one nobody reads when it matters. announcing when the
+/// module arrives is the first moment at which such a child becomes possible
+///
+/// it is deliberately **not** waited for and deliberately not a refusal. the
+/// interpreter is supported and the feature works on it, apart from this; what
+/// would be wrong is letting the silence read as "no child was started"
+fn announce_blindspot(module: &str) {
+    if module != "multiprocessing" && !module.starts_with("multiprocessing.") {
+        return;
+    }
+    let Some(blindspot) = lock().take() else {
+        return;
+    };
+    attach::send(&FromAgent::BlindTo { blindspot });
 }
 
 /// a path with its links resolved, or `None` when there is nothing behind it
@@ -196,7 +328,10 @@ unsafe extern "C" fn saw(
 ) -> c_int {
     // SAFETY: cpython passes a nul-terminated static string for every event
     let name = unsafe { CStr::from_ptr(event) };
-    if !WATCHED.contains(&name) {
+    let watched = WATCHED
+        .get()
+        .unwrap_or_else(|| unreachable!("the hook is not installed before `install` ran"));
+    if !watched.contains(&name) {
         return 0;
     }
 
@@ -210,7 +345,28 @@ unsafe extern "C" fn saw(
     // borrowed reference to the event's argument tuple that outlives this call
     Python::attach(|python| {
         let arguments = unsafe { Bound::from_borrowed_ptr_or_opt(python, args) };
-        if let Some(child) = describe(&name.to_string_lossy(), arguments.as_ref()) {
+        let name = name.to_string_lossy();
+
+        // `import` is watched only on the interpreters that have the blind
+        // spot, and only ever means this. it is not a child and must not be
+        // read as one
+        if name == "import" {
+            let module = arguments
+                .as_ref()
+                .and_then(|arguments| arguments.get_item(0).ok())
+                .and_then(|module| text(&module))
+                .unwrap_or_default();
+            announce_blindspot(&module);
+            return;
+        }
+
+        // the `subprocess.Popen` / `os.posix_spawn` pair, which is one child
+        let after_subprocess = AFTER_SUBPROCESS_POPEN.replace(name == "subprocess.Popen");
+        if after_subprocess && name == "os.posix_spawn" {
+            return;
+        }
+
+        if let Some(child) = describe(&name, arguments.as_ref()) {
             attach::send(&FromAgent::Spawned { child });
         }
     });

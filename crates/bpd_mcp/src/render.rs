@@ -444,6 +444,19 @@ pub fn spawned(child: &bpd_core::Spawn) -> serde_json::Value {
     })
 }
 
+/// a way of starting a child this interpreter does not let `bpd` see
+///
+/// the field an agent has to act on is `silence_is_not_evidence`. everything
+/// else `bpd` reports is a positive claim, and this is the one message that
+/// says what an *absence* of claims no longer rules out — an agent that missed
+/// it would conclude from an empty `started` that the program has no children
+pub fn blind_to(blindspot: &bpd_core::Blindspot) -> serde_json::Value {
+    serde_json::json!({
+        "says": blindspot.to_string(),
+        "silence_is_not_evidence": true,
+    })
+}
+
 /// one logpoint record
 pub fn logged(record: &LogRecord) -> serde_json::Value {
     serde_json::json!({

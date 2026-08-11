@@ -983,6 +983,7 @@ struct Said {
     pausing: Vec<Vec<u64>>,
     children: Vec<bpd_core::Spawn>,
     children_dropped: usize,
+    blind: Vec<bpd_core::Blindspot>,
 }
 
 impl Said {
@@ -1017,7 +1018,7 @@ impl Said {
     /// the program was asked to say. an agent that found it under `logged`
     /// would reasonably read it as a logpoint firing
     fn children(&mut self) -> Option<serde_json::Value> {
-        if self.children.is_empty() {
+        if self.children.is_empty() && self.blind.is_empty() {
             return None;
         }
         let started: Vec<serde_json::Value> = self.children.iter().map(render::spawned).collect();
@@ -1025,6 +1026,16 @@ impl Said {
         let dropped = std::mem::take(&mut self.children_dropped);
 
         let mut rendered = serde_json::json!({ "started": started });
+        if !self.blind.is_empty() {
+            // beside the children rather than instead of them: an agent that
+            // read `started: []` without this would conclude there were none
+            rendered["cannot_see"] = serde_json::json!(
+                std::mem::take(&mut self.blind)
+                    .iter()
+                    .map(render::blind_to)
+                    .collect::<Vec<_>>()
+            );
+        }
         if dropped > 0 {
             rendered["dropped"] = dropped.into();
             rendered["says"] = format!(
@@ -1057,6 +1068,16 @@ impl Reporting for Said {
         } else {
             self.children_dropped += 1;
         }
+    }
+
+    /// this interpreter hides a whole way of starting a child
+    ///
+    /// unbounded, unlike the children beside it, because there is a fixed and
+    /// very small number of blind spots and each is announced once per program.
+    /// dropping this one to save room would be dropping the message that keeps
+    /// the rest honest
+    fn blind_to(&mut self, blindspot: bpd_core::Blindspot) {
+        self.blind.push(blindspot);
     }
 }
 

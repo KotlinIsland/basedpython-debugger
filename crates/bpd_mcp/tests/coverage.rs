@@ -540,6 +540,38 @@ fn started_a_child() -> bpd_core::Spawn {
     }
 }
 
+/// the blind spot the fake session announces while the program runs
+fn cannot_see_a_child() -> bpd_core::Blindspot {
+    bpd_core::Blindspot::MultiprocessingSpawn {
+        interpreter: "3.13".to_string(),
+    }
+}
+
+#[test]
+fn a_blind_spot_is_carried_beside_the_children_rather_than_instead_of_them() {
+    // parity with DAP, where the same fact arrives as an `important` output
+    // event. an agent that read `started` without this would conclude from an
+    // empty list that the program has no children — which is exactly what this
+    // message exists to stop
+    let stepped = drive(&Asked::default()).result_of("step_over");
+    let unseen = &stepped["spawned"]["cannot_see"][0];
+
+    assert_eq!(
+        unseen["silence_is_not_evidence"], true,
+        "the one field an agent has to act on was not there: {stepped}"
+    );
+    assert!(
+        unseen["says"]
+            .as_str()
+            .is_some_and(|says| says.contains("3.14")),
+        "the message has to name the release where this is visible: {unseen}"
+    );
+    assert!(
+        stepped["spawned"]["started"].is_array(),
+        "the blind spot goes beside the children, not instead of them: {stepped}"
+    );
+}
+
 #[test]
 fn a_child_the_program_started_is_carried_on_the_answer_that_saw_it() {
     // parity with DAP, where the same fact arrives as an `output` event. MCP
@@ -824,6 +856,7 @@ impl Session for FakeSession {
         // that needs a real interpreter
         if matches!(request, Request::Wait { .. }) {
             reporting.spawned(started_a_child());
+            reporting.blind_to(cannot_see_a_child());
         }
 
         Ok(match request {

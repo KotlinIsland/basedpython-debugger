@@ -428,7 +428,13 @@ propagate anything, and the child runs exactly as it would have — including th
 guarantee that a program cannot tell it is being debugged, which is unchanged
 and is still tested against a bare run. the reason that is worth having on its
 own is that the symptom it removes is a breakpoint reported unbound with no
-reason given. see [child processes](docs/development/subprocesses.md)
+reason given
+
+the audit events differ by release — `_posixsubprocess.fork_exec` only became
+one in 3.14 — so the watch list is chosen from the running interpreter, and the
+one thing 3.13 cannot see at all, a `multiprocessing` child started with the
+`spawn` or `forkserver` method, is **announced** rather than left as a silence.
+see [child processes](docs/development/subprocesses.md)
 
 what is left is the propagation, and the hard part of it is not the hook: an
 audit hook can **observe** a spawn and cannot rewrite its arguments, so the only

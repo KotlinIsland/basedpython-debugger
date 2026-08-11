@@ -1807,6 +1807,19 @@ impl Reporting for Events<'_> {
             "output": format!("{child}\n"),
         }));
     }
+
+    /// this interpreter hides a whole way of starting a child
+    ///
+    /// on `important` rather than `console`. DAP has a category for exactly
+    /// this — something the user should see even with the console collapsed —
+    /// and a client that filed it beside ordinary notices would let the one
+    /// message that stops silence being evidence scroll past
+    fn blind_to(&mut self, blindspot: bpd_core::Blindspot) {
+        self.emit(&serde_json::json!({
+            "category": "important",
+            "output": format!("{blindspot}\n"),
+        }));
+    }
 }
 
 /// what one DAP `setBreakpoints` asked for, for one line

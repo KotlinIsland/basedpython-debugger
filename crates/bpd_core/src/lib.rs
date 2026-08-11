@@ -56,7 +56,7 @@ pub use session::{
     ContextLayer, ExceptionBreakpoints, Reporting, Request, Response, Running, Shadowed, Stack,
     TemplateContext, Threads, Variables, WorldStopped, exit_code, only_stop,
 };
-pub use spawn::{Spawn, Verdict};
+pub use spawn::{Blindspot, Spawn, Verdict};
 pub use stop::{Holding, Mode, Part, StepKind, Stop, StopReason};
 pub use thread::{Progress, ThreadState, Where, Which};
 pub use value::{Content, Detail, Entry, Evaluated, Omitted, Pair, Value};

@@ -47,37 +47,96 @@ child's command line on the way past. [python support](python-support.md) rules
 monkeypatching the stdlib out, and a hook is the alternative — with the
 limitation that comes with it, stated below
 
-## which events, and why those
+## which events, and why they differ by release
 
-measured against 3.13, 3.14 and 3.15, with a hook watching everything:
+measured on 3.13.15, 3.14.7 and 3.15, on posix, by recording every event of
+every name that each way of making a child raised:
 
-| what the program does             | what cpython raises                                      |
-| --------------------------------- | -------------------------------------------------------- |
-| `subprocess.run([...])`           | `subprocess.Popen`, **and** `_posixsubprocess.fork_exec` |
-| `subprocess.run(..., shell=True)` | the same, with `/bin/sh -c` as the command               |
-| `multiprocessing`, `spawn`        | `_posixsubprocess.fork_exec` **and nothing else**        |
-| `multiprocessing`, `fork`         | `os.fork`                                                |
-| `multiprocessing`, `forkserver`   | `_posixsubprocess.fork_exec`, then `os.fork`             |
-| `os.fork()`                       | `os.fork`                                                |
-| `os.execv(...)`                   | `os.exec`                                                |
-| `os.posix_spawn(...)`             | `os.posix_spawn`                                         |
-| `os.spawnv(...)`                  | `os.fork` in the parent, `os.exec` in the child          |
+| what the program does                  | 3.13                                   | 3.14 and 3.15                                    |
+| -------------------------------------- | -------------------------------------- | ------------------------------------------------ |
+| `subprocess.run([...])`                | `subprocess.Popen`                     | `subprocess.Popen`, `_posixsubprocess.fork_exec` |
+| `subprocess.run(..., shell=True)`      | the same, with `/bin/sh -c`            | the same, with `/bin/sh -c`                      |
+| `subprocess.run(..., close_fds=False)` | `subprocess.Popen`, `os.posix_spawn`   | `subprocess.Popen`, `os.posix_spawn`             |
+| `multiprocessing`, `spawn`             | **nothing at all**                     | `_posixsubprocess.fork_exec`                     |
+| `multiprocessing`, `forkserver`        | **nothing at all**                     | `_posixsubprocess.fork_exec`, `os.fork`          |
+| `multiprocessing`, `fork`              | `os.fork`                              | `os.fork`                                        |
+| `os.fork()`                            | `os.fork`                              | `os.fork`                                        |
+| `os.execv(...)`                        | `os.exec`                              | `os.exec`                                        |
+| `os.posix_spawn(...)`                  | `os.posix_spawn`                       | `os.posix_spawn`                                 |
+| `os.spawnv(...)`                       | `os.fork`, then `os.exec` in the child | the same                                         |
 
-what `bpd` watches is `_posixsubprocess.fork_exec`, `os.posix_spawn`, `os.exec`
-and `os.fork` — and `_winapi.CreateProcess` and `os.exec` on windows, because
-the events are per platform and so is the list
+**`_posixsubprocess.fork_exec` only became an audit event in 3.14.** so the
+watch list is chosen from the running interpreter's version:
 
-two of those choices are not obvious, and both were forced by the measurement:
+|                | watched                                                              |
+| -------------- | -------------------------------------------------------------------- |
+| 3.14 and later | `_posixsubprocess.fork_exec`, `os.posix_spawn`, `os.exec`, `os.fork` |
+| 3.13           | `subprocess.Popen`, `os.posix_spawn`, `os.exec`, `os.fork`           |
+| windows, any   | `_winapi.CreateProcess`, `os.exec`                                   |
 
-- **`subprocess.Popen` is not watched.** it fires for the same child as the
-    event underneath it, so watching both reports every ordinary subprocess
-    twice
-- **`_posixsubprocess.fork_exec` cannot be left out.** `multiprocessing` with
-    the `spawn` start method goes through `multiprocessing.util.spawnv_passfds`,
-    which calls `_posixsubprocess.fork_exec` directly — no `subprocess.Popen`
-    event, no `os.*` event, nothing. a watch list built from the obvious names
-    would miss every `multiprocessing` child on posix, which is one of the two
-    cases this feature exists for
+that is **not** a capability ladder, and this project does not ship one. it is
+one capability reached through the name the interpreter raises it under — the
+same kind of release-to-release change as 3.14 splitting `BRANCH` into
+`BRANCH_LEFT` and `BRANCH_RIGHT`, which [python support](python-support.md)
+already names as a thing to check on every release. what `bpd` reports is
+identical on both, apart from the one thing 3.13 genuinely cannot say — and
+that one thing is said out loud
+
+three of these choices are not obvious, and all three were forced by the
+measurement:
+
+- **on 3.14 and later, `subprocess.Popen` is not watched.** it fires for the
+    same child as the event underneath it, so watching both reports every
+    ordinary subprocess twice
+- **on 3.13 it has to be**, because there it is the only event an ordinary
+    `subprocess` child raises at all. that reopens the double against
+    `os.posix_spawn`, which fires beside it whenever `close_fds=False` lets
+    `subprocess` take that path. `subprocess.py` raises its event and then calls
+    one of the two, on the same thread, with nothing else watched in between —
+    so "the previous watched event on this thread" identifies the pair exactly,
+    and that is the whole of the deduplication.
+    `a_child_started_the_posix_spawn_way_is_reported_once` runs on every
+    interpreter and is what proves it rather than assuming it
+- **`_posixsubprocess.fork_exec` cannot be left out on 3.14.**
+    `multiprocessing` with the `spawn` start method goes through
+    `multiprocessing.util.spawnv_passfds`, which calls it directly — no
+    `subprocess.Popen` event, no `os.*` event, nothing. a watch list built from
+    the obvious names would miss every `multiprocessing` child on posix
+
+## the blind spot on 3.13, which is stated rather than left silent
+
+on 3.13, a `multiprocessing` child started with the `spawn` or `forkserver`
+start method raises **no audit event of any name**. that is not a gap in the
+watch list — it was established by recording every event raised while one
+starts, and the whole set is `import`, `exec`, `open`, `marshal.loads` and some
+sockets. there is nothing to watch
+
+a feature whose normal output is silence cannot afford an unannounced blind
+spot: a user who sees no report concludes there was no child, and on 3.13 that
+conclusion would be wrong. so `bpd` **says so** — once per program, on the
+import of `multiprocessing`, which is the first moment at which such a child
+becomes possible:
+
+> this program imported `multiprocessing`, and python 3.13 raises no event at
+> all when it starts a child with the `spawn` or `forkserver` start method — so
+> bpd cannot see one, and silence here does not mean there was none.
+> `_posixsubprocess.fork_exec` became an audit event in 3.14, where this is
+> visible. the `fork` start method is visible on every version, and so is
+> `subprocess`
+
+it is announced on the import rather than at launch on purpose. a warning on
+every 3.13 launch of every program — most of which never start a child — is a
+warning everybody learns to skip, and then nobody reads it when it matters
+
+it reaches a client the same three ways a child does, and on DAP it goes on the
+**`important`** category rather than `console`: everything else `bpd` says is a
+positive claim, and this is the one message about an *absence*, which a
+collapsed console must not hide. on MCP it is `spawned.cannot_see`, carrying
+`silence_is_not_evidence`, beside the children rather than instead of them
+
+windows has no such blind spot: `multiprocessing`'s spawn method reaches a child
+through `_winapi.CreateProcess` there, which has been an audit event since
+PEP 578 landed in 3.8
 
 ## what a report can and cannot know
 

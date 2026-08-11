@@ -447,6 +447,24 @@ fn a_program_that_reads_its_own_import_path_finds_no_debugger_on_it() {
     }
 }
 
+/// the audit event `bpd` watches a `subprocess` child by, on this interpreter
+///
+/// it is not one name. `_posixsubprocess.fork_exec` only became an audit event
+/// in **3.14**, so below that `bpd` watches `subprocess.Popen` instead — see
+/// [child processes](../../../docs/development/subprocesses.md). the guard
+/// below has to name the one that is really watched here, or on the other
+/// interpreter it is either vacuous or a failure about nothing
+fn watched_event() -> &'static str {
+    let version = interpreter().version;
+    if cfg!(windows) {
+        "_winapi.CreateProcess"
+    } else if (version.major, version.minor) >= (3, 14) {
+        "_posixsubprocess.fork_exec"
+    } else {
+        "subprocess.Popen"
+    }
+}
+
 #[test]
 fn a_program_that_watches_its_own_audit_events_sees_exactly_the_ones_it_would_have() {
     // the third fingerprint, and the one the child-process report could have
@@ -478,11 +496,12 @@ fn a_program_that_watches_its_own_audit_events_sees_exactly_the_ones_it_would_ha
              bpd than without it, as {form:?}. a hook the program can detect is \
              a program that can behave differently under the debugger"
         );
+        let watched = watched_event();
         assert!(
-            bare.stdout.contains("_posixsubprocess.fork_exec")
-                || bare.stdout.contains("_winapi.CreateProcess"),
-            "the fixture has to reach the event bpd watches, or this compared \
-             two runs of a program that proves nothing:\n{}",
+            bare.stdout.contains(watched),
+            "the fixture has to reach the event bpd watches on *this* \
+             interpreter, or this compared two runs of a program that proves \
+             nothing. it was looking for `{watched}` and the program saw:\n{}",
             bare.stdout
         );
         assert!(

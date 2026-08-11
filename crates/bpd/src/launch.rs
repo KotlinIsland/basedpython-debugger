@@ -137,6 +137,19 @@ impl bpd_core::Reporting for Watching {
     fn spawned(&mut self, child: bpd_core::Spawn) {
         eprintln!("bpd: {child}");
     }
+
+    /// this interpreter hides a whole way of starting a child
+    ///
+    /// the same stream and the same prefix as a child itself, because it is the
+    /// same subject and a person reading one needs the other beside it
+    #[expect(
+        clippy::print_stderr,
+        reason = "a limit nobody is told about is a limit that reads as an \
+                  absence of children — see above"
+    )]
+    fn blind_to(&mut self, blindspot: bpd_core::Blindspot) {
+        eprintln!("bpd: {blindspot}");
+    }
 }
 
 pub(crate) fn run(args: &Args) -> ExitCode {

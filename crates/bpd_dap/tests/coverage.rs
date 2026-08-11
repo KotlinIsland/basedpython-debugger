@@ -163,6 +163,42 @@ fn started_a_child() -> bpd_core::Spawn {
     }
 }
 
+/// the blind spot the fake session announces while the program runs
+fn cannot_see_a_child() -> bpd_core::Blindspot {
+    bpd_core::Blindspot::MultiprocessingSpawn {
+        interpreter: "3.13".to_string(),
+    }
+}
+
+#[test]
+fn a_blind_spot_reaches_the_client_where_a_collapsed_console_cannot_hide_it() {
+    // the message that stops silence being evidence. it is the one notice a
+    // client must not file beside ordinary console chatter, because everything
+    // else bpd says is a positive claim and this one is about an absence
+    let client = drive(&Asked::default());
+
+    let said: Vec<&serde_json::Value> = client
+        .events("output")
+        .into_iter()
+        .filter(|event| {
+            event["body"]["output"]
+                .as_str()
+                .is_some_and(|text| text.contains("silence here does not mean"))
+        })
+        .collect();
+    assert!(
+        !said.is_empty(),
+        "the interpreter has a blind spot and the client was never told"
+    );
+
+    for event in said {
+        assert_eq!(
+            event["body"]["category"], "important",
+            "DAP has a category for exactly this and it was not used: {event}"
+        );
+    }
+}
+
 #[test]
 fn a_child_the_program_started_reaches_the_client_as_the_debuggers_own_words() {
     let client = drive(&Asked::default());
@@ -694,6 +730,7 @@ impl Session for FakeSession {
         // something only a real interpreter ever exercises
         if matches!(request, Request::Wait { .. }) {
             reporting.spawned(started_a_child());
+            reporting.blind_to(cannot_see_a_child());
         }
         {
             let mut recorder = self.asked.lock().expect("the recorder is not poisoned");

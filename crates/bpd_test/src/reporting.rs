@@ -7,7 +7,7 @@
 //! program arriving where nobody looks is how a test passes while proving
 //! something else
 
-use bpd_core::{LogRecord, Reporting, Spawn};
+use bpd_core::{Blindspot, LogRecord, Reporting, Spawn};
 
 /// a sink nothing is supposed to reach, which panics naming what did
 ///
@@ -27,6 +27,10 @@ impl Reporting for Unreported {
 
     fn spawned(&mut self, child: Spawn) {
         panic!("this program was not expected to start a child, and it started {child}")
+    }
+
+    fn blind_to(&mut self, blindspot: Blindspot) {
+        panic!("this interpreter announced a blind spot nothing here is about: {blindspot}")
     }
 }
 
@@ -52,6 +56,10 @@ impl Reporting for Logs {
     fn spawned(&mut self, child: Spawn) {
         panic!("this program was not expected to start a child, and it started {child}")
     }
+
+    fn blind_to(&mut self, blindspot: Blindspot) {
+        panic!("this interpreter announced a blind spot nothing here is about: {blindspot}")
+    }
 }
 
 /// a sink that keeps every child the program started
@@ -62,6 +70,11 @@ impl Reporting for Logs {
 pub struct Children {
     /// every child, in the order it was reported
     pub started: Vec<Spawn>,
+    /// every way of starting one this interpreter does not let bpd see
+    ///
+    /// a test that asserts on `started` has to be able to tell "no child" from
+    /// "no child bpd can see", or it is a test that passes on a blind spot
+    pub unseen: Vec<Blindspot>,
 }
 
 impl Reporting for Children {
@@ -75,5 +88,9 @@ impl Reporting for Children {
 
     fn spawned(&mut self, child: Spawn) {
         self.started.push(child);
+    }
+
+    fn blind_to(&mut self, blindspot: Blindspot) {
+        self.unseen.push(blindspot);
     }
 }
