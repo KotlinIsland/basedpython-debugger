@@ -12,7 +12,10 @@
 //! native state, and may call a python object that was resolved before any of
 //! this started. it may not look one up
 
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -38,6 +41,8 @@ struct Handles {
     set_events: Py<PyAny>,
     set_local_events: Py<PyAny>,
     restart_events: Py<PyAny>,
+    register_callback: Py<PyAny>,
+    free_tool_id: Py<PyAny>,
     get_ident: Py<PyAny>,
     get_frame: Py<PyAny>,
     get_frames: Py<PyAny>,
@@ -50,6 +55,97 @@ struct Handles {
 }
 
 static HANDLES: OnceLock<Handles> = OnceLock::new();
+
+/// every code object this tool has non-zero local events on, by address
+///
+/// [`watch_locally`] is the only place `set_local_events` is called, so this
+/// set is complete **by construction** rather than by every part of the agent
+/// that arms a code object remembering to say so. an address is a sound key for
+/// the reason it is elsewhere in the agent: the map holds a strong reference to
+/// everything in it, which is what stops the allocator handing the same address
+/// to a different code object
+///
+/// it exists for one reader — [`disarm`], which takes this tool's
+/// instrumentation off a process that has stopped being a debuggee. cpython has
+/// no way to clear a tool before `sys.monitoring.clear_tool_id` in 3.14, and
+/// the minimum here is 3.13, so the set has to be kept
+static ARMED_LOCALLY: Mutex<BTreeMap<usize, Py<PyAny>>> = Mutex::new(BTreeMap::new());
+
+/// the same set, as a snapshot that can be read **without taking a lock**
+///
+/// [`disarm`] runs in a forked child, and a fork keeps only the calling thread:
+/// a lock another thread held at the instant of the fork is one the child's copy
+/// would wait on for ever. on a gil build that cannot happen to this particular
+/// lock, because `os.fork()` holds the GIL and so does everything that takes it
+/// — but on a free-threaded build there is no GIL to hold, another thread can be
+/// arming a code object while a third forks, and a first-class target does not
+/// get an argument that holds on one build
+///
+/// so the writer publishes an immutable `Vec` and the child reads the pointer.
+/// the box is filled before its pointer is stored and the box it replaces is
+/// released only after, so whichever one a fork copies is a complete one
+///
+/// what it holds is a **superset** of what is armed rather than exactly it —
+/// see the ordering rule in [`watch_locally`] — because a fork can land between
+/// any two instructions there and losing a code object that really is armed is
+/// the one outcome that matters. clearing local events on a code object that
+/// has none is a no-op
+///
+/// null until a code object is first armed, which is most sessions
+static ARMED_SNAPSHOT: AtomicPtr<Vec<Py<PyAny>>> = AtomicPtr::new(std::ptr::null_mut());
+
+/// the code objects with local events on, for the thread that changes them
+fn armed_locally() -> MutexGuard<'static, BTreeMap<usize, Py<PyAny>>> {
+    ARMED_LOCALLY
+        .lock()
+        .expect("the armed set is only held for map operations, which do not panic")
+}
+
+/// publish the set for a forked child to read
+///
+/// called under the lock, so the `Vec` handed over and the map it was built
+/// from are the same set. the swap comes before the release of what it replaced
+/// — the other order would leave a fork that landed between them copying a box
+/// that had already been freed
+fn publish(python: Python<'_>, armed: &BTreeMap<usize, Py<PyAny>>) {
+    let snapshot: Vec<Py<PyAny>> = armed.values().map(|code| code.clone_ref(python)).collect();
+    let replaced = ARMED_SNAPSHOT.swap(Box::into_raw(Box::new(snapshot)), Ordering::AcqRel);
+    if replaced.is_null() {
+        return;
+    }
+    // SAFETY: every non-null value this pointer ever holds came from
+    // `Box::into_raw`, on the line above. the swap has already taken this one
+    // out, and this runs under the lock every other `publish` needs, so no
+    // other call can be holding it. [`take_snapshot`] is the only other place a
+    // box is taken back and it runs in a **forked child**, which frees its own
+    // copy of the heap and nothing of this process's
+    #[expect(
+        unsafe_code,
+        reason = "an owned box behind an atomic pointer is what makes the set \
+                  readable from a fork handler without a lock — see above"
+    )]
+    drop(unsafe { Box::from_raw(replaced) });
+}
+
+/// the set as a forked child sees it, taking ownership of the child's copy
+///
+/// the one read of this set that takes no lock, and the reason there is a
+/// snapshot at all. it is reached only from [`disarm`], which is reached only
+/// from the fork handler — so the process running this is always a child that
+/// has just been made, with one thread and its own copy of the heap
+fn take_snapshot() -> Vec<Py<PyAny>> {
+    let published = ARMED_SNAPSHOT.swap(std::ptr::null_mut(), Ordering::AcqRel);
+    if published.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: the invariant [`publish`] keeps — every non-null value came from
+    // `Box::into_raw` — and the swap means nothing else in this process can
+    // reach it. the process that published it is a different one, and freeing a
+    // child's copy of the heap is nothing to it
+    #[expect(unsafe_code, reason = "see `publish`")]
+    let owned = unsafe { Box::from_raw(published) };
+    *owned
+}
 
 /// the native functions the interpreter calls, one per event bpd listens for
 ///
@@ -194,6 +290,12 @@ pub(crate) fn install(
         set_events: monitoring.getattr("set_events")?.unbind(),
         set_local_events: monitoring.getattr("set_local_events")?.unbind(),
         restart_events: monitoring.getattr("restart_events")?.unbind(),
+        // resolved here for the reason everything else in this struct is, and
+        // for one more: [`disarm`] runs inside a fork handler, where looking a
+        // name up would mean an attribute lookup on a module in a process whose
+        // interpreter has just been reassembled
+        register_callback: monitoring.getattr("register_callback")?.unbind(),
+        free_tool_id: monitoring.getattr("free_tool_id")?.unbind(),
         get_ident: PyModule::import(python, "_thread")?
             .getattr("get_ident")?
             .unbind(),
@@ -262,6 +364,15 @@ pub(crate) fn watch_globally(python: Python<'_>, wanted: Global) -> PyResult<()>
 /// the same replacement rule `set_events` has, per code object: a step that
 /// wanted returns on a code object a breakpoint already watches lines in has to
 /// ask for both, or arming its own would turn the breakpoint's off
+///
+/// the ordering around [`ARMED_SNAPSHOT`] is the other rule, and it is not
+/// cosmetic. the snapshot has to stay a **superset** of what the interpreter
+/// really has armed, because a fork can land between any two instructions here
+/// on a free-threaded build: so a code object joining the set is published
+/// **before** the interpreter is told, and one leaving it **after**. a child
+/// that lands in either window finds a code object listed that has nothing on
+/// it, and clearing that one is a no-op — the other order would lose one that
+/// really was armed
 pub(crate) fn watch_locally(
     python: Python<'_>,
     code: &Bound<'_, PyAny>,
@@ -278,10 +389,90 @@ pub(crate) fn watch_locally(
             events |= bit;
         }
     }
+
+    let address = code.as_ptr() as usize;
+    if events != 0 {
+        let mut armed = armed_locally();
+        // an entry already there is the same code object with a different mask.
+        // what a forked child does with it does not depend on the mask, so
+        // there is nothing to republish
+        if let Entry::Vacant(empty) = armed.entry(address) {
+            empty.insert(code.clone().unbind());
+            publish(python, &armed);
+        }
+    }
+
     handles
         .set_local_events
         .bind(python)
         .call1((DEBUGGER_TOOL_ID, code, events))?;
+
+    if events == 0 {
+        let mut armed = armed_locally();
+        if armed.remove(&address).is_some() {
+            publish(python, &armed);
+        }
+    }
+    Ok(())
+}
+
+/// take this tool off the process entirely
+///
+/// what a process that has stopped being a debuggee does with the
+/// instrumentation it inherited. the four things `sys.monitoring` holds are
+/// independent and all four have to go, in this order:
+///
+/// 1. the **local** events on every code object the session armed. these are
+///    the ones that outlive everything else: `free_tool_id` explicitly does not
+///    clear them, so an id given back with local events still set on it is an
+///    id the next tool to claim it would receive this session's breakpoints on
+/// 2. the **global** events, which `set_events` replaces wholesale
+/// 3. the **callbacks**. a registered callback with no event armed is inert,
+///    and removing them is what makes an event that somehow survived inert too
+///    — measured: cpython delivers nothing for a tool with no callback
+/// 4. the **tool id**, so `sys.monitoring.get_tool(0)` stops naming `bpd` in a
+///    process bpd is not debugging
+///
+/// it is not `sys.monitoring.clear_tool_id`, which does all four in one call
+/// and arrived in 3.14. the minimum here is 3.13, and a second mechanism for
+/// the newer release would be two things to keep true instead of one
+///
+/// **this runs in a forked child and takes no lock.** the code objects come
+/// from [`ARMED_SNAPSHOT`], which exists for exactly that reason, and the map
+/// behind it is deliberately left alone: it is a copy of the parent's and this
+/// process is never going to arm anything again
+pub(crate) fn disarm(python: Python<'_>) -> PyResult<()> {
+    let handles = handles();
+
+    for code in &take_snapshot() {
+        handles.set_local_events.bind(python).call1((
+            DEBUGGER_TOOL_ID,
+            code.bind(python),
+            0_u32,
+        ))?;
+    }
+
+    watch_globally(python, Global::default())?;
+
+    for bit in [
+        handles.py_start,
+        handles.line,
+        handles.py_return,
+        handles.py_resume,
+        handles.py_unwind,
+        handles.py_throw,
+        handles.raised,
+    ] {
+        handles
+            .register_callback
+            .bind(python)
+            .call1((DEBUGGER_TOOL_ID, bit, python.None()))?;
+    }
+
+    handles
+        .free_tool_id
+        .bind(python)
+        .call1((DEBUGGER_TOOL_ID,))?;
     Ok(())
 }
 

@@ -161,9 +161,10 @@ fn a_fork_is_reported_as_a_process_sharing_this_session() {
          describing a process it had not looked at"
     );
 
-    // a forked child holds the agent's monitoring state *and* the fd of this
-    // session's control connection. the report is the only thing standing
-    // between that and two processes writing frames into one socket
+    // a forked child inherits the agent's monitoring state *and* both
+    // descriptors of this session's control connection, and gives all of it up
+    // before it runs a line — see `forks.rs`. the report is what says so, and a
+    // fork reported without it reads as a child bpd has simply lost sight of
     let said = child.to_string();
     assert!(said.contains("control connection"), "it said {said}");
 }

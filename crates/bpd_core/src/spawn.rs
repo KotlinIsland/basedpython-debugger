@@ -82,9 +82,12 @@ pub enum Verdict {
 
     /// the child is this process, copied — a `fork` with no `exec` after it
     ///
-    /// it is python by construction, and it is more than that: it holds the
-    /// agent's `sys.monitoring` state and the debugger's own control connection,
-    /// neither of which `bpd` gave it
+    /// it is python by construction, and for the length of the `fork` call it
+    /// is more than that: it inherits the agent's `sys.monitoring` state and
+    /// the descriptors of the debugger's own control connection, neither of
+    /// which `bpd` gave it. it gives both up before `os.fork()` returns to it,
+    /// which is what makes "bpd is not debugging it" a fact about the process
+    /// rather than a hope
     ThisProcess,
 
     /// the child will run a python interpreter that is not this one
@@ -128,9 +131,11 @@ impl fmt::Display for Spawn {
         match &self.verdict {
             Verdict::ThisProcess => write!(
                 out,
-                "the program forked. the child is a copy of this process — it \
-                 holds the agent's monitoring state and this session's control \
-                 connection, and bpd is not debugging it as a session of its own"
+                "the program forked. the child was a copy of this process, agent \
+                 and all, and gave the debugger up before it ran a line — it \
+                 holds none of the agent's monitoring state and neither \
+                 descriptor of this session's control connection. bpd is not \
+                 debugging it as a session of its own"
             ),
             Verdict::ThisInterpreter => write!(
                 out,
@@ -266,9 +271,10 @@ mod tests {
         let said = forked.to_string();
         assert!(
             said.contains("control connection"),
-            "a fork shares the debugger's own socket, and a report that did not \
-             say so would leave that looking like a protocol bug later. it said \
-             {said}"
+            "a fork inherits the debugger's own socket, and a report that did \
+             not say what became of it leaves a reader with no way to tell this \
+             from the case where two processes really are writing into one. it \
+             said {said}"
         );
     }
 

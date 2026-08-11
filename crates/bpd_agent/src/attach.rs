@@ -21,6 +21,8 @@
 
 use std::io;
 use std::net::TcpStream;
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -47,6 +49,34 @@ static WRITER: Mutex<Option<TcpStream>> = Mutex::new(None);
 /// would report a failure where there was none
 static FINISHED: AtomicBool = AtomicBool::new(false);
 
+/// whether this process has given up the session it inherited
+///
+/// set in a forked child and nowhere else, so it is false for the whole of an
+/// ordinary session and false everywhere on a platform that has no `fork`. a
+/// fork copies the descriptors of the control connection and **not** the thread
+/// that reads them, so a child that went on being a debuggee would write frames
+/// into a socket another process owns, interleaved with that process's own, and
+/// would wait for answers nothing can send
+///
+/// an atomic rather than anything larger because of where it is read: in a
+/// forked child, and in [`send`] *before* the writing end is locked. the reader
+/// thread writes without the GIL, so a fork can land while it holds that lock,
+/// and the child's copy of it would then be held for ever by a thread that does
+/// not exist. see [`crate::forks`]
+static DETACHED: AtomicBool = AtomicBool::new(false);
+
+/// the two descriptors this session's socket is reached through
+///
+/// [`attach`] makes two handles on one socket, one for the reader thread and
+/// one for writing, and a fork copies both. the numbers are kept because a
+/// forked child has to close both and can reach neither: the writing handle is
+/// behind a lock it must not take, and the reading handle lives on a stack that
+/// did not survive the fork
+///
+/// `-1` before `attach`, which is not a descriptor on any platform bpd runs on
+#[cfg(unix)]
+static DESCRIPTORS: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
+
 /// connect to the engine, complete the handshake, and start reading
 pub(crate) fn attach(endpoint: &str, token_hex: &str) -> io::Result<()> {
     let token = decode_token(token_hex)?;
@@ -61,6 +91,14 @@ pub(crate) fn attach(endpoint: &str, token_hex: &str) -> io::Result<()> {
     // reader blocks for the whole life of the session, and a held thread has to
     // be able to answer while it does
     let reading = stream.try_clone()?;
+
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd as _;
+        DESCRIPTORS[0].store(stream.as_raw_fd(), Ordering::Relaxed);
+        DESCRIPTORS[1].store(reading.as_raw_fd(), Ordering::Relaxed);
+    }
+
     *writer() = Some(stream);
 
     std::thread::Builder::new()
@@ -84,12 +122,87 @@ pub(crate) fn mark_finished() {
     FINISHED.store(true, Ordering::Relaxed);
 }
 
+/// whether this process has given up the session it inherited
+pub(crate) fn detached() -> bool {
+    DETACHED.load(Ordering::Relaxed)
+}
+
+/// give up the session this process was forked holding
+///
+/// `true` when this call was the one that gave it up, and `false` when it had
+/// already been given up — which is a child of a child, inheriting a connection
+/// its parent had already let go of
+///
+/// the descriptors are closed rather than left open, and that is not tidiness.
+/// a socket is closed when the **last** descriptor referring to it is, so a
+/// forked child that kept its copies would hold this session's connection open
+/// for as long as it ran: the engine would go on waiting to read from a
+/// debuggee that had exited, on a connection whose only remaining owner is a
+/// process it is not debugging. every worker pool and every reloader has
+/// exactly that shape
+///
+/// closing them here does nothing whatever to the process this one was forked
+/// from. a fork copies the descriptor **table**, so the parent's own entries
+/// are untouched, and no FIN is sent while it still holds them — measured
+/// against a real socket, and pinned by
+/// `a_fork_leaves_the_parents_session_exactly_as_it_was`, which has the parent
+/// reach a breakpoint after the fork and read its own tool id back
+///
+/// no lock is taken, on any build. the writing end is behind one that the
+/// reader thread holds without the GIL, so a fork can land while it is locked
+/// and the child's copy of it would then be held by a thread that does not
+/// exist. see [`crate::forks`]
+#[cfg(unix)]
+pub(crate) fn detach() -> bool {
+    if DETACHED.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+
+    for descriptor in &DESCRIPTORS {
+        let raw = descriptor.swap(-1, Ordering::SeqCst);
+        if raw < 0 {
+            continue;
+        }
+        // SAFETY: these are the two descriptors `attach` opened in the process
+        // this one was forked from, and nothing in *this* process will close
+        // either of them again. the reading handle's `TcpStream` is on the
+        // stack of a thread that did not survive the fork, and the writing
+        // handle's is inside a `static` whose destructor never runs and which
+        // nothing reads once `DETACHED` is set — [`send`] returns before it
+        // looks. so this is the only close they will get
+        #[expect(
+            unsafe_code,
+            reason = "the owning values are unreachable in a forked child, so \
+                      taking the descriptors back by number is the only way to \
+                      close them — see above"
+        )]
+        drop(unsafe {
+            use std::os::fd::FromRawFd as _;
+            std::os::fd::OwnedFd::from_raw_fd(raw)
+        });
+    }
+    true
+}
+
 /// tell the engine something
 ///
 /// the connection is taken for the write and released, so nothing holds it
 /// across a stop. a write that fails means the engine is gone, and the debuggee
 /// does not carry on without it
+///
+/// **a detached process writes nothing.** this is the one place that is
+/// enforced, because it is the only place a frame is written: the socket
+/// belongs to the process this one was forked from, two writers interleaving
+/// mid-frame desynchronise a length-prefixed stream, and the engine renders
+/// that as a peer sending a message it does not understand. silence is not this
+/// degrading quietly — the decision was taken and reported by the process that
+/// owns the session, which says of every fork that bpd is not debugging the
+/// child
 pub(crate) fn send(message: &FromAgent) {
+    if detached() {
+        return;
+    }
+
     let mut writer = writer();
     let Some(stream) = writer.as_mut() else {
         unreachable!("nothing sends on the control connection before `attach` installed it");

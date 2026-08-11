@@ -5,8 +5,13 @@ its work somewhere the debugger is not, and until something says so the only
 symptom is a breakpoint that never fires
 
 that is what this page is about. `bpd` **notices** a python child and reports
-it. it does not debug one yet, and it does not change anything about the child:
-the program runs exactly as it would have
+it, and it does not debug one yet
+
+a child that was started — by `subprocess`, by `multiprocessing`, by `exec` — is
+not touched at all: it runs exactly as it would have. a child that was
+**forked** is the one case where something has to happen, because a fork copies
+the debugger into it. what happens is that it stops being a debuggee, which
+leaves it running exactly as it would have too
 
 ## the case this exists for
 
@@ -175,19 +180,120 @@ that way is missed. that is a stated limit rather than a silence
 
 ## a fork is a different thing, and is reported as one
 
-`sys.monitoring` state survives `fork()` completely: the child still holds the
-tool id, its local events are unchanged, and callbacks fire in it. so a forked
-child has the agent, armed, with the breakpoint table intact
+`fork` copies the process and keeps **only the calling thread**. what the child
+inherits was measured on 3.13, 3.14 and 3.15, on a gil build and a
+free-threaded one:
 
-it also inherits **the control connection's file descriptor**, and that is not a
-detail. two processes writing length-prefixed frames into one socket
-desynchronise it, and the engine turns that into "the peer sent a message this
-build does not understand" — the debugger blaming its own protocol for the
-program having forked
+- the `sys.monitoring` tool id, still held and still named `bpd`
+- every global and local event, unchanged, with the callbacks still registered
+    and still firing
+- the breakpoint table, the code registry and the stop registry, because they
+    are memory
+- **both file descriptors of the control connection**
 
-so a fork gets its own report, saying that the child is a copy of this process,
-that it holds the agent's monitoring state and this session's connection, and
-that `bpd` is not debugging it as a session of its own
+and what it does not inherit is the thread that reads that connection. so a
+forked child would be an armed debuggee that can write to the session socket and
+can never be answered:
+
+- `bpd_protocol` frames are length prefixed, and two writers interleaving
+    mid-frame desynchronise the stream. the engine turns that into "the peer sent
+    a message this build does not understand" — the debugger blaming its own
+    protocol for the program having forked
+- a child that reached a breakpoint would report a stop and then wait for a
+    resume that no process is able to send. its own thread would be held for ever
+    inside a callback
+
+so a fork gets its own report, saying that the child was a copy of this process,
+that it gave the agent's monitoring state and this session's connection up
+before it ran a line, and that `bpd` is not debugging it as a session of its own
+
+### the child stops being a debuggee
+
+that report is only true because of what the child then does, which is: give the
+whole session up, before `os.fork()` has returned to python, and run exactly as
+it would have if the program had never been launched under `bpd`
+
+it is arranged with `os.register_at_fork(after_in_child=…)`, registered once from
+the agent at attach. `os` is already imported — the entry point uses it to take
+`bpd`'s own variables back out of `os.environ` — so this adds nothing to the
+debuggee's `sys.modules`, and there is no python code in the handler: it is a
+native function the interpreter holds a reference to
+
+**not `pthread_atfork`.** a `pthread_atfork` child handler is called by the C
+library from inside `fork()`, before cpython has put its own runtime back
+together — the GIL, the import lock and the per-interpreter locks are in whatever
+state the fork left them, and every call the handler has to make is a call into
+the interpreter. cpython runs `after_in_child` from `PyOS_AfterFork_Child`,
+*after* reinitialising all of that and *before* `os.fork()` returns, which is the
+one place where both halves of the job are possible. it also has an order
+relative to cpython's own handlers, which `pthread_atfork` does not
+
+what the handler does, in this order:
+
+1. **gives up the session.** from that instruction on nothing in the agent
+    writes a frame: the one place a frame is written checks it first
+1. **closes both inherited descriptors** — see below
+1. **takes the tool off the process.** the local events on every code object the
+    session armed, then the global events, then the callbacks, then the tool id
+    itself. all four, because they are independent: `free_tool_id` explicitly
+    does *not* clear events, so an id handed back with local events still set on
+    it is an id the next tool to claim it would receive this session's
+    breakpoints on
+
+the code objects it clears come from the one place `set_local_events` is called,
+so that set is complete by construction rather than by every part of the agent
+that arms one remembering to say so. it is not `sys.monitoring.clear_tool_id`,
+which does all four in one call and arrived in 3.14: the minimum here is 3.13,
+and a second mechanism for the newer release would be two things to keep true
+instead of one
+
+a child of a child inherits the handler as well, and it is idempotent — the
+second run finds the session already given up and returns
+
+### why the descriptors are closed, and what closing them does to the parent
+
+a socket is closed when the **last** descriptor referring to it is. a fork copies
+the descriptor *table*, so parent and child hold separate entries pointing at one
+open socket, and a child that kept its copies would hold this session's
+connection open for as long as it ran — the engine would go on waiting to read
+from a debuggee that had exited, on a connection whose only remaining owner is a
+process it is not debugging. every worker pool and every reloader has exactly
+that shape, and
+`a_child_that_outlives_its_parent_does_not_hold_the_session_open` is what proves
+it
+
+closing them in the child does **nothing** to the process it was forked from. the
+parent's own entries are untouched, and no FIN is sent while it still holds them
+— measured against a real socket, and pinned by
+`a_fork_leaves_the_parents_session_exactly_as_it_was`, which has the parent reach
+a breakpoint after the fork and read its own tool id back
+
+### the handler takes no lock at all
+
+a fork keeps only the calling thread, so a lock another thread held at the
+instant of the fork is one the child's copy would wait on for ever — and unlike
+almost everything else in the agent, that is not something the GIL rules out. the
+control connection is written to by the reader thread, which does not hold the
+GIL, so even on a gil build a fork can land while its lock is held. on a
+free-threaded build there is no GIL to argue from at all, and free-threaded
+builds are a first-class target
+
+so nothing the handler does takes one:
+
+- the descriptors are closed **by number**. their owning values are unreachable
+    in a forked child anyway — one is on the stack of a thread that did not
+    survive, the other behind the lock in question
+- the code objects to clear come from an **immutable snapshot behind an atomic
+    pointer**, republished by the one place `set_local_events` is called whenever
+    the set changes. what the child reads is whatever was published at the instant
+    of the fork
+- the snapshot is deliberately a **superset** of what is armed rather than
+    exactly it: a code object joining the set is published before the interpreter
+    is told and one leaving it afterwards, so a fork landing between the two finds
+    a code object listed that has nothing on it. clearing that one is a no-op,
+    where losing one that really was armed would not be
+- the stop registry is not read. a process that gave the session up has nothing
+    to report about threads that did not survive the fork
 
 ### only the process that attached reports
 
@@ -198,6 +304,24 @@ writes into the parent's socket
 the consequence is stated rather than hidden: an `os.exec` performed **inside** a
 forked child is not reported, and the `os.fork` that made it is. `os.spawnv` is
 the shape that produces it
+
+### what a forked child can tell, and the one thing that gives it away
+
+nothing, in the child. `a_forked_child_sees_exactly_what_it_would_have_seen_without_the_debugger`
+runs one program twice — once bare and once under `bpd`, with a breakpoint armed
+on a line the child runs — and requires the two children's records of
+`sys.monitoring.get_tool`, `get_events`, `get_local_events`, `sys.argv`,
+`sys.path[0]`, `__name__` and `__file__` to be identical
+
+the **parent** is a different matter, and it is a limit this page states rather
+than leaves to be discovered. the agent reads the control connection on a thread
+of its own, so a debuggee is multi-threaded where a bare run of the same program
+is not — and since 3.12 cpython emits a `DeprecationWarning` on `os.fork()` in a
+multi-threaded process. so a program that forks writes a line to stderr under
+`bpd` that it does not write bare. that is not something this feature introduced
+and not something it can take away: a stop holds one thread and leaves the rest
+of the program running, so the connection has to be readable while a thread is
+held, and that needs a thread which is not the held one
 
 ## where the report comes out
 
@@ -237,9 +361,20 @@ than quietly ending the guarantee
 the environment and `sys.path` are untouched by any of this. this feature adds
 no variable, no path entry and no module
 
+the fork handler is the same shape: cpython exposes `os.register_at_fork` and
+**nothing that enumerates what has been registered**, so a program cannot read
+`bpd`'s handler out either. what it *can* observe is the warning above, which is
+about the reader thread rather than about anything on this page
+
 ## what is not built
 
-propagation. the child is not debugged, and telling it how to reach the session
+propagation, including for a fork. a forked child gives the session up and is
+not handed a new one, which is the honest default rather than the final answer:
+a fork inherits memory, so a child could be told how to reconnect without
+anything going through the environment at all. that is a feature, and it is not
+this one
+
+the child is not debugged, and telling an exec'd one how to reach the session
 means giving it something through its environment — which is the one channel the
 parity guarantee currently keeps clean. what that would cost, and what the
 guarantee would become, is designed rather than guessed at, and it is the rest of
