@@ -130,6 +130,7 @@ name = "bpd_dap"
 version = "0.0.0"
 dependencies = [
  "bpd_core",
+ "getrandom",
  "serde",
  "serde_json",
  "thiserror",

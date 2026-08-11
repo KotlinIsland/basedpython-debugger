@@ -16,6 +16,15 @@
 //! be an adapter shaped by how the agent happens to report something, and how
 //! the agent reports something would become what a DAP client sees
 //!
+//! ## the two transports
+//!
+//! DAP defines two ways for a client to reach an adapter, and both end at the
+//! same [`serve`]. stdio is the one an editor spawns; [`listen`] is the one a
+//! client connects to, for a client that did not spawn this process. a
+//! transport is where a client's bytes come from and nothing past that point
+//! knows which one it was — which is why the same session assertions are run
+//! over both rather than each transport having its own idea of what works
+//!
 //! ## where DAP's model and bpd's differ
 //!
 //! neither difference is papered over, because papering over one is how a
@@ -42,6 +51,7 @@ pub mod capabilities;
 pub mod configuration;
 pub mod coverage;
 pub mod handles;
+pub mod listen;
 pub mod render;
 pub mod session;
 pub mod wire;
@@ -50,4 +60,5 @@ pub use adapter::serve;
 pub use capabilities::capabilities;
 pub use configuration::Configuration;
 pub use coverage::{reach_of, reach_of_facet, surface};
+pub use listen::Listening;
 pub use session::{Failed, Interrupt, Launcher, ProgramOutput, Session, Started, Stream, describe};

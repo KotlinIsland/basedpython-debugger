@@ -6,15 +6,28 @@
 //! is proved by the **program's own output**, which is what a `f_locals` write
 //! the compiled code never reads would not change
 //!
-//! the transport is the real one too: a child process, `Content-Length`
-//! framing, stdin and stdout. that matters more than it looks, because the
-//! debuggee's own stdout is on the same file descriptor the protocol would be
-//! on if it were inherited — a single `print` would make every message after it
-//! unreadable, and a test that spoke to the adapter in-process would never
-//! notice
+//! the transport is the real one too: a child process and `Content-Length`
+//! framing. that matters more than it looks, because the debuggee's own stdout
+//! is on the same file descriptor the protocol would be on if it were inherited
+//! — a single `print` would make every message after it unreadable, and a test
+//! that spoke to the adapter in-process would never notice
+//!
+//! ## both transports, one set of assertions
+//!
+//! DAP defines two, and `bpd dap` speaks both: stdin and stdout, and a loopback
+//! socket a client connects to. every scenario below is a function that takes
+//! the [`Transport`], and [`over_each_transport`] gives each one two `#[test]`s
+//! — so the assertions that prove a session works exist **once** and are run
+//! over both. a transport that quietly did something different from the other
+//! would be a second debugger nobody is testing, and there is no way to add one
+//! here without both entries appearing
+//!
+//! what is loopback's alone is at the bottom: what it prints when it binds, and
+//! the connections it refuses
 
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::io::{BufRead, BufReader, Read as _, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,6 +36,47 @@ use bpd_test::debuggee::{Fixture, line_of};
 
 /// the binary this test run built, not whatever `bpd` is on PATH
 const BPD: &str = env!("CARGO_BIN_EXE_bpd");
+
+/// how a client reaches the adapter
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transport {
+    /// the adapter is spawned and speaks on the pipes it was given
+    Stdio,
+    /// the adapter listens on a loopback port and the client connects to it
+    Loopback,
+}
+
+/// give a scenario a `#[test]` on each transport
+///
+/// the scenario takes a [`Transport`] rather than a started client, so that one
+/// which starts more than one client starts all of them the same way
+macro_rules! over_each_transport {
+    ($($scenario:ident),* $(,)?) => {
+        $(
+            mod $scenario {
+                #[test]
+                fn over_stdio() {
+                    super::$scenario(super::Transport::Stdio);
+                }
+
+                #[test]
+                fn over_loopback_tcp() {
+                    super::$scenario(super::Transport::Loopback);
+                }
+            }
+        )*
+    };
+}
+
+over_each_transport!(
+    a_breakpoint_is_hit_a_local_is_written_and_the_program_sees_the_write,
+    a_running_program_can_be_paused_while_the_adapter_is_waiting_for_it,
+    a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so,
+    an_editor_can_run_a_whole_investigation_the_way_an_agent_can,
+    an_editor_can_ask_what_changed_between_two_stops,
+    a_capability_that_is_not_advertised_is_refused_rather_than_guessed_at,
+    a_client_is_refused_the_same_interpreter_the_command_line_is,
+);
 
 /// a program with a local worth writing to, and a marker after the breakpoint
 ///
@@ -50,15 +104,14 @@ main()
 /// how long a test waits for the adapter to say something
 const PATIENCE: Duration = Duration::from_mins(1);
 
-#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "it is one session end to end, and that is the acceptance. \
               splitting it into helpers hides the order the messages go in"
 )]
-fn a_breakpoint_is_hit_a_local_is_written_and_the_program_sees_the_write() {
+fn a_breakpoint_is_hit_a_local_is_written_and_the_program_sees_the_write(transport: Transport) {
     let fixture = Fixture::new("dapped", PROGRAM);
-    let mut client = Client::start();
+    let mut client = Client::start(transport);
 
     client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
     client.request(
@@ -212,14 +265,13 @@ print("finished", flush=True)
 sys.exit(0)
 "#;
 
-#[test]
-fn a_running_program_can_be_paused_while_the_adapter_is_waiting_for_it() {
+fn a_running_program_can_be_paused_while_the_adapter_is_waiting_for_it(transport: Transport) {
     // the request that cannot go the way every other one goes: the agent
     // answers on a thread it is holding, and a running program has none. so it
     // is delivered on an interrupt while the session is blocked reading its
     // connection, and this is what proves that path is real
     let fixture = Fixture::new("spinner", SPINNING);
-    let mut client = Client::start();
+    let mut client = Client::start(transport);
 
     client.request("initialize", &serde_json::json!({}));
     client.request(
@@ -268,8 +320,7 @@ fn a_running_program_can_be_paused_while_the_adapter_is_waiting_for_it() {
     client.finish();
 }
 
-#[test]
-fn a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so() {
+fn a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so(transport: Transport) {
     // "the breakpoint is set" is the easiest thing in a debugger to claim
     // wrongly. a module the program has not imported has no code object behind
     // it, and DAP has a word for exactly that state
@@ -279,7 +330,7 @@ fn a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so() {
     );
     let sibling = fixture.sibling("later", "def value():\n    return 7\n");
 
-    let mut client = Client::start();
+    let mut client = Client::start(transport);
     client.request("initialize", &serde_json::json!({}));
     client.request(
         "launch",
@@ -328,14 +379,13 @@ fn a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so() {
     client.finish();
 }
 
-#[test]
-fn an_editor_can_run_a_whole_investigation_the_way_an_agent_can() {
+fn an_editor_can_run_a_whole_investigation_the_way_an_agent_can(transport: Transport) {
     // the parity rule, at the far end: a debug script is a capability of the
     // core, so it is not an agent's alone. DAP has no request of its own for one
     // and never will, so it is an extension — and a client sends it with the
     // `customRequest` every DAP client has
     let fixture = Fixture::new("scripted", PROGRAM);
-    let mut client = Client::start();
+    let mut client = Client::start(transport);
 
     client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
     client.request(
@@ -402,14 +452,13 @@ fn an_editor_can_run_a_whole_investigation_the_way_an_agent_can() {
     client.finish();
 }
 
-#[test]
-fn an_editor_can_ask_what_changed_between_two_stops() {
+fn an_editor_can_ask_what_changed_between_two_stops(transport: Transport) {
     // the parity rule again: the declarative query and the difference between
     // two of its answers are capabilities of the core, so they are not an
     // agent's alone. "what changed between here and there" is a thing a person
     // wants, and no editor offers it
     let fixture = Fixture::new("compared", PROGRAM);
-    let mut client = Client::start();
+    let mut client = Client::start(transport);
 
     client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
     client.request(
@@ -495,10 +544,9 @@ fn an_editor_can_ask_what_changed_between_two_stops() {
     client.finish();
 }
 
-#[test]
-fn a_capability_that_is_not_advertised_is_refused_rather_than_guessed_at() {
+fn a_capability_that_is_not_advertised_is_refused_rather_than_guessed_at(transport: Transport) {
     let fixture = Fixture::new("hit", "x = 1\ny = 2\n");
-    let mut client = Client::start();
+    let mut client = Client::start(transport);
 
     client.request("initialize", &serde_json::json!({}));
     client.request(
@@ -564,16 +612,136 @@ fn variable<'a>(response: &'a serde_json::Value, name: &str) -> &'a serde_json::
 struct Client {
     adapter: Arc<Mutex<Child>>,
     finished: Arc<AtomicBool>,
-    writes: ChildStdin,
-    reads: BufReader<ChildStdout>,
+    writes: Box<dyn Write + Send>,
+    reads: Box<dyn BufRead + Send>,
+    /// the port this adapter bound, when it is listening on one
+    listening: Option<Listener>,
+    /// the token to put on the next message, until it has been presented
+    ///
+    /// only the loopback transport has one. a pipe has exactly one writer and
+    /// whoever spawned the adapter chose it, so there is nothing for a token to
+    /// separate
+    token: Option<String>,
     seen: Vec<serde_json::Value>,
     /// how much of `seen` the test has already looked at for an event
     taken: usize,
     seq: i64,
 }
 
-impl Client {
+/// a `bpd dap --listen 0` that has bound, before anything has connected to it
+///
+/// separate from [`Client`] because the interesting refusals happen to a
+/// connection that never becomes a client, and one of them has to be the
+/// **first** connection to prove the listener carries on waiting afterwards
+struct Listener {
+    process: Arc<Mutex<Child>>,
+    finished: Arc<AtomicBool>,
+    endpoint: SocketAddr,
+    token: String,
+    /// the adapter's own stdout, held open
+    ///
+    /// the announcement is the only thing it ever writes there, and a closed
+    /// read end would turn a stray write into a signal instead of a failure
+    _stdout: BufReader<ChildStdout>,
+}
+
+impl Listener {
+    /// spawn a listening adapter and read the line it prints when it binds
+    ///
+    /// this is the whole reason the port is reported: the adapter binds `0`, the
+    /// operating system picks, and the number comes back here. a test that had
+    /// to choose a port would be racing every other test and every other
+    /// program on the machine for it
     fn start() -> Self {
+        let mut adapter = Command::new(BPD)
+            .args(["dap", "--listen", "0"])
+            // a listening adapter never reads its stdin, and a pipe left open
+            // for it would only be something to close later
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("the binary was built by the same cargo invocation as this test");
+        let mut stdout = BufReader::new(adapter.stdout.take().expect("stdout was asked for"));
+
+        let process = Arc::new(Mutex::new(adapter));
+        let finished = Arc::new(AtomicBool::new(false));
+        watch(&process, &finished);
+
+        let mut line = String::new();
+        let read = stdout
+            .read_line(&mut line)
+            .expect("a listening adapter says where it bound before it accepts anything");
+        assert_ne!(
+            read, 0,
+            "`bpd dap --listen 0` ended without saying where it had bound"
+        );
+
+        let said: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|error| {
+            panic!("the announcement is one line of json: {error}\n{line}")
+        });
+        assert_eq!(
+            said["listening"]["host"], "127.0.0.1",
+            "a DAP message runs the debuggee's own code, so this binds loopback \
+             and nothing else: {said}"
+        );
+
+        let port = said["listening"]["port"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("the announcement names a port: {said}"));
+        let port = u16::try_from(port).expect("a port is sixteen bits");
+        assert_ne!(port, 0, "nothing can connect to the port that means any");
+
+        let token = said["listening"]["token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the announcement names the token to present: {said}"))
+            .to_string();
+
+        Self {
+            process,
+            finished,
+            endpoint: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            token,
+            _stdout: stdout,
+        }
+    }
+
+    /// become this adapter's client, presenting the token it asked for
+    fn client(self) -> Client {
+        let socket =
+            TcpStream::connect(self.endpoint).expect("the adapter said it had bound that endpoint");
+        Client {
+            adapter: Arc::clone(&self.process),
+            finished: Arc::clone(&self.finished),
+            writes: Box::new(socket.try_clone().expect("a connected socket clones")),
+            reads: Box::new(BufReader::new(socket)),
+            token: Some(self.token.clone()),
+            listening: Some(self),
+            seen: Vec::new(),
+            taken: 0,
+            seq: 0,
+        }
+    }
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        // the same reason [`Client`] has one: an adapter holding a debuggee
+        // with a held thread never exits on its own
+        self.finished.store(true, Ordering::Relaxed);
+        end(&self.process);
+    }
+}
+
+impl Client {
+    fn start(transport: Transport) -> Self {
+        match transport {
+            Transport::Stdio => Self::spawned(),
+            Transport::Loopback => Listener::start().client(),
+        }
+    }
+
+    /// the adapter as an editor starts one: spawned, speaking on its pipes
+    fn spawned() -> Self {
         let mut adapter = Command::new(BPD)
             .arg("dap")
             .stdin(Stdio::piped())
@@ -591,8 +759,10 @@ impl Client {
         Self {
             adapter,
             finished,
-            writes,
-            reads,
+            writes: Box::new(writes),
+            reads: Box::new(reads),
+            listening: None,
+            token: None,
             seen: Vec::new(),
             taken: 0,
             seq: 0,
@@ -608,11 +778,21 @@ impl Client {
         })
         .to_string();
 
-        write!(self.writes, "Content-Length: {}\r\n\r\n{body}", body.len())
-            .expect("the adapter is reading its stdin");
+        // the token goes on the first message and only the first: it
+        // authenticates the connection, and the connection is the session
+        let presenting = match self.token.take() {
+            Some(token) => format!("X-Bpd-Token: {token}\r\n"),
+            None => String::new(),
+        };
+        write!(
+            self.writes,
+            "Content-Length: {}\r\n{presenting}\r\n{body}",
+            body.len()
+        )
+        .expect("the adapter is reading its end of the connection");
         self.writes
             .flush()
-            .expect("the adapter is reading its stdin");
+            .expect("the adapter is reading its end of the connection");
 
         loop {
             let message = self.next_message();
@@ -637,6 +817,14 @@ impl Client {
             }
             self.next_message();
         }
+    }
+
+    /// where this adapter is listening, when it is
+    fn endpoint(&self) -> SocketAddr {
+        self.listening
+            .as_ref()
+            .expect("this client was started on the loopback transport")
+            .endpoint
     }
 
     /// everything the program and bpd have said so far, as one string
@@ -785,13 +973,12 @@ impl Drop for Client {
 /// answered "launch failed" would leave a client with no way to tell an
 /// unsupported interpreter from a missing file, and the parity rule is that an
 /// agent can do everything a human can, including *know why*
-#[test]
-fn a_client_is_refused_the_same_interpreter_the_command_line_is() {
+fn a_client_is_refused_the_same_interpreter_the_command_line_is(transport: Transport) {
     for capabilities in bpd_test::discovered().unsupported() {
         // a program that would announce itself, so "it did not run" is
         // something the test observes rather than infers
         let fixture = Fixture::new("never_reached", "print('the-program-ran')\n");
-        let mut client = Client::start();
+        let mut client = Client::start(transport);
 
         client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
         let refused = client.request(
@@ -826,4 +1013,330 @@ fn a_client_is_refused_the_same_interpreter_the_command_line_is() {
             "the program ran before the adapter refused the interpreter"
         );
     }
+}
+
+/// a connection that is not the adapter's client
+///
+/// a raw socket rather than a [`Client`], because what these tests are about is
+/// what a connection is told *before* it becomes a session — and one of them
+/// never sends anything at all
+struct Bystander {
+    socket: TcpStream,
+}
+
+impl Bystander {
+    fn connect(endpoint: SocketAddr) -> Self {
+        let socket = TcpStream::connect(endpoint).expect("the adapter is listening there");
+        // a refusal that never arrives is the hang this whole shape exists to
+        // rule out, so a read that waits is a failure rather than a wait
+        socket
+            .set_read_timeout(Some(PATIENCE))
+            .expect("a connected socket takes a read timeout");
+        Self { socket }
+    }
+
+    /// send one framed message, with whatever headers were asked for
+    fn send(&mut self, headers: &str, body: &str) {
+        self.send_raw(&format!(
+            "Content-Length: {}\r\n{headers}\r\n{body}",
+            body.len()
+        ));
+    }
+
+    /// send bytes that are not necessarily a DAP message at all
+    fn send_raw(&mut self, text: &str) {
+        self.socket
+            .write_all(text.as_bytes())
+            .expect("the adapter is reading the connection");
+        self.socket.flush().expect("the adapter is reading it");
+    }
+
+    /// the text of the next `output` event, whatever else arrives first
+    fn told(&mut self) -> String {
+        let mut reader = BufReader::new(&self.socket);
+        let mut length = None;
+        loop {
+            let mut line = String::new();
+            let read = reader
+                .read_line(&mut line)
+                .unwrap_or_else(|error| panic!("the adapter said nothing back: {error}"));
+            assert_ne!(
+                read, 0,
+                "the connection was closed without being told why it was refused"
+            );
+            let line = line.trim_end_matches(['\r', '\n']).to_string();
+            if line.is_empty() {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("Content-Length: ") {
+                length = Some(value.parse().expect("a length is a number"));
+            }
+        }
+
+        let mut body = vec![0; length.expect("every DAP message carries its length")];
+        reader
+            .read_exact(&mut body)
+            .expect("the adapter wrote as many bytes as it promised");
+        let message: serde_json::Value =
+            serde_json::from_slice(&body).expect("a refusal is a DAP message");
+
+        assert_eq!(
+            message["event"], "output",
+            "an unsolicited message is an event, since a refused connection sent \
+             nothing this adapter would answer: {message}"
+        );
+        message["body"]["output"]
+            .as_str()
+            .unwrap_or_else(|| panic!("an output event carries text: {message}"))
+            .to_string()
+    }
+
+    /// require that the adapter hung up rather than holding the connection
+    ///
+    /// what is left to read does not matter; that the read **ends** does. a
+    /// refused connection left open is a client that has been told no and is
+    /// still waiting to be told something else
+    fn hung_up(&mut self) {
+        let mut rest = Vec::new();
+        if let Err(error) = self.socket.read_to_end(&mut rest) {
+            panic!("a refused connection is closed, not held open: {error}");
+        }
+    }
+}
+
+/// a program that runs long enough to be interrupted by a second connection
+const WAITING: &str = "import sys\nx = 1\nsys.exit(0)\n";
+
+#[test]
+fn a_second_client_is_told_the_adapter_is_busy_rather_than_left_waiting() {
+    // a session **is** the connection — that is DAP's model. so a second one
+    // gets an answer. a queue would be indistinguishable from a hang at the
+    // other end, and a client waiting on a socket that never answers has
+    // nothing to report to whoever is waiting on it
+    let fixture = Fixture::new("occupied", WAITING);
+    let mut client = Client::start(Transport::Loopback);
+    let endpoint = client.endpoint();
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+
+    // nothing is sent on this one: the refusal has to be the adapter's first
+    // move, or a client that is waiting to be spoken to first would wait forever
+    let mut second = Bystander::connect(endpoint);
+    let told = second.told();
+    assert!(
+        told.contains("already serving"),
+        "the second connection has to be told why, and was told {told:?}"
+    );
+    assert!(
+        told.contains("--listen"),
+        "and what to do about it, and was told {told:?}"
+    );
+    second.hung_up();
+
+    // and the session that was already running is untouched by any of it
+    client.request("configurationDone", &serde_json::json!({}));
+    let exited = client.event("exited");
+    assert_eq!(exited["body"]["exitCode"], 0);
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+#[test]
+fn a_connection_with_no_token_or_the_wrong_one_is_refused_and_the_listener_waits_on() {
+    // the token is the whole of what separates this adapter's client from any
+    // other process that can reach loopback, and a DAP message runs the
+    // debuggee's own code. so: refused, told why — and the listener carries on,
+    // because a bad connection that could end the adapter or take its one slot
+    // would let anything that reaches the port stop the session being started
+    let listener = Listener::start();
+    let endpoint = listener.endpoint;
+    let initialize = r#"{"seq":1,"type":"request","command":"initialize"}"#;
+
+    let mut nothing = Bystander::connect(endpoint);
+    nothing.send("", initialize);
+    let told = nothing.told();
+    assert!(
+        told.contains("x-bpd-token"),
+        "the refusal has to name the header, and said {told:?}"
+    );
+    assert!(
+        told.contains("--listen"),
+        "and where the token comes from, and said {told:?}"
+    );
+    nothing.hung_up();
+
+    let mut guessing = Bystander::connect(endpoint);
+    guessing.send(
+        &format!("X-Bpd-Token: {}\r\n", "f".repeat(listener.token.len())),
+        initialize,
+    );
+    let told = guessing.told();
+    assert!(
+        told.contains("not this session's token"),
+        "a wrong token is named as one, and said {told:?}"
+    );
+    assert!(
+        !told.contains(&listener.token[..8]),
+        "a refusal must not quote the token back at whoever is guessing: {told:?}"
+    );
+    guessing.hung_up();
+
+    // and after both, the client that does present the token gets a session
+    let fixture = Fixture::new("admitted", WAITING);
+    let mut client = listener.client();
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+    let exited = client.event("exited");
+    assert_eq!(
+        exited["body"]["exitCode"], 0,
+        "two refused connections left the listener able to serve a real one"
+    );
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+#[test]
+fn a_port_that_cannot_be_bound_names_the_port_and_what_to_do_instead() {
+    // the flag's value is really used, and a listener that could not start says
+    // so rather than exiting with nothing on either stream
+    let taken = std::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .expect("loopback binds an arbitrary port");
+    let port = taken
+        .local_addr()
+        .expect("a bound listener has an address")
+        .port();
+
+    let refused = Command::new(BPD)
+        .args(["dap", "--listen", &port.to_string()])
+        .stdin(Stdio::null())
+        .output()
+        .expect("the binary was built by the same cargo invocation as this test");
+
+    assert!(
+        !refused.status.success(),
+        "the adapter reported success on a port it never bound"
+    );
+    assert!(
+        refused.stdout.is_empty(),
+        "nothing announces an endpoint that does not exist, and it said {:?}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(said.contains(&port.to_string()), "said {said}");
+    assert!(
+        said.contains("--listen 0"),
+        "the refusal has to say what to do instead, and said {said}"
+    );
+}
+
+#[test]
+fn there_is_no_way_to_ask_this_adapter_to_listen_anywhere_but_loopback() {
+    // the security decision, as the command line: `--listen` takes a **port**,
+    // so a wildcard bind is not expressible rather than merely defaulted away
+    // from. reaching this port is running code as whoever started bpd, and an
+    // address that could be widened is one that eventually is
+    for address in ["0.0.0.0:5678", "0.0.0.0", "::", "127.0.0.1:5678"] {
+        let refused = Command::new(BPD)
+            .args(["dap", "--listen", address])
+            .stdin(Stdio::null())
+            .output()
+            .expect("the binary was built by the same cargo invocation as this test");
+
+        assert!(
+            !refused.status.success(),
+            "`--listen {address}` was accepted, so there is an address to widen"
+        );
+        assert!(
+            refused.stdout.is_empty(),
+            "`--listen {address}` announced an endpoint: {:?}",
+            String::from_utf8_lossy(&refused.stdout)
+        );
+    }
+
+    // and no flag alongside it offers one either
+    let help = Command::new(BPD)
+        .args(["dap", "--help"])
+        .output()
+        .expect("the binary was built by the same cargo invocation as this test");
+    let said = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        said.contains("127.0.0.1"),
+        "`bpd dap --help` has to say where it listens, and said {said}"
+    );
+    for widening in ["--host", "--address", "--bind"] {
+        assert!(
+            !said.contains(widening),
+            "`{widening}` would be a way to widen the address, and it is offered: {said}"
+        );
+    }
+}
+
+#[test]
+fn a_request_shaped_like_a_browser_fetch_is_refused_before_anything_in_it_is_read() {
+    // this is the sharp edge the token is for, and it is why loopback is not a
+    // trust boundary. a page can POST to 127.0.0.1 with `text/plain` and no
+    // preflight, and this framing is HTTP shaped enough that a request line
+    // with a colon in its path parses as an ordinary header — so the body that
+    // follows would be a whole DAP message. a DAP message runs the debuggee's
+    // own code. what a page cannot do is obtain this session's token, because
+    // the same origin policy stops it reading anything back
+    let listener = Listener::start();
+    let mut page = Bystander::connect(listener.endpoint);
+
+    let body = r#"{"seq":1,"type":"request","command":"evaluate","arguments":{"expression":"1"}}"#;
+    page.send_raw(&format!(
+        "POST /a:b HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://example.invalid\r\n\
+         Content-Type: text/plain;charset=UTF-8\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    ));
+
+    let told = page.told();
+    assert!(
+        told.contains("x-bpd-token"),
+        "the request was answered rather than refused, and said {told:?}"
+    );
+    page.hung_up();
+}
+
+#[test]
+fn a_connection_that_presents_nothing_is_dropped_rather_than_holding_the_listener() {
+    // the one thing a token cannot stop on its own: a process that connects and
+    // then says nothing. left alone it would hold the slot for as long as it
+    // liked, and the client the person is waiting for would never be reached.
+    // so there is a deadline on presenting one, and when it passes the listener
+    // goes back to waiting rather than staying stuck on it
+    let listener = Listener::start();
+    let silent = TcpStream::connect(listener.endpoint).expect("the adapter is listening there");
+
+    // this one connects after, so it cannot be admitted until the silent one is
+    // let go of
+    let fixture = Fixture::new("after_a_silence", WAITING);
+    let mut client = listener.client();
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+    let exited = client.event("exited");
+    assert_eq!(
+        exited["body"]["exitCode"], 0,
+        "a connection that never presented a token stopped the session that did"
+    );
+
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+    drop(silent);
 }

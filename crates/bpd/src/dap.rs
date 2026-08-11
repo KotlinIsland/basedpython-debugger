@@ -1,4 +1,4 @@
-//! `bpd dap` — speak the debug adapter protocol on stdin and stdout
+//! `bpd dap` — speak the debug adapter protocol, on stdio or on a socket
 //!
 //! this is the composition root, and it is the whole reason `bpd_dap` depends
 //! on `bpd_core` alone: the adapter says what it needs of a session, and this
@@ -9,43 +9,87 @@
 //! the program's own stdout and stderr are **pipes**, not this process's. an
 //! adapter's stdout is the protocol, and one `print` from the debuggee in the
 //! middle of a message would make every message after it unreadable
+//!
+//! under `--listen` the protocol is on the socket instead, and this process's
+//! stdout carries exactly one line: where the adapter bound and what a client
+//! has to present. that is why the port can be reported at all — it is the one
+//! transport where stdout is not the protocol
 
 use std::ffi::OsString;
-use std::io::{BufRead as _, BufReader, Read};
+use std::io::{BufRead as _, BufReader, Read, Write as _};
 use std::sync::Arc;
 
 use bpd_core::python::Capabilities;
 use bpd_core::{Addressed, Reporting, Request, Response, Stop};
-use bpd_dap::{Configuration, Failed, Launcher, ProgramOutput, Session, Started, Stream};
+use bpd_dap::{
+    Configuration, Failed, Launcher, Listening, ProgramOutput, Session, Started, Stream,
+};
 use bpd_engine::{Debuggee, Launched, Program};
 
 use crate::report_error;
 
 /// `bpd dap` arguments
 ///
-/// there are none. everything a session needs is in the `launch` request the
-/// client sends, which is where an editor's `launch.json` ends up — a flag here
+/// there is one, and it chooses a transport rather than configuring a session.
+/// everything a session needs is in the `launch` request the client sends,
+/// which is where an editor's `launch.json` ends up — a flag for one of those
 /// would be a second place to configure the same thing, and the two would
 /// disagree
 #[derive(Debug, clap::Args)]
-pub(crate) struct Args {}
+pub(crate) struct Args {
+    /// listen on this loopback TCP port for one client, instead of speaking on
+    /// stdin and stdout
+    ///
+    /// `0` binds a port the operating system chooses. either way the port that
+    /// was really bound, and the token a client must present, are printed on
+    /// stdout as one line of json before the first connection is accepted
+    ///
+    /// the address is not configurable and the port is all this takes: a DAP
+    /// message runs the debuggee's own code, so this listens on 127.0.0.1 and
+    /// there is nothing to widen it to
+    #[arg(long, value_name = "PORT")]
+    listen: Option<u16>,
+}
 
-pub(crate) fn run(_args: &Args) -> std::process::ExitCode {
-    let served = bpd_dap::serve(
-        &mut Engine,
-        Box::new(std::io::stdin()),
-        Box::new(std::io::stdout()),
-    );
+pub(crate) fn run(args: &Args) -> std::process::ExitCode {
+    let served = match args.listen {
+        Some(port) => listen(port).map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
+        None => bpd_dap::serve(
+            &mut Engine,
+            Box::new(std::io::stdin()),
+            Box::new(std::io::stdout()),
+        )
+        .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
+    };
 
     match served {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            // stdout is the protocol and the client is already gone, so this
-            // goes to stderr — which is where an editor keeps its adapter log
-            report_error(&error);
+            // stdout is the protocol, or the one line that said where it is, and
+            // the client is already gone either way. this goes to stderr —
+            // which is where an editor keeps its adapter log
+            report_error(error.as_ref());
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// bind, say where, and serve the one client that presents the token
+///
+/// the announcement is printed and **flushed** before anything is accepted, so
+/// a script that reads a line and then connects cannot lose the race it would
+/// have had to run if it had to guess a port
+fn listen(port: u16) -> Result<(), bpd_dap::listen::Error> {
+    let listening = Listening::bind(port)?;
+
+    println!("{}", listening.announcement());
+    if let Err(error) = std::io::stdout().flush() {
+        // whoever started this is waiting on that line to know where to
+        // connect, and a listener nobody can find is a hang with no cause
+        panic!("the endpoint could not be written to stdout, so nothing can learn it: {error}");
+    }
+
+    listening.serve(&mut Engine, &|said| eprintln!("bpd dap: {said}"))
 }
 
 /// the engine, as the adapter's launcher
