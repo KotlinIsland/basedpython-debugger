@@ -87,6 +87,13 @@ const OUTPUT_KEPT: usize = 64 << 10;
 /// produces millions — so this keeps the first and counts the rest
 const LOGS_KEPT: usize = 200;
 
+/// how many child processes are kept between calls
+///
+/// a program that starts children in a loop has no bound on this either, and
+/// far fewer are worth reading than log records: they say the same thing about
+/// the same program. whatever falls off is counted and reported
+const CHILDREN_KEPT: usize = 50;
+
 /// serve one MCP client over `input` and `output`
 ///
 /// returns when the client hangs up. the debuggee never outlives it: a client
@@ -735,6 +742,9 @@ impl<'a> Server<'a> {
         if let Some(said) = self.said.take() {
             answer["logged"] = said;
         }
+        if let Some(children) = self.said.children() {
+            answer["spawned"] = children;
+        }
         if !answer.is_object() {
             unreachable!("every tool answers with an object, and one answered with {answer}");
         }
@@ -971,6 +981,8 @@ struct Said {
     logs: Vec<LogRecord>,
     dropped: usize,
     pausing: Vec<Vec<u64>>,
+    children: Vec<bpd_core::Spawn>,
+    children_dropped: usize,
 }
 
 impl Said {
@@ -998,6 +1010,32 @@ impl Said {
         }
         Some(rendered)
     }
+
+    /// the children the program started since the last answer, if any
+    ///
+    /// its own key rather than part of the logs, because it is not something
+    /// the program was asked to say. an agent that found it under `logged`
+    /// would reasonably read it as a logpoint firing
+    fn children(&mut self) -> Option<serde_json::Value> {
+        if self.children.is_empty() {
+            return None;
+        }
+        let started: Vec<serde_json::Value> = self.children.iter().map(render::spawned).collect();
+        self.children.clear();
+        let dropped = std::mem::take(&mut self.children_dropped);
+
+        let mut rendered = serde_json::json!({ "started": started });
+        if dropped > 0 {
+            rendered["dropped"] = dropped.into();
+            rendered["says"] = format!(
+                "the program started more than the {CHILDREN_KEPT} children bpd \
+                 keeps between calls, so {dropped} later ones are gone. these \
+                 are the first"
+            )
+            .into();
+        }
+        Some(rendered)
+    }
 }
 
 impl Reporting for Said {
@@ -1011,6 +1049,14 @@ impl Reporting for Said {
 
     fn pausing(&mut self, running: Vec<u64>) {
         self.pausing.push(running);
+    }
+
+    fn spawned(&mut self, child: bpd_core::Spawn) {
+        if self.children.len() < CHILDREN_KEPT {
+            self.children.push(child);
+        } else {
+            self.children_dropped += 1;
+        }
     }
 }
 

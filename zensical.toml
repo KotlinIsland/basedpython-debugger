@@ -76,4 +76,5 @@ development = [
     "development/python-support.md",
     "development/source-mapping.md",
     "development/django-templates.md",
+    "development/subprocesses.md",
 ]

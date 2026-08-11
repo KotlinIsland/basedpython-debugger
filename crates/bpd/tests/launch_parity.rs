@@ -447,6 +447,53 @@ fn a_program_that_reads_its_own_import_path_finds_no_debugger_on_it() {
     }
 }
 
+#[test]
+fn a_program_that_watches_its_own_audit_events_sees_exactly_the_ones_it_would_have() {
+    // the third fingerprint, and the one the child-process report could have
+    // left. `bpd` watches for a child through `PySys_AddAuditHook`, which is a
+    // hook in the program's own interpreter — so the question is whether the
+    // program can tell it is there
+    //
+    // it cannot be *listed*: cpython exposes `sys.addaudithook` and `sys.audit`
+    // and nothing that enumerates what is installed. what is left is whether
+    // the events a program's own hook receives change, and that is what this
+    // compares — for a spawn, which is the one thing bpd's hook acts on
+    for form in EVERY_FORM {
+        let fixture = Fixture::new(
+            "audited",
+            "import subprocess\n\
+             import sys\n\n\
+             seen = []\n\
+             sys.addaudithook(lambda event, arguments: seen.append(event))\n\
+             subprocess.run([sys.executable, '-c', 'pass'], check=True)\n\
+             subprocess.run(['/bin/echo'], check=True, capture_output=True)\n\
+             print('\\n'.join(seen))\n\
+             print(sorted(name for name in dir(sys) if 'audit' in name.lower()))\n",
+        );
+        let (bare, debugged) = both(&fixture, form, &[]);
+
+        assert_eq!(
+            debugged.stdout, bare.stdout,
+            "the program's own audit hook saw a different set of events under \
+             bpd than without it, as {form:?}. a hook the program can detect is \
+             a program that can behave differently under the debugger"
+        );
+        assert!(
+            bare.stdout.contains("_posixsubprocess.fork_exec")
+                || bare.stdout.contains("_winapi.CreateProcess"),
+            "the fixture has to reach the event bpd watches, or this compared \
+             two runs of a program that proves nothing:\n{}",
+            bare.stdout
+        );
+        assert!(
+            bare.stdout.contains("['addaudithook', 'audit']"),
+            "if cpython grows a way to list the installed hooks, this guarantee \
+             has to be re-established rather than assumed. `sys` now has:\n{}",
+            bare.stdout
+        );
+    }
+}
+
 /// every module a debuggee has that a bare run of the same program does not,
 /// and why each one is still there
 ///

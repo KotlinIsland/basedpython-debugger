@@ -418,9 +418,22 @@ built, `--noreload` is the answer, which
 what makes it hard is that a debuggee must be able to hand a child the same
 session without the child's launch going through `bpd` at all, and that the
 child is spawned by code `bpd` does not control. debugpy does this with
-`subProcess` defaulting to true and a custom `debugpyAttach` DAP event; the DAP
-shape for it is therefore already established, and the part to design is what
-the agent does across a `fork` and an `exec`
+`subProcess` defaulting to true and a custom `debugpyAttach` DAP event — which
+predates the standard `startDebugging` reverse request, and that is the shape to
+use rather than debugpy's
+
+**the first step of it is built**: `bpd` notices a python child and reports it,
+through a native audit hook, in the CLI, in DAP and in MCP. it does not
+propagate anything, and the child runs exactly as it would have — including the
+guarantee that a program cannot tell it is being debugged, which is unchanged
+and is still tested against a bare run. the reason that is worth having on its
+own is that the symptom it removes is a breakpoint reported unbound with no
+reason given. see [child processes](docs/development/subprocesses.md)
+
+what is left is the propagation, and the hard part of it is not the hook: an
+audit hook can **observe** a spawn and cannot rewrite its arguments, so the only
+way into an exec'd child is its environment — which is the one channel the
+parity guarantee currently keeps clean
 
 ### M8 — attach
 

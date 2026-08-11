@@ -36,9 +36,8 @@ fn stopped(fixture: &Fixture, args: &[OsString]) -> bpd_engine::Debuggee {
 
 /// resume a debuggee with no breakpoints set, which cannot stop again
 fn to_exit(mut debuggee: bpd_engine::Debuggee) -> ExitStatus {
-    let unlogged = |record| panic!("no logpoint was set, and the agent sent {record:?}");
     match debuggee
-        .run(unlogged)
+        .run(&mut bpd_test::reporting::Unreported)
         .expect("the debuggee ran to completion")
     {
         Running::Exited { status, rebound } => {

@@ -1789,6 +1789,24 @@ impl Reporting for Events<'_> {
         };
         self.emit(&serde_json::json!({ "category": "console", "output": text }));
     }
+
+    /// the program started a child, on the `console` category
+    ///
+    /// `console` rather than `stdout`, because the program did not write this —
+    /// bpd did. a client showing it among the program's own output would be
+    /// putting words in the debuggee's mouth
+    ///
+    /// there is no `source` and no `line` on it, and that is deliberate: the
+    /// audit hook runs on whatever thread made the child and reports what the
+    /// program asked the operating system for, not where in the program it was
+    /// asked. a location invented from the frame that happened to be running
+    /// would be a location nobody can act on
+    fn spawned(&mut self, child: bpd_core::Spawn) {
+        self.emit(&serde_json::json!({
+            "category": "console",
+            "output": format!("{child}\n"),
+        }));
+    }
 }
 
 /// what one DAP `setBreakpoints` asked for, for one line

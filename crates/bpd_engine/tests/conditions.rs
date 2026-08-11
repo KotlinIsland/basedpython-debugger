@@ -18,8 +18,8 @@ use std::path::Path;
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Binding, Evaluation, HitCondition, LogRecord, Part, Resolved, Running, SourceBreakpoint,
-    StopReason, Unbound,
+    Binding, Evaluation, HitCondition, Part, Resolved, Running, SourceBreakpoint, StopReason,
+    Unbound,
 };
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
@@ -109,17 +109,6 @@ fn launch(fixture: &Fixture) -> Debuggee {
     }
 }
 
-/// nothing in this test is a logpoint, so a record would be one the agent
-/// invented
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "it stands in for a `FnMut(LogRecord)` sink, which is handed the \
-              record to own"
-)]
-fn unlogged(record: LogRecord) {
-    panic!("no logpoint was set, and the agent sent {record:?}")
-}
-
 /// how a breakpoint's condition will be answered, or the reason it did not bind
 fn evaluation(resolved: &Resolved) -> Evaluation {
     match &resolved.binding {
@@ -158,7 +147,10 @@ fn stopped_for(reason: &StopReason) -> &[u32] {
 /// held, which is the only moment its side effects can be checked
 fn run_to_exit(debuggee: &mut Debuggee, mut at_stop: impl FnMut(&StopReason)) {
     loop {
-        match debuggee.run(unlogged).expect("the debuggee was resumed") {
+        match debuggee
+            .run(&mut bpd_test::reporting::Unreported)
+            .expect("the debuggee was resumed")
+        {
             Running::Stopped { stop, .. } => at_stop(&stop.reason),
             Running::Exited { status, .. } => {
                 assert!(status.success(), "the program exited with {status}");
@@ -381,7 +373,10 @@ fn a_breakpoint_asked_for_again_unchanged_keeps_its_hit_count() {
     debuggee
         .set_breakpoints(vec![third()])
         .expect("the breakpoint request was answered");
-    let (reason, _) = match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    let (reason, _) = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, rebound } => (stop.reason, rebound),
         Running::Exited { status, .. } => panic!("it exited with {status} instead of stopping"),
         Running::StillRunning { waited, .. } => unreachable!(
@@ -419,7 +414,10 @@ fn a_breakpoint_that_changed_starts_counting_again() {
     debuggee
         .set_breakpoints(vec![third.clone()])
         .expect("the breakpoint request was answered");
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { .. } => {}
         Running::Exited { status, .. } => panic!("it exited with {status} instead of stopping"),
         Running::StillRunning { waited, .. } => unreachable!(
@@ -626,7 +624,10 @@ fn a_condition_that_raises_stops_and_reports_the_exception() {
         ])
         .expect("the breakpoint request was answered");
 
-    let reason = match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    let reason = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => stop.reason,
         Running::Exited { status, .. } => {
             panic!("a condition that raised was treated as false, and the program ran to {status}")
@@ -698,7 +699,10 @@ fn a_condition_that_raises_inside_a_call_carries_the_frames_it_raised_in() {
         ])
         .expect("the breakpoint request was answered");
 
-    let reason = match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    let reason = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => stop.reason,
         Running::Exited { status, .. } => panic!("it ran to {status} instead of stopping"),
         Running::StillRunning { waited, .. } => unreachable!(
@@ -813,11 +817,8 @@ fn a_logpoint_reports_what_the_frame_held_and_does_not_stop() {
         ])
         .expect("the breakpoint request was answered");
 
-    let mut records = Vec::new();
-    match debuggee
-        .run(|record| records.push(record))
-        .expect("the debuggee was resumed")
-    {
+    let mut logs = bpd_test::reporting::Logs::default();
+    match debuggee.run(&mut logs).expect("the debuggee was resumed") {
         Running::Exited { status, .. } => assert!(status.success(), "it exited with {status}"),
         Running::Stopped { stop, .. } => {
             panic!("a logpoint logs instead of stopping, and it stopped for {stop:?}")
@@ -832,7 +833,7 @@ fn a_logpoint_reports_what_the_frame_held_and_does_not_stop() {
     }
 
     assert_eq!(
-        records
+        logs.records
             .iter()
             .map(|record| (record.hit, record.message.as_str(), record.line))
             .collect::<Vec<_>>(),
@@ -842,7 +843,7 @@ fn a_logpoint_reports_what_the_frame_held_and_does_not_stop() {
             (3, "value=3 doubled=6 literal={brace}", at_line),
         ]
     );
-    for record in &records {
+    for record in &logs.records {
         assert_eq!(record.breakpoint, 7);
         assert_eq!(Path::new(&record.file), fixture.path());
     }
@@ -860,7 +861,10 @@ fn a_log_message_that_raises_stops_and_reports_it() {
         ])
         .expect("the breakpoint request was answered");
 
-    let reason = match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    let reason = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => stop.reason,
         Running::Exited { status, .. } => {
             panic!("a log message that raised was skipped, and it ran to {status}")
@@ -922,17 +926,9 @@ fn a_logpoint_on_a_hot_line_costs_no_round_trips() {
         .expect("the breakpoint request was answered");
 
     let before = debuggee.requests_sent();
-    let mut records: u64 = 0;
-    let mut first = None;
-    let mut last = None;
+    let mut counted = Counted::default();
     match debuggee
-        .run(|record| {
-            records += 1;
-            if records == 1 {
-                first = Some(record.clone());
-            }
-            last = Some(record);
-        })
+        .run(&mut counted)
         .expect("the debuggee was resumed")
     {
         Running::Exited { status, .. } => assert!(status.success(), "it exited with {status}"),
@@ -946,7 +942,7 @@ fn a_logpoint_on_a_hot_line_costs_no_round_trips() {
         }
     }
 
-    assert_eq!(records, TOTAL, "one record per pass over the line");
+    assert_eq!(counted.records, TOTAL, "one record per pass over the line");
 
     // the number that makes this a claim rather than a hope. the agent reads
     // the control connection only inside a stop, so a request per hit would
@@ -958,9 +954,9 @@ fn a_logpoint_on_a_hot_line_costs_no_round_trips() {
         "resuming is one request, and a million log records must not add any"
     );
 
-    let first = first.expect("a million records is more than none");
+    let first = counted.first.expect("a million records is more than none");
     assert_eq!((first.hit, first.message.as_str()), (1, "0"));
-    let last = last.expect("a million records is more than none");
+    let last = counted.last.expect("a million records is more than none");
     assert_eq!((last.hit, last.message.as_str()), (TOTAL, "999999"));
 
     // the program's own arithmetic, so the loop really ran a million times
@@ -970,6 +966,38 @@ fn a_logpoint_on_a_hot_line_costs_no_round_trips() {
             .expect("the program ran to the end"),
         (TOTAL * (TOTAL - 1) / 2).to_string()
     );
+}
+
+/// a sink for a logpoint that fires a million times
+///
+/// `bpd_test::reporting::Logs` keeps every record, which is the right thing for
+/// a countable logpoint and the wrong thing for this one: a million records
+/// held in the test's own heap would be measuring the test rather than the
+/// agent. what this keeps is the count and the two ends, which is what the
+/// assertions are about
+#[derive(Debug, Default)]
+struct Counted {
+    records: u64,
+    first: Option<bpd_core::LogRecord>,
+    last: Option<bpd_core::LogRecord>,
+}
+
+impl bpd_core::Reporting for Counted {
+    fn logged(&mut self, record: bpd_core::LogRecord) {
+        self.records += 1;
+        if self.records == 1 {
+            self.first = Some(record.clone());
+        }
+        self.last = Some(record);
+    }
+
+    fn pausing(&mut self, running: Vec<u64>) {
+        panic!("no pause was armed, and the agent acknowledged one naming {running:?}")
+    }
+
+    fn spawned(&mut self, child: bpd_core::Spawn) {
+        panic!("this program starts no child, and it started {child}")
+    }
 }
 
 /// a program whose condition is the first thing to run another module
@@ -1031,7 +1059,10 @@ fn a_file_only_half_seen_binds_nothing_and_says_which_half_is_missing() {
     // reported. that leaves bpd holding one function out of a file of two
     let mut rebindings = Vec::new();
     loop {
-        match debuggee.run(unlogged).expect("the debuggee was resumed") {
+        match debuggee
+            .run(&mut bpd_test::reporting::Unreported)
+            .expect("the debuggee was resumed")
+        {
             Running::Stopped { stop, rebound } => {
                 assert_eq!(stopped_for(&stop.reason), [1]);
                 rebindings.extend(rebound);

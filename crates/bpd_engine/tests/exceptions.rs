@@ -15,9 +15,7 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use bpd_core::python::Capabilities;
-use bpd_core::{
-    Binding, ExceptionBreakpoints, LogRecord, PythonError, Running, SourceBreakpoint, StopReason,
-};
+use bpd_core::{Binding, ExceptionBreakpoints, PythonError, Running, SourceBreakpoint, StopReason};
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
 
@@ -108,15 +106,6 @@ fn interpreter() -> &'static Capabilities {
     bpd_test::agent::matching_interpreter()
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "it stands in for a `FnMut(LogRecord)` sink, which is handed the \
-              record to own"
-)]
-fn unlogged(record: LogRecord) {
-    panic!("no logpoint was set, and the agent sent {record:?}")
-}
-
 fn launch(fixture: &Fixture) -> Debuggee {
     match bpd_engine::launch(
         interpreter(),
@@ -144,7 +133,10 @@ fn armed(fixture: &Fixture, source: &str, raised: bool, uncaught: bool) -> Debug
         .expect("the breakpoint request was answered");
     assert!(matches!(resolved[0].binding, Binding::Bound { .. }));
 
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { .. } => {}
         other => panic!("expected the program to stop before it ran, got {other:?}"),
     }
@@ -161,7 +153,10 @@ fn armed(fixture: &Fixture, source: &str, raised: bool, uncaught: bool) -> Debug
 
 /// the next stop, or what the program did instead
 fn next_stop(debuggee: &mut Debuggee) -> StopReason {
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => stop.reason,
         other => panic!("expected a stop, got {other:?}"),
     }
@@ -210,7 +205,10 @@ fn an_exception_caught_inside_a_library_is_not_an_uncaught_one() {
     // stops again on the way out: the agent reports an exception the program
     // did not catch by raising `SystemExit` out of its own bootstrap frame, and
     // a stop for that would be bpd stopping the program for its own decision
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Exited { status, .. } => assert!(
             !status.success(),
             "an exception nothing catches ends the program"
@@ -227,7 +225,10 @@ fn nothing_is_uncaught_in_a_program_that_catches_everything() {
     // two exceptions are raised, one of them through two frames, and both are
     // caught. an uncaught-exception stop for either would be a false statement
     // about the program
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Exited { status, .. } => assert!(status.success()),
         other => panic!("nothing here is uncaught, and it stopped for {other:?}"),
     }
@@ -266,7 +267,10 @@ fn a_raise_stops_in_the_frame_that_raised_it() {
     debuggee
         .set_exception_breakpoints(false, false)
         .expect("the exception breakpoints were cleared");
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Exited { status, .. } => assert!(status.success()),
         other => panic!("nothing is armed any more, and it stopped for {other:?}"),
     }
@@ -283,7 +287,10 @@ fn one_raise_is_one_stop_however_many_frames_it_passes_through() {
     // measures directly. they are one exception and they are one stop
     let mut raised = Vec::new();
     loop {
-        match debuggee.run(unlogged).expect("the debuggee was resumed") {
+        match debuggee
+            .run(&mut bpd_test::reporting::Unreported)
+            .expect("the debuggee was resumed")
+        {
             Running::Stopped { stop, .. } => match stop.reason {
                 StopReason::Raised { error, line, .. } => raised.push((error.kind, line)),
                 other => panic!("expected a raise, got {other:?}"),

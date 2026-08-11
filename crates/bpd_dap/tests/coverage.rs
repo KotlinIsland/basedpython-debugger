@@ -153,6 +153,53 @@ fn a_stop_that_ends_takes_its_references_with_it() {
     );
 }
 
+/// the child the fake session reports while the program runs
+fn started_a_child() -> bpd_core::Spawn {
+    bpd_core::Spawn {
+        event: "_posixsubprocess.fork_exec".to_string(),
+        executable: Some("/usr/bin/python3.14".to_string()),
+        arguments: vec!["/usr/bin/python3.14".to_string(), "worker.py".to_string()],
+        verdict: bpd_core::Verdict::ThisInterpreter,
+    }
+}
+
+#[test]
+fn a_child_the_program_started_reaches_the_client_as_the_debuggers_own_words() {
+    let client = drive(&Asked::default());
+
+    let said: Vec<&serde_json::Value> = client
+        .events("output")
+        .into_iter()
+        .filter(|event| {
+            event["body"]["output"]
+                .as_str()
+                .is_some_and(|text| text.contains("worker.py"))
+        })
+        .collect();
+    assert!(
+        !said.is_empty(),
+        "the program started a child and the client was never told"
+    );
+
+    for event in said {
+        // `console` and not `stdout`. the program did not write this — bpd did
+        // — and a client that showed it among the program's own output would
+        // be putting words in the debuggee's mouth
+        assert_eq!(
+            event["body"]["category"], "console",
+            "a notice of bpd's shown as program output: {event}"
+        );
+        // no `source` and no `line`. the hook runs on whatever thread made the
+        // child and sees what the program asked the operating system for, not
+        // where it was asked — a location invented from the frame that happened
+        // to be running is a location nobody can act on
+        assert!(
+            event["body"]["source"].is_null() && event["body"]["line"].is_null(),
+            "the notice claimed a place in the program: {event}"
+        );
+    }
+}
+
 #[test]
 fn the_thread_model_reaches_the_client_on_every_stop() {
     let client = drive(&Asked::default());
@@ -639,8 +686,15 @@ impl Session for FakeSession {
     fn dispatch(
         &mut self,
         request: Request,
-        _reporting: &mut dyn Reporting,
+        reporting: &mut dyn Reporting,
     ) -> Result<Response, Failed> {
+        // a program starts a child while it runs, so a wait is where one is
+        // reported. the fake does it on every wait, which is what makes the
+        // adapter's route for it part of this conversation rather than
+        // something only a real interpreter ever exercises
+        if matches!(request, Request::Wait { .. }) {
+            reporting.spawned(started_a_child());
+        }
         {
             let mut recorder = self.asked.lock().expect("the recorder is not poisoned");
             recorder.requests.push(request.name());

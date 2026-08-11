@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 use bpd_core::python::Capabilities;
 use bpd_core::{
     Detail, Difference, Evaluated, ExceptionBreakpoints, FrameId, LogRecord, Reporting, Request,
-    Resolved, Response, Running, Scope, Script, Snapshot, SnapshotId, SourceBreakpoint, Stack,
-    StateQuery, StepKind, Stop, TemplateContext, Threads, Transcript, Variables, Which,
+    Resolved, Response, Running, Scope, Script, Snapshot, SnapshotId, SourceBreakpoint, Spawn,
+    Stack, StateQuery, StepKind, Stop, TemplateContext, Threads, Transcript, Variables, Which,
     WorldStopped,
 };
 use bpd_protocol::env;
@@ -38,17 +38,35 @@ use bpd_protocol::message::{FromAgent, FromEngine};
 
 use crate::{Error, Interrupt, Listener, Result, Session, agent};
 
-/// a [`Reporting`] sink that can only take log records
+/// the [`Reporting`] sink for a request whose answer is what is waited for
 ///
-/// what the ergonomic methods on [`Debuggee`] hand to [`Debuggee::dispatch`].
-/// a pause acknowledgement cannot reach one: [`Debuggee::pause`] waits for its
-/// own, and the other way to arm one is [`Interrupt::deliver`], whose
-/// acknowledgement arrives at whatever sink the wait was given
-struct OnlyLogs<F>(F);
+/// what [`Debuggee::ask_for`] hands to [`Debuggee::dispatch`]. a log record or a
+/// child that arrives while one of those is in flight is kept by
+/// [`Debuggee::send_and_wait`] for the next wait, so almost nothing reaches
+/// here — the exception is a debug script, whose steps do their own waiting
+///
+/// a child is **collected** rather than dropped, and the caller puts it back on
+/// the debuggee's queue. a program that starts a child while a script is
+/// running has started a child, and a report that went missing because of when
+/// it arrived would be the debugger losing a fact about the program
+struct Aside {
+    /// the children seen while the request was in flight
+    spawned: Vec<Spawn>,
+}
 
-impl<F: FnMut(LogRecord)> Reporting for OnlyLogs<F> {
-    fn logged(&mut self, record: LogRecord) {
-        (self.0)(record);
+impl Aside {
+    const fn new() -> Self {
+        Self {
+            spawned: Vec::new(),
+        }
+    }
+}
+
+impl Reporting for Aside {
+    fn logged(&mut self, _record: LogRecord) {
+        // a debug script's own wait drains the queue into whatever sink it was
+        // given, and this is that sink. the records are the script's to report
+        // and it reports them in its transcript
     }
 
     fn pausing(&mut self, running: Vec<u64>) {
@@ -56,6 +74,10 @@ impl<F: FnMut(LogRecord)> Reporting for OnlyLogs<F> {
             "a pause was acknowledged to a caller that cannot have armed one, \
              naming {running:?} as running python"
         )
+    }
+
+    fn spawned(&mut self, child: Spawn) {
+        self.spawned.push(child);
     }
 }
 
@@ -98,6 +120,14 @@ pub struct Debuggee {
     /// so while the program runs. kept for the next wait rather than dropped,
     /// for the same reason a log record is
     pending_rebinds: Vec<Resolved>,
+    /// children that were started while the engine was waiting for an answer
+    ///
+    /// a program starts a child without asking the debugger, so one can be in
+    /// the socket ahead of the reply to a request. kept for the next wait for
+    /// the reason a log record is: a session pointed at a process that does
+    /// none of the work is the thing this report exists to prevent, and one
+    /// that went missing because of when it arrived would prevent nothing
+    pending_spawns: Vec<Spawn>,
     /// every state a query has read, under the id it was given out as
     ///
     /// nothing evicts one. a snapshot is a reading that was already taken rather
@@ -277,13 +307,17 @@ impl Debuggee {
         self.run_script(stop, script)
     }
 
-    /// dispatch a request that cannot deliver a log record
+    /// dispatch a request whose answer is the only thing the caller waits for
     ///
     /// a logpoint that fires while one of these is in flight is kept in
     /// `pending_logs` for the next [`Self::wait`] rather than handed over here,
-    /// so there is nothing for a sink to receive
+    /// and so is a child. what a debug script's own waiting reaches is
+    /// [`Aside`], and the children it collected go back on the queue here
     fn ask_for(&mut self, request: Request) -> Result<Response> {
-        self.dispatch(request, &mut OnlyLogs(drop))
+        let mut aside = Aside::new();
+        let answer = self.dispatch(request, &mut aside);
+        self.pending_spawns.extend(aside.spawned);
+        answer
     }
 
     /// the one stop that is held, for a request that is about one thread
@@ -762,6 +796,7 @@ impl Debuggee {
         loop {
             match self.session.next_event()? {
                 Some(FromAgent::Logged { record }) => self.pending_logs.push(record),
+                Some(FromAgent::Spawned { child }) => self.pending_spawns.push(child),
                 Some(FromAgent::BreakpointsResolved { resolved })
                     if !matches!(request, FromEngine::SetBreakpoints { .. }) =>
                 {
@@ -821,12 +856,18 @@ impl Debuggee {
 
     /// wait for the next thing the debuggee does
     ///
-    /// log records go to `on_log` as they arrive rather than into the result.
-    /// there is no bound on how many a logpoint produces, and a debugger that
-    /// accumulated a million of them before saying anything would be holding
-    /// the program's history hostage to its own memory
-    pub fn wait(&mut self, on_log: impl FnMut(LogRecord)) -> Result<Running> {
-        match self.dispatch(Request::Wait { deadline: None }, &mut OnlyLogs(on_log))? {
+    /// what the program says while it runs goes to `reporting` as it arrives
+    /// rather than into the result. there is no bound on how many records a
+    /// logpoint produces or how many children a program starts, and a debugger
+    /// that accumulated a million of either before saying anything would be
+    /// holding the program's history hostage to its own memory
+    ///
+    /// it is a [`Reporting`] rather than a closure over log records because
+    /// there is more than one kind of thing a running program says, and a
+    /// caller that could only receive one of them would be a caller the rest
+    /// went missing at
+    pub fn wait(&mut self, reporting: &mut dyn Reporting) -> Result<Running> {
+        match self.dispatch(Request::Wait { deadline: None }, reporting)? {
             Response::Ran(running) => Ok(running),
             other => unreachable!("a wait was answered with {other:?}"),
         }
@@ -836,8 +877,8 @@ impl Debuggee {
     ///
     /// the whole-program "continue". it resumes everything held rather than one
     /// thread, and what it waits for is the program, not a particular thread
-    pub fn run(&mut self, on_log: impl FnMut(LogRecord)) -> Result<Running> {
-        match self.dispatch(Request::Run { deadline: None }, &mut OnlyLogs(on_log))? {
+    pub fn run(&mut self, reporting: &mut dyn Reporting) -> Result<Running> {
+        match self.dispatch(Request::Run { deadline: None }, reporting)? {
             Response::Ran(running) => Ok(running),
             other => unreachable!("a run was answered with {other:?}"),
         }
@@ -856,6 +897,9 @@ impl Debuggee {
     ) -> Result<Running> {
         for record in self.pending_logs.drain(..) {
             reporting.logged(record);
+        }
+        for child in self.pending_spawns.drain(..) {
+            reporting.spawned(child);
         }
         let mut rebound = std::mem::take(&mut self.pending_rebinds);
 
@@ -889,6 +933,10 @@ impl Debuggee {
                 }
                 Some(FromAgent::BreakpointsResolved { resolved }) => rebound.extend(resolved),
                 Some(FromAgent::Logged { record }) => reporting.logged(record),
+                // the program started a child. it is already running — the
+                // agent reports and does not block — so this is news rather
+                // than a decision anybody is waiting to make
+                Some(FromAgent::Spawned { child }) => reporting.spawned(child),
                 // the acknowledgement of a pause armed on an `Interrupt`. it
                 // arrives here because here is where the reading end is, and
                 // its `running` is what says whether a stop is coming at all
@@ -1122,6 +1170,7 @@ fn start(
         session,
         pending_logs: Vec::new(),
         pending_rebinds: Vec::new(),
+        pending_spawns: Vec::new(),
         snapshots: Vec::new(),
     }))
 }

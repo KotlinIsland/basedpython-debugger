@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
-use bpd_core::{Holding, LogRecord, Mode, Progress, Running, SourceBreakpoint, Stop};
+use bpd_core::{Holding, Mode, Progress, Running, SourceBreakpoint, Stop};
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
 
@@ -64,16 +64,6 @@ fn interpreter() -> &'static Capabilities {
     bpd_test::agent::matching_interpreter()
 }
 
-/// no test here sets a logpoint, so a record would be one the agent invented
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "it stands in for a `FnMut(LogRecord)` sink, which is handed the \
-              record to own"
-)]
-fn unlogged(record: LogRecord) {
-    panic!("no logpoint was set, and the agent sent {record:?}")
-}
-
 fn launch(fixture: &Fixture) -> Debuggee {
     match bpd_engine::launch(
         interpreter(),
@@ -98,7 +88,10 @@ fn arm(debuggee: &mut Debuggee, file: &Path, line: u32) {
 
 /// wait for the next stop, and require that it is one
 fn next_stop(debuggee: &mut Debuggee) -> Stop {
-    match debuggee.wait(unlogged).expect("the debuggee was waited on") {
+    match debuggee
+        .wait(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was waited on")
+    {
         Running::Stopped { stop, .. } => stop,
         Running::Exited { status, .. } => {
             panic!("the debuggee exited with {status} instead of stopping")
@@ -115,7 +108,10 @@ fn next_stop(debuggee: &mut Debuggee) -> Stop {
 
 /// resume everything and require that the program finishes
 fn to_exit(debuggee: &mut Debuggee) {
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Exited { status, .. } => {
             assert!(status.success(), "the program exited with {status}");
         }
@@ -213,7 +209,10 @@ fn another_thread_goes_on_running_while_one_thread_is_held() {
 
     let mut debuggee = launch(&fixture);
     arm(&mut debuggee, &fixture.path(), at_line);
-    let stop = match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    let stop = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the main thread to stop, got {other:?}"),
     };
@@ -403,7 +402,10 @@ fn a_thread_piled_up_behind_a_lock_the_held_thread_took_is_reported_as_getting_n
 
     let mut debuggee = launch(&fixture);
     arm(&mut debuggee, &fixture.path(), at_line);
-    let stop = match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    let stop = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the holder thread to stop, got {other:?}"),
     };
@@ -537,7 +539,10 @@ fn a_thread_held_inside_the_import_system_says_which_module_it_is_holding() {
 
     let mut debuggee = launch(&fixture);
     arm(&mut debuggee, &late, at_line);
-    let stop = match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    let stop = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the importing thread to stop, got {other:?}"),
     };
@@ -647,7 +652,10 @@ fn stopping_the_world_holds_what_it_can_and_never_counts_a_native_thread_as_held
             .when("False"),
         ])
         .expect("the breakpoint request was answered");
-    let stop = match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    let stop = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the main thread to stop, got {other:?}"),
     };
@@ -800,7 +808,10 @@ fn a_program_that_ends_with_a_thread_still_held_says_so_rather_than_looking_like
     // breakpoint without the test having to race it
     tell(&fixture, "go");
 
-    let stop = match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    let stop = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the worker to stop, got {other:?}"),
     };
@@ -813,7 +824,10 @@ fn a_program_that_ends_with_a_thread_still_held_says_so_rather_than_looking_like
     tell(&fixture, "main_may_finish");
     expect(&fixture, "main_finished");
 
-    match debuggee.wait(unlogged).expect("the debuggee was waited on") {
+    match debuggee
+        .wait(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was waited on")
+    {
         Running::StillRunning { waited, .. } => unreachable!(
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"

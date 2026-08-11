@@ -129,6 +129,17 @@ pub enum FromAgent {
         record: LogRecord,
     },
 
+    /// the program started a child process that could be python
+    ///
+    /// sent while the program runs and never waited on, for the reason
+    /// [`FromAgent::Logged`] is: the child is not blocked while this is written,
+    /// and it must not be — reporting a child is not a reason to change what
+    /// the program does
+    Spawned {
+        /// the child, and what the agent could tell about it
+        child: bpd_core::Spawn,
+    },
+
     /// the stack of one held thread
     ///
     /// **only** a held thread's. a running thread's frames are moving, and a
@@ -599,6 +610,27 @@ mod tests {
                 thread: 8_482_561_408,
                 hit: 4,
                 message: "value is 4".to_string(),
+            },
+        };
+
+        let mut wire = Vec::new();
+        write(&mut wire, &sent).expect("writing to a vec cannot fail");
+
+        let received: Option<FromAgent> =
+            read(&mut wire.as_slice(), &mut Vec::new()).expect("the frame is whole");
+        assert_eq!(received, Some(sent));
+    }
+
+    #[test]
+    fn a_spawned_child_round_trips_with_the_evidence_for_its_verdict() {
+        let sent = FromAgent::Spawned {
+            child: bpd_core::Spawn {
+                event: "_posixsubprocess.fork_exec".to_string(),
+                executable: Some("/usr/bin/python3.14".to_string()),
+                arguments: vec!["/usr/bin/python3.14".to_string(), "-c".to_string()],
+                verdict: bpd_core::Verdict::Perhaps {
+                    named: "python3.14".to_string(),
+                },
             },
         };
 

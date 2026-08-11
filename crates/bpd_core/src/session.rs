@@ -19,6 +19,7 @@ use crate::breakpoint::{LogRecord, Resolved, SourceBreakpoint};
 use crate::frame::{Frame, FrameId, Scope};
 use crate::query::{Difference, Snapshot, SnapshotId, StateQuery};
 use crate::script::{Script, Transcript};
+use crate::spawn::Spawn;
 use crate::stop::{Mode, StepKind, Stop};
 use crate::thread::{ThreadState, Which};
 use crate::value::{Detail, Entry, Evaluated, Omitted, Value};
@@ -280,12 +281,18 @@ impl Request {
 
 /// what a running debuggee says that is not the answer to a [`Request`]
 ///
-/// a logpoint's record and a pause's acknowledgement both arrive while the
-/// program is running, so neither answers anything a client is waiting on. they
-/// are handed over as they arrive rather than accumulated: there is no bound on
-/// how many records a logpoint produces, and a debugger that buffered a million
-/// of them before saying anything would be holding the program's history in its
-/// own heap
+/// a logpoint's record, a pause's acknowledgement and a child process all
+/// arrive while the program is running, so none of them answers anything a
+/// client is waiting on. they are handed over as they arrive rather than
+/// accumulated: there is no bound on how many records a logpoint produces, or
+/// on how many children a program starts, and a debugger that buffered a
+/// million of either before saying anything would be holding the program's
+/// history in its own heap
+///
+/// there is no default body on any of these, and there is not going to be one.
+/// every front end has to say what it does with each, because a front end that
+/// silently dropped one would be the only place a fact about the program went
+/// missing
 pub trait Reporting {
     /// a logpoint produced a record
     fn logged(&mut self, record: LogRecord);
@@ -296,6 +303,14 @@ pub trait Reporting {
     /// arrive** until some thread runs python again: every thread is parked in
     /// a C call, where there is no monitoring event to hold one at
     fn pausing(&mut self, running: Vec<u64>);
+
+    /// the program started a child process that could be python
+    ///
+    /// `bpd` debugs one process. a child is not debugged and is not blocked
+    /// either — it runs exactly as it would have — so this is the only thing
+    /// that stands between a user and a session pointed at a supervisor that
+    /// does none of the work. see [`Spawn`]
+    fn spawned(&mut self, child: Spawn);
 }
 
 /// what a session answered a [`Request`] with

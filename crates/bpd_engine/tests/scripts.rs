@@ -18,8 +18,8 @@ use std::path::Path;
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Answered, Bound, Budget, Content, Did, Disarmed, Evaluated, Halted, Landed, LogRecord, Outcome,
-    Predicate, Record, Running, Script, Step, StopReason, Transcript,
+    Answered, Bound, Budget, Content, Did, Disarmed, Evaluated, Halted, Landed, Outcome, Predicate,
+    Record, Running, Script, Step, StopReason, Transcript,
 };
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
@@ -74,16 +74,6 @@ never = 1
 
 fn interpreter() -> &'static Capabilities {
     bpd_test::agent::matching_interpreter()
-}
-
-/// no test here sets a logpoint, so a record would be one the agent invented
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "it stands in for a `FnMut(LogRecord)` sink, which is handed the \
-              record to own"
-)]
-fn unlogged(record: LogRecord) {
-    panic!("no logpoint was set, and the agent sent {record:?}")
 }
 
 fn launch(fixture: &Fixture) -> Debuggee {
@@ -570,7 +560,10 @@ fn a_run_to_that_runs_out_of_clock_leaves_nothing_armed() {
 
     // the proof that nothing is armed: let the program go, and it runs to its
     // end without stopping at the line the script was running to
-    match debuggee.run(unlogged).expect("the program was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the program was resumed")
+    {
         Running::Exited { status, .. } => assert!(status.success(), "it exited with {status}"),
         other => panic!("the script left something armed and the program stopped at it: {other:?}"),
     }

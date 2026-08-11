@@ -339,7 +339,13 @@ anything. nothing is misreported — the supervisor never imports the template
 engine, so the hook never arms and the breakpoint is reported **unbound**, which
 is true — but the answer looks like a broken feature until you know why
 
-until `bpd` follows a subprocess, the way to use this is to take the reloader out:
+the "until you know why" part is smaller than it was: `bpd` now **says** when
+the program it is debugging has started a python child, so a `runserver` session
+reports the reloader's child rather than leaving an unbound breakpoint to be
+interpreted. see [child processes](subprocesses.md)
+
+it still does not follow the child, so the way to use this is to take the
+reloader out:
 
 ```sh
 bpd launch manage.py runserver --noreload
