@@ -169,6 +169,14 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
                 let answer = stopped.set_variable(frame, scope, &name, &value, detail)?;
                 attach::send(&answer);
             }
+            FromEngine::SetNextStatement { frame, line } => {
+                let answer = stopped.set_next_statement(frame, line)?;
+                attach::send(&answer);
+            }
+            FromEngine::RestartFrame { frame } => {
+                let answer = stopped.restart_frame(frame)?;
+                attach::send(&answer);
+            }
             FromEngine::Threads { settle_ms } => {
                 let answer = threads::census(python, Duration::from_millis(settle_ms.into()))?;
                 attach::send(&answer);

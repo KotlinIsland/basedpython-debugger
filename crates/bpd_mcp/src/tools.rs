@@ -686,6 +686,78 @@ pub fn tools() -> Vec<Tool> {
             },
         },
         Tool {
+            name: "set_next_statement",
+            title: "move the held frame to another line",
+            description: "move where the program will carry on from, **without \
+                running anything**: the thread stays held, at the line it moved \
+                to. the lines between where it was and where it is now are not \
+                executed.\n\n\
+                only in the frame the thread is executing — `frame: 0`, and the \
+                frame under a template frame is not it either. a frame further \
+                down is suspended in a call, and cpython *accepts* a move in one \
+                rather than refusing it: the frame then runs on with a value \
+                stack that no longer matches where it is, and returns something \
+                it never computed. bpd refuses instead.\n\n\
+                what the answer tells you that nothing else would:\n\n\
+                - `at` is read off the frame, because **no line event is \
+                  delivered for the line a jump moves to**. a debugger that \
+                  waited to be told would report the line after it\n\
+                - `unannounced` names breakpoints on the destination line that \
+                  will **not** fire for this pass, for the same reason. they are \
+                  still set, and fire the next time the line runs\n\
+                - `bound_to_none` names locals that held nothing and hold `None` \
+                  now. cpython binds every unbound local of the frame as part of \
+                  a jump — it is a change to the program the debugger caused\n\n\
+                it does **not** run the cleanup of a block it leaves: jumping out \
+                of a `with` does not call `__exit__` and jumping out of a `try` \
+                does not run its `finally`. cpython does not, and bpd does not \
+                pretend to.\n\n\
+                a line cpython will not move to is refused with cpython's own \
+                reason — `can't jump into the body of a for loop`, `can only jump \
+                from a 'line' trace event` — and the frame does not move."
+                .to_string(),
+            schema: object(
+                serde_json::json!({
+                    "stop": integer(STOP),
+                    "frame": integer(FRAME),
+                    "line": integer("the line of that frame's file to move to. it \
+                                     has to be a line of the code object the \
+                                     frame is running, and cpython decides \
+                                     whether it can be reached from where the \
+                                     frame is"),
+                }),
+                &["line"],
+            ),
+        },
+        Tool {
+            name: "restart_frame",
+            title: "re-enter the held frame from the top",
+            description: "`set_next_statement` to the first line of the frame's \
+                own code object, worked out in the debuggee because the code \
+                object is the only thing that knows it. the same answer, and the \
+                same limits — including that only the frame the thread is \
+                executing can move.\n\n\
+                **it re-enters with what the parameters hold now.** a parameter \
+                the frame has already assigned to holds the new value: nothing \
+                captured what the call was made with, and capturing it would mean \
+                copying every argument of every call in the process. so this is \
+                not `undo` — side effects the frame already performed are not \
+                undone, and the frames it called are gone.\n\n\
+                a generator, a coroutine or an async generator frame is refused: \
+                the first instruction of such a code object is the `RESUME` its \
+                driver sends into rather than the top of the body, and moving \
+                there ends the frame instead of running it again. \
+                `set_next_statement` to a line of the body works there."
+                .to_string(),
+            schema: object(
+                serde_json::json!({
+                    "stop": integer(STOP),
+                    "frame": integer(FRAME),
+                }),
+                &[],
+            ),
+        },
+        Tool {
             name: "threads",
             title: "what every thread of the program is doing",
             description: "the only question that is about threads bpd is **not** \

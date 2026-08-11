@@ -12,8 +12,8 @@
 //!   than one per front end
 
 use bpd_core::{
-    Binding, Difference, Evaluated, LogRecord, Resolved, Snapshot, Source, SourceBreakpoint, Stack,
-    Stop, Threads, Transcript, Variables, WorldStopped,
+    Binding, Difference, Evaluated, Jump, Jumped, LogRecord, Resolved, Snapshot, Source,
+    SourceBreakpoint, Stack, Stop, Threads, Transcript, Variables, WorldStopped,
 };
 
 /// one held thread, as the answer to a control tool
@@ -157,6 +157,64 @@ pub fn template_context(context: &bpd_core::TemplateContext) -> serde_json::Valu
 /// this is a result rather than a failure
 pub fn evaluated(result: &Evaluated) -> serde_json::Value {
     serde_json::json!({ "result": result })
+}
+
+/// what a jump did, and where the frame is now
+///
+/// `at` is the frame's own answer, read after the move, and it is the only
+/// thing that can be: no `LINE` event is delivered for the line a jump moves
+/// to. the notes are not decoration — each of them is a fact about the program
+/// that nothing else in the session will ever mention, and an agent that was
+/// not told would go on to make a wrong claim about a breakpoint that did not
+/// fire or a local that is suddenly `None`
+pub fn jumped(jump: &Jumped) -> serde_json::Value {
+    let mut rendered = serde_json::json!({
+        "at": jump.at,
+        "outcome": jump.outcome,
+        "mode": jump.mode.to_string(),
+    });
+
+    let mut notes: Vec<String> = Vec::new();
+    match &jump.outcome {
+        Jump::Moved {
+            from,
+            bound_to_none,
+            unannounced,
+        } => {
+            notes.push(format!(
+                "the thread is still held, at {}. the lines between {from} and \
+                 {} were not executed, and the cleanup of any block the move \
+                 left was not run — jumping out of a `with` does not call \
+                 `__exit__` and jumping out of a `try` does not run its \
+                 `finally`",
+                jump.at, jump.at.line
+            ));
+            if !unannounced.is_empty() {
+                notes.push(format!(
+                    "breakpoint(s) {unannounced:?} are bound to line {} and will \
+                     **not** fire for this pass: no line event is delivered for \
+                     the line a jump moves to. they are still set, and fire the \
+                     next time that line runs",
+                    jump.at.line
+                ));
+            }
+            if !bound_to_none.is_empty() {
+                notes.push(format!(
+                    "{bound_to_none:?} held nothing before the move and hold \
+                     `None` now. cpython binds every unbound local of a frame as \
+                     part of a jump — this is a change to the program that the \
+                     jump made"
+                ));
+            }
+        }
+        Jump::Refused { wanted, error } => notes.push(format!(
+            "cpython refused the move to line {wanted} — `{error}` — and the \
+             frame did not move. it is still at {}",
+            jump.at
+        )),
+    }
+    rendered["notes"] = notes.into();
+    rendered
 }
 
 /// what every thread of the debuggee was doing

@@ -367,6 +367,15 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)]) -> Transcript 
         }),
     );
 
+    // moving where the program will carry on from, and re-entering the frame
+    // from the top. neither resumes anything: the thread is still held after
+    // both, which is why the conversation goes on asking about the same stop
+    client.call(
+        "set_next_statement",
+        &serde_json::json!({ "frame": 1, "line": 2 }),
+    );
+    client.call("restart_frame", &serde_json::json!({ "frame": 1 }));
+
     // the whole of a stop in one call, and the difference between two of them.
     // the id comes back on the answer and is what a `diff` is written against
     let described = client.call(
@@ -562,6 +571,8 @@ fn tool_order() -> Vec<&'static str> {
         "template_context",
         "evaluate",
         "set_variable",
+        "set_next_statement",
+        "restart_frame",
         "state",
         "diff",
         "run_script",
@@ -889,6 +900,11 @@ impl Session for FakeSession {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per capability of the core, which is what makes a \
+                  capability the fake does not answer a compile error here too"
+    )]
     fn dispatch(
         &mut self,
         asked: Addressed,
@@ -979,6 +995,37 @@ impl Session for FakeSession {
                     value: integer("9"),
                 })
             }
+            // both jumps answer the same shape, and the fake answers the
+            // interesting one: a breakpoint on the destination that will not
+            // fire for this pass, and a local the move bound to `None`. that a
+            // real interpreter really moves is
+            // `crates/bpd_engine/tests/jumps.rs`
+            Request::SetNextStatement { line, .. } => Response::Jumped(bpd_core::Jumped {
+                at: bpd_core::Where {
+                    file: "/tmp/fake.py".to_string(),
+                    line,
+                    function: "main".to_string(),
+                },
+                outcome: bpd_core::Jump::Moved {
+                    from: 3,
+                    bound_to_none: vec!["total".to_string()],
+                    unannounced: vec![1],
+                },
+                mode: Mode::NonStop,
+            }),
+            Request::RestartFrame { .. } => Response::Jumped(bpd_core::Jumped {
+                at: bpd_core::Where {
+                    file: "/tmp/fake.py".to_string(),
+                    line: 1,
+                    function: "main".to_string(),
+                },
+                outcome: bpd_core::Jump::Moved {
+                    from: 3,
+                    bound_to_none: Vec::new(),
+                    unannounced: Vec::new(),
+                },
+                mode: Mode::NonStop,
+            }),
             Request::RunScript { stop, script } => Response::Transcript(transcript(stop, &script)),
             Request::Query { stop, query } => Response::State(snapshot(stop, &query)),
             Request::Diff { before, after } => Response::Difference(bpd_core::difference(

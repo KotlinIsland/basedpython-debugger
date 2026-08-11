@@ -450,6 +450,38 @@ fn drive(asked: &Asked) -> Transcript {
         "evaluate",
         serde_json::json!({ "expression": "total + 1", "frameId": frame }),
     );
+    // moving where the program will carry on from. `goto` carries a target
+    // rather than a line, and `gotoTargets` is where one comes from — so the
+    // two are driven together, and the target is used against the thread it
+    // was minted for
+    let targets = answer(
+        &mut client_writes,
+        &mut reader,
+        "gotoTargets",
+        // the file the fake's *python* frame is running. frame 0 of that stack
+        // is a django template frame, and a template line is not a place the
+        // interpreter can be moved to
+        serde_json::json!({ "source": { "path": "/tmp/fake.py" }, "line": 1 }),
+    );
+    let target = targets["body"]["targets"][0]["id"].clone();
+    assert!(
+        target.is_number(),
+        "a held thread executing the file the client asked about has a target, \
+         and the adapter offered {targets}"
+    );
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "goto",
+        serde_json::json!({ "threadId": thread, "targetId": target }),
+    );
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "restartFrame",
+        serde_json::json!({ "frameId": frame }),
+    );
+
     // the whole of a stop in one call, and the difference between two of them.
     // DAP's own way of reading state is the tree walk above, and it keeps it —
     // this is the same capability an agent's front end has, which is what the
@@ -937,6 +969,36 @@ impl Session for FakeSession {
                     value: integer("9"),
                 })
             }
+            // both jumps answer the same shape, and the fake answers the
+            // interesting one: a breakpoint on the destination that will not
+            // fire, and a local the move bound to `None`. that a real
+            // interpreter really moves is `crates/bpd_engine/tests/jumps.rs`
+            Request::SetNextStatement { line, .. } => Response::Jumped(bpd_core::Jumped {
+                at: bpd_core::Where {
+                    file: "/tmp/fake.py".to_string(),
+                    line,
+                    function: "main".to_string(),
+                },
+                outcome: bpd_core::Jump::Moved {
+                    from: 3,
+                    bound_to_none: vec!["total".to_string()],
+                    unannounced: vec![1],
+                },
+                mode: Mode::NonStop,
+            }),
+            Request::RestartFrame { .. } => Response::Jumped(bpd_core::Jumped {
+                at: bpd_core::Where {
+                    file: "/tmp/fake.py".to_string(),
+                    line: 1,
+                    function: "main".to_string(),
+                },
+                outcome: bpd_core::Jump::Moved {
+                    from: 3,
+                    bound_to_none: Vec::new(),
+                    unannounced: Vec::new(),
+                },
+                mode: Mode::NonStop,
+            }),
             // the same two capabilities an agent's front end reaches, reached by
             // an editor. that a query really reads a real interpreter is
             // `crates/bpd_engine/tests/queries.rs`

@@ -41,8 +41,8 @@
 use std::sync::OnceLock;
 
 use bpd_core::{
-    ContextLayer, Detail, Entry, Evaluated, Frame, FrameId, FrameKind, Holding, Omitted, Refusal,
-    Scope, Where,
+    ContextLayer, Detail, Entry, Evaluated, Frame, FrameId, FrameKind, Holding, Jump, Jumped,
+    Omitted, Refusal, Scope, Suspendable, Unrestartable, Where,
 };
 use bpd_protocol::message::FromAgent;
 use pyo3::exceptions::PyKeyError;
@@ -59,6 +59,17 @@ use crate::{events, templates, world};
 /// are an ordinary namespace mapping. the two are read differently and a
 /// debugger that treated them alike would report one of them wrongly
 const CO_OPTIMIZED: u32 = 0x1;
+
+/// `CO_GENERATOR`, `CO_COROUTINE`, `CO_ASYNC_GENERATOR` — the three flags for a
+/// frame its driver sends into rather than one that is called
+///
+/// what makes them one group here is the first instruction of the code object:
+/// for all three it is the `RESUME` that `send`, `throw` and `await` enter at,
+/// rather than the top of the body. restarting such a frame moves to that
+/// instruction and ends the frame — see [`Unrestartable::Suspendable`]
+const CO_GENERATOR: u32 = 0x20;
+const CO_COROUTINE: u32 = 0x80;
+const CO_ASYNC_GENERATOR: u32 = 0x200;
 
 /// the frame the agent entered the program from
 ///
@@ -538,6 +549,132 @@ impl<'py> Stopped<'py> {
         })
     }
 
+    /// move the executing frame to another line of the code it is running
+    pub(crate) fn set_next_statement(&mut self, id: FrameId, line: u32) -> PyResult<FromAgent> {
+        self.jump(id, Wanted::Line(line), "setting the next statement")
+    }
+
+    /// re-enter the executing frame from the top
+    pub(crate) fn restart_frame(&mut self, id: FrameId) -> PyResult<FromAgent> {
+        self.jump(id, Wanted::FirstLine, "restarting a frame")
+    }
+
+    /// the frame an id names, when it is the one its thread is executing
+    ///
+    /// a jump is only sound in that frame. every frame below it is suspended in
+    /// a call, and cpython does **not** refuse a move in one — measured on 3.13,
+    /// 3.14 and 3.15, the assignment is accepted and the frame goes on with a
+    /// value stack that no longer matches where it is, so the function returns
+    /// something it never computed. that is the whole reason this check is here
+    /// rather than left to the interpreter
+    fn executing(
+        &mut self,
+        id: FrameId,
+        wanted: &'static str,
+    ) -> PyResult<Result<Bound<'py, PyAny>, Refusal>> {
+        let frame = match self.frame(id, wanted)? {
+            Ok(frame) => frame,
+            Err(reason) => return Ok(Err(reason)),
+        };
+
+        let stop = self.stop;
+        let depth = self
+            .frames()?
+            .iter()
+            .position(|slot| matches!(slot, Slot::Python(_)))
+            .unwrap_or_else(|| {
+                unreachable!(
+                    "the walk starts at the frame the interpreter is in, so the \
+                     stack of a held thread holds at least one python frame"
+                )
+            });
+        let executing = FrameId {
+            stop,
+            depth: u32::try_from(depth).expect("a stack is not four billion frames deep"),
+        };
+
+        if id != executing {
+            return Ok(Err(Refusal::NotTheExecutingFrame {
+                frame: id,
+                executing,
+                wanted: wanted.to_string(),
+            }));
+        }
+        debug_assert!(
+            frame.is(&events::current_frame(self.python)?),
+            "the innermost python frame of a held thread's stack is the frame \
+             the interpreter is in"
+        );
+        Ok(Ok(frame))
+    }
+
+    /// move the executing frame, and report what that did to it
+    fn jump(&mut self, id: FrameId, wanted: Wanted, what: &'static str) -> PyResult<FromAgent> {
+        let frame = match self.executing(id, what)? {
+            Ok(frame) => frame,
+            Err(reason) => return Ok(FromAgent::Refused { reason }),
+        };
+        let code = frame.getattr("f_code")?;
+
+        let line = match wanted {
+            Wanted::Line(line) => line,
+            Wanted::FirstLine => match restartable(&code)? {
+                Ok(line) => line,
+                Err(reason) => {
+                    return Ok(FromAgent::Refused {
+                        reason: Refusal::NotRestartable {
+                            frame: id,
+                            function: code.getattr("co_qualname")?.extract()?,
+                            reason,
+                        },
+                    });
+                }
+            },
+        };
+
+        let from: u32 = frame.getattr("f_lineno")?.extract()?;
+        // every name of the frame's own slots that holds nothing right now.
+        // cpython binds all of them to `None` as part of a jump, which is a
+        // change to the program's state that the debugger caused and that
+        // nothing else would say
+        let unbound = Place::of(&frame)?.unbound()?;
+
+        // the assignment runs the warnings machinery, which is the program's own
+        // code — `showwarning` is replaceable and `linecache` reads the file. a
+        // breakpoint reached inside it would be a stop whose stack is half
+        // debugger, which is what this holds off for the same reason a condition
+        // does
+        let moved = {
+            let _suppressed = conditions::suppress();
+            frame.setattr("f_lineno", line)
+        };
+
+        let outcome = match moved {
+            Ok(()) => Jump::Moved {
+                from,
+                bound_to_none: bound_to_none(&frame, &unbound)?,
+                unannounced: crate::breakpoints::bound_at(code.as_ptr() as usize, line),
+            },
+            Err(error) => Jump::Refused {
+                wanted: line,
+                error: capture(self.python, &error),
+            },
+        };
+
+        Ok(FromAgent::Jumped {
+            jumped: Jumped {
+                // read off the frame rather than assumed from the line that was
+                // asked for: no `LINE` event is delivered for the destination,
+                // so the frame itself is the only thing that can say where the
+                // program is now — and after a refusal it says the same way that
+                // nothing moved
+                at: describe_where(&frame)?,
+                outcome,
+                mode: world::mode(),
+            },
+        })
+    }
+
     /// write a variable of a frame, and report what the frame holds afterwards
     pub(crate) fn set_variable(
         &mut self,
@@ -601,6 +738,76 @@ impl<'py> Stopped<'py> {
             mode: world::mode(),
         })
     }
+}
+
+/// where a jump is going, before the code object has been looked at
+///
+/// the two operations differ in exactly this and in nothing else
+#[derive(Debug, Clone, Copy)]
+enum Wanted {
+    /// the line the caller named
+    Line(u32),
+    /// the line of the code object's first instruction that carries one
+    FirstLine,
+}
+
+/// the line a restart moves to, or why the frame cannot be re-entered
+///
+/// the destination is the line of the **first instruction** that carries one,
+/// in offset order, rather than `co_firstlineno`. the two differ: a module's
+/// first instruction is a `RESUME` whose line is `0`, and a function that closes
+/// over a variable begins with `MAKE_CELL` instructions that carry no line at
+/// all. `co_firstlineno` is where the code was written, and what a jump needs is
+/// a position the frame can be put at
+fn restartable(code: &Bound<'_, PyAny>) -> PyResult<Result<u32, Unrestartable>> {
+    let flags: u32 = code.getattr("co_flags")?.extract()?;
+    for (flag, kind) in [
+        (CO_GENERATOR, Suspendable::Generator),
+        (CO_COROUTINE, Suspendable::Coroutine),
+        (CO_ASYNC_GENERATOR, Suspendable::AsyncGenerator),
+    ] {
+        if flags & flag != 0 {
+            return Ok(Err(Unrestartable::Suspendable { kind }));
+        }
+    }
+
+    let mut first: Option<(u32, u32)> = None;
+    for entry in code.call_method0("co_lines")?.try_iter()? {
+        let (start, _end, line): (u32, u32, Option<u32>) = entry?.extract()?;
+        // `0` is what cpython gives a module's own `RESUME`, and `None` is what
+        // it gives an instruction with no source line at all. neither is a line
+        // of the file, and neither can be jumped to
+        let Some(line) = line.filter(|line| *line >= 1) else {
+            continue;
+        };
+        if first.is_none_or(|(earliest, _)| start < earliest) {
+            first = Some((start, line));
+        }
+    }
+
+    Ok(first.map_or(Err(Unrestartable::NoFirstLine), |(_, line)| Ok(line)))
+}
+
+/// which of the names that held nothing before a jump hold `None` after it
+///
+/// read back out of the frame rather than predicted from the warning cpython
+/// raises. the assertion is the invariant that makes the field's name true: if
+/// a jump ever binds an unbound local to something other than `None`, a report
+/// that called it `bound_to_none` would be a wrong statement about the program
+fn bound_to_none(frame: &Bound<'_, PyAny>, unbound: &[(Scope, String)]) -> PyResult<Vec<String>> {
+    let place = Place::of(frame)?;
+    let mut bound = Vec::new();
+    for (scope, name) in unbound {
+        if let Held::Value(value) = place.read(*scope, name)? {
+            assert!(
+                value.is_none(),
+                "cpython binds a frame's unbound locals to `None` when it jumps, \
+                 and `{name}` came back holding {value}"
+            );
+            bound.push(name.clone());
+        }
+    }
+    Ok(bound)
 }
 
 /// the stack as a client sees it: the python frames, with template frames over
@@ -781,6 +988,32 @@ impl<'py> Place<'py> {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// the names of this frame's own slots that hold nothing right now
+    ///
+    /// only a frame whose locals are slots the compiler assigned has any: a
+    /// module or a class body keeps its locals in a namespace mapping, where a
+    /// name that is not there is absent rather than unbound, and cpython's jump
+    /// binds nothing in one
+    fn unbound(&self) -> PyResult<Vec<(Scope, String)>> {
+        if !self.optimized {
+            return Ok(Vec::new());
+        }
+
+        let mut unbound = Vec::new();
+        for (scope, names) in [
+            (Scope::Local, &self.varnames),
+            (Scope::Cell, &self.cellvars),
+            (Scope::Free, &self.freevars),
+        ] {
+            for name in names {
+                if matches!(self.read(scope, name)?, Held::Unbound) {
+                    unbound.push((scope, name.clone()));
+                }
+            }
+        }
+        Ok(unbound)
     }
 
     /// every scope of this frame that holds `name`

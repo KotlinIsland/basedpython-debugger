@@ -28,8 +28,8 @@ use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Addressed, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, FrameId, LogRecord,
-    Reporting, Request, Resolved, Response, Running, Scope, Script, SessionId, Snapshot,
+    Addressed, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, FrameId, Jumped,
+    LogRecord, Reporting, Request, Resolved, Response, Running, Scope, Script, SessionId, Snapshot,
     SnapshotId, SourceBreakpoint, Spawn, Stack, StateQuery, StepKind, Stop, TemplateContext,
     Threads, Transcript, Variables, Which, WorldStopped,
 };
@@ -280,6 +280,12 @@ impl Debuggee {
             } => Ok(Response::Evaluated(self.write_variable(
                 frame, scope, &name, &value, detail, reporting,
             )?)),
+            Request::SetNextStatement { frame, line } => Ok(Response::Jumped(
+                self.move_frame(&FromEngine::SetNextStatement { frame, line }, reporting)?,
+            )),
+            Request::RestartFrame { frame } => Ok(Response::Jumped(
+                self.move_frame(&FromEngine::RestartFrame { frame }, reporting)?,
+            )),
             Request::RunScript { stop, script } => Ok(Response::Transcript(
                 self.execute(stop, &script, reporting)?,
             )),
@@ -685,6 +691,44 @@ impl Debuggee {
         };
         match self.ask(&request, EXPECTED, reporting)? {
             FromAgent::Evaluated { result, .. } => Ok(result),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// move the executing frame to another line of the code it is running
+    ///
+    /// the thread stays held, at the line it moved to. the program is not
+    /// resumed by it and the lines between are not executed
+    pub fn set_next_statement(&mut self, frame: FrameId, line: u32) -> Result<Jumped> {
+        match self.ask_for(Request::SetNextStatement { frame, line })? {
+            Response::Jumped(jumped) => Ok(jumped),
+            other => unreachable!("a jump was answered with {other:?}"),
+        }
+    }
+
+    /// re-enter a frame from the top, with what its parameters hold now
+    pub fn restart_frame(&mut self, frame: FrameId) -> Result<Jumped> {
+        match self.ask_for(Request::RestartFrame { frame })? {
+            Response::Jumped(jumped) => Ok(jumped),
+            other => unreachable!("a restart was answered with {other:?}"),
+        }
+    }
+
+    /// the request half both jumps share
+    ///
+    /// one function rather than two, because the two differ only in which
+    /// message goes down the connection: everything about the answer — where
+    /// the frame is now, what the move bound to `None`, which breakpoints on
+    /// the destination will not fire — is the same claim either way
+    fn move_frame(
+        &mut self,
+        request: &FromEngine,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Jumped> {
+        const EXPECTED: &str = "the frame to move";
+
+        match self.ask(request, EXPECTED, reporting)? {
+            FromAgent::Jumped { jumped } => Ok(jumped),
             other => Err(unexpected(&other, EXPECTED)),
         }
     }

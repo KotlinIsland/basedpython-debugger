@@ -77,6 +77,15 @@ pub const fn reach_of(request: &Request) -> Reach {
         Request::TemplateContext { .. } => Reach::Direct("scopes, then variables"),
         Request::Evaluate { .. } => Reach::Direct("evaluate"),
         Request::SetVariable { .. } => Reach::Direct("setVariable"),
+
+        // `goto` carries a target id rather than a line, so a client asks
+        // `gotoTargets` for one first. that round trip is DAP's mechanics rather
+        // than a capability of the core: the adapter mints a target for the
+        // location the client asked about, and only when it is the file the held
+        // thread is executing — a line number means nothing without the file it
+        // is in, and cpython would accept the same number in another file
+        Request::SetNextStatement { .. } => Reach::Direct("goto, after gotoTargets"),
+        Request::RestartFrame { .. } => Reach::Direct("restartFrame"),
     }
 }
 

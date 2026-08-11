@@ -243,6 +243,17 @@ pub enum FromAgent {
         mode: Mode,
     },
 
+    /// what a jump did, and where the frame is now
+    ///
+    /// the answer to both jumps. where the frame is is read **off the frame**
+    /// after the assignment, because no `LINE` event is delivered for the line
+    /// a jump moves to — an agent that waited to be told would report the line
+    /// after the one it moved to
+    Jumped {
+        /// what became of it, and what it changed about the frame
+        jumped: bpd_core::Jumped,
+    },
+
     /// the source around one frame's current line, or why there is none
     ///
     /// read on the debuggee's own filesystem, which is the one the interpreter
@@ -411,6 +422,30 @@ pub enum FromEngine {
         frame: FrameId,
         /// how many lines either side of that frame's current line
         around: u32,
+    },
+
+    /// move the executing frame to another line of the code it is running
+    ///
+    /// the thread stays held. only the frame the thread is executing can move,
+    /// and the agent refuses any other — cpython accepts a move in a frame that
+    /// is suspended in a call, and the frame then runs on with a value stack
+    /// that does not match where it is
+    SetNextStatement {
+        /// which frame
+        frame: FrameId,
+        /// the line to move to
+        line: u32,
+    },
+
+    /// re-enter a frame from the top
+    ///
+    /// the destination is the line of the first instruction of the frame's code
+    /// object that carries one, which is why this is a request of its own
+    /// rather than a line the engine could work out: the code object is in the
+    /// debuggee
+    RestartFrame {
+        /// which frame
+        frame: FrameId,
     },
 
     /// write a variable of a frame
@@ -827,6 +862,76 @@ mod tests {
                 detail: Detail::default(),
             })
         );
+    }
+
+    #[test]
+    fn a_jump_and_what_it_did_round_trip() {
+        let frame = FrameId { stop: 1, depth: 0 };
+        let request = FromEngine::SetNextStatement { frame, line: 12 };
+        let answer = FromAgent::Jumped {
+            jumped: bpd_core::Jumped {
+                at: Where {
+                    file: "/tmp/program.py".to_string(),
+                    line: 12,
+                    function: "handler".to_string(),
+                },
+                outcome: bpd_core::Jump::Moved {
+                    from: 15,
+                    bound_to_none: vec!["total".to_string()],
+                    unannounced: vec![3],
+                },
+                mode: Mode::NonStop,
+            },
+        };
+
+        let mut wire = Vec::new();
+        write(&mut wire, &request).expect("writing to a vec cannot fail");
+        write(&mut wire, &answer).expect("writing to a vec cannot fail");
+
+        let mut buffer = Vec::new();
+        let mut wire = wire.as_slice();
+        let received: Option<FromEngine> =
+            read(&mut wire, &mut buffer).expect("the frame is whole");
+        assert_eq!(received, Some(request));
+        let received: Option<FromAgent> = read(&mut wire, &mut buffer).expect("the frame is whole");
+        assert_eq!(received, Some(answer));
+    }
+
+    #[test]
+    fn a_jump_cpython_refused_round_trips_with_cpythons_own_reason() {
+        let request = FromEngine::RestartFrame {
+            frame: FrameId { stop: 2, depth: 0 },
+        };
+        let answer = FromAgent::Jumped {
+            jumped: bpd_core::Jumped {
+                at: Where {
+                    file: "/tmp/program.py".to_string(),
+                    line: 9,
+                    function: "loopy".to_string(),
+                },
+                outcome: bpd_core::Jump::Refused {
+                    wanted: 11,
+                    error: PythonError {
+                        kind: "ValueError".to_string(),
+                        message: "can't jump into the body of a for loop".to_string(),
+                        traceback: Vec::new(),
+                    },
+                },
+                mode: Mode::NonStop,
+            },
+        };
+
+        let mut wire = Vec::new();
+        write(&mut wire, &request).expect("writing to a vec cannot fail");
+        write(&mut wire, &answer).expect("writing to a vec cannot fail");
+
+        let mut buffer = Vec::new();
+        let mut wire = wire.as_slice();
+        let received: Option<FromEngine> =
+            read(&mut wire, &mut buffer).expect("the frame is whole");
+        assert_eq!(received, Some(request));
+        let received: Option<FromAgent> = read(&mut wire, &mut buffer).expect("the frame is whole");
+        assert_eq!(received, Some(answer));
     }
 
     #[test]
