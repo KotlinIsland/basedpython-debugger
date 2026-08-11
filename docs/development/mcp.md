@@ -107,6 +107,8 @@ shape of what bpd can see from here
 | `variables`                        | one scope of one frame                                            |
 | `evaluate`                         | a python expression, in a frame                                   |
 | `set_variable`                     | write a name of a frame's scope                                   |
+| `set_next_statement`               | move the held frame to another line of the code it is running     |
+| `restart_frame`                    | re-enter the held frame from the top                              |
 | `threads`                          | what every thread is doing, as a sample                           |
 | `stop_the_world`                   | hold every thread that can be held                                |
 | `state`                            | describe a whole stop in one call, and keep the answer            |

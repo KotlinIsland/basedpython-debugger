@@ -302,8 +302,15 @@ and the user gets an error at the moment they need it
 
 advertised: `supportsConfigurationDoneRequest`,
 `supportsConditionalBreakpoints`, `supportsLogPoints`, `supportsSetVariable`,
-`supportsSingleThreadExecutionRequests`, `supportsExceptionInfoRequest`, and the
+`supportsSingleThreadExecutionRequests`, `supportsExceptionInfoRequest`,
+`supportsGotoTargetsRequest`, `supportsRestartFrame`, and the
 `raised` / `uncaught` exception filters
+
+`gotoTargets` and `goto` are [set next statement](jumps.md), and `restartFrame`
+is restart frame. a target is minted only for a location in the file a held
+thread is **executing**, and the `stopped` event that follows either of them
+carries reason `goto` or `restart` — the thread was never resumed, and the client
+has to re-read the stack to see where it is
 
 not advertised, and why:
 
