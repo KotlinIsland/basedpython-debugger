@@ -31,7 +31,14 @@ breakpoint is not already solid
         `sys.path[0]`, same exit code, same stdout and stderr interleaving
 - [ ] it runs on cpython 3.13 and 3.14, on linux, macos and windows, on gil and
         free-threaded builds
-- [ ] an unsupported interpreter is refused before anything is launched, by name
+- [x] an unsupported interpreter is refused before anything is launched, by
+        name. the refusal names the interpreter as given, the version it found
+        and the minimum, and it comes from `bpd_engine::launch::start`, which
+        every front end goes through — so a DAP client gets the same sentence,
+        and `a_client_is_refused_the_same_interpreter_the_command_line_is` is
+        what says so. "before" is the part that is actually tested:
+        `crates/bpd/tests/launch_refusal.rs` runs all three launch forms with a
+        program that would announce itself, and requires that it did not
 
 **breakpoints**
 
