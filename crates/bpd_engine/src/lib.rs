@@ -13,6 +13,7 @@
 //! *connect*; none can join the session
 
 pub mod agent;
+pub mod cache;
 pub mod launch;
 
 use std::io;
@@ -84,6 +85,30 @@ pub enum Error {
         /// the directory that was refused
         path: PathBuf,
         /// what is wrong with it, and what it would take to fix
+        reason: String,
+    },
+
+    /// the agent cache could not be read
+    #[error("could not read the agent cache: `{path}`")]
+    ReadAgentCache {
+        /// the file or directory the failure was about
+        path: PathBuf,
+        /// the underlying failure
+        #[source]
+        source: io::Error,
+    },
+
+    /// the agent cache holds something staging never put there
+    ///
+    /// a cache with a surprise in it may not be the directory `bpd` thinks it
+    /// is, and the one operation here that cannot be undone is deleting — so
+    /// this refuses the whole of it rather than removing what it does
+    /// recognise and leaving the rest
+    #[error("refusing to change the agent cache `{root}`: {reason}")]
+    UnexpectedInAgentCache {
+        /// the cache directory
+        root: PathBuf,
+        /// what was found in it, and what it would take to fix
         reason: String,
     },
 

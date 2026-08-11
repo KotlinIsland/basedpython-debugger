@@ -101,6 +101,11 @@ path, and windows uses `%LOCALAPPDATA%\bpd\agents\…\bpd_agent.pyd`. macOS gets
 `~/.cache` rather than `~/Library/Caches`, because one rule is one thing to
 check and the directory is `bpd`'s own either way
 
+nothing ever removes an entry, which is what makes reuse safe and also what
+makes the directory grow without limit — 89 entries and 448 MiB of them on the
+machine this was written on. reclaiming it is a thing a person asks for, with
+[`bpd cache`](agent-cache.md), and never something a launch does on its own
+
 it used to be a fresh temporary directory per launch, and that was **119 ms of a
 150 ms attach**: on macOS the first load of a shared object the system has never
 seen is checked before it is mapped, and a copy written a moment ago is never a

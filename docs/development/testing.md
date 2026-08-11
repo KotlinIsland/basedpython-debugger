@@ -364,6 +364,18 @@ reliably wrong one and is the stronger reason a step holds a reference. an
 assertion either way would be flaky, so there is none, and this paragraph is the
 record rather than a passing test
 
+**the removal failure `bpd cache clear` is written for cannot be produced on
+unix**, and that is written down rather than left looking like coverage. the
+failure it exists to report is windows refusing to delete a shared object a
+debuggee has loaded, and no unix machine will refuse for that reason. what is
+tested is the same shape from the other direction — an entry directory nothing
+can be removed from, made with `chmod 0500` — in
+`crates/bpd_engine/src/cache.rs` and `crates/bpd/tests/cache.rs`. that produces
+a real refusal from the operating system rather than a code path reached by a
+mock, and pins what a script depends on: the entry is named with the reason, the
+other entries still go, and the command does not report success. the windows
+half is the platform's, and CI is where it would show
+
 ### the rest
 
 the two adapters are covered from both ends. `crates/bpd_dap/tests/coverage.rs`

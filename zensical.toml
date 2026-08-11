@@ -60,6 +60,7 @@ basedpythondebugger = "index.md"
 development = [
     "development/architecture.md",
     "development/launching.md",
+    "development/agent-cache.md",
     "development/breakpoints.md",
     "development/state.md",
     "development/stepping.md",
