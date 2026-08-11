@@ -530,6 +530,57 @@ fn tool_order() -> Vec<&'static str> {
     ]
 }
 
+/// the child the fake session reports while the program runs
+fn started_a_child() -> bpd_core::Spawn {
+    bpd_core::Spawn {
+        event: "_posixsubprocess.fork_exec".to_string(),
+        executable: Some("/usr/bin/python3.14".to_string()),
+        arguments: vec!["/usr/bin/python3.14".to_string(), "worker.py".to_string()],
+        verdict: bpd_core::Verdict::ThisInterpreter,
+    }
+}
+
+#[test]
+fn a_child_the_program_started_is_carried_on_the_answer_that_saw_it() {
+    // parity with DAP, where the same fact arrives as an `output` event. MCP
+    // has no event stream — the server writes nothing that is not an answer —
+    // so it rides on the answer of the call the program was running during
+    let stepped = drive(&Asked::default()).result_of("step_over");
+    let spawned = &stepped["spawned"];
+    assert!(
+        spawned.is_object(),
+        "the program started a child during this call and the answer was {stepped}"
+    );
+
+    let started = &spawned["started"][0];
+    assert_eq!(started["arguments"][1], "worker.py");
+    assert_eq!(started["event"], "_posixsubprocess.fork_exec");
+
+    // its own key rather than under `logged`. an agent that found it there
+    // would reasonably read it as a logpoint having fired
+    assert!(
+        stepped["logged"].is_null(),
+        "a child was reported as a log record: {stepped}"
+    );
+
+    // the two fields an agent decides on. `certain` is why the verdict is not a
+    // boolean — bpd reads an argument vector, so it can be sure a child runs
+    // this interpreter and cannot be sure what a launcher will do
+    assert_eq!(started["certain"], true);
+    assert_eq!(
+        started["debugged"], false,
+        "an agent that assumed the child was being debugged would set \
+         breakpoints in it and wait for stops that never come"
+    );
+    assert!(
+        started["says"]
+            .as_str()
+            .is_some_and(|says| says.contains("not debugging it")),
+        "the sentence a person is shown has to be here too, or an agent and a \
+         human reading the same session read different things: {started}"
+    );
+}
+
 #[test]
 fn the_conversation_calls_every_tool_this_server_offers() {
     // a tool nobody calls is a tool nothing checks. `terminate` is called last
@@ -763,9 +814,17 @@ impl Session for FakeSession {
     fn dispatch(
         &mut self,
         request: Request,
-        _reporting: &mut dyn Reporting,
+        reporting: &mut dyn Reporting,
     ) -> Result<Response, Failed> {
         self.record(&request);
+
+        // a program starts a child while it runs, so a wait is where one is
+        // reported. the fake does it on every wait, which puts the server's
+        // route for it in this conversation rather than leaving it to a test
+        // that needs a real interpreter
+        if matches!(request, Request::Wait { .. }) {
+            reporting.spawned(started_a_child());
+        }
 
         Ok(match request {
             Request::SetBreakpoints { breakpoints } => Response::BreakpointsResolved {

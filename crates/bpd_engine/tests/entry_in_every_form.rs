@@ -87,9 +87,8 @@ fn the_program_has_run_nothing_while_it_is_stopped_in_any_form() {
         );
 
         let mut debuggee = debuggee;
-        let unlogged = |record| panic!("no logpoint was set, and the agent sent {record:?}");
         match debuggee
-            .run(unlogged)
+            .run(&mut bpd_test::reporting::Unreported)
             .expect("the debuggee ran to completion")
         {
             Running::Exited { status, .. } => {

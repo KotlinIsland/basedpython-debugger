@@ -227,6 +227,13 @@ the adapter's stdout **is** the protocol, so the debuggee cannot share it: one
 program is launched with pipes and each line becomes an `output` event, `stdout`
 and `stderr` categorised separately
 
+what `bpd` itself has to say goes on the **`console`** category instead, and the
+one thing that currently does is a python child the program started. `console`
+and not `stdout`, because the program did not write it and a client that showed
+it among the program's own output would be putting words in the debuggee's
+mouth. it carries no `source` and no `line` either — see
+[child processes](subprocesses.md)
+
 ## the parity rule, both sided
 
 no capability may exist in one adapter and not the other, and the test of that

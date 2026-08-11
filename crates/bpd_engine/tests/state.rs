@@ -17,7 +17,7 @@ use std::path::Path;
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Binding, Content, Detail, Evaluated, FrameId, LogRecord, Omitted, Resolved, Running, Scope,
+    Binding, Content, Detail, Evaluated, FrameId, Omitted, Resolved, Running, Scope,
     SourceBreakpoint, StopReason, Value, Variables,
 };
 use bpd_engine::{Debuggee, Launched};
@@ -79,17 +79,6 @@ fn launch(fixture: &Fixture) -> Debuggee {
     }
 }
 
-/// nothing in this test is a logpoint, so a record would be one the agent
-/// invented
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "it stands in for a `FnMut(LogRecord)` sink, which is handed the \
-              record to own"
-)]
-fn unlogged(record: LogRecord) {
-    panic!("no logpoint was set, and the agent sent {record:?}")
-}
-
 /// require that every breakpoint in a request bound
 fn bound(resolved: &[Resolved]) {
     for resolution in resolved {
@@ -109,7 +98,10 @@ fn stop_at(debuggee: &mut Debuggee, file: &Path, line: u32) {
         .expect("the breakpoint request was answered");
     bound(&resolved);
 
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => match stop.reason {
             StopReason::Breakpoint {
                 breakpoints,
@@ -139,7 +131,10 @@ fn to_exit(debuggee: &mut Debuggee) {
     debuggee
         .set_breakpoints(Vec::new())
         .expect("the breakpoint set was cleared");
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Exited { status, .. } => assert!(status.success(), "it exited with {status}"),
         Running::Stopped { stop, .. } => panic!("nothing is set, and it stopped for {stop:?}"),
         Running::StillRunning { waited, .. } => unreachable!(
@@ -612,7 +607,10 @@ fn a_stack_holds_no_frame_of_bpds_even_where_an_expression_of_bpds_just_ran() {
         ])
         .expect("the breakpoint request was answered");
 
-    let reason = match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    let reason = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => stop.reason,
         Running::Exited { status, .. } => panic!("it ran to {status} instead of stopping"),
         Running::StillRunning { waited, .. } => unreachable!(

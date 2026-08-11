@@ -74,17 +74,6 @@ fn launch(fixture: &Fixture) -> Debuggee {
     }
 }
 
-/// no breakpoint in this file is a logpoint, so a log record would mean the
-/// agent invented one
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "it stands in for a `FnMut(LogRecord)` sink, which is handed the \
-              record to own"
-)]
-fn unlogged(record: bpd_core::LogRecord) {
-    panic!("no logpoint was set, and the agent sent {record:?}")
-}
-
 /// ask for one breakpoint per `(id, line)` on the same file
 fn at(file: &Path, lines: &[(u32, u32)]) -> Vec<SourceBreakpoint> {
     lines
@@ -126,7 +115,10 @@ fn unbound(resolved: &Resolved) -> &Unbound {
 
 /// resume every held thread and require that the debuggee stops again
 fn to_stop(debuggee: &mut Debuggee) -> (Stop, Vec<Resolved>) {
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, rebound } => (stop, rebound),
         Running::Exited { status, .. } => {
             panic!("the debuggee exited with {status} instead of stopping")
@@ -147,7 +139,10 @@ fn finish(mut debuggee: Debuggee) {
         .set_breakpoints(Vec::new())
         .expect("the breakpoint set was cleared");
 
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Exited { status, rebound } => {
             assert!(status.success(), "the program exited with {status}");
             assert!(rebound.is_empty(), "nothing is set, and got {rebound:?}");
@@ -297,7 +292,10 @@ fn a_breakpoint_fires_on_every_pass_over_the_line() {
     // reached three times. one stop would mean the first pass disabled the line
     let mut stops = 0;
     loop {
-        match debuggee.run(unlogged).expect("the debuggee was resumed") {
+        match debuggee
+            .run(&mut bpd_test::reporting::Unreported)
+            .expect("the debuggee was resumed")
+        {
             Running::Stopped { .. } => stops += 1,
             Running::Exited { status, .. } => {
                 assert!(status.success(), "the program exited with {status}");
@@ -777,7 +775,10 @@ observe()
         .expect("the breakpoint request was answered");
     to_stop(&mut debuggee);
 
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Exited { status, .. } => assert!(status.success()),
         Running::Stopped { stop, .. } => panic!("it stopped again for {stop:?}"),
         Running::StillRunning { waited, .. } => unreachable!(
@@ -970,7 +971,10 @@ fn a_debuggee_that_has_exited_says_so_rather_than_that_nothing_is_held() {
     let fixture = Fixture::new("widget", WIDGET);
     let mut debuggee = launch(&fixture);
 
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Exited { .. } => {}
         Running::Stopped { stop, .. } => panic!("nothing was set, got {stop:?}"),
         Running::StillRunning { waited, .. } => unreachable!(
@@ -1009,7 +1013,7 @@ fn a_running_debuggee_refuses_a_request_rather_than_leaving_it_unanswered() {
             bpd_core::Request::Run {
                 deadline: Some(std::time::Duration::from_millis(100)),
             },
-            &mut Nothing,
+            &mut bpd_test::reporting::Unreported,
         )
         .expect("the debuggee was resumed");
     match running {
@@ -1038,16 +1042,3 @@ fn a_running_debuggee_refuses_a_request_rather_than_leaving_it_unanswered() {
 
 /// a program that is still running a moment after it is let go
 const SLEEPER: &str = "import time\n\ntime.sleep(1)\n";
-
-/// a `Reporting` that is asked for nothing, since nothing here logs or pauses
-struct Nothing;
-
-impl bpd_core::Reporting for Nothing {
-    fn logged(&mut self, record: bpd_core::LogRecord) {
-        panic!("nothing here sets a logpoint, and one recorded {record:?}")
-    }
-
-    fn pausing(&mut self, running: Vec<u64>) {
-        panic!("nothing here arms a pause, and one acknowledged {running:?}")
-    }
-}

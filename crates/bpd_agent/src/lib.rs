@@ -21,6 +21,7 @@ mod pause;
 mod run;
 mod session;
 mod source;
+mod spawns;
 mod steps;
 mod stops;
 mod templates;
@@ -53,7 +54,7 @@ const TOOL_NAME: &str = "bpd";
 mod bpd_agent {
     use super::{
         BUILT_FOR, DEBUGGER_TOOL_ID, TOOL_NAME, arm, attach, frames, monitoring, run,
-        running_version, session,
+        running_version, session, spawns,
     };
     use bpd_protocol::env::Form;
     use pyo3::exceptions::{PyImportError, PyRuntimeError, PySystemExit};
@@ -97,6 +98,11 @@ mod bpd_agent {
             .map_err(|error| PySystemExit::new_err(format!("bpd: could not attach: {error}")))?;
         claim(python)?;
         arm(python)?;
+
+        // after the connection, because the hook reports through it, and before
+        // the program runs, because a child started by the program's first
+        // statement is one bpd has to have seen
+        spawns::install(python)?;
 
         // this is the one python frame that belongs to bpd — the `-c` bootstrap
         // the interpreter was entered through — and it is remembered here,

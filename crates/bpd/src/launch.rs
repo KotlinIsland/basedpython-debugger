@@ -107,6 +107,38 @@ fn text(value: &OsString, what: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{what} has to be valid utf-8, and {value:?} is not"))
 }
 
+/// what `bpd launch` does with the things a running program says
+///
+/// two of the three cannot happen here and say so: `bpd launch` sets no
+/// breakpoints, so nothing can log, and it arms no pause. the third can happen
+/// to any program at all
+struct Watching;
+
+impl bpd_core::Reporting for Watching {
+    fn logged(&mut self, record: bpd_core::LogRecord) {
+        unreachable!("no breakpoints were set, and the agent logged {record:?}")
+    }
+
+    fn pausing(&mut self, running: Vec<u64>) {
+        unreachable!("no pause was armed, and the agent acknowledged one naming {running:?}")
+    }
+
+    /// the program started a child, and `bpd` is debugging the parent
+    ///
+    /// on stderr, prefixed, because it is the debugger talking and not the
+    /// program. it is written as it arrives rather than at the end: a
+    /// supervisor that starts a child and then waits for ever is exactly the
+    /// program this is worth knowing about, and it never reaches an end
+    #[expect(
+        clippy::print_stderr,
+        reason = "the whole point of this sink is to put the notice where a \
+                  person running `bpd launch` in a terminal will see it"
+    )]
+    fn spawned(&mut self, child: bpd_core::Spawn) {
+        eprintln!("bpd: {child}");
+    }
+}
+
 pub(crate) fn run(args: &Args) -> ExitCode {
     let (program, arguments) = match args.program() {
         Ok(program) => program,
@@ -137,9 +169,7 @@ pub(crate) fn run(args: &Args) -> ExitCode {
         // interpreter's own words, and a line of bpd's on top would be a line
         // that is not there without the debugger
         Launched::ExitedBeforeStopping(status) => Ok(status),
-        Launched::Stopped(mut debuggee) => match debuggee
-            .run(|record| unreachable!("no breakpoints were set, and the agent logged {record:?}"))
-        {
+        Launched::Stopped(mut debuggee) => match debuggee.run(&mut Watching) {
             // `bpd launch` sets no breakpoints, so nothing in the program can
             // stop it and nothing can change what a breakpoint resolves to.
             // both are stated rather than absorbed, because a stop nobody

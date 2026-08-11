@@ -21,9 +21,9 @@ use std::path::Path;
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Binding, Content, Detail, Evaluated, FrameId, LogRecord, Omitted, Resolved, Running, Scope,
-    Seen, SnapshotId, Source, SourceBreakpoint, StateQuery, StopReason, Subject, Unverified,
-    Wanted, WhyNot,
+    Binding, Content, Detail, Evaluated, FrameId, Omitted, Resolved, Running, Scope, Seen,
+    SnapshotId, Source, SourceBreakpoint, StateQuery, StopReason, Subject, Unverified, Wanted,
+    WhyNot,
 };
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
@@ -74,16 +74,6 @@ fn launch(fixture: &Fixture) -> Debuggee {
     }
 }
 
-/// nothing here is a logpoint, so a record would be one the agent invented
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "it stands in for a `FnMut(LogRecord)` sink, which is handed the \
-              record to own"
-)]
-fn unlogged(record: LogRecord) {
-    panic!("no logpoint was set, and the agent sent {record:?}")
-}
-
 fn bound(resolved: &[Resolved]) {
     for resolution in resolved {
         if let Binding::Unbound { reason } = &resolution.binding {
@@ -103,7 +93,10 @@ fn stop_at(debuggee: &mut Debuggee, file: &Path, line: u32) {
 
 /// run to the next hit of the breakpoint that is already set
 fn carry_on(debuggee: &mut Debuggee, line: u32) {
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => match stop.reason {
             StopReason::Breakpoint { line: at, .. } => assert_eq!(at, line),
             other => panic!("it stopped for {other:?}"),
@@ -117,7 +110,10 @@ fn finish(debuggee: &mut Debuggee, fixture: &Fixture) -> String {
     debuggee
         .set_breakpoints(Vec::new())
         .expect("the breakpoints were cleared");
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Exited { status, .. } => assert!(status.success(), "the program failed: {status}"),
         other => panic!("the program did not finish: {other:?}"),
     }

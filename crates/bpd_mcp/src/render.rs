@@ -421,6 +421,29 @@ pub fn difference(difference: &Difference) -> serde_json::Value {
     rendered
 }
 
+/// one child process the program started
+///
+/// `says` carries the same sentence a person is shown, so an agent and a human
+/// looking at the same session are looking at the same words. the structured
+/// fields are beside it rather than instead of it, because an agent that has to
+/// parse a sentence to find the command is an agent that will parse it wrongly
+///
+/// `certain` is the field that matters most, and it is why the verdict is not a
+/// boolean: `bpd` reads an argument vector, so it can be sure a child runs this
+/// interpreter and it cannot be sure what `/usr/bin/env python3` will do. an
+/// agent that treated the two the same would act on a guess
+pub fn spawned(child: &bpd_core::Spawn) -> serde_json::Value {
+    serde_json::json!({
+        "says": child.to_string(),
+        "event": child.event,
+        "executable": child.executable,
+        "arguments": child.arguments,
+        "verdict": child.verdict,
+        "certain": child.verdict.certain(),
+        "debugged": false,
+    })
+}
+
 /// one logpoint record
 pub fn logged(record: &LogRecord) -> serde_json::Value {
     serde_json::json!({

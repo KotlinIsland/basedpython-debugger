@@ -220,6 +220,14 @@ counted and reported. logpoint records are bounded the same way — the first 20
 with the number that were dropped — because there is no bound on how many a
 logpoint on a hot line produces
 
+a python **child** the program started rides on the same answer, under
+`spawned`, and is bounded at fifty for the same reason a logpoint is. it is its
+own key rather than part of `logged`, because an agent that found it there would
+reasonably read it as a logpoint having fired. every entry carries
+`debugged: false`, since an agent that assumed otherwise would set breakpoints in
+the child and wait for stops that never come — see
+[child processes](subprocesses.md)
+
 ## what a failure looks like
 
 two shapes, and they are different on purpose:

@@ -15,9 +15,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
-use bpd_core::{
-    Binding, Detail, Evaluated, LogRecord, Running, SourceBreakpoint, StepKind, Stop, StopReason,
-};
+use bpd_core::{Binding, Detail, Evaluated, Running, SourceBreakpoint, StepKind, Stop, StopReason};
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
 
@@ -208,16 +206,6 @@ fn interpreter() -> &'static Capabilities {
     bpd_test::agent::matching_interpreter()
 }
 
-/// no test here sets a logpoint, so a record would be one the agent invented
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "it stands in for a `FnMut(LogRecord)` sink, which is handed the \
-              record to own"
-)]
-fn unlogged(record: LogRecord) {
-    panic!("no logpoint was set, and the agent sent {record:?}")
-}
-
 fn launch(fixture: &Fixture) -> Debuggee {
     match bpd_engine::launch(
         interpreter(),
@@ -252,7 +240,10 @@ fn held_at(debuggee: &mut Debuggee, file: &Path, line: u32) -> Stop {
         Binding::Unbound { reason } => panic!("the breakpoint did not bind: {reason}"),
     }
 
-    let stop = match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    let stop = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected a breakpoint stop, got {other:?}"),
     };
@@ -265,7 +256,10 @@ fn held_at(debuggee: &mut Debuggee, file: &Path, line: u32) -> Stop {
 /// step the only held thread and require that it landed
 fn stepped(debuggee: &mut Debuggee, kind: StepKind) -> Stop {
     debuggee.the_step(kind).expect("the thread was stepped");
-    match debuggee.wait(unlogged).expect("the debuggee was waited on") {
+    match debuggee
+        .wait(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was waited on")
+    {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected a {kind} to land, got {other:?}"),
     }
@@ -303,7 +297,10 @@ fn value_of(debuggee: &mut Debuggee, expression: &str) -> String {
 
 /// resume everything and require that the program finishes successfully
 fn to_exit(debuggee: &mut Debuggee) {
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Exited { status, .. } => {
             assert!(status.success(), "the program exited with {status}");
         }
@@ -599,7 +596,10 @@ fn a_step_is_offered_a_line_an_earlier_pass_disabled() {
     // anyway, which needs the process-wide restart because PEP 669 has no
     // per-location undo
     for expected in [1, 2] {
-        match debuggee.run(unlogged).expect("the debuggee was resumed") {
+        match debuggee
+            .run(&mut bpd_test::reporting::Unreported)
+            .expect("the debuggee was resumed")
+        {
             Running::Stopped { stop, .. } => match &stop.reason {
                 StopReason::Breakpoint { line, .. } => assert_eq!(*line, entry),
                 other => panic!("expected a breakpoint stop, got {other:?}"),
@@ -645,7 +645,10 @@ fn a_breakpoint_reached_while_stepping_is_reported_as_a_breakpoint() {
     debuggee
         .the_step(StepKind::Over)
         .expect("the thread was stepped");
-    let stop = match debuggee.wait(unlogged).expect("the debuggee was waited on") {
+    let stop = match debuggee
+        .wait(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was waited on")
+    {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the breakpoint to stop it, got {other:?}"),
     };
@@ -684,7 +687,10 @@ fn a_step_out_of_the_outermost_frame_lets_the_program_finish() {
     debuggee
         .the_step(StepKind::Over)
         .expect("the thread was stepped");
-    match debuggee.wait(unlogged).expect("the debuggee was waited on") {
+    match debuggee
+        .wait(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was waited on")
+    {
         Running::Exited { status, .. } => assert!(status.success()),
         other => panic!("expected the program to finish, got {other:?}"),
     }
@@ -707,7 +713,10 @@ fn stepping_one_thread_does_not_step_or_stop_another() {
         .expect("the breakpoint request was answered");
     assert!(matches!(resolved[0].binding, Binding::Bound { .. }));
 
-    let stop = match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    let stop = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the main thread to stop, got {other:?}"),
     };
@@ -759,7 +768,10 @@ fn a_step_is_offered_a_line_another_thread_would_have_disabled() {
         ])
         .expect("the breakpoint request was answered");
     assert!(matches!(resolved[0].binding, Binding::Bound { .. }));
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { .. } => {}
         other => panic!("expected the main thread to stop, got {other:?}"),
     }
@@ -780,7 +792,10 @@ fn a_step_is_offered_a_line_another_thread_would_have_disabled() {
     expect(&fixture, "spun_while_gated");
     tell(&fixture, "go");
 
-    let stop = match debuggee.wait(unlogged).expect("the debuggee was waited on") {
+    let stop = match debuggee
+        .wait(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was waited on")
+    {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the step to land, got {other:?}"),
     };
@@ -861,7 +876,10 @@ fn a_pause_holds_the_first_thread_that_reaches_a_line() {
         "the only thread of this program was going round a python loop"
     );
 
-    let stop = match debuggee.wait(unlogged).expect("the debuggee was waited on") {
+    let stop = match debuggee
+        .wait(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was waited on")
+    {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the pause to hold a thread, got {other:?}"),
     };

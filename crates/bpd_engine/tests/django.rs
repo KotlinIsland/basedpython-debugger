@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Binding, Content, Detail, Evaluated, Frame, FrameId, FrameKind, LogRecord, Resolved, Running,
-    Scope, SourceBreakpoint, StopReason, TemplateContext, Unbound, Value,
+    Binding, Content, Detail, Evaluated, Frame, FrameId, FrameKind, Resolved, Running, Scope,
+    SourceBreakpoint, StopReason, TemplateContext, Unbound, Value,
 };
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
@@ -137,16 +137,6 @@ fn launch(fixture: &Fixture) -> Debuggee {
     }
 }
 
-/// nothing here is a logpoint, so a record would be one the agent invented
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "it stands in for a `FnMut(LogRecord)` sink, which is handed the \
-              record to own"
-)]
-fn unlogged(record: LogRecord) {
-    panic!("no logpoint was set, and the agent sent {record:?}")
-}
-
 /// a template breakpoint is unbound until django parses the template
 ///
 /// the program has run nothing at the entry stop, so django has not been
@@ -192,7 +182,10 @@ fn in_template(binding: &Binding) -> (u32, &[String]) {
 
 /// run to the next stop, and hand back the reason with what was rebound on the way
 fn run_to_stop(debuggee: &mut Debuggee) -> (StopReason, Vec<(u32, Binding)>) {
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Stopped { stop, rebound } => (stop.reason, latest(rebound)),
         Running::Exited { status, rebound } => panic!(
             "it exited with {status} instead of stopping. what it said about \
@@ -211,7 +204,10 @@ fn run_to_stop(debuggee: &mut Debuggee) -> (StopReason, Vec<(u32, Binding)>) {
 
 /// run to the end, and hand back what was rebound on the way
 fn run_to_exit(debuggee: &mut Debuggee) -> Vec<(u32, Binding)> {
-    match debuggee.run(unlogged).expect("the debuggee was resumed") {
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
         Running::Exited { status, rebound } => {
             assert!(status.success(), "the debuggee exited with {status}");
             latest(rebound)
