@@ -19,10 +19,17 @@ compatibility layer holding it back:
 - **and MCP, at parity** — ai agents get the same session through an interface
     shaped for them rather than for a ui. both are thin adapters over the same
     session core, and a capability exists in both or in neither
-- **basedpython aware** — set a breakpoint in `.by` source, get frames back in
-    `.by` source, through a source map that is verified rather than assumed
 - **django templates** — breakpoints in template files and template frames in
-    the stack, not the `django/template/base.py` frames underneath them
+    the stack, not the `django/template/base.py` frames underneath them. under
+    `runserver` the reloader serves from a **child** process the debugger is not
+    in, so that wants `--noreload` until `bpd` follows a child — and `bpd` says
+    so rather than leaving a breakpoint looking broken
+- **basedpython aware — not built yet.** the thing this project is named for is
+    the one bullet here that does not exist: `.by` breakpoints and `.by` frames
+    need the transpiler to emit a source map with provenance and a hash of both
+    artefacts, and that work is upstream. this project's rule is that a feature
+    is built or it does not exist, so it is labelled rather than listed beside
+    the ones that are
 - **cpython 3.13+** — no `sys.settrace` path, no shims, no fallback ladders
 
 ## status
