@@ -291,9 +291,8 @@ there without the debugger
 
 ## the one fingerprint that remains
 
-`bpd_agent` stays in the debuggee's `sys.modules`, and so do the modules
-importing it pulled in. it cannot be removed — unimporting it would unload the
-code that is running
+`bpd_agent` stays in the debuggee's `sys.modules`. it cannot be removed —
+unimporting it would unload the code that is running
 
 everything else is erased before any user code runs:
 
@@ -313,10 +312,109 @@ this is recorded as assertions rather than footnotes, in
 `a_program_that_reads_its_own_environment_finds_no_debugger_in_it` and
 `a_program_that_reads_its_own_import_path_finds_no_debugger_on_it`
 
-what is **not** erased is `sys.modules`: importing the agent imports
-`threading`, `re`, `sysconfig` and the rest of what it needs, and a program that
-lists its own modules sees them. that is a difference `bpd` has not closed, and
-it is written here rather than implied away
+### what a program can still tell, in full
+
+a program can list its own `sys.modules`, and what is in there under `bpd` is
+not quite what is in there without it. that matters beyond curiosity: a plugin
+scanner, a lazy importer, or a test that asserts on an import side effect
+behaves **differently** because a module it did not import is already there
+
+so the difference is measured rather than described. this is the delta against a
+bare run of the same program — not the whole of what the agent touches, since
+`sys`, `builtins`, `os`, `_thread` and `_imp` are in every interpreter before the
+agent exists and are not a difference at all:
+
+|       | script     | `-m`       | `-c`       |
+| ----- | ---------- | ---------- | ---------- |
+| 3.13  | 31 → **2** | 26 → **2** | 26 → **1** |
+| 3.14  | 32 → **2** | 26 → **2** | 30 → **1** |
+| 3.14t | 32 → **2** | 26 → **2** | 30 → **1** |
+| 3.15  | 32 → **2** | 26 → **2** | 30 → **1** |
+
+measured on macOS, where two of the names it was are `_osx_support` and
+`_sysconfigdata__darwin_darwin` — the left column is a little platform's own.
+the right one is not: the same **two names**, on every interpreter and every
+platform, and the same reason for each:
+
+- **`bpd_agent`**, in all three forms. importing the agent costs exactly this one
+    name: it is a `cdylib` with no python of its own, so nothing comes with it.
+    it stays because unimporting it would unload the code that is running
+- **`linecache`**, in the script and `-m` forms. this one is **cpython's, not
+    the agent's**: every `-c` run imports it to keep the command's source where a
+    traceback can find it, and `bpd` enters all three forms through a `-c`
+    bootstrap. it is in `sys.modules` before the agent is imported at all, and a
+    bare `-c` run has it too — which is why the command form's delta is one name
+    rather than two
+
+what the rest were is worth writing down, because it is the shape this mistake
+takes. **twenty-nine of the thirty-two were one call**:
+`sysconfig.get_config_var("Py_GIL_DISABLED")`, which the agent asked once to tell
+a free-threaded interpreter from a gil one. importing `sysconfig` is eight names
+— `threading` and `types` among them — and the call is twenty-one more, because
+it loads `_sysconfigdata_…` and `_osx_support`, and `_osx_support` imports `re`,
+which brings `enum`, `functools`, `collections`, `operator`, `copyreg`,
+`reprlib`, `keyword` and five `re` submodules. one lookup, a fifth of the stdlib
+
+it is read off the extension suffix instead. `_imp.extension_suffixes()[0]` is
+`EXT_SUFFIX`, built from `SOABI`, and the interpreter tag in it carries the `t`
+exactly when `Py_GIL_DISABLED` was set — `cpython-314t-darwin` against
+`cpython-314-darwin`, `cp314t` against `cp314` on windows. `_imp` is a builtin
+every interpreter has already imported. a suffix carrying neither `3xx` nor
+`3xxt` is an error naming the suffix, not a guess
+
+`sys._is_gil_enabled()` and `sys.flags.gil` were both rejected, and the reason is
+not taste. a free-threaded build turns the gil **back on** when it imports an
+extension that has not declared itself free-threading safe — which is exactly
+what a mismatched agent is — so both would report a free-threaded interpreter as
+a gil one in the one case the check exists for. `sys.abiflags` carries the same
+`t`, and is documented `Availability: Unix`
+
+two imports of the agent's own outlived that one, and they are the same kind of
+thing at a smaller size — a module imported to reach a single name that was
+already in the process. `types` was imported for
+`types.ModuleType`, which `Lib/types.py` defines as `type(sys)` and nothing else,
+so the fresh `__main__` is built from `type(sys)` directly. and
+`importlib.machinery` was imported for `SourceFileLoader`, which is reached
+instead through the frozen `importlib._bootstrap_external` the interpreter is
+already running on — the same route `set_main_loader` in `pythonrun.c` takes, and
+the same class object, without the four `sys.modules` entries, two of which are
+aliases for modules the interpreter has already loaded
+
+### why nothing is deleted from `sys.modules`
+
+the shorter way to make this table read zero is to take the names back out. it is
+not on the table, and the reason is measured rather than assumed. deleting a
+module does not undo the import — it makes the **next** import of it run the
+module's top level a second time, in a fresh namespace:
+
+| after `del sys.modules[…]` and importing again |                                                                                   |
+| ---------------------------------------------- | --------------------------------------------------------------------------------- |
+| the module's top level                         | runs a second time                                                                |
+| its classes                                    | are new objects — `isinstance` against the old ones is false                      |
+| `threading.main_thread()`                      | a different object, and the real main thread is not in the new registry           |
+| `enum.Enum`                                    | a different class, so classes built on the old one are no longer subclasses of it |
+
+`re` looks like it survives — a compiled pattern is still an `re.Pattern`
+afterwards — but only because `re.Pattern` is a C type from `_sre` rather than
+one of `re`'s own. that is luck, not a rule
+
+so hiding `threading` this way would hand a program that touches threads a thread
+registry that does not contain its own main thread. a module with a side effect
+on its top level would perform it twice. that is a *behaviour* change, and it
+would be made to conceal a cosmetic one
+
+### the list is a test, not a note
+
+`the_only_modules_a_debuggee_gains_are_the_ones_written_down` in
+`crates/bpd/tests/launch_parity.rs` runs a program that prints its own
+`sys.modules` bare and under `bpd`, in all three forms, and compares. the two
+names above are written down there **with their reasons**, and anything else
+appearing fails the test with the name it found and the question of whether it
+should have
+
+it fails in the other direction too: a name in the list that no form produces any
+more is a reason nobody needs, and the test says so. a list without reasons is a
+list people update instead of reading
 
 ## what the entry stop is
 

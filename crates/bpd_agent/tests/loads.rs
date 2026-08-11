@@ -28,14 +28,32 @@ fn the_agent_is_built_for_the_interpreter_that_imports_it() {
     // the `t` matters: a free-threaded build reports the same `version_info`
     // as the gil build of the same release and is a different abi, so a stamp
     // of the version alone names two interpreters
-    let running = bpd_test::eval(
-        matching_interpreter(),
-        "import sys, sysconfig\n\
-         suffix = 't' if sysconfig.get_config_var('Py_GIL_DISABLED') else ''\n\
-         print('%d.%d%s' % (sys.version_info[0], sys.version_info[1], suffix))",
-    );
+    let running = bpd_test::eval(matching_interpreter(), THE_EXPENSIVE_WAY);
 
     assert_eq!(built_for, running);
+}
+
+/// what a separate process says the running interpreter is, the expensive way
+///
+/// `sysconfig.get_config_var("Py_GIL_DISABLED")` is the answer everything else
+/// uses and is exactly what the agent must **not** ask for inside a debuggee —
+/// importing `sysconfig` and calling it pulls twenty-nine modules into
+/// `sys.modules` that a bare run does not have. so it is the right ground truth
+/// here: a different route to the same fact
+const THE_EXPENSIVE_WAY: &str = "import sys, sysconfig\n\
+     suffix = 't' if sysconfig.get_config_var('Py_GIL_DISABLED') else ''\n\
+     print('%d.%d%s' % (sys.version_info[0], sys.version_info[1], suffix))";
+
+#[test]
+fn the_interpreter_the_agent_is_running_on_is_the_one_sysconfig_reports() {
+    // the agent reads free-threadedness off the extension suffix, because
+    // `sysconfig` costs a fingerprint. that is only sound if it agrees with
+    // `sysconfig`, and the two have to be asked separately for the agreement to
+    // mean anything
+    let running = succeeds("import bpd_agent; print(bpd_agent.running_on())");
+    let expensive = bpd_test::eval(matching_interpreter(), THE_EXPENSIVE_WAY);
+
+    assert_eq!(running, expensive);
 }
 
 #[test]

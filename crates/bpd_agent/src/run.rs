@@ -147,12 +147,11 @@ fn script(python: Python<'_>, as_given: &str, absolute: &Path) -> PyResult<()> {
         .getattr("compile")?
         .call1((source.as_slice(), &displayed, "exec"))?;
 
-    let main = install_main(python, &sys)?;
+    let main = install_main(&sys)?;
     // what `_PyRun_SimpleFileObject` puts on `__main__` for a file, on top of
     // what every main module gets: the loader that read it and the path it came
     // from
-    let from_source =
-        PyModule::import(python, "importlib.machinery")?.getattr("SourceFileLoader")?;
+    let from_source = source_file_loader(python)?;
     main.setattr("__loader__", from_source.call1(("__main__", &displayed))?)?;
     main.setattr("__file__", &displayed)?;
     if namespaces_carry_cached(&sys, &from_source)? {
@@ -210,7 +209,7 @@ fn module(python: Python<'_>, module: &str) -> PyResult<()> {
     // it to the **resolved file** of the module it ran — not the module name —
     // and doing it here as well would be writing a value bpd would have to
     // resolve for itself
-    let main = install_main(python, &sys)?;
+    let main = install_main(&sys)?;
     watch_for(Entry::MainModule(
         main.getattr("__dict__")?.cast_into::<PyDict>()?.unbind(),
     ));
@@ -251,7 +250,7 @@ fn command(python: Python<'_>, source: &str) -> PyResult<()> {
         .getattr("_register_code")?
         .call1((&code, source, "<string>"))?;
 
-    let main = install_main(python, &sys)?;
+    let main = install_main(&sys)?;
     watch_for(Entry::Compiled(code.clone().unbind()));
     builtins
         .getattr("exec")?
@@ -367,6 +366,20 @@ fn repair_path(sys: &Bound<'_, PyModule>, entry: &str) -> PyResult<()> {
     Ok(())
 }
 
+/// the loader class cpython puts on a script's `__main__`
+///
+/// reached the way `set_main_loader` in `pythonrun.c` reaches it — through the
+/// frozen `importlib._bootstrap_external` the interpreter is already running on
+/// — rather than through `importlib.machinery`, which is the same class object
+/// behind four `sys.modules` entries a bare script run does not have. two of
+/// those four are aliases for modules the interpreter has already loaded, so
+/// importing them buys the debuggee a fingerprint and nothing else
+fn source_file_loader(python: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    PyModule::import(python, "_frozen_importlib")?
+        .getattr("_bootstrap_external")?
+        .getattr("SourceFileLoader")
+}
+
 /// whether this interpreter still puts `__cached__` in a module's namespace
 ///
 /// **cpython 3.15 removed it.** up to 3.14 `_PyRun_SimpleFileObject` set it
@@ -403,8 +416,9 @@ fn namespaces_carry_cached(
     }
 
     unreachable!(
-        "the agent imports `linecache` and `types` before it enters the \
-         program, and every interpreter loads both from source"
+        "the agent imports `linecache` before it enters the program, and no \
+         interpreter freezes it — cpython has already loaded it from source to \
+         hold the `-c` bootstrap's own line"
     )
 }
 
@@ -426,17 +440,16 @@ fn namespaces_carry_cached(
 /// through runpy's `_run_code`. `__spec__` and `__package__` stay as the
 /// interpreter left them, which is `None` — what a script and a command get,
 /// and what `-m` replaces
-fn install_main<'py>(
-    python: Python<'py>,
-    sys: &Bound<'py, PyModule>,
-) -> PyResult<Bound<'py, PyAny>> {
+fn install_main<'py>(sys: &Bound<'py, PyModule>) -> PyResult<Bound<'py, PyAny>> {
     let modules = sys.getattr("modules")?;
     let interpreters = modules.get_item("__main__")?.getattr("__dict__")?;
     let interpreters = interpreters.cast_into::<PyDict>()?;
 
-    let main = PyModule::import(python, "types")?
-        .getattr("ModuleType")?
-        .call1(("__main__",))?;
+    // `types.ModuleType` without `types`: `Lib/types.py` defines that name as
+    // `type(sys)` and nothing else, so this is the same class one import
+    // earlier — and `types` is two `sys.modules` entries a bare script or `-c`
+    // run does not have
+    let main = sys.get_type().call1(("__main__",))?;
     let namespace = main.getattr("__dict__")?.cast_into::<PyDict>()?;
 
     for (name, value) in &interpreters {

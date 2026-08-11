@@ -233,6 +233,14 @@ awkwardly is how a benchmark turns into an advertisement. what it is evidence of
 is module cache warmth, not the event path. the `session` row for `imports` is
 unaffected and is the honest end-to-end number
 
+**the 40 ms was taken while `bpd` had some of that warmth too.** the agent used
+to leave `re`, `threading`, `collections`, `functools` and twenty-five more in
+`sys.modules`, and this workload imports several of them — so a little of that
+3 ms was the same effect, on `bpd`'s side of the table. the delta is now two
+modules (see [launching](launching.md)), which takes the warmth away and should
+move this row back towards bare. it has not been re-measured, and this says so
+rather than leaving a number that quietly means something else
+
 ## what is not measured
 
 - **linux and windows.** the benchmark runs there; nobody has recorded what it

@@ -447,6 +447,109 @@ fn a_program_that_reads_its_own_import_path_finds_no_debugger_on_it() {
     }
 }
 
+/// every module a debuggee has that a bare run of the same program does not,
+/// and why each one is still there
+///
+/// this is the whole of the fingerprint `bpd` leaves in `sys.modules`, and it is
+/// a short list on purpose. a program that lists its own modules can tell it is
+/// being debugged from any entry here, and — worse — a plugin scanner, a lazy
+/// importer or a test that asserts on an import side effect behaves *differently*
+/// because of one
+///
+/// the reasons are the point. a bare list of names is something people update
+/// when it fails; a reason is something they have to disagree with.
+/// [launching](../../../docs/development/launching.md) has the measurement this
+/// was cut down from — thirty-two names, of which twenty-nine were one call to
+/// `sysconfig.get_config_var`
+const ALLOWED: &[(&str, &str)] = &[
+    (
+        "bpd_agent",
+        "the agent itself. it cannot go — unimporting it would unload the code \
+         that is running — and importing it costs exactly this one name",
+    ),
+    (
+        "linecache",
+        "cpython's, not the agent's. every `-c` run imports it to keep the \
+         command's source for a traceback, and bpd enters all three forms \
+         through a `-c` bootstrap — so it is already there before the agent \
+         exists, and a bare `-c` run has it too",
+    ),
+];
+
+/// every module a program could see in its own `sys.modules`
+fn modules(run: &Run) -> std::collections::BTreeSet<String> {
+    assert!(
+        run.success,
+        "the fixture exited with {:?}\nstderr:\n{}",
+        run.exit_code, run.stderr
+    );
+    run.stdout.lines().map(ToString::to_string).collect()
+}
+
+#[test]
+fn the_only_modules_a_debuggee_gains_are_the_ones_written_down() {
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for form in EVERY_FORM {
+        let fixture = Fixture::new(
+            "modules",
+            "import sys\nprint('\\n'.join(sorted(sys.modules)))\n",
+        );
+        let (bare, debugged) = both(&fixture, form, &[]);
+        let (bare, debugged) = (modules(&bare), modules(&debugged));
+
+        let gained: Vec<&String> = debugged.difference(&bare).collect();
+        for name in &gained {
+            assert!(
+                ALLOWED.iter().any(|(allowed, _)| *allowed == name.as_str()),
+                "as {form:?} the debuggee imported `{name}`, which a bare run of \
+                 the same program does not have and which nothing in this list \
+                 accounts for:\n{}\n\
+                 should it have? a module in the debuggee that is not in a bare \
+                 run is a program that can tell it is being debugged, and one \
+                 that behaves differently when it is. if it genuinely has to be \
+                 there, add it above with the reason — and if it does not, the \
+                 import that pulled it in is the thing to move",
+                reasons()
+            );
+        }
+        seen.extend(gained.into_iter().cloned());
+
+        let lost: Vec<&String> = bare.difference(&debugged).collect();
+        assert!(
+            lost.is_empty(),
+            "as {form:?} the debuggee is missing {lost:?}, which a bare run has. \
+             taking a module back out of `sys.modules` is not a way to hide it: \
+             the next import of it runs its top level a second time"
+        );
+
+        assert!(
+            debugged.contains("bpd_agent"),
+            "as {form:?} the debuggee had no agent in it, so this compared two \
+             bare runs and proved nothing"
+        );
+    }
+
+    let written_down: std::collections::BTreeSet<String> = ALLOWED
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect();
+    assert_eq!(
+        seen, written_down,
+        "the list above claims a module the debuggee no longer gains in any \
+         form. a reason nobody needs is a reason nobody reads — take it out"
+    );
+}
+
+/// the allowed list, spelled out for a failure to print
+fn reasons() -> String {
+    ALLOWED
+        .iter()
+        .map(|(name, reason)| format!("  - `{name}`: {reason}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn the_program_is_the_only_main_module() {
     for form in EVERY_FORM {
