@@ -204,6 +204,41 @@ times over. that is the thing `sys.monitoring.DISABLE` exists for, and it is the
 one measurement on this page that is really about architecture rather than about
 implementation
 
+that was an inference from the shape of the number until it was read in the
+source. `_pydevd_sys_monitoring/_pydevd_sys_monitoring.py:1577`, in the line
+event, after nothing matched and no step is armed:
+
+```py
+if step_cmd == -1:
+    if (
+        func_code_info.breakpoint_found
+        or func_code_info.plugin_line_breakpoint_found
+        or any_thread_stepping()
+    ):
+        return None
+
+    return monitor.DISABLE
+```
+
+`breakpoint_found` is a property of the **code object**, so one breakpoint
+anywhere in a function keeps every line of that function live forever. `bpd`
+disables per *location*: the line the breakpoint is on stays, the other five in
+the loop body go on their first pass. that is the whole 63×, and it is a
+granularity difference rather than a faster callback
+
+two consequences read out of the same file. `any_thread_stepping()` is process
+wide, so one thread holding a step turns `DISABLE` off for every code object in
+the process. and thread liveness returns bare `None` at `:1501`, never
+`DISABLE`, with the comment "we can't disable the code tracing because other
+threads may still want it" — `sys.monitoring` is per interpreter and pydevd
+needs a per-thread answer, so it cannot use the mechanism in the case where it
+would help most
+
+`justMyCode` is therefore load bearing for their numbers and not only for their
+ui: a filtered-out code object takes an unconditional `DISABLE` at `:1507`. with
+`justMyCode: false` — what anyone debugging into a library sets — that escape is
+gone
+
 ### debugpy is not a `settrace` debugger any more, and this project's docs said it was
 
 debugpy 1.8.21 vendors pydevd with `_pydevd_sys_monitoring`, compiled with
