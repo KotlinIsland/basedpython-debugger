@@ -171,10 +171,15 @@ happen
 
 ### what removes an entry
 
-nothing does. each is one copy of the agent — about a megabyte — and a
-developer who rebuilds the agent leaves one behind every time. deleting the
-directory is always safe: the next launch republishes what it needs and pays the
-cold load once
+**a person, and nothing else.** [`bpd cache clear`](agent-cache.md) is the only
+thing that takes an entry out; no launch, no timer and no threshold does it, and
+the reason is in that page
+
+each entry is one copy of the agent — 5.6 MB of it, not the megabyte this said
+before anyone measured — and a developer who rebuilds the agent leaves one
+behind every time, which is how the cache on the machine this was written on
+reached 89 entries and 448 MiB. deleting the whole directory by hand is always
+safe too: the next launch republishes what it needs and pays the cold load once
 
 ## why a `-c` bootstrap and not a python file
 
