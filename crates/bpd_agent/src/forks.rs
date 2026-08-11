@@ -90,32 +90,87 @@
 //! session already given up and returns. that is [`crate::attach::detach`]'s
 //! answer rather than a flag of this module's, so there is one place that
 //! decides whether this process still owns a session
+//!
+//! ## the parent is not left changed either
+//!
+//! since 3.12 cpython counts the process's operating system threads at
+//! `os.fork()` and raises a `DeprecationWarning` when there is more than one.
+//! the agent reads the control connection on a thread of its own, so a debuggee
+//! is multi-threaded where a bare run of the same program is not — and a
+//! program can put that warning in **its own data** with
+//! `warnings.catch_warnings(record=True)`, which makes it a parity violation
+//! rather than a line of output
+//!
+//! so the reader thread is not on the process while it forks. `before` stands
+//! it down and `after_in_parent` starts it again, and
+//! `a_program_that_forks_records_exactly_the_warnings_it_would_have` in
+//! `crates/bpd/tests/launch_parity.rs` compares what the program itself
+//! recorded, both ways. what the window costs is
+//! [`crate::attach::stand_down`]'s to state
+//!
+//! the three handlers compose in one direction only, and it is the one cpython
+//! decides: a fork runs every `before` handler, then either the child's
+//! handlers or the parent's, never both. so the child never starts a reader —
+//! it has given the session up by then, and both halves check that before they
+//! touch anything
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 
 use crate::{attach, events};
 
-/// arrange for a forked child to stop being a debuggee
+/// arrange for a fork to change nothing the program can see, and for a forked
+/// child to stop being a debuggee
 ///
 /// called once, from the agent's entry point, after the connection is up and
 /// before the program runs — a program that forks in its first statement is one
 /// this has to have been ready for
 ///
-/// `before` and `after_in_parent` are not registered, and there is nothing for
-/// them to do. the parent is unaffected by a fork: it keeps its own
-/// descriptors, its own tool id and its own breakpoints, and
-/// `a_fork_leaves_the_parents_session_exactly_as_it_was` is what says so
+/// all three handlers go on in one call, so cpython holds them in one place and
+/// their order relative to each other is its own: `before` handlers run in
+/// reverse registration order, which puts this one **last**, nearest the fork,
+/// and the two `after` ones run in registration order, which puts them first
 pub(crate) fn install(python: Python<'_>) -> PyResult<()> {
-    let handler = wrap_pyfunction!(gave_up_the_session, python)?;
     let arguments = PyDict::new(python);
-    arguments.set_item("after_in_child", handler)?;
+    arguments.set_item("before", wrap_pyfunction!(going_to_fork, python)?)?;
+    arguments.set_item("after_in_parent", wrap_pyfunction!(forked, python)?)?;
+    arguments.set_item(
+        "after_in_child",
+        wrap_pyfunction!(gave_up_the_session, python)?,
+    )?;
 
     // `os` is already imported — the entry point uses it to take bpd's own
     // variables back out of `os.environ` — so this adds nothing to the
     // debuggee's `sys.modules`
     PyModule::import(python, "os")?.call_method("register_at_fork", (), Some(&arguments))?;
     Ok(())
+}
+
+/// this process is about to fork, and the agent must not be a thread on it
+///
+/// the GIL is held for the whole of this and is deliberately **not** given
+/// back. everything it reaches is a socket write and a `pthread_join`, none of
+/// which needs the interpreter — so releasing it would only add a wait for the
+/// GIL inside `os.fork()` that a bare run of the program does not have, and a
+/// C extension holding the GIL somewhere else would then be able to hold the
+/// program's fork up
+///
+/// see [`crate::attach::stand_down`] for what a request arriving between here
+/// and [`forked`] does, which is: wait in the kernel's receive buffer and be
+/// read afterwards
+#[pyfunction]
+fn going_to_fork() {
+    attach::stand_down();
+}
+
+/// the fork is over in the process that did it, and the agent is a thread again
+///
+/// this runs in the **parent** only. the child registers
+/// [`gave_up_the_session`] instead, and there is nothing there to start: it has
+/// given the session up and closed the descriptors a reader would read
+#[pyfunction]
+fn forked() {
+    attach::resume_reading();
 }
 
 /// this process is the forked child, and it is not being debugged

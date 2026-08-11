@@ -28,6 +28,13 @@ bpd_protocol = { workspace = true }
 
 pyo3 = { workspace = true }
 
+# the reader thread waits on the control connection *and* on a wakeup, so that
+# a fork can take it off the process and put it back. `poll` is the wait, and
+# `fork` is posix — there is nothing on windows for either half to be the
+# answer to
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+
 [dev-dependencies]
 bpd_test = { workspace = true }
 

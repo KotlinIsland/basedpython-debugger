@@ -189,7 +189,8 @@ free-threaded one:
     and still firing
 - the breakpoint table, the code registry and the stop registry, because they
     are memory
-- **both file descriptors of the control connection**
+- **every file descriptor this session opened** — the two on the control
+    connection, and the two of the socket pair the reader thread is woken through
 
 and what it does not inherit is the thread that reads that connection. so a
 forked child would be an armed debuggee that can write to the session socket and
@@ -214,10 +215,13 @@ whole session up, before `os.fork()` has returned to python, and run exactly as
 it would have if the program had never been launched under `bpd`
 
 it is arranged with `os.register_at_fork(after_in_child=…)`, registered once from
-the agent at attach. `os` is already imported — the entry point uses it to take
-`bpd`'s own variables back out of `os.environ` — so this adds nothing to the
-debuggee's `sys.modules`, and there is no python code in the handler: it is a
-native function the interpreter holds a reference to
+the agent at attach, in the same call as the `before` and `after_in_parent`
+handlers [below](#the-parent-is-not-left-multi-threaded-either) — one
+registration, so cpython decides their order relative to each other rather than
+anything here. `os` is already imported — the entry point uses it to take `bpd`'s
+own variables back out of `os.environ` — so this adds nothing to the debuggee's
+`sys.modules`, and there is no python code in any of the three: they are native
+functions the interpreter holds references to
 
 **not `pthread_atfork`.** a `pthread_atfork` child handler is called by the C
 library from inside `fork()`, before cpython has put its own runtime back
@@ -305,23 +309,121 @@ the consequence is stated rather than hidden: an `os.exec` performed **inside** 
 forked child is not reported, and the `os.fork` that made it is. `os.spawnv` is
 the shape that produces it
 
-### what a forked child can tell, and the one thing that gives it away
+### what a forked child can tell
 
-nothing, in the child. `a_forked_child_sees_exactly_what_it_would_have_seen_without_the_debugger`
+nothing. `a_forked_child_sees_exactly_what_it_would_have_seen_without_the_debugger`
 runs one program twice — once bare and once under `bpd`, with a breakpoint armed
 on a line the child runs — and requires the two children's records of
 `sys.monitoring.get_tool`, `get_events`, `get_local_events`, `sys.argv`,
 `sys.path[0]`, `__name__` and `__file__` to be identical
 
-the **parent** is a different matter, and it is a limit this page states rather
-than leaves to be discovered. the agent reads the control connection on a thread
-of its own, so a debuggee is multi-threaded where a bare run of the same program
-is not — and since 3.12 cpython emits a `DeprecationWarning` on `os.fork()` in a
-multi-threaded process. so a program that forks writes a line to stderr under
-`bpd` that it does not write bare. that is not something this feature introduced
-and not something it can take away: a stop holds one thread and leaves the rest
-of the program running, so the connection has to be readable while a thread is
-held, and that needs a thread which is not the held one
+### the parent is not left multi-threaded either
+
+the agent reads the control connection on a thread of its own, and since 3.12
+cpython counts the process's **operating system** threads at `os.fork()` and
+raises a `DeprecationWarning` when there is more than one. that thread is
+registered with nothing, so `threading.active_count()` is `1` and
+`threading.enumerate()` is `['MainThread']` under `bpd` exactly as bare — the
+count cpython takes is the one place it shows
+
+it is not a matter of output. this program
+
+```py
+import os, warnings
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    os.waitpid(pid, 0)
+print([w.category.__name__ for w in caught])
+```
+
+prints `[]` bare. under `bpd` it printed `['DeprecationWarning']` — the program's
+own recorded data, differing — and it prints `[]` now. so it is the same class of
+thing as every other assertion in `crates/bpd/tests/launch_parity.rs`, and that
+is where
+`a_program_that_forks_records_exactly_the_warnings_it_would_have` now lives. it
+compares what the program recorded, not what reached stderr, and it forks a
+second time with a thread the program started itself — which has to warn on both
+runs, or the first comparison is being made against an interpreter that stopped
+counting
+
+**the warning is taken away by taking the thread away.** the count keys on the
+threads alive at the instant of the fork and not on whether the process ever had
+one, so a thread that is not running then does not produce it. the agent
+registers `before` and `after_in_parent` beside the `after_in_child` above: the
+first stands the reader thread down, the second starts it again. where cpython
+takes the count was measured from both sides, on 3.13, 3.14, 3.15 and a
+free-threaded 3.14 — a thread stopped in a `before` handler is not counted, and
+one started in an `after_in_parent` handler is not counted either
+
+the thread is **joined**, not signalled and abandoned. `join` is `pthread_join`,
+and that is the only thing that says the operating system thread has gone, which
+is what is being counted
+
+this is the mechanism rather than the instance: `os.forkpty()` warns the same way
+and runs the same handlers — measured — so it is covered by the same registration
+rather than by a second one
+
+#### the window, and what arrives in it
+
+between `before` and `after_in_parent` nothing is reading the connection. a
+request that arrives there **waits in the kernel's receive buffer** and is read
+afterwards. that is true because of where the reader is allowed to stop: it
+waits with `poll` on the socket *and* on a wakeup, and standing down wins over a
+frame that has begun to arrive — so it only ever stands down **between** frames,
+never owning part of one. nothing is dropped, and a length-prefixed stream that
+no reader has half-consumed cannot desynchronise
+
+the engine is not asked to know about any of this. it writes when it has
+something to say and the bytes wait
+
+#### a stop in flight
+
+a thread held at a breakpoint is held with the GIL released, so a fork on another
+thread neither waits for it nor disturbs it. the resume it is waiting for is a
+request like any other: if it arrives in the window it waits in the receive
+buffer and is delivered when the reader starts again, and the thread stays held
+until then rather than being let go early or lost.
+`a_thread_held_at_a_breakpoint_is_still_answered_while_another_thread_forks` is
+what says so — it holds a worker on a breakpoint, has the main thread fork over
+and over until the test releases it, and walks the stack and evaluates in the
+middle of that
+
+the `before` handler runs on the forking thread **with the GIL held, and does not
+give it back**. everything it does is a socket write and a join, none of which
+needs the interpreter — and releasing it would put a wait for the GIL inside
+`os.fork()` that a bare run does not have, where a C extension holding the GIL
+elsewhere could hold the program's fork up
+
+#### two threads forking at once
+
+`before` counts rather than flags, and the reader goes back on when the **last**
+fork in flight is through. so a fork that starts while another is still going
+still finds the thread gone, instead of finding it just restarted by the other
+one's `after_in_parent`
+
+#### if it cannot be started again
+
+then the session is over — nothing can answer a stop or deliver a resume — and
+the program would carry on undebugged. so it does not carry on: the agent writes
+the reason to stderr and exits, the same answer this project already gives when
+the debugger disappears mid-session. a debuggee running unobserved after the
+thing watching it has gone is the outcome that is refused
+
+#### what is left, and is not claimed away
+
+arming a **pause** needs a thread of the agent's own for the length of one
+arming, because the reader must not block on the GIL. a fork landing in that
+window still finds a second thread and still warns. it is not waited for, and
+that is deliberate rather than unfinished: it is a thread that is waiting for the
+GIL, so waiting for it inside `os.fork()` would make the program's fork depend on
+the GIL becoming free — and a C extension holding the GIL while it waits on the
+forking thread would then deadlock. a warning that a debugger's own explicit
+interrupt raced with a fork is a smaller thing to be wrong about than a fork that
+never returns
 
 ## where the report comes out
 
@@ -361,10 +463,17 @@ than quietly ending the guarantee
 the environment and `sys.path` are untouched by any of this. this feature adds
 no variable, no path entry and no module
 
-the fork handler is the same shape: cpython exposes `os.register_at_fork` and
+the fork handlers are the same shape: cpython exposes `os.register_at_fork` and
 **nothing that enumerates what has been registered**, so a program cannot read
-`bpd`'s handler out either. what it *can* observe is the warning above, which is
-about the reader thread rather than about anything on this page
+`bpd`'s handlers out either. what a program records around its own `os.fork()`
+is compared both ways above, and the one case that is still not equal is named
+there
+
+what a debuggee does have is **open file descriptors a bare run does not** — the
+control connection's two, and the two of the pair the reader thread is woken
+through. a program that walks its own `/dev/fd` sees them. that is the session
+itself rather than anything on this page, and it is the one fingerprint that
+cannot go while the agent is talking to an engine at all
 
 ## what is not built
 

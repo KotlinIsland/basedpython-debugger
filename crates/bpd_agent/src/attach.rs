@@ -18,13 +18,35 @@
 //! the GIL is answered on a python thread that bpd is already holding, because
 //! evaluating an expression anywhere else would run the program's code on the
 //! wrong thread and quietly report another thread's `threading.current_thread()`
+//!
+//! ## it is not on the process while it forks
+//!
+//! since 3.12 cpython counts the process's **operating system** threads at
+//! `os.fork()` and raises a `DeprecationWarning` when there is more than one —
+//! and a program can put that in its own data with
+//! `warnings.catch_warnings(record=True)`, not only on its stderr. this thread
+//! is registered with nothing, so `threading.active_count()` and
+//! `threading.enumerate()` are the same under bpd as without it, and the count
+//! cpython takes is the one place its existence shows
+//!
+//! so it does not exist across a fork. `os.register_at_fork(before=…)` stands
+//! it down and `after_in_parent=…` starts it again, which is
+//! [`crate::forks`]'s doing and [`stand_down`] and [`resume_reading`]'s work.
+//! the count cpython takes is after every `before` handler has run and before
+//! every `after_in_parent` one does — measured on 3.13, 3.14, 3.15 and a
+//! free-threaded 3.14, from both sides: a thread stopped in a `before` handler
+//! is not counted, and one started in an `after_in_parent` handler is not
+//! either
 
 use std::io;
 use std::net::TcpStream;
 #[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
+use std::thread::JoinHandle;
 
 use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
@@ -65,17 +87,72 @@ static FINISHED: AtomicBool = AtomicBool::new(false);
 /// not exist. see [`crate::forks`]
 static DETACHED: AtomicBool = AtomicBool::new(false);
 
-/// the two descriptors this session's socket is reached through
+/// every descriptor this session opened in the debuggee
 ///
 /// [`attach`] makes two handles on one socket, one for the reader thread and
-/// one for writing, and a fork copies both. the numbers are kept because a
-/// forked child has to close both and can reach neither: the writing handle is
-/// behind a lock it must not take, and the reading handle lives on a stack that
-/// did not survive the fork
+/// one for writing, and a socket pair the reader thread is woken through. a
+/// fork copies all four. the numbers are kept because a forked child has to
+/// close all four and can reach none of them: the writing handle is behind a
+/// lock it must not take, the wakeup's writing half is behind another, and the
+/// reading handles live in a `static` a detached process must not read
 ///
 /// `-1` before `attach`, which is not a descriptor on any platform bpd runs on
 #[cfg(unix)]
-static DESCRIPTORS: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
+static DESCRIPTORS: [AtomicI32; 4] = [
+    AtomicI32::new(-1),
+    AtomicI32::new(-1),
+    AtomicI32::new(-1),
+    AtomicI32::new(-1),
+];
+
+/// the reading end of the control connection, and the wakeup beside it
+///
+/// what a reader thread is handed, and what it hands back when it stands down.
+/// it is one value because the two are read together and a reader that had one
+/// without the other could not be stood down
+struct Reading {
+    /// the frames arrive here
+    stream: TcpStream,
+    /// the reading half of the pair [`stand_down`] writes a byte into
+    ///
+    /// non blocking, because it is drained rather than waited on: the wait is
+    /// the `poll` over both descriptors
+    #[cfg(unix)]
+    wakeup: UnixStream,
+}
+
+/// who is reading the control connection, and what is keeping them off it
+///
+/// **nothing under this lock needs the interpreter.** that is what makes it
+/// safe to hold while a python thread is inside `os.fork()` with the GIL: a
+/// thread holding it always makes progress, so a thread waiting for it cannot
+/// be waiting on something that is waiting for the GIL
+struct Reader {
+    /// how many forks are between their `before` handler and their
+    /// `after_in_parent` one
+    ///
+    /// a count rather than a flag because two threads can fork at once. the
+    /// thread is put back when the **last** of them is through, so a fork that
+    /// starts while another is in flight still finds it gone
+    #[cfg(unix)]
+    forking: usize,
+    /// the writing half of the wakeup pair, or nothing before [`attach`]
+    #[cfg(unix)]
+    waker: Option<UnixStream>,
+    /// the reading end while no thread holds it
+    idle: Option<Reading>,
+    /// the thread that holds it, which hands it back when it stands down
+    running: Option<JoinHandle<Reading>>,
+}
+
+static READER: Mutex<Reader> = Mutex::new(Reader {
+    #[cfg(unix)]
+    forking: 0,
+    #[cfg(unix)]
+    waker: None,
+    idle: None,
+    running: None,
+});
 
 /// connect to the engine, complete the handshake, and start reading
 pub(crate) fn attach(endpoint: &str, token_hex: &str) -> io::Result<()> {
@@ -88,23 +165,39 @@ pub(crate) fn attach(endpoint: &str, token_hex: &str) -> io::Result<()> {
     frame::read_handshake(&mut stream, &token).map_err(|error| framing(&error))?;
 
     // one handle for reading and one for writing, on the same socket. the
-    // reader blocks for the whole life of the session, and a held thread has to
-    // be able to answer while it does
+    // reader is blocked on the reading one whenever the session is idle, and a
+    // held thread has to be able to answer while it is
     let reading = stream.try_clone()?;
+
+    #[cfg(unix)]
+    let (waker, wakeup) = {
+        let (waker, wakeup) = UnixStream::pair()?;
+        wakeup.set_nonblocking(true)?;
+        (waker, wakeup)
+    };
 
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd as _;
         DESCRIPTORS[0].store(stream.as_raw_fd(), Ordering::Relaxed);
         DESCRIPTORS[1].store(reading.as_raw_fd(), Ordering::Relaxed);
+        DESCRIPTORS[2].store(waker.as_raw_fd(), Ordering::Relaxed);
+        DESCRIPTORS[3].store(wakeup.as_raw_fd(), Ordering::Relaxed);
     }
 
     *writer() = Some(stream);
 
-    std::thread::Builder::new()
-        .name("bpd-control".to_string())
-        .spawn(move || read_requests(reading))?;
-    Ok(())
+    let mut reader = reader();
+    #[cfg(unix)]
+    {
+        reader.waker = Some(waker);
+    }
+    reader.idle = Some(Reading {
+        stream: reading,
+        #[cfg(unix)]
+        wakeup,
+    });
+    start_reading(&mut reader)
 }
 
 fn lock<T>(mutex: &'static Mutex<T>) -> MutexGuard<'static, T> {
@@ -115,6 +208,129 @@ fn lock<T>(mutex: &'static Mutex<T>) -> MutexGuard<'static, T> {
 
 fn writer() -> MutexGuard<'static, Option<TcpStream>> {
     lock(&WRITER)
+}
+
+fn reader() -> MutexGuard<'static, Reader> {
+    lock(&READER)
+}
+
+/// hand the reading end to a thread of its own
+///
+/// the caller holds the lock for the whole transition, so there is never a
+/// moment at which the connection has two readers or none unaccounted for
+fn start_reading(reader: &mut Reader) -> io::Result<()> {
+    let reading = reader
+        .idle
+        .take()
+        .unwrap_or_else(|| unreachable!("the reading end is idle whenever no thread holds it"));
+
+    // the reading end goes with the closure, so a spawn that fails closes it.
+    // that is the right end of a bad choice: the alternative is a session whose
+    // connection is open and unread, which looks exactly like a debuggee that
+    // is busy. every caller of this reports the failure and stops
+    let handle = std::thread::Builder::new()
+        .name("bpd-control".to_string())
+        .spawn(move || read_requests(reading))?;
+    reader.running = Some(handle);
+    Ok(())
+}
+
+/// take the reader thread off the process, because it is about to fork
+///
+/// called from `os.register_at_fork(before=…)`, on the thread that is forking,
+/// with the GIL held. **the GIL is not given back**: everything here is a
+/// socket write and a join, none of it needs the interpreter, and giving it
+/// back would put a wait for the GIL inside `os.fork()` that a bare run does
+/// not have
+///
+/// the thread is joined rather than signalled and left, because `join` is
+/// `pthread_join` and that is the only thing that says the operating system
+/// thread has gone — which is what cpython counts
+///
+/// it stands down **between frames**, so what has arrived and not been read
+/// stays in the kernel's receive buffer for the next reader. a request that
+/// arrives inside the window is therefore delayed and never lost, and the
+/// length-prefixed stream cannot desynchronise: no reader ever holds half a
+/// frame. a thread this session is holding at a breakpoint stays held across
+/// the fork and is resumed by the request that was waiting
+#[cfg(unix)]
+pub(crate) fn stand_down() {
+    // a forked child gave the session up and has no reader thread to stand
+    // down. it must not touch this: its copy of the reading end names
+    // descriptors `detach` has already closed
+    if detached() {
+        return;
+    }
+
+    let mut reader = reader();
+    reader.forking += 1;
+    let Some(handle) = reader.running.take() else {
+        // another fork is already in flight and has taken it off
+        return;
+    };
+
+    {
+        use std::io::Write as _;
+        let waker = reader
+            .waker
+            .as_mut()
+            .unwrap_or_else(|| unreachable!("`attach` installs the waker before the first reader"));
+        if let Err(error) = waker.write_all(&[0]) {
+            fatal(&format!(
+                "the reader of the control connection could not be told to \
+                 stand down for a fork: {error}. it cannot be joined, and a \
+                 fork with it still on the process would change what the \
+                 program records"
+            ));
+        }
+    }
+
+    match handle.join() {
+        Ok(mut reading) => {
+            reading.drain_wakeup();
+            reader.idle = Some(reading);
+        }
+        // a panic in the agent is a broken invariant, and this is the one place
+        // it would otherwise be swallowed: the thread is gone either way, so
+        // the fork would succeed and the session would be dead
+        Err(_) => fatal(
+            "the reader of the control connection panicked. the session cannot \
+             be answered and the program is not being left to run undebugged",
+        ),
+    }
+}
+
+/// put the reader thread back, now that the fork is over
+///
+/// called from `os.register_at_fork(after_in_parent=…)`, in the process that
+/// did the forking. the child registers nothing here — it has given the session
+/// up and there is nothing for it to read
+#[cfg(unix)]
+pub(crate) fn resume_reading() {
+    if detached() {
+        return;
+    }
+
+    let mut reader = reader();
+    assert!(
+        reader.forking > 0,
+        "every fork's `after_in_parent` handler follows its own `before` one"
+    );
+    reader.forking -= 1;
+    if reader.forking > 0 {
+        // another fork is still in flight, and the thread it is waiting to be
+        // rid of is this one
+        return;
+    }
+
+    if let Err(error) = start_reading(&mut reader) {
+        fatal(&format!(
+            "the reader of the control connection could not be started again \
+             after a fork: {error}. the session is over — nothing can answer a \
+             stop or deliver a resume — and the program is not being left to \
+             run undebugged"
+        ));
+    }
 }
 
 /// the program has ended, so a connection that closes now is not a loss
@@ -148,6 +364,9 @@ pub(crate) fn detached() -> bool {
 /// `a_fork_leaves_the_parents_session_exactly_as_it_was`, which has the parent
 /// reach a breakpoint after the fork and read its own tool id back
 ///
+/// the wakeup pair goes the same way and for the same reason: it is two more
+/// descriptors this session opened in a process that is no longer a debuggee
+///
 /// no lock is taken, on any build. the writing end is behind one that the
 /// reader thread holds without the GIL, so a fork can land while it is locked
 /// and the child's copy of it would then be held by a thread that does not
@@ -163,13 +382,12 @@ pub(crate) fn detach() -> bool {
         if raw < 0 {
             continue;
         }
-        // SAFETY: these are the two descriptors `attach` opened in the process
-        // this one was forked from, and nothing in *this* process will close
-        // either of them again. the reading handle's `TcpStream` is on the
-        // stack of a thread that did not survive the fork, and the writing
-        // handle's is inside a `static` whose destructor never runs and which
-        // nothing reads once `DETACHED` is set — [`send`] returns before it
-        // looks. so this is the only close they will get
+        // SAFETY: these are the descriptors `attach` opened in the process this
+        // one was forked from, and nothing in *this* process will close any of
+        // them again. every owning value is inside a `static` whose destructor
+        // never runs, and nothing reads one once `DETACHED` is set — [`send`],
+        // [`stand_down`] and [`resume_reading`] all return before they look. so
+        // this is the only close they will get
         #[expect(
             unsafe_code,
             reason = "the owning values are unreachable in a forked child, so \
@@ -213,22 +431,116 @@ pub(crate) fn send(message: &FromAgent) {
     }
 }
 
-/// read requests for the life of the session and hand each to the thread it
-/// names
-fn read_requests(mut stream: TcpStream) {
+/// what the reader thread does next
+#[cfg(unix)]
+enum Next {
+    /// a frame has begun to arrive
+    Frame,
+    /// the process is about to fork, and this thread must not be on it
+    StandDown,
+}
+
+#[cfg(unix)]
+impl Reading {
+    /// wait until there is a frame to read, or until this thread is to go
+    ///
+    /// standing down **wins** over a frame that has begun to arrive: whatever
+    /// the kernel is holding stays there, and the reader started after the fork
+    /// reads it. that is what makes the window lossless — the alternative is a
+    /// reader that stands down owning part of a frame, and a length-prefixed
+    /// stream cannot be resumed from the middle
+    fn awaited(&mut self) -> Next {
+        use std::os::fd::AsFd as _;
+
+        use rustix::event::{PollFd, PollFlags, poll};
+
+        loop {
+            let mut watched = [
+                PollFd::from_borrowed_fd(self.wakeup.as_fd(), PollFlags::IN),
+                PollFd::from_borrowed_fd(self.stream.as_fd(), PollFlags::IN),
+            ];
+            match poll(&mut watched, None) {
+                Ok(_) => {}
+                // a signal the *program* installed a handler for arrives on
+                // whichever thread the operating system picks, and this thread
+                // is as eligible as any. it is not a failure of the connection
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(error) => lost(&format!("the control connection failed: {error}")),
+            }
+
+            let wakeup = watched[0].revents();
+            let stream = watched[1].revents();
+
+            if wakeup.intersects(PollFlags::IN) {
+                return Next::StandDown;
+            }
+
+            // an end of stream and an error are the reading path's to report,
+            // in the words it already has for them
+            if !stream.is_empty() {
+                return Next::Frame;
+            }
+        }
+    }
+
+    /// take back every byte that was written to wake a reader
+    ///
+    /// the invariant it keeps is that the wakeup is **empty whenever the
+    /// reading end is idle**, established by [`attach`] making a fresh pair and
+    /// re-established here. a byte left behind would stand the next reader down
+    /// the instant it started, with no fork in flight to join it — and then
+    /// nothing would be reading the connection and nothing would have said so
+    ///
+    /// it is done by the thread that joined the reader rather than by the
+    /// reader itself, because a reader can also return when the session ends,
+    /// on a path that never looked at the wakeup at all
+    fn drain_wakeup(&mut self) {
+        use std::io::Read as _;
+
+        let mut swallowed = [0u8; 8];
+        loop {
+            match self.wakeup.read(&mut swallowed) {
+                Ok(read) if read > 0 => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
+                // the writing half lives in a `static` for the life of the
+                // process, so there is no end of stream to reach here and no
+                // error left that is about anything but the pair itself
+                other => fatal(&format!(
+                    "the wakeup of the control connection's reader could not be \
+                     read back ({other:?}). the next reader would stand down \
+                     the moment it started, and the session would go unread"
+                )),
+            }
+        }
+    }
+}
+
+/// read requests for as long as this thread holds the connection, and hand each
+/// to the thread it names
+///
+/// it gives the reading end back rather than closing it. on unix that is a
+/// stand-down for a fork, and the connection outlives this thread by design; on
+/// every platform it is also how a session that has ended lets go
+fn read_requests(mut reading: Reading) -> Reading {
     let mut buffer = Vec::new();
     loop {
-        match message::read::<_, FromEngine>(&mut stream, &mut buffer) {
+        #[cfg(unix)]
+        if matches!(reading.awaited(), Next::StandDown) {
+            return reading;
+        }
+
+        match message::read::<_, FromEngine>(&mut reading.stream, &mut buffer) {
             Ok(Some(request)) => stops::route(request),
             Ok(None) => {
                 if FINISHED.load(Ordering::Relaxed) {
-                    return;
+                    return reading;
                 }
                 lost("the debugger closed the control connection while the program was running");
             }
             Err(error) => {
                 if FINISHED.load(Ordering::Relaxed) {
-                    return;
+                    return reading;
                 }
                 lost(&format!("the control connection failed: {error}"));
             }

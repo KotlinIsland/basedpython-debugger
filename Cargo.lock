@@ -112,6 +112,7 @@ dependencies = [
  "bpd_test",
  "pyo3",
  "pyo3-build-config",
+ "rustix",
 ]
 
 [[package]]
