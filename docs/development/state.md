@@ -23,8 +23,7 @@ a frame id is `{stop, depth}`: the number of the stop it was minted at, and how
 far down the stack it is, with the frame that stopped at zero
 
 DAP hands out an opaque integer that is valid until the next resume and looks
-exactly the same afterwards, which is [the stale handle
-problem](agent-interface.md#what-is-wrong-with-dap-for-an-agent) an agent hits
+exactly the same afterwards, which is [the stale handle problem](agent-interface.md#what-is-wrong-with-dap-for-an-agent) an agent hits
 the moment it reasons across turns. carrying the stop in the id means a stale
 one is **detected**, not guessed at:
 
@@ -79,12 +78,12 @@ in the contract as something this project will not ship
 so the names come from the code object, one scope at a time, and the values come
 from the frame:
 
-| scope | names | what it is |
-| --- | --- | --- |
-| `local` | `co_varnames` | the frame's own locals |
-| `cell` | `co_cellvars` | locals of this frame that a nested function captures |
-| `free` | `co_freevars` | variables captured from an enclosing frame |
-| `global` | the mapping itself | `f_globals` |
+| scope    | names              | what it is                                           |
+| -------- | ------------------ | ---------------------------------------------------- |
+| `local`  | `co_varnames`      | the frame's own locals                               |
+| `cell`   | `co_cellvars`      | locals of this frame that a nested function captures |
+| `free`   | `co_freevars`      | variables captured from an enclosing frame           |
+| `global` | the mapping itself | `f_globals`                                          |
 
 two consequences that look like bugs and are not:
 
@@ -161,16 +160,16 @@ alongside it says what it really is. `a_value_is_read_from_its_storage_and_not_
 from_the_types_own_code` puts exactly that class in a frame, with every one of
 those methods raising
 
-| kind | how it is read | reported as |
-| --- | --- | --- |
-| `int` | `int.__repr__`, the unbound slot | decimal text |
-| `float` | `float.__repr__` | python's own text |
-| `str` | the string's utf-8 | the characters, not a repr |
-| `bytes`, `bytearray` | the buffer, copied | lowercase hex |
-| `list`, `tuple` | `PyList_GetSlice` / the tuple's items | a sequence |
-| `set`, `frozenset` | `list()`, and only for an **exact** one | a sequence |
-| `dict` | `PyDict_Items` | pairs, not names |
-| anything else | its instance dictionary | an object |
+| kind                 | how it is read                          | reported as                |
+| -------------------- | --------------------------------------- | -------------------------- |
+| `int`                | `int.__repr__`, the unbound slot        | decimal text               |
+| `float`              | `float.__repr__`                        | python's own text          |
+| `str`                | the string's utf-8                      | the characters, not a repr |
+| `bytes`, `bytearray` | the buffer, copied                      | lowercase hex              |
+| `list`, `tuple`      | `PyList_GetSlice` / the tuple's items   | a sequence                 |
+| `set`, `frozenset`   | `list()`, and only for an **exact** one | a sequence                 |
+| `dict`               | `PyDict_Items`                          | pairs, not names           |
+| anything else        | its instance dictionary                 | an object                  |
 
 a few of those are decisions rather than mechanics:
 
@@ -218,17 +217,16 @@ which hangs hangs the thread it was asked on
 a request carries five bounds, and **every bound that bites is named in the
 answer, in the place where it bit**:
 
-| bound | default | what it limits |
-| --- | --- | --- |
-| `depth` | 3 | levels of container or object opened |
-| `children` | 100 | children read from one container |
-| `text` | 1024 | characters of one string, bytes of one `bytes` |
-| `budget` | 8192 | bytes for the whole answer |
-| `attributes` / `repr` | on / off | what may run |
+| bound                 | default  | what it limits                                 |
+| --------------------- | -------- | ---------------------------------------------- |
+| `depth`               | 3        | levels of container or object opened           |
+| `children`            | 100      | children read from one container               |
+| `text`                | 1024     | characters of one string, bytes of one `bytes` |
+| `budget`              | 8192     | bytes for the whole answer                     |
+| `attributes` / `repr` | on / off | what may run                                   |
 
 these defaults are a starting point rather than a settled answer. the byte budget
-is spending an agent's context window, and [what it is worth is an open
-question](agent-interface.md#still-open) that cannot be closed until there is an
+is spending an agent's context window, and [what it is worth is an open question](agent-interface.md#still-open) that cannot be closed until there is an
 agent surface to measure it against
 
 `budget` means one more thing inside [a state query](queries.md#the-budget-is-one-budget),
@@ -293,9 +291,9 @@ build — see [threads](threads.md). so a read taken here is a **sample** of a
 program that is still moving, and every answer carries the mode it was taken in
 rather than leaving that to be assumed:
 
-| mode | what it says |
-| --- | --- |
-| `non_stop` | one thread was held and the rest of the program kept running |
+| mode             | what it says                                                  |
+| ---------------- | ------------------------------------------------------------- |
+| `non_stop`       | one thread was held and the rest of the program kept running  |
 | `stop_the_world` | everything that could be held was, and here is what could not |
 
 one thing is a snapshot in either mode: **the held thread's own stack**. it is

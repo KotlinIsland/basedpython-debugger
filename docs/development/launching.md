@@ -20,14 +20,14 @@ a bare one
 an interpreter can be entered three ways, and **none of them is a special case
 of another**. what they differ in is visible to the program:
 
-| | `script.py` | `-m module` | `-c source` |
-| --- | --- | --- | --- |
-| `sys.argv[0]` | the path as typed | **the resolved file** | `-c` |
-| `sys.path[0]` | the script's directory | the working directory | `""` |
-| `__main__.__spec__` | absent | the module's spec | absent |
-| `__main__.__package__` | absent | `""`, or the package | absent |
-| `__main__.__file__` | the script | the module's file | absent |
-| `__main__.__cached__` | `None` | the `.pyc` | absent |
+|                        | `script.py`            | `-m module`           | `-c source` |
+| ---------------------- | ---------------------- | --------------------- | ----------- |
+| `sys.argv[0]`          | the path as typed      | **the resolved file** | `-c`        |
+| `sys.path[0]`          | the script's directory | the working directory | `""`        |
+| `__main__.__spec__`    | absent                 | the module's spec     | absent      |
+| `__main__.__package__` | absent                 | `""`, or the package  | absent      |
+| `__main__.__file__`    | the script             | the module's file     | absent      |
+| `__main__.__cached__`  | `None`                 | the `.pyc`            | absent      |
 
 `__cached__` is in that table with a caveat: **cpython 3.15 removed it** from
 module namespaces, from a script's `__main__`, from runpy's and from every
@@ -56,28 +56,28 @@ there is no arrangement of arguments in which two of them are given. giving
 ## the shape of a launch
 
 ```text
-  bpd                                      the debuggee
-   │
-   ├─ probe the interpreter, refuse if it cannot be driven
-   ├─ stage the agent build, from the cache after the first time
-   ├─ bind loopback, generate a session token
-   ├─ spawn ────────────────────────────▶  python -c "import bpd_agent;
-   │                                                   bpd_agent.main()"
-   │                                        │
-   │                                        ├─ verify the interpreter matches
-   │                                        ├─ read the endpoint and token
-   │                                        ├─ erase them from the environment
-   │  ◀──────── connect, handshake ─────────┤
-   │                                        ├─ take its own directory back off
-   │                                        │  PYTHONPATH and sys.path
-   │                                        ├─ claim the monitoring tool id
-   │                                        ├─ arm PY_START
-   │                                        ├─ repair what the form needs
-   │                                        ├─ install a fresh __main__
-   │  ◀──────── stopped: entry ─────────────┤  ← the program has run nothing
-   ├─ resume ──────────────────────────────▶│
-   │                                        └─ run the program
-   └─ exit with the program's own code
+bpd                                      the debuggee
+ │
+ ├─ probe the interpreter, refuse if it cannot be driven
+ ├─ stage the agent build, from the cache after the first time
+ ├─ bind loopback, generate a session token
+ ├─ spawn ────────────────────────────▶  python -c "import bpd_agent;
+ │                                                   bpd_agent.main()"
+ │                                        │
+ │                                        ├─ verify the interpreter matches
+ │                                        ├─ read the endpoint and token
+ │                                        ├─ erase them from the environment
+ │  ◀──────── connect, handshake ─────────┤
+ │                                        ├─ take its own directory back off
+ │                                        │  PYTHONPATH and sys.path
+ │                                        ├─ claim the monitoring tool id
+ │                                        ├─ arm PY_START
+ │                                        ├─ repair what the form needs
+ │                                        ├─ install a fresh __main__
+ │  ◀──────── stopped: entry ─────────────┤  ← the program has run nothing
+ ├─ resume ──────────────────────────────▶│
+ │                                        └─ run the program
+ └─ exit with the program's own code
 ```
 
 the agent connects **back** to the engine. that removes any race over who binds
@@ -140,13 +140,13 @@ what is in it is a shared object that gets loaded into the user's **own**
 processes. a directory another user can write to is another user choosing what
 runs inside the debuggee. so before anything is read from it or written to it:
 
-| the directory | what happens |
-| --- | --- |
-| is not there | created, mode `0700` |
-| is a link | refused |
-| is not a directory | refused |
-| belongs to another user | refused, naming both uids |
-| is writable by group or other | refused, naming the mode |
+| the directory                 | what happens              |
+| ----------------------------- | ------------------------- |
+| is not there                  | created, mode `0700`      |
+| is a link                     | refused                   |
+| is not a directory            | refused                   |
+| belongs to another user       | refused, naming both uids |
+| is writable by group or other | refused, naming the mode  |
 
 write rather than read: the agent is not a secret, and a rule that refused
 `0755` — what an ordinary umask produces — would be refusing directories nobody
@@ -186,12 +186,12 @@ so the entry point is the shortest thing that can work —
 entering through `-c` is only the launch form the user asked for one time in
 three, and the differences are visible to the program:
 
-| | what `-c` leaves | a script | `-m` |
-| --- | --- | --- | --- |
-| `sys.argv[0]` | `-c` | the path **as typed** | the resolved file |
-| `sys.path[0]` | `""` | the script's directory | the working directory |
-| `__main__` | the bootstrap's module | the program's own | the program's own |
-| `__file__` | absent | the script, absolutised | the module's file |
+|               | what `-c` leaves       | a script                | `-m`                  |
+| ------------- | ---------------------- | ----------------------- | --------------------- |
+| `sys.argv[0]` | `-c`                   | the path **as typed**   | the resolved file     |
+| `sys.path[0]` | `""`                   | the script's directory  | the working directory |
+| `__main__`    | the bootstrap's module | the program's own       | the program's own     |
+| `__file__`    | absent                 | the script, absolutised | the module's file     |
 
 the command form is the one that needs nothing put back, and saying so is the
 point: `-c` is entered through `-c`, so `sys.argv[0]` and `sys.path[0]` are

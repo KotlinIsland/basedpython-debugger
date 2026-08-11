@@ -23,15 +23,15 @@ repos:
   - repo: local
     hooks:
       # yaml, and the json and javascript the vs code extension is made of.
-      # what it formats, and why markdown is not part of it, is in
-      # `dprint.jsonc` — that file is the scope, so this runs the whole set
-      # rather than the changed files, and the two cannot disagree
+      # what it formats, and how, is in `dprint.jsonc` — that file is the
+      # scope, so this runs the whole set rather than the changed files, and
+      # the two cannot disagree
       - id: dprint
         name: dprint
         entry: dprint fmt
         language: node
         additional_dependencies: ["dprint@0.55.2"]
-        files: '\.(ya?ml|json|jsonc|m?js|toml|py)$'
+        files: '\.(ya?ml|json|jsonc|m?js|toml|py|md)$'
         pass_filenames: false
 
       - id: rustfmt

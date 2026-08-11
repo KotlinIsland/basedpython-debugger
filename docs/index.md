@@ -12,8 +12,7 @@ compatibility layer holding it back:
     run, on a loop of eighteen million line locations with a breakpoint held in
     the same function. what a session *does* cost is the 55 ms it takes to
     attach, and that is on the same page
-- **speaks DAP** — the [debug adapter
-    protocol](https://microsoft.github.io/debug-adapter-protocol/), the same
+- **speaks DAP** — the [debug adapter protocol](https://microsoft.github.io/debug-adapter-protocol/), the same
     protocol vs code, pycharm, neovim and the rest already know how to drive.
     `bpd` is a debug adapter, so an editor needs a launch configuration rather
     than a bespoke plugin

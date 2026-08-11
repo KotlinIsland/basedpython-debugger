@@ -23,8 +23,13 @@ request `bpd/runScript`. the same engine walks the same tree either way
 ```json
 {
   "steps": [
-    { "step": "run_to", "file": "app.py", "line": 40,
-      "condition": "amount < 0", "hits": { "hits": "exactly", "count": 3 } },
+    {
+      "step": "run_to",
+      "file": "app.py",
+      "line": 40,
+      "condition": "amount < 0",
+      "hits": { "hits": "exactly", "count": 3 }
+    },
     { "step": "eval", "expression": "amount" },
     { "step": "stack", "top": 3 }
   ],
@@ -50,17 +55,17 @@ one the step was about, and stops
 
 ## the steps
 
-| step | what it does |
-| --- | --- |
-| `step_over`, `step_in`, `step_out` | step the script's thread, and record where it landed |
-| `continue` | let the script's thread go until it stops again |
-| `run_to` | arm a breakpoint of the script's own, run to it, and **take it back off** |
-| `eval` | evaluate a python expression in a frame, and record what it produced |
-| `stack` | record the thread's frame chain |
-| `log` | record a note of the script's own — nothing reaches the debuggee |
-| `if` | run one of two blocks, according to a python predicate |
-| `while` | run a block while a predicate is true, at most `limit` times |
-| `finish` | end the script here, with a reason |
+| step                               | what it does                                                              |
+| ---------------------------------- | ------------------------------------------------------------------------- |
+| `step_over`, `step_in`, `step_out` | step the script's thread, and record where it landed                      |
+| `continue`                         | let the script's thread go until it stops again                           |
+| `run_to`                           | arm a breakpoint of the script's own, run to it, and **take it back off** |
+| `eval`                             | evaluate a python expression in a frame, and record what it produced      |
+| `stack`                            | record the thread's frame chain                                           |
+| `log`                              | record a note of the script's own — nothing reaches the debuggee          |
+| `if`                               | run one of two blocks, according to a python predicate                    |
+| `while`                            | run a block while a predicate is true, at most `limit` times              |
+| `finish`                           | end the script here, with a reason                                        |
 
 `log` and `eval` are both in the list on purpose and they are different things:
 an `eval` records a **value** and costs the program an evaluation, a `log`
@@ -81,10 +86,10 @@ nobody asked for
 inside a script the engine owns the whole composition, including the removal:
 
 - the breakpoint is armed under an id **above every one the client's set uses**,
-  so a stop that names it is unambiguously the script's. the record says which id
+    so a stop that names it is unambiguously the script's. the record says which id
 - a location that does not bind **halts the script**, with the binding failure's
-  own reason. running to a breakpoint that binds nothing would spend the whole
-  wall clock budget arriving nowhere
+    own reason. running to a breakpoint that binds nothing would spend the whole
+    wall clock budget arriving nowhere
 - every record of a `run_to` says what became of the breakpoint, as `disarmed`
 
 the one case it cannot simply be taken off is a script whose clock ran out with
@@ -136,10 +141,17 @@ it ended there, and will guess
   "at_most": 20,
   "bytes": 1204,
   "records": [
-    { "step": "1", "at": { "stop": 1, "thread": 3, "place": null, "why": "entry" },
-      "did": { "did": "ran_to", "line": 40, "armed_as": 1,
-               "landed": { "landed": "stopped", "to": { "stop": 2, "…": "…" } },
-               "disarmed": { "disarmed": "removed" } } }
+    {
+      "step": "1",
+      "at": { "stop": 1, "thread": 3, "place": null, "why": "entry" },
+      "did": {
+        "did": "ran_to",
+        "line": 40,
+        "armed_as": 1,
+        "landed": { "landed": "stopped", "to": { "stop": 2, "…": "…" } },
+        "disarmed": { "disarmed": "removed" }
+      }
+    }
   ],
   "outcome": { "outcome": "ran" },
   "partial": false
@@ -147,18 +159,18 @@ it ended there, and will guess
 ```
 
 - **`step`** is the position in the submitted tree, counting from one, with a
-  branch named on the way in: `3` is the third step, `3.then.1` is the first step
-  of its `then` block, `4.body.2` is the second step of a `while` body. a loop's
-  body records the same path on every pass, and the test before each pass says
-  which pass it is
+    branch named on the way in: `3` is the third step, `3.then.1` is the first step
+    of its `then` block, `4.body.2` is the second step of a `while` body. a loop's
+    body records the same path on every pass, and the test before each pass says
+    which pass it is
 - **`at`** is where the held thread was **when the step ran**, built from a stop
-  the agent reported and from nothing else. `place` is `null` only at the entry
-  stop, where the program has run nothing and there is no line it is at
+    the agent reported and from nothing else. `place` is `null` only at the entry
+    stop, where the program has run nothing and there is no line it is at
 - a control step's landing carries `to`, which is the same shape — so a step
-  says where it started and where it finished, and neither is a guess
+    says where it started and where it finished, and neither is a guess
 - **`at_most`** is how many records the script could have produced, computed
-  before it ran. every loop carries a bound, so this is computable — which is
-  the examinability arbitrary python cannot offer
+    before it ran. every loop carries a bound, so this is computable — which is
+    the examinability arbitrary python cannot offer
 
 ### the budget, and what partial means
 
@@ -166,11 +178,11 @@ it ended there, and will guess
 session that can hang, which is the whole reason a step tree exists rather than
 submitted python
 
-| axis | what it bounds |
-| --- | --- |
-| `steps` | how many steps run — one per record, including each `if` test and each `while` test |
+| axis      | what it bounds                                                                                 |
+| --------- | ---------------------------------------------------------------------------------------------- |
+| `steps`   | how many steps run — one per record, including each `if` test and each `while` test            |
 | `wall_ms` | how long the whole script may take. it is **also the deadline every control step waits under** |
-| `bytes` | how many bytes of transcript are recorded |
+| `bytes`   | how many bytes of transcript are recorded                                                      |
 
 there is deliberately **no per-step deadline**. the wall clock budget is the
 one clock: a script waiting for a program that never stops is spending exactly
@@ -195,16 +207,16 @@ there is no carrying on past one, and no catch: the steps after a failure would
 run somewhere the script did not intend, and the record would describe an
 investigation that did not happen. the ways a script halts:
 
-| halted | when |
-| --- | --- |
-| `raised` | an `eval` or a predicate raised — the exception is the record, and it is the end |
-| `not_a_bool` | a predicate produced something else |
-| `unbound` | a `run_to` named a location nothing will stop at |
-| `elsewhere` | the thread stopped, and not for the reason the step asked for |
-| `other_thread` | a different thread stopped and this one is still running |
-| `exited`, `finishing` | the program ended |
-| `bounded` | a loop ran its allowance and its predicate was still true |
-| `refused` | the session would not answer the request the step is made of |
+| halted                | when                                                                             |
+| --------------------- | -------------------------------------------------------------------------------- |
+| `raised`              | an `eval` or a predicate raised — the exception is the record, and it is the end |
+| `not_a_bool`          | a predicate produced something else                                              |
+| `unbound`             | a `run_to` named a location nothing will stop at                                 |
+| `elsewhere`           | the thread stopped, and not for the reason the step asked for                    |
+| `other_thread`        | a different thread stopped and this one is still running                         |
+| `exited`, `finishing` | the program ended                                                                |
+| `bounded`             | a loop ran its allowance and its predicate was still true                        |
+| `refused`             | the session would not answer the request the step is made of                     |
 
 a script that expects an expression to raise should test the condition with an
 `if` first. there is no `try`, because a step that swallowed a failure is a step
@@ -229,10 +241,10 @@ over a state the first one moved
 ## what this page does not offer
 
 - **no `set_breakpoints` step.** the breakpoint set belongs to the client, and a
-  script that changed it would leave a session whose set is not what the client
-  last asked for. a `run_to` puts the set back before it returns, which is the
-  only reason the engine touches it at all
+    script that changed it would leave a session whose set is not what the client
+    last asked for. a `run_to` puts the set back before it returns, which is the
+    only reason the engine touches it at all
 - **no nested script, and no `try`.** a nested one would be a second budget
-  inside a budget; a `try` would be a failure that did not halt
+    inside a budget; a `try` would be a failure that did not halt
 - **no step for the whole-program `continue`.** a script drives one thread, and
-  resuming the others would be a script letting go of threads nobody named
+    resuming the others would be a script letting go of threads nobody named

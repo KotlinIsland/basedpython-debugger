@@ -2,10 +2,10 @@
 
 ## the policy
 
-| | version | why |
-| --- | --- | --- |
-| minimum | cpython 3.13 | PEP 669 is the only event backbone |
-| attach | cpython 3.14 | PEP 768 `sys.remote_exec` |
+|                | version      | why                                        |
+| -------------- | ------------ | ------------------------------------------ |
+| minimum        | cpython 3.13 | PEP 669 is the only event backbone         |
+| attach         | cpython 3.14 | PEP 768 `sys.remote_exec`                  |
 | implementation | cpython only | PEP 669 and PEP 768 are cpython interfaces |
 
 there is no compatibility layer, no capability fallback ladder, and no branch

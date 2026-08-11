@@ -7,22 +7,22 @@ that was designed
 ## the shape
 
 ```text
-  editor                          ai agent
-    │ DAP                            │ MCP
-    ▼                                ▼
-  ┌────────────────────────────────────┐
-  │  bpd_dap        │       bpd_mcp    │   adapters, no logic
-  ├────────────────────────────────────┤
-  │            bpd_core                │   the vocabulary, and Request/Response
-  │            bpd_sourcemap          │   locations in, locations out
-  ├────────────────────────────────────┤
-  │            bpd_engine              │   owns targets, answers requests
-  └───────────────┬────────────────────┘
-                  │ bpd_protocol, over a socket
-  ┌───────────────▼────────────────────┐
-  │  bpd_agent, in the debuggee        │   a cdylib, PEP 669 callbacks in rust
-  │  cpython 3.13+                     │
-  └────────────────────────────────────┘
+editor                          ai agent
+  │ DAP                            │ MCP
+  ▼                                ▼
+┌────────────────────────────────────┐
+│  bpd_dap        │       bpd_mcp    │   adapters, no logic
+├────────────────────────────────────┤
+│            bpd_core                │   the vocabulary, and Request/Response
+│            bpd_sourcemap          │   locations in, locations out
+├────────────────────────────────────┤
+│            bpd_engine              │   owns targets, answers requests
+└───────────────┬────────────────────┘
+                │ bpd_protocol, over a socket
+┌───────────────▼────────────────────┐
+│  bpd_agent, in the debuggee        │   a cdylib, PEP 669 callbacks in rust
+│  cpython 3.13+                     │
+└────────────────────────────────────┘
 ```
 
 the engine is out of process. the agent is a native extension module loaded
@@ -246,8 +246,7 @@ being one implementation
 ## attaching
 
 attaching to a running process is PEP 768. cpython 3.14 exposes
-`sys.remote_exec(pid, script)`, and documents the underlying [attachment
-protocol](https://docs.python.org/3.14/howto/remote_debugging.html) — read the
+`sys.remote_exec(pid, script)`, and documents the underlying [attachment protocol](https://docs.python.org/3.14/howto/remote_debugging.html) — read the
 target's debug offsets, write a script path into its control section, set the
 pending flag, and the interpreter picks it up at its next safe point
 

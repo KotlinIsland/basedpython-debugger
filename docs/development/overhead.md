@@ -13,13 +13,13 @@ not all of it agreed with the pages it was written to check
 five programs, chosen to be the **worst** cases for this design rather than the
 best. they live in `crates/bpd/benches/workloads/`:
 
-| workload | what it is for |
-| --- | --- |
-| `startup` | a program that does nothing, so what is left is the cost of attaching |
-| `lines` | six lines of a loop body run three million times — eighteen million `LINE` locations |
-| `calls` | ten million python calls across three functions — the worst case for the global `PY_START` |
-| `imports` | fifty-odd stdlib packages — thousands of code objects, each seen once |
-| `mixed` | a log parsed with a regex, grouped, summarised, hashed — ordinary python, most of its time inside C |
+| workload  | what it is for                                                                                      |
+| --------- | --------------------------------------------------------------------------------------------------- |
+| `startup` | a program that does nothing, so what is left is the cost of attaching                               |
+| `lines`   | six lines of a loop body run three million times — eighteen million `LINE` locations                |
+| `calls`   | ten million python calls across three functions — the worst case for the global `PY_START`          |
+| `imports` | fifty-odd stdlib packages — thousands of code objects, each seen once                               |
+| `mixed`   | a log parsed with a regex, grouped, summarised, hashed — ordinary python, most of its time inside C |
 
 each is run three ways — bare, under `bpd`, and under debugpy — and `lines` is
 run twice more under each debugger, once with a breakpoint that is hit fifty
@@ -45,14 +45,14 @@ bind would otherwise post the best number on the page
 
 ## the machine
 
-| | |
-| --- | --- |
-| cpu | apple M4 Max — 12 performance cores, 4 efficiency cores |
-| memory | 128 GiB |
-| os | macOS 26.5.2 (25F84), arm64 |
-| interpreter | cpython 3.14.7 |
-| debugpy | 1.8.21 |
-| rust | 1.97.0, `--release` |
+|             |                                                         |
+| ----------- | ------------------------------------------------------- |
+| cpu         | apple M4 Max — 12 performance cores, 4 efficiency cores |
+| memory      | 128 GiB                                                 |
+| os          | macOS 26.5.2 (25F84), arm64                             |
+| interpreter | cpython 3.14.7                                          |
+| debugpy     | 1.8.21                                                  |
+| rust        | 1.97.0, `--release`                                     |
 
 every figure is the **median of ten runs**, with the smallest and largest of the
 ten in brackets — ten whole processes, not ten iterations inside one, because
@@ -88,20 +88,20 @@ BPD_BENCH_DEBUGPY=/path/to/venv/bin/python cargo bench --bench overhead
 
 on the busy machine — read a `bpd` figure against the `bare` one beside it:
 
-| workload | bare | bpd | debugpy |
-| --- | --- | --- | --- |
-| `startup` | 17 (16–19) | 74 (66–84) | 1091 (1050–1137) |
-| `lines` | 181 (180–183) | 215 (214–216) | 1025 (1020–1032) |
-| `calls` | 230 (227–232) | 269 (263–279) | 1258 (1246–1272) |
-| `imports` | 83 (76–90) | 101 (100–103) | 1057 (1043–1071) |
-| `mixed` | 278 (276–281) | 326 (312–343) | 1256 (1240–1277) |
+| workload  | bare          | bpd           | debugpy          |
+| --------- | ------------- | ------------- | ---------------- |
+| `startup` | 17 (16–19)    | 74 (66–84)    | 1091 (1050–1137) |
+| `lines`   | 181 (180–183) | 215 (214–216) | 1025 (1020–1032) |
+| `calls`   | 230 (227–232) | 269 (263–279) | 1258 (1246–1272) |
+| `imports` | 83 (76–90)    | 101 (100–103) | 1057 (1043–1071) |
+| `mixed`   | 278 (276–281) | 326 (312–343) | 1256 (1240–1277) |
 
 and `lines` again, with one breakpoint in the function the loop is in:
 
-| | bpd | debugpy |
-| --- | --- | --- |
+|                 | bpd           | debugpy             |
+| --------------- | ------------- | ------------------- |
 | hit fifty times | 230 (229–232) | 12984 (11646–14850) |
-| never hit | 219 (218–221) | 12033 (11691–12607) |
+| never hit       | 219 (218–221) | 12033 (11691–12607) |
 
 the `bpd` column was 163, 354, 403, 204 and 429 before the agent was staged into
 a cache, on the idle machine where `bare` was 11, 178, 228, 62 and 264. the
@@ -111,28 +111,28 @@ attach table below is where that went
 
 the idle machine's, and not re-measured — see [the machine](#the-machine):
 
-| workload | bare | bpd | debugpy |
-| --- | --- | --- | --- |
-| `lines` | 164 (162–165) | 165 (163–168) | 167 (166–168) |
-| `calls` | 216 (213–255) | 214 (213–216) | 215 (213–219) |
-| `imports` | 43 (43–44) | 40 (39–42) | 18 (18–21) |
-| `mixed` | 250 (248–257) | 252 (247–254) | 251 (249–258) |
+| workload  | bare          | bpd           | debugpy       |
+| --------- | ------------- | ------------- | ------------- |
+| `lines`   | 164 (162–165) | 165 (163–168) | 167 (166–168) |
+| `calls`   | 216 (213–255) | 214 (213–216) | 215 (213–219) |
+| `imports` | 43 (43–44)    | 40 (39–42)    | 18 (18–21)    |
+| `mixed`   | 250 (248–257) | 252 (247–254) | 251 (249–258) |
 
-| `lines`, with one breakpoint | bpd | debugpy |
-| --- | --- | --- |
-| hit fifty times | 180 (179–185) | 10384 (10203–10529) |
-| never hit | 165 (164–167) | 10285 (10060–10465) |
+| `lines`, with one breakpoint | bpd           | debugpy             |
+| ---------------------------- | ------------- | ------------------- |
+| hit fifty times              | 180 (179–185) | 10384 (10203–10529) |
+| never hit                    | 165 (164–167) | 10285 (10060–10465) |
 
 ## attaching, in milliseconds
 
 three rows measured back to back in one run, so the machine's state cancels out
 of the differences between them:
 
-| | busy machine | idle machine, before the cache |
-| --- | --- | --- |
-| the interpreter alone, `python -c pass` | 15.9 (13.6–18.4) | 9.5 (9.4–9.6) |
-| the agent imported, staged once | 15.9 (15.0–16.8) | 10.2 (10.0–10.7) |
-| the agent imported, staged fresh | 144 (140–150) | 129 (127–147) |
+|                                         | busy machine     | idle machine, before the cache |
+| --------------------------------------- | ---------------- | ------------------------------ |
+| the interpreter alone, `python -c pass` | 15.9 (13.6–18.4) | 9.5 (9.4–9.6)                  |
+| the agent imported, staged once         | 15.9 (15.0–16.8) | 10.2 (10.0–10.7)               |
+| the agent imported, staged fresh        | 144 (140–150)    | 129 (127–147)                  |
 
 `staged once` is what a launch does now: the agent is staged into a per-user
 cache named after the sha-256 of its bytes, so every launch after the first

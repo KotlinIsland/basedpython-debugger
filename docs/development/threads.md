@@ -44,11 +44,11 @@ thread's `threading.current_thread()`
 
 a request names its thread through the stop it belongs to:
 
-| request | addressed by |
-| --- | --- |
-| stack | the stop number |
-| variables, evaluate, set variable | the frame id, which carries the stop |
-| resume | the thread identities, or all of them |
+| request                              | addressed by                                           |
+| ------------------------------------ | ------------------------------------------------------ |
+| stack                                | the stop number                                        |
+| variables, evaluate, set variable    | the frame id, which carries the stop                   |
+| resume                               | the thread identities, or all of them                  |
 | breakpoints, threads, stop the world | the process, answered on the lowest-numbered held stop |
 
 a stop that has ended is **refused**, naming the stops that are held now. a
@@ -131,9 +131,9 @@ describe a state the program was never in. so **every read carries the mode it
 was taken in**, the same rule already applied to
 [a timed out control call](agent-interface.md)
 
-| mode | what it says |
-| --- | --- |
-| `non_stop` | one thread was held and the rest of the program kept running |
+| mode             | what it says                                                  |
+| ---------------- | ------------------------------------------------------------- |
+| `non_stop`       | one thread was held and the rest of the program kept running  |
 | `stop_the_world` | everything that could be held was, and here is what could not |
 
 one thing *is* a snapshot in either mode: **the held thread's own stack**. it is
@@ -208,11 +208,11 @@ pretending to handle it
 ## what is not built
 
 - **a thread bpd is not holding has no stack request.** its frames are moving,
-  and a stack read off one would be a description of a moment that had already
-  gone. where it is, stated as the sample it is, is the thread census
+    and a stack read off one would be a description of a moment that had already
+    gone. where it is, stated as the sample it is, is the thread census
 - **there is no cli surface.** the thread model reaches a user through the
-  adapters, which are not built. the capability is `Debuggee::held`,
-  `Debuggee::resume`, `Debuggee::threads` and `Debuggee::stop_the_world`
+    adapters, which are not built. the capability is `Debuggee::held`,
+    `Debuggee::resume`, `Debuggee::threads` and `Debuggee::stop_the_world`
 
 ## stepping is one thread's, and it is built
 

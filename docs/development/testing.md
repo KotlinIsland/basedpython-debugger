@@ -38,12 +38,12 @@ a probe that agrees with itself proves nothing. every assertion about an
 interpreter obtains its expected value by a different route than the code under
 test:
 
-| under test | ground truth |
-| --- | --- |
-| the version in the capability report | `sys.version`, the interpreter's own banner |
-| `EXT_SUFFIX` in the report | `sysconfig.get_config_var` in a separate process |
-| the free-threaded build flag | `sys._is_gil_enabled()` at runtime |
-| `require_debuggable` | the version and implementation, compared independently |
+| under test                           | ground truth                                           |
+| ------------------------------------ | ------------------------------------------------------ |
+| the version in the capability report | `sys.version`, the interpreter's own banner            |
+| `EXT_SUFFIX` in the report           | `sysconfig.get_config_var` in a separate process       |
+| the free-threaded build flag         | `sys._is_gil_enabled()` at runtime                     |
+| `require_debuggable`                 | the version and implementation, compared independently |
 
 `bpd_test::eval` exists for this. it runs a snippet in the interpreter and
 returns its output, so a test can establish a fact rather than restate one
@@ -162,13 +162,13 @@ entered and returns what the program observed about its own launch, so
 
 the three forms are not variations of one another:
 
-| | `script.py` | `-m module` | `-c source` |
-| --- | --- | --- | --- |
-| `sys.argv[0]` | the path as given | **the resolved file path** | `-c` |
-| `sys.path[0]` | the script's directory | the working directory | `""` |
-| `__main__.__spec__` | absent | the module's spec | absent |
-| `__main__.__package__` | absent | `""` | absent |
-| `__main__.__file__` | the script | the module's file | absent |
+|                        | `script.py`            | `-m module`                | `-c source` |
+| ---------------------- | ---------------------- | -------------------------- | ----------- |
+| `sys.argv[0]`          | the path as given      | **the resolved file path** | `-c`        |
+| `sys.path[0]`          | the script's directory | the working directory      | `""`        |
+| `__main__.__spec__`    | absent                 | the module's spec          | absent      |
+| `__main__.__package__` | absent                 | `""`                       | absent      |
+| `__main__.__file__`    | the script             | the module's file          | absent      |
 
 these are recorded in `crates/bpd_test/tests/launch_forms.rs` against every
 installed interpreter. two of them are the traps: `-m` rewrites `argv[0]` to the

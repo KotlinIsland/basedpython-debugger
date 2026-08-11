@@ -292,11 +292,11 @@ contact with the session:
 
 MCP has three primitives, and **only one of them is model-controlled**:
 
-| primitive | who decides it is used |
-| --- | --- |
-| tools | the model |
-| resources — read-only documents | the host application |
-| prompts — reusable parameterised workflows | the user |
+| primitive                                  | who decides it is used |
+| ------------------------------------------ | ---------------------- |
+| tools                                      | the model              |
+| resources — read-only documents            | the host application   |
+| prompts — reusable parameterised workflows | the user               |
 
 that asymmetry decides the design. an agent will reliably read a **tool schema**
 and a **tool result**; whether it ever sees a resource is the host's choice, and
@@ -399,7 +399,6 @@ compares against by hand
     addressing shipped, for the second reason above rather than the first
 - what the right default byte budget is for an object graph, given that it is
     spending someone's context window. the mechanism is built and its defaults
-    are a placeholder — [the stopped
-    state](state.md#expansion-and-saying-what-was-left-out) records what they
+    are a placeholder — [the stopped state](state.md#expansion-and-saying-what-was-left-out) records what they
     are and why the number cannot be settled until there is an agent surface to
     measure it against

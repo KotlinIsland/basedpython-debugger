@@ -14,11 +14,11 @@ the thing a step is "in" is a **frame**, and a code object is not one. that
 distinction is the whole of the correctness here, because every way of getting
 it wrong looks right in a test that calls a function once:
 
-| what re-enters a code object | what a step following the code object does |
-| --- | --- |
-| a recursive call | lands one level down, in a frame the user never asked about |
-| a second generator built from the same function | lands in the other generator |
-| a coroutine awaited from two places | lands in the wrong one |
+| what re-enters a code object                    | what a step following the code object does                  |
+| ----------------------------------------------- | ----------------------------------------------------------- |
+| a recursive call                                | lands one level down, in a frame the user never asked about |
+| a second generator built from the same function | lands in the other generator                                |
+| a coroutine awaited from two places             | lands in the wrong one                                      |
 
 so a step holds the frame object itself and compares identity. it holds a
 **strong** reference to it, which is load bearing rather than tidy: cpython
@@ -70,11 +70,11 @@ of their own
 
 ## what it costs
 
-| step | what is armed |
-| --- | --- |
-| over | `LINE` and `PY_RETURN` on the code object of the frame, locally |
-| in | the above, plus `PY_START`, `PY_RESUME` and `PY_THROW` for the program |
-| out | `PY_RETURN` on the code object of the frame, locally |
+| step | what is armed                                                          |
+| ---- | ---------------------------------------------------------------------- |
+| over | `LINE` and `PY_RETURN` on the code object of the frame, locally        |
+| in   | the above, plus `PY_START`, `PY_RESUME` and `PY_THROW` for the program |
+| out  | `PY_RETURN` on the code object of the frame, locally                   |
 
 plus `PY_UNWIND` for the program, for all three
 
