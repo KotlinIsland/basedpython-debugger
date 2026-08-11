@@ -397,11 +397,43 @@ answer
 what is left out is named on that page. the largest is that stepping from a
 template frame steps the python underneath it rather than node to node
 
+### M7a — the process that serves is not the process launched
+
+**this is a hole in M7 rather than a milestone after it**, which is why it sits
+here and not at the end
+
+`django.utils.autoreload.restart_with_reloader` calls `subprocess.run(args)` and
+the parent does nothing afterwards but wait on the exit code — read in django
+6.1. so under the default `runserver`, the **child** serves every request, and
+`bpd launch manage.py runserver` attaches the agent to a supervisor that never
+renders a template. the same is true of anything using `multiprocessing`, and of
+flask's reloader
+
+nothing is reported wrongly: the supervisor never imports the template engine,
+so the hook never arms and a template breakpoint is reported **unbound**, which
+is the truth. the feature is unreachable, not dishonest — and until this is
+built, `--noreload` is the answer, which
+[django templates](docs/development/django-templates.md) now says
+
+what makes it hard is that a debuggee must be able to hand a child the same
+session without the child's launch going through `bpd` at all, and that the
+child is spawned by code `bpd` does not control. debugpy does this with
+`subProcess` defaulting to true and a custom `debugpyAttach` DAP event; the DAP
+shape for it is therefore already established, and the part to design is what
+the agent does across a `fork` and an `exec`
+
 ### M8 — attach
 
 PEP 768, implemented as the wire protocol in rust rather than through
-`sys.remote_exec`, so no matching local interpreter is needed. 3.14 or newer,
+`sys.remote_exec`, so **no local interpreter is needed at all**. 3.14 or newer,
 and a refusal below that
+
+that difference is the whole of it on the happy path, and worth stating plainly
+because the obvious contrast is gone: debugpy 1.8.21 also prefers PEP 768 —
+`server/cli.py:455` gates on `hasattr(sys, "remote_exec")` and `:474` calls it.
+what it does that this will not is `:480`, "Will reattempt using pydevd", which
+shells out to gdb. so the contrast is not "PEP 768 versus injection", it is that
+`bpd` needs no python of its own to attach and never falls back
 
 ### M9 — reset stack frame to here
 
@@ -412,10 +444,20 @@ the top with its original arguments. the honest limitation, which the ui states
 rather than buries: side effects already performed are not undone
 
 **set next statement** — move execution to another line inside the current frame.
-cpython historically permits assigning to `frame.f_lineno` only from inside a
-trace function, and `bpd` does not install one, so whether this is reachable at
-all under PEP 669 is the first thing to establish. if it needs a cpython change,
-the answer is to propose one upstream
+this was written down as the open question of the milestone, on the grounds that
+cpython permits assigning to `frame.f_lineno` only from inside a trace function
+and `bpd` does not install one. **measured, and it is not a question**: from a
+`sys.monitoring` LINE callback with `sys.gettrace()` returning `None`, on 3.13,
+3.14 and 3.15, a forward jump takes effect, a backward jump takes effect and the
+block genuinely re-executes, and an illegal one raises `ValueError: can't jump
+into the body of a for loop`. pydevd sets `f_trace` first, which is why reading
+it suggests otherwise — that is the `settrace` era's requirement, not this one
+
+so the loud refusal this milestone needs is cpython's own, with a reason already
+in it, and what is left to build is the plumbing. one trap found while
+establishing it: `co_lines()` reports the `def` line, and **no LINE event is ever
+delivered for it**, so a jump origin taken from `co_lines()` can be a line that
+never arrives
 
 both refuse loudly rather than approximating: a jump into a different block,
 into or out of a `try`, or across a `with` is either correct or rejected
