@@ -459,8 +459,8 @@ fn a_program_that_reads_its_own_import_path_finds_no_debugger_on_it() {
 /// the reasons are the point. a bare list of names is something people update
 /// when it fails; a reason is something they have to disagree with.
 /// [launching](../../../docs/development/launching.md) has the measurement this
-/// was cut down from — thirty-two names, of which twenty-nine were one call to
-/// `sysconfig.get_config_var`
+/// was cut down from — thirty-two names on 3.14, of which twenty-nine were one
+/// call to `sysconfig.get_config_var`
 const ALLOWED: &[(&str, &str)] = &[
     (
         "bpd_agent",

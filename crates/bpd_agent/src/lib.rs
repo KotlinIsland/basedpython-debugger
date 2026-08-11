@@ -724,7 +724,8 @@ fn running_version(python: Python<'_>) -> PyResult<String> {
 /// same build flag `sysconfig.get_config_var("Py_GIL_DISABLED")` reports, from a
 /// module every interpreter has already imported: asking `sysconfig` instead
 /// pulls **twenty-nine** modules into the debuggee that a bare run does not
-/// have, `re`, `enum`, `collections`, `functools` and `threading` among them.
+/// have on 3.14 and later, twenty-five on 3.13 — `re`, `enum`, `collections`,
+/// `functools` and `threading` among them.
 /// see [launching](../../../docs/development/launching.md)
 ///
 /// `sys._is_gil_enabled()` is not the answer, and neither is `sys.flags.gil`.

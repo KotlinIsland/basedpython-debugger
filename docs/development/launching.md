@@ -347,7 +347,8 @@ platform, and the same reason for each:
     rather than two
 
 what the rest were is worth writing down, because it is the shape this mistake
-takes. **twenty-nine of the thirty-two were one call**:
+takes. **twenty-nine of the thirty-two were one call** — twenty-five of 3.13's
+thirty-one, the same call costing a little less there:
 `sysconfig.get_config_var("Py_GIL_DISABLED")`, which the agent asked once to tell
 a free-threaded interpreter from a gil one. importing `sysconfig` is eight names
 — `threading` and `types` among them — and the call is twenty-one more, because
