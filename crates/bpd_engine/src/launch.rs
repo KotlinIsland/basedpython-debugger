@@ -28,10 +28,10 @@ use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Detail, Difference, Evaluated, ExceptionBreakpoints, FrameId, LogRecord, Reporting, Request,
-    Resolved, Response, Running, Scope, Script, Snapshot, SnapshotId, SourceBreakpoint, Spawn,
-    Stack, StateQuery, StepKind, Stop, TemplateContext, Threads, Transcript, Variables, Which,
-    WorldStopped,
+    Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, FrameId, LogRecord, Reporting,
+    Request, Resolved, Response, Running, Scope, Script, Snapshot, SnapshotId, SourceBreakpoint,
+    Spawn, Stack, StateQuery, StepKind, Stop, TemplateContext, Threads, Transcript, Variables,
+    Which, WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine};
@@ -52,12 +52,15 @@ use crate::{Error, Interrupt, Listener, Result, Session, agent};
 struct Aside {
     /// the children seen while the request was in flight
     spawned: Vec<Spawn>,
+    /// the blind spots announced while it was
+    blind: Vec<Blindspot>,
 }
 
 impl Aside {
     const fn new() -> Self {
         Self {
             spawned: Vec::new(),
+            blind: Vec::new(),
         }
     }
 }
@@ -78,6 +81,10 @@ impl Reporting for Aside {
 
     fn spawned(&mut self, child: Spawn) {
         self.spawned.push(child);
+    }
+
+    fn blind_to(&mut self, blindspot: Blindspot) {
+        self.blind.push(blindspot);
     }
 }
 
@@ -128,6 +135,12 @@ pub struct Debuggee {
     /// none of the work is the thing this report exists to prevent, and one
     /// that went missing because of when it arrived would prevent nothing
     pending_spawns: Vec<Spawn>,
+    /// blind spots announced while the engine was waiting for an answer
+    ///
+    /// kept for the reason the others are. this one is the least droppable of
+    /// the three: it is the message that stops a silence being read as "there
+    /// was no child"
+    pending_blind: Vec<Blindspot>,
     /// every state a query has read, under the id it was given out as
     ///
     /// nothing evicts one. a snapshot is a reading that was already taken rather
@@ -317,6 +330,7 @@ impl Debuggee {
         let mut aside = Aside::new();
         let answer = self.dispatch(request, &mut aside);
         self.pending_spawns.extend(aside.spawned);
+        self.pending_blind.extend(aside.blind);
         answer
     }
 
@@ -797,6 +811,7 @@ impl Debuggee {
             match self.session.next_event()? {
                 Some(FromAgent::Logged { record }) => self.pending_logs.push(record),
                 Some(FromAgent::Spawned { child }) => self.pending_spawns.push(child),
+                Some(FromAgent::BlindTo { blindspot }) => self.pending_blind.push(blindspot),
                 Some(FromAgent::BreakpointsResolved { resolved })
                     if !matches!(request, FromEngine::SetBreakpoints { .. }) =>
                 {
@@ -901,6 +916,9 @@ impl Debuggee {
         for child in self.pending_spawns.drain(..) {
             reporting.spawned(child);
         }
+        for blindspot in self.pending_blind.drain(..) {
+            reporting.blind_to(blindspot);
+        }
         let mut rebound = std::mem::take(&mut self.pending_rebinds);
 
         let started = Instant::now();
@@ -937,6 +955,9 @@ impl Debuggee {
                 // agent reports and does not block — so this is news rather
                 // than a decision anybody is waiting to make
                 Some(FromAgent::Spawned { child }) => reporting.spawned(child),
+                // and the message that says a silence about one has stopped
+                // being evidence
+                Some(FromAgent::BlindTo { blindspot }) => reporting.blind_to(blindspot),
                 // the acknowledgement of a pause armed on an `Interrupt`. it
                 // arrives here because here is where the reading end is, and
                 // its `running` is what says whether a stop is coming at all
@@ -982,6 +1003,13 @@ fn unexpected(event: &FromAgent, expected: &'static str) -> Error {
 /// catch-all arm instead — which is how a debugger acquires a state nobody
 /// handles
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the large variant is the session itself, and this enum is \
+              constructed once per launch and matched immediately. boxing it \
+              would buy nothing back and would put a pointer chase in front of \
+              every field the request path reads for the rest of the session"
+)]
 pub enum Launched {
     /// the debuggee is attached and held before its first statement
     Stopped(Debuggee),
@@ -1171,6 +1199,7 @@ fn start(
         pending_logs: Vec::new(),
         pending_rebinds: Vec::new(),
         pending_spawns: Vec::new(),
+        pending_blind: Vec::new(),
         snapshots: Vec::new(),
     }))
 }

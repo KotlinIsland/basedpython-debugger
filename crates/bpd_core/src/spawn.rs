@@ -159,6 +159,46 @@ impl fmt::Display for Spawn {
     }
 }
 
+/// a way of starting a child that this interpreter raises no audit event for
+///
+/// `bpd` reports the children it can see, and the failure that would make that
+/// worthless is **silence read as "there was no child"**. so where an
+/// interpreter leaves `bpd` blind, `bpd` says which children it will not be
+/// able to see, at the moment it becomes possible that there are some
+///
+/// deliberately closed and deliberately specific. "this might not catch
+/// everything" is a disclaimer; naming the start method, the interpreter and
+/// the release that fixes it is something a person can act on
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "blind_to", rename_all = "snake_case")]
+pub enum Blindspot {
+    /// `multiprocessing`'s `spawn` and `forkserver` start methods, below 3.14
+    ///
+    /// they reach a child through `multiprocessing.util.spawnv_passfds`, which
+    /// calls `_posixsubprocess.fork_exec` — and that only became an audit event
+    /// in 3.14. below it, nothing whatever is raised: measured by recording
+    /// every event of every name raised while one starts, on 3.13 and on 3.14
+    MultiprocessingSpawn {
+        /// the interpreter's `major.minor`, as it reported itself
+        interpreter: String,
+    },
+}
+
+impl fmt::Display for Blindspot {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self::MultiprocessingSpawn { interpreter } = self;
+        write!(
+            out,
+            "this program imported `multiprocessing`, and python {interpreter} \
+             raises no event at all when it starts a child with the `spawn` or \
+             `forkserver` start method — so bpd cannot see one, and silence \
+             here does not mean there was none. `_posixsubprocess.fork_exec` \
+             became an audit event in 3.14, where this is visible. the `fork` \
+             start method is visible on every version, and so is `subprocess`"
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +269,33 @@ mod tests {
             "a fork shares the debugger's own socket, and a report that did not \
              say so would leave that looking like a protocol bug later. it said \
              {said}"
+        );
+    }
+
+    #[test]
+    fn a_blind_spot_names_the_interpreter_the_start_method_and_the_release() {
+        // the whole value of this message is that it is specific. "bpd might
+        // not see every child" is a disclaimer nobody can act on
+        let said = Blindspot::MultiprocessingSpawn {
+            interpreter: "3.13".to_string(),
+        }
+        .to_string();
+
+        assert!(said.contains("3.13"), "it said {said}");
+        assert!(
+            said.contains("spawn") && said.contains("forkserver"),
+            "it said {said}"
+        );
+        assert!(said.contains("3.14"), "it said {said}");
+        assert!(
+            said.contains("silence here does not mean there was none"),
+            "the point of the message is what silence stops meaning, and it \
+             said {said}"
+        );
+        assert!(
+            said.contains("`fork`") && said.contains("`subprocess`"),
+            "a blind spot that did not say what is still visible reads as bpd \
+             seeing nothing at all, and it said {said}"
         );
     }
 

@@ -140,6 +140,16 @@ pub enum FromAgent {
         child: bpd_core::Spawn,
     },
 
+    /// this interpreter raises no event for a whole way of starting a child
+    ///
+    /// sent once, when the program does something that makes such a child
+    /// possible. it is the opposite claim to [`FromAgent::Spawned`]: not that a
+    /// child exists, but that a silence about one has stopped being evidence
+    BlindTo {
+        /// what the agent will not be able to see, and on which interpreter
+        blindspot: bpd_core::Blindspot,
+    },
+
     /// the stack of one held thread
     ///
     /// **only** a held thread's. a running thread's frames are moving, and a
@@ -631,6 +641,22 @@ mod tests {
                 verdict: bpd_core::Verdict::Perhaps {
                     named: "python3.14".to_string(),
                 },
+            },
+        };
+
+        let mut wire = Vec::new();
+        write(&mut wire, &sent).expect("writing to a vec cannot fail");
+
+        let received: Option<FromAgent> =
+            read(&mut wire.as_slice(), &mut Vec::new()).expect("the frame is whole");
+        assert_eq!(received, Some(sent));
+    }
+
+    #[test]
+    fn a_blind_spot_round_trips() {
+        let sent = FromAgent::BlindTo {
+            blindspot: bpd_core::Blindspot::MultiprocessingSpawn {
+                interpreter: "3.13".to_string(),
             },
         };
 

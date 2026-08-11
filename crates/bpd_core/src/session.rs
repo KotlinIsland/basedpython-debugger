@@ -19,7 +19,7 @@ use crate::breakpoint::{LogRecord, Resolved, SourceBreakpoint};
 use crate::frame::{Frame, FrameId, Scope};
 use crate::query::{Difference, Snapshot, SnapshotId, StateQuery};
 use crate::script::{Script, Transcript};
-use crate::spawn::Spawn;
+use crate::spawn::{Blindspot, Spawn};
 use crate::stop::{Mode, StepKind, Stop};
 use crate::thread::{ThreadState, Which};
 use crate::value::{Detail, Entry, Evaluated, Omitted, Value};
@@ -311,6 +311,19 @@ pub trait Reporting {
     /// that stands between a user and a session pointed at a supervisor that
     /// does none of the work. see [`Spawn`]
     fn spawned(&mut self, child: Spawn);
+
+    /// there is a way of starting a child this interpreter does not let `bpd`
+    /// see
+    ///
+    /// its own method rather than a kind of [`Self::spawned`], because it is
+    /// the opposite claim: [`Self::spawned`] says a child exists, and this says
+    /// that a silence is about to stop being evidence. a front end that
+    /// rendered one as the other would be reporting a child that was never
+    /// started
+    ///
+    /// this is what keeps "`bpd` says so when it cannot know" true of a
+    /// feature whose normal output is silence. see [`Blindspot`]
+    fn blind_to(&mut self, blindspot: Blindspot);
 }
 
 /// what a session answered a [`Request`] with
