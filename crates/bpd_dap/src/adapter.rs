@@ -195,6 +195,15 @@ struct Adapter {
     announced: Vec<Stop>,
     /// why each held thread stopped, for `exceptionInfo`
     reasons: BTreeMap<u64, StopReason>,
+    /// whether each held stop was announced as holding the whole program
+    ///
+    /// remembered rather than recomputed, because a `stopped` event sent for a
+    /// stop that is already held — which is what a `goto` and a `restartFrame`
+    /// produce — has to say the same thing about the other threads as the event
+    /// that announced it. asking again would be asking the world to stop a
+    /// second time, and answering `false` because nothing was asked would tell
+    /// the client threads are running that this stop is holding
+    worlds: BTreeMap<u64, bool>,
     breakpoints: FileBreakpoints,
 }
 
@@ -212,6 +221,7 @@ impl Adapter {
             threads: ThreadIds::default(),
             announced: Vec::new(),
             reasons: BTreeMap::new(),
+            worlds: BTreeMap::new(),
             breakpoints: FileBreakpoints::default(),
         }
     }
@@ -319,6 +329,9 @@ impl Adapter {
             Some("next") => self.step(message, StepKind::Over),
             Some("stepIn") => self.step(message, StepKind::In),
             Some("stepOut") => self.step(message, StepKind::Out),
+            Some("gotoTargets") => self.goto_targets(message),
+            Some("goto") => self.goto(message),
+            Some("restartFrame") => self.restart_frame(message),
             Some("exceptionInfo") => self.exception_info(message),
             // DAP has no request for a debug script and never will, so this is
             // an extension — which DAP provides for, and which a client sends
@@ -866,6 +879,13 @@ impl Adapter {
                      scopes and then for the variables of one of them"
                 )));
             }
+            Handle::Goto { frame, line } => {
+                return Err(Aborted::Refuse(format!(
+                    "{reference} names line {line} of {frame}, which is a place \
+                     to move to rather than a value. it is what a `goto` \
+                     carries"
+                )));
+            }
         };
 
         self.respond(message, Some(serde_json::json!({ "variables": variables })))?;
@@ -1191,6 +1211,223 @@ impl Adapter {
         Ok(())
     }
 
+    /// the places a `goto` could move a held thread to
+    ///
+    /// a target is minted for the location the client asked about, and only when
+    /// that location is in the file a held thread is **executing**. the file
+    /// check is the whole value of this request: `goto` carries a target rather
+    /// than a line precisely because a line number means nothing on its own, and
+    /// cpython would take the same number against whatever file the frame
+    /// happens to be running
+    ///
+    /// offering a target is not a claim that the move will happen. whether a
+    /// line can be reached from where the frame is is cpython's answer, given
+    /// when the move is made — and the label says so rather than implying the
+    /// list has been checked
+    fn goto_targets(&mut self, message: &Incoming) -> Answered {
+        let file = message.arguments["source"]["path"].as_str().ok_or(
+            "a `gotoTargets` request has no `source.path`, and a line means \
+             nothing without the file it is in",
+        )?;
+        let file = PathBuf::from(file);
+        let line = message.arguments["line"]
+            .as_u64()
+            .and_then(|line| u32::try_from(line).ok())
+            .ok_or("a `gotoTargets` request arrived with no line")?;
+
+        let mut targets = Vec::new();
+        for stop in self.announced.clone() {
+            let Some(frame) = self.executing_frame(stop.stop)? else {
+                continue;
+            };
+            if !same_file(&file, &frame.file) {
+                continue;
+            }
+            let id = self.handles.add(Handle::Goto {
+                frame: frame.id,
+                line,
+            });
+            targets.push(serde_json::json!({
+                "id": id,
+                "label": format!(
+                    "line {line} of `{}`, which stop {} is executing — whether \
+                     the frame can be moved there is cpython's answer, given \
+                     when the move is made",
+                    frame.name(),
+                    stop.stop,
+                ),
+                "line": line,
+            }));
+        }
+
+        self.respond(message, Some(serde_json::json!({ "targets": targets })))?;
+        Ok(())
+    }
+
+    /// move a held thread's executing frame to a target minted for it
+    fn goto(&mut self, message: &Incoming) -> Answered {
+        let target = message.arguments["targetId"]
+            .as_i64()
+            .ok_or("a `goto` request arrived with no `targetId`")?;
+        let stop = self.stop_of(message)?;
+
+        let (frame, line) = match self.handles.get(target) {
+            Some(Handle::Goto { frame, line }) => (*frame, *line),
+            Some(other) => {
+                return Err(Aborted::Refuse(format!(
+                    "{target} names {other:?}, not a place to move to. a target \
+                     comes from `gotoTargets`"
+                )));
+            }
+            None => return Err(stale(target)),
+        };
+        // a target is minted against one frame of one stop. using it on another
+        // thread would move a frame the client did not look at
+        if frame.stop != stop {
+            return Err(Aborted::Refuse(format!(
+                "{target} was minted for stop {}, and this `goto` names the \
+                 thread stop {stop} is holding. a target is a place in one \
+                 frame — ask `gotoTargets` again for this thread",
+                frame.stop
+            )));
+        }
+
+        let jumped = match self.ask(Request::SetNextStatement { frame, line })? {
+            Response::Jumped(jumped) => jumped,
+            other => unreachable!("a jump was answered with {other:?}"),
+        };
+        self.respond(message, None)?;
+        self.moved(stop, &jumped, "goto")
+    }
+
+    /// re-enter a frame from the top
+    ///
+    /// DAP's own wording for this request has it discard the frames above the
+    /// one named. there is no mechanism for that — the refusal for a frame that
+    /// is not the executing one says so — and what this does is exactly what it
+    /// says: the executing frame runs again from its first line, with what its
+    /// parameters hold now
+    fn restart_frame(&mut self, message: &Incoming) -> Answered {
+        let reference = message.arguments["frameId"]
+            .as_i64()
+            .ok_or("a `restartFrame` request arrived with no `frameId`")?;
+        // either kind: a template frame is refused by the session, which names
+        // the python frame underneath and why a synthesised frame has no
+        // instruction pointer to move
+        let frame = match self.handles.get(reference) {
+            Some(Handle::Frame(frame) | Handle::TemplateFrame(frame)) => *frame,
+            Some(other) => {
+                return Err(Aborted::Refuse(format!(
+                    "{reference} names {other:?}, not a frame"
+                )));
+            }
+            None => return Err(stale(reference)),
+        };
+
+        let jumped = match self.ask(Request::RestartFrame { frame })? {
+            Response::Jumped(jumped) => jumped,
+            other => unreachable!("a restart was answered with {other:?}"),
+        };
+        self.respond(message, None)?;
+        self.moved(frame.stop, &jumped, "restart")
+    }
+
+    /// the frame a stop's thread is **executing**, which is the only one that
+    /// can move
+    ///
+    /// the topmost python frame rather than the topmost frame: a django template
+    /// frame is synthesised above the `Node.render_annotated` frame that renders
+    /// it, and the interpreter has no frame for it at all
+    fn executing_frame(&mut self, stop: u64) -> Result<Option<bpd_core::Frame>, Aborted> {
+        // two, because a template frame sits above the python frame that is
+        // really running and a client may be looking at either
+        let stack = match self.ask(Request::Stack { stop, top: Some(2) })? {
+            Response::Stack(stack) => stack,
+            other => unreachable!("a stack walk was answered with {other:?}"),
+        };
+        Ok(stack
+            .frames
+            .into_iter()
+            .find(|frame| matches!(frame.kind, bpd_core::FrameKind::Python { .. })))
+    }
+
+    /// tell the client where a frame is now, and what the move did to it
+    ///
+    /// DAP answers a `goto` and a `restartFrame` with an empty response and then
+    /// a `stopped` event, because the thread was never resumed and the client
+    /// has to re-read the stack to see where it is
+    ///
+    /// the two facts that have nowhere to go in that event go to the console.
+    /// neither is decoration: a breakpoint on the destination line does not fire
+    /// for this pass, and a local that held nothing holds `None` now — a client
+    /// that was not told would watch its own breakpoint be passed over
+    fn moved(&mut self, stop: u64, jumped: &bpd_core::Jumped, reason: &str) -> Answered {
+        let Some(thread) = self
+            .announced
+            .iter()
+            .find(|held| held.stop == stop)
+            .map(|held| self.threads.of(held.thread))
+        else {
+            // the stop ended while the jump was in flight, which means the
+            // thread ran on. there is nothing left to report a position for, and
+            // `announce` has already told the client the stop is gone
+            return Ok(());
+        };
+
+        let description = match &jumped.outcome {
+            bpd_core::Jump::Moved {
+                from,
+                bound_to_none,
+                unannounced,
+            } => {
+                if !unannounced.is_empty() {
+                    self.say(&format!(
+                        "stop {stop}: breakpoint(s) {unannounced:?} are on line \
+                         {} and will not fire for this pass — no line event is \
+                         delivered for the line a jump moves to. they are still \
+                         set, and fire the next time that line runs\n",
+                        jumped.at.line
+                    ))?;
+                }
+                if !bound_to_none.is_empty() {
+                    self.say(&format!(
+                        "stop {stop}: {bound_to_none:?} held nothing before the \
+                         move and hold `None` now — cpython binds every unbound \
+                         local of a frame as part of a jump\n"
+                    ))?;
+                }
+                format!(
+                    "moved from line {from} to {}. the lines between were not \
+                     executed, and neither was the cleanup of any block the move \
+                     left",
+                    jumped.at
+                )
+            }
+            bpd_core::Jump::Refused { wanted, error } => {
+                self.say(&format!(
+                    "stop {stop}: cpython refused the move to line {wanted} — \
+                     {error}\n"
+                ))?;
+                format!("still at {}: {error}", jumped.at)
+            }
+        };
+
+        self.event(
+            "stopped",
+            &serde_json::json!({
+                "reason": reason,
+                "description": description,
+                "text": description,
+                "threadId": thread,
+                // what this stop was announced with. the thread was never
+                // resumed, so nothing about the other threads changed — and a
+                // second event saying otherwise would contradict the first
+                "allThreadsStopped": self.worlds.get(&stop).copied().unwrap_or(false),
+                "preserveFocusHint": false,
+            }),
+        )
+    }
+
     fn exception_info(&mut self, message: &Incoming) -> Answered {
         let stop = self.stop_of(message)?;
         let reason = self
@@ -1316,6 +1553,7 @@ impl Adapter {
         self.handles.forget(&ended);
         for stop in &ended {
             self.reasons.remove(stop);
+            self.worlds.remove(stop);
         }
 
         let fresh: Vec<Stop> = held
@@ -1353,6 +1591,8 @@ impl Adapter {
             } else {
                 false
             };
+
+            self.worlds.insert(stop.stop, whole_program);
 
             for holding in &stop.holding {
                 self.say(&format!(
@@ -1572,6 +1812,26 @@ fn stale(reference: i64) -> Aborted {
              to one stop, and the thread it named has run on since — ask for \
              the stack again"
     ))
+}
+
+/// whether a path the client named and a frame's `co_filename` are one file
+///
+/// resolved before they are compared, because a client sends the path its editor
+/// opened and the interpreter reports the path it imported — the same file
+/// reached two ways. when a path cannot be resolved the spellings are compared
+/// instead, which is a narrower claim and the only one left: a `co_filename`
+/// like `<string>` names no file on disk, and a file that has been deleted since
+/// it was imported names nothing either
+///
+/// a comparison that says no costs a target that would have worked. a
+/// comparison that says yes wrongly costs a frame moved against another file's
+/// line numbers, which cpython would accept, so this errs the first way
+fn same_file(client: &Path, frame: &str) -> bool {
+    let frame = Path::new(frame);
+    match (client.canonicalize(), frame.canonicalize()) {
+        (Ok(client), Ok(frame)) => client == frame,
+        _ => client == frame,
+    }
 }
 
 /// what a stop turns into on the wire: a reason, a description, and the

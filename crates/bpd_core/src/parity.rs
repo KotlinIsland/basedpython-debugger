@@ -163,6 +163,8 @@ pub fn surface() -> Vec<Request> {
             value: "1".to_string(),
             detail: Detail::default(),
         },
+        Request::SetNextStatement { frame, line: 2 },
+        Request::RestartFrame { frame },
         Request::Query {
             stop: 1,
             query: StateQuery {

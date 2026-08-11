@@ -24,6 +24,7 @@ pub mod breakpoint;
 pub mod error;
 pub mod exception;
 pub mod frame;
+pub mod jump;
 pub mod parity;
 pub mod python;
 pub mod query;
@@ -41,6 +42,7 @@ pub use breakpoint::{
 pub use error::{Error, Result};
 pub use exception::{PythonError, TracebackFrame};
 pub use frame::{Frame, FrameId, FrameKind, Scope};
+pub use jump::{Jump, Jumped, Suspendable, Unrestartable};
 pub use parity::{Facet, Reach, surface};
 pub use query::{
     Answer, Appeared, Changed, Difference, FrameState, Frames, Moved, NotCompared, NotRead,

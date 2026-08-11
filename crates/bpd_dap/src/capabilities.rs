@@ -21,8 +21,7 @@
 //!   for it
 //! - **`supportsSetExpression`**, **`supportsFunctionBreakpoints`**,
 //!   **`supportsDataBreakpoints`**, **`supportsStepBack`**,
-//!   **`supportsGotoTargetsRequest`**, **`supportsRestartRequest`** — no
-//!   capability behind them exists yet
+//!   **`supportsRestartRequest`** — no capability behind them exists yet
 //! - **`supportsDelayedStackTraceLoading`** — [`bpd_core::Request::Stack`]
 //!   bounds a walk by how many frames from the top, and has no way to start
 //!   part way down. a client that paged from the middle would be answered from
@@ -55,6 +54,19 @@ pub fn capabilities() -> serde_json::Value {
 
         // `Request::Evaluate`, in a named frame
         "supportsEvaluateForHovers": false,
+
+        // `Request::SetNextStatement`. a target is minted for the location the
+        // client asks about, and only when it is the file the held thread is
+        // executing: a line number means nothing without its file, and cpython
+        // would accept the same number against another one
+        "supportsGotoTargetsRequest": true,
+
+        // `Request::RestartFrame`, which re-enters the frame the thread is
+        // executing with what its parameters hold **now**. DAP's own wording
+        // for this request implies discarding the frames above the one named,
+        // and there is no mechanism for that — so a frame that is not the
+        // executing one is refused with the reason rather than approximated
+        "supportsRestartFrame": true,
 
         // a stop holds **one thread** and the rest of the program keeps
         // running. this is the capability that says so: without it a client is
@@ -113,7 +125,9 @@ mod tests {
                 "supportsConditionalBreakpoints",
                 "supportsConfigurationDoneRequest",
                 "supportsExceptionInfoRequest",
+                "supportsGotoTargetsRequest",
                 "supportsLogPoints",
+                "supportsRestartFrame",
                 "supportsSetVariable",
                 "supportsSingleThreadExecutionRequests",
             ]

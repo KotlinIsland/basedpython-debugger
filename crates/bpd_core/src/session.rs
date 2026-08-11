@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use crate::breakpoint::{LogRecord, Resolved, SourceBreakpoint};
 use crate::frame::{Frame, FrameId, Scope};
+use crate::jump::Jumped;
 use crate::query::{Difference, Snapshot, SnapshotId, StateQuery};
 use crate::script::{Script, Transcript};
 use crate::spawn::{Blindspot, Spawn};
@@ -345,6 +346,44 @@ pub enum Request {
         after: SnapshotId,
     },
 
+    /// move the executing frame to another line of the code it is running
+    ///
+    /// the program is not resumed by it: the thread is still held, at the line
+    /// it was moved to, and what runs next is whatever it is asked to do next.
+    /// the code between where it was and where it is now is **not** executed,
+    /// and neither is the cleanup of any block the move leaves — see
+    /// [`crate::Jumped`]
+    ///
+    /// only in the frame the thread is executing. a frame below the top is
+    /// suspended in a call, and cpython accepts a move in one rather than
+    /// refusing it, so the refusal is `bpd`'s
+    SetNextStatement {
+        /// which frame — the one its thread is executing, or a refusal
+        frame: FrameId,
+        /// the line of that frame's file to move to
+        line: u32,
+    },
+
+    /// re-enter a frame from the top
+    ///
+    /// [`Request::SetNextStatement`] to the line of the first instruction of
+    /// the frame's code object, worked out in the debuggee because the code
+    /// object is the only thing that knows it
+    ///
+    /// it re-enters with **what the parameters hold now**, which is not
+    /// necessarily what the frame was called with: a parameter the frame has
+    /// since assigned to holds the new value, and nothing captured the old one.
+    /// capturing them would mean copying every argument of every call in the
+    /// process, on the event path, for an operation almost nobody makes
+    ///
+    /// side effects the frame already performed are not undone. nothing here
+    /// can undo them, and a debugger that implied otherwise would be inviting a
+    /// belief about the program that is false
+    RestartFrame {
+        /// which frame — the one its thread is executing, or a refusal
+        frame: FrameId,
+    },
+
     /// write a variable of a frame, and read back what the frame holds after it
     SetVariable {
         /// which frame
@@ -386,6 +425,8 @@ impl Request {
             Self::Query { .. } => "the state of a stop",
             Self::Diff { .. } => "the difference between two states",
             Self::SetVariable { .. } => "writing a variable",
+            Self::SetNextStatement { .. } => "setting the next statement",
+            Self::RestartFrame { .. } => "restarting a frame",
         }
     }
 
@@ -420,7 +461,9 @@ impl Request {
             Self::Variables { frame, .. }
             | Self::TemplateContext { frame, .. }
             | Self::Evaluate { frame, .. }
-            | Self::SetVariable { frame, .. } => Some(frame.stop),
+            | Self::SetVariable { frame, .. }
+            | Self::SetNextStatement { frame, .. }
+            | Self::RestartFrame { frame } => Some(frame.stop),
         }
     }
 }
@@ -523,6 +566,14 @@ pub enum Response {
 
     /// what an expression did, or what a write left behind
     Evaluated(Evaluated),
+
+    /// what a jump did, and where the frame is now
+    ///
+    /// the same answer for both jumps: they differ in where the line comes
+    /// from, and a client is told the same things about either — where the
+    /// frame is now, what the move bound to `None`, and which breakpoints on
+    /// the destination will not fire for this pass
+    Jumped(Jumped),
 
     /// what a debug script did, step by step
     Transcript(Transcript),
@@ -1082,6 +1133,8 @@ mod tests {
                 "the template context of a frame",
                 "evaluating an expression",
                 "writing a variable",
+                "setting the next statement",
+                "restarting a frame",
                 "the state of a stop",
                 "running a debug script",
             ]

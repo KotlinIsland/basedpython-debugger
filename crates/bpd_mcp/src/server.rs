@@ -427,6 +427,25 @@ impl<'a> Server<'a> {
                     other => unreachable!("a variable write was answered with {other:?}"),
                 }
             }
+            "set_next_statement" => {
+                let args: SetNextStatementArgs = parse(name, arguments)?;
+                let frame = self.frame_of(args.stop, args.frame, "setting the next statement")?;
+                match self.ask(Request::SetNextStatement {
+                    frame,
+                    line: args.line,
+                })? {
+                    Response::Jumped(jumped) => Ok(render::jumped(&jumped)),
+                    other => unreachable!("a jump was answered with {other:?}"),
+                }
+            }
+            "restart_frame" => {
+                let args: RestartFrameArgs = parse(name, arguments)?;
+                let frame = self.frame_of(args.stop, args.frame, "restarting a frame")?;
+                match self.ask(Request::RestartFrame { frame })? {
+                    Response::Jumped(jumped) => Ok(render::jumped(&jumped)),
+                    other => unreachable!("a restart was answered with {other:?}"),
+                }
+            }
             "threads" => {
                 let args: ThreadsArgs = parse(name, arguments)?;
                 match self.ask(Request::Threads {
@@ -1241,6 +1260,25 @@ struct SetVariableArgs {
     detail: Detail,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetNextStatementArgs {
+    #[serde(default)]
+    stop: Option<u64>,
+    #[serde(default)]
+    frame: u32,
+    line: u32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestartFrameArgs {
+    #[serde(default)]
+    stop: Option<u64>,
+    #[serde(default)]
+    frame: u32,
+}
+
 /// a whole investigation, submitted as data
 ///
 /// the steps and the budget are `bpd_core`'s own types, so what the schema
@@ -1487,6 +1525,8 @@ mod tests {
         "template_context" => TemplateContextArgs,
         "evaluate" => EvaluateArgs,
         "set_variable" => SetVariableArgs,
+        "set_next_statement" => SetNextStatementArgs,
+        "restart_frame" => RestartFrameArgs,
         "threads" => ThreadsArgs,
         "stop_the_world" => WorldArgs,
         "run_script" => RunScript,

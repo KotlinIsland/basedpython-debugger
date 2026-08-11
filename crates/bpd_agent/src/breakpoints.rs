@@ -91,6 +91,22 @@ pub(crate) fn hit(address: usize, line: u32) -> Option<Vec<Arc<Plan>>> {
     read().armed.get(&address)?.lines.get(&line).cloned()
 }
 
+/// the breakpoints bound to this line of this code object, by the client's id
+///
+/// the same lookup [`hit`] makes and none of the deciding: nothing is evaluated
+/// and no hit count moves. it exists because a jump's destination line is
+/// **not** announced — no `LINE` event is delivered for it — so a breakpoint
+/// bound there does not fire for the pass the jump lands in, and the answer to
+/// the jump has to say which ones those are
+pub(crate) fn bound_at(address: usize, line: u32) -> Vec<u32> {
+    read()
+        .armed
+        .get(&address)
+        .and_then(|armed| armed.lines.get(&line))
+        .map(|plans| plans.iter().map(|plan| plan.id).collect())
+        .unwrap_or_default()
+}
+
 /// whether anything is set, which is what decides if `PY_START` stays on
 pub(crate) fn any_set() -> bool {
     !read().pending.is_empty()

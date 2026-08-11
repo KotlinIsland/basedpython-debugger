@@ -88,6 +88,21 @@ pub enum Handle {
         path: Vec<Step>,
     },
 
+    /// a place a `goto` may move a frame to
+    ///
+    /// DAP's `goto` carries a target id rather than a location, and
+    /// `gotoTargets` is where the id comes from. it is a handle rather than a
+    /// table of its own for the reason every other reference is one: a target
+    /// names a **frame**, and a frame belongs to the stop it was reported at —
+    /// so a target minted before a resume has to stop resolving with everything
+    /// else that stop handed out
+    Goto {
+        /// the frame it would move, which is the one its thread is executing
+        frame: FrameId,
+        /// the line it would move to
+        line: u32,
+    },
+
     /// a value that was read once and has no scope to re-read it from
     ///
     /// what an evaluated expression produces. it cannot be re-read, because
@@ -115,7 +130,8 @@ impl Handle {
             | Self::TemplateFrame(frame)
             | Self::Scope { frame, .. }
             | Self::Nested { frame, .. }
-            | Self::TemplateLayer { frame, .. } => frame.stop,
+            | Self::TemplateLayer { frame, .. }
+            | Self::Goto { frame, .. } => frame.stop,
             Self::Stored { stop, .. } => *stop,
         }
     }

@@ -5,6 +5,7 @@
 //! guess what was meant
 
 use crate::frame::{FrameId, Scope};
+use crate::jump::Unrestartable;
 
 /// a request the agent will not answer, and why
 ///
@@ -73,6 +74,31 @@ pub enum Refusal {
         python: FrameId,
     },
 
+    /// the frame is not the one its thread is executing, and a jump needs that
+    ///
+    /// cpython does **not** refuse this one, which is the whole reason `bpd`
+    /// does. a frame below the top is suspended in a call, and assigning to its
+    /// `f_lineno` is accepted — measured on 3.13, 3.14 and 3.15 — leaving the
+    /// frame to go on with a value stack that no longer matches where it is
+    NotTheExecutingFrame {
+        /// what was asked about
+        frame: FrameId,
+        /// the frame the thread is executing, which is the one that can move
+        executing: FrameId,
+        /// what was asked for
+        wanted: String,
+    },
+
+    /// the frame cannot be re-entered from the top
+    NotRestartable {
+        /// what was asked about
+        frame: FrameId,
+        /// `co_qualname` of what it is running
+        function: String,
+        /// what stands in the way
+        reason: Unrestartable,
+    },
+
     /// the request is about a template frame and that frame is a python frame
     NotATemplateFrame {
         /// what was asked about
@@ -118,6 +144,13 @@ pub enum Refusal {
 }
 
 impl std::fmt::Display for Refusal {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per refusal, and every one of them is a whole \
+                  sentence about what stood in the way and what to do instead. \
+                  splitting them out would put half of a message somewhere \
+                  nobody reading the variant would find it"
+    )]
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::StaleFrame { frame, held } => write!(
@@ -176,6 +209,33 @@ impl std::fmt::Display for Refusal {
                  no python scopes. its variables are the template context: ask \
                  for that. for the python underneath it, ask about {python}"
             ),
+            Self::NotTheExecutingFrame {
+                frame,
+                executing,
+                wanted,
+            } => write!(
+                formatter,
+                "{frame} is not the frame that thread is executing — {executing} \
+                 is — and {wanted} moves the frame that is. cpython does not \
+                 refuse this: a frame below the top is suspended in a call, and \
+                 assigning to its `f_lineno` is accepted and leaves it running \
+                 on with a value stack that no longer matches where it is, so \
+                 the function returns something it never computed. making a \
+                 deeper frame the executing one would mean discarding the frames \
+                 above it, and there is no mechanism for that — `frame.clear()` \
+                 answers `cannot clear an executing frame`, and making each \
+                 frame return runs its `finally` and `except` blocks, which is a \
+                 different operation. ask about {executing}"
+            ),
+            Self::NotRestartable {
+                frame,
+                function,
+                reason,
+            } => write!(
+                formatter,
+                "{frame} runs `{function}` and cannot be re-entered from the \
+                 top: {reason}"
+            ),
             Self::NotATemplateFrame { frame, function } => write!(
                 formatter,
                 "{frame} is a python frame running `{function}`, not a django \
@@ -210,6 +270,11 @@ impl std::fmt::Display for Refusal {
 mod tests {
     use super::*;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one case per refusal, which is what makes a refusal that \
+                  nobody checked the wording of visible here"
+    )]
     #[test]
     fn a_refusal_names_the_frame_and_what_to_do_instead() {
         let frame = FrameId { stop: 1, depth: 2 };
@@ -262,6 +327,36 @@ mod tests {
                     "django template frame",
                     "the template context",
                     "frame 3 of stop 1",
+                ],
+            ),
+            (
+                Refusal::NotTheExecutingFrame {
+                    frame,
+                    executing: FrameId { stop: 1, depth: 0 },
+                    wanted: "setting the next statement".to_string(),
+                },
+                vec![
+                    "frame 2 of stop 1",
+                    "frame 0 of stop 1",
+                    // the reason has to say why bpd refuses what cpython
+                    // accepts, or it reads as fussiness and somebody removes it
+                    "never computed",
+                    "cannot clear an executing frame",
+                ],
+            ),
+            (
+                Refusal::NotRestartable {
+                    frame,
+                    function: "counter".to_string(),
+                    reason: Unrestartable::Suspendable {
+                        kind: crate::jump::Suspendable::Generator,
+                    },
+                },
+                vec![
+                    "frame 2 of stop 1",
+                    "`counter`",
+                    "a generator",
+                    "StopIteration",
                 ],
             ),
             (
