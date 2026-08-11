@@ -17,10 +17,17 @@ a debugger for python and [basedpython](https://github.com/KotlinIsland/basedpyt
 - **and MCP, at parity** — ai agents get the same session through an interface
     shaped for them rather than for a ui. both are thin adapters over one
     session core, and a capability exists in both or in neither
-- **basedpython aware** — breakpoints in `.by` source, frames reported against
-    `.by` source, through a verified source map
 - **django templates** — breakpoints in template files, template frames in the
-    stack
+    stack. under `runserver` the reloader serves from a **child** process the
+    debugger is not in, so that wants `--noreload` until `bpd` follows a child;
+    it says so rather than leaving a breakpoint looking broken
+- **basedpython aware — not built yet.** it is the thing this project is named
+    for and it is the one bullet here describing something that does not exist:
+    `.by` breakpoints and `.by` frames need the transpiler to emit a source map
+    with provenance and a hash of both artefacts, and that work is upstream. the
+    rule this project holds itself to is that a feature is built or it does not
+    exist, and a list that quietly mixed the two would break it on the first
+    line
 - **cpython 3.13+, no compromises** — no `sys.settrace` path, no compatibility
     shims, no capability fallbacks
 
