@@ -38,7 +38,8 @@ fn the_agent_is_built_for_the_interpreter_that_imports_it() {
 /// `sysconfig.get_config_var("Py_GIL_DISABLED")` is the answer everything else
 /// uses and is exactly what the agent must **not** ask for inside a debuggee —
 /// importing `sysconfig` and calling it pulls twenty-nine modules into
-/// `sys.modules` that a bare run does not have. so it is the right ground truth
+/// `sys.modules` that a bare run does not have, twenty-five of them on 3.13.
+/// so it is the right ground truth
 /// here: a different route to the same fact
 const THE_EXPENSIVE_WAY: &str = "import sys, sysconfig\n\
      suffix = 't' if sysconfig.get_config_var('Py_GIL_DISABLED') else ''\n\
