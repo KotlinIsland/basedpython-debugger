@@ -34,12 +34,15 @@ what exists today:
 ```sh
 cargo run --bin bpd -- doctor
 cargo run --bin bpd -- launch --python python3.14 script.py
+cargo run --bin bpd -- cache
 ```
 
 `doctor` reports whether an interpreter can be debugged and refuses loudly when
 it cannot. `launch` runs a program with the agent attached, holds it before its
 first statement, and lets it go — producing a run indistinguishable from a bare
-one, which is checked rather than claimed
+one, which is checked rather than claimed. `cache` says what the agent staging
+cache is holding and clears it when asked — nothing prunes it on its own, and
+[the agent cache](docs/development/agent-cache.md) says why
 
 ## documentation
 

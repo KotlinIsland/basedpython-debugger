@@ -45,6 +45,10 @@ use crate::{Error, Result};
 /// the module name the interpreter imports, and so the file's stem
 const MODULE: &str = "bpd_agent";
 
+/// what an importable extension module is called, on unix and on windows
+const UNIX_SUFFIX: &str = ".so";
+const WINDOWS_SUFFIX: &str = ".pyd";
+
 /// the agent, renamed into a directory an interpreter can import from
 #[derive(Debug)]
 pub struct Staged {
@@ -74,7 +78,7 @@ pub fn stage_into(cache: &Path) -> Result<Staged> {
 }
 
 /// the cache entry holding exactly the bytes of `artifact`, made if absent
-fn stage_artifact(cache: &Path, artifact: &Path) -> Result<Staged> {
+pub(crate) fn stage_artifact(cache: &Path, artifact: &Path) -> Result<Staged> {
     let bytes = std::fs::read(artifact).map_err(failed(artifact))?;
 
     trust(cache)?;
@@ -168,7 +172,15 @@ fn trust(cache: &Path) -> Result<()> {
     }
 
     let metadata = std::fs::symlink_metadata(cache).map_err(failed(cache))?;
+    trusted(cache, &metadata)
+}
 
+/// the checks themselves, over metadata the caller has already taken
+///
+/// split out because `bpd cache` is held to exactly this rule and must **not**
+/// create the directory to be told about it: a report that made the thing it
+/// was asked to describe would answer a question nobody asked
+pub(crate) fn trusted(cache: &Path, metadata: &std::fs::Metadata) -> Result<()> {
     // a link is refused on every platform, and on windows it is the whole of
     // the check: reading an ACL needs a security descriptor walk that is not
     // written here, so what stands between a windows user and somebody else's
@@ -253,7 +265,7 @@ fn private_dir(path: &Path) -> io::Result<()> {
 }
 
 /// the sha-256 of the artifact, as the name of its cache entry
-fn digest(bytes: &[u8]) -> String {
+pub(crate) fn digest(bytes: &[u8]) -> String {
     use sha2::{Digest as _, Sha256};
 
     let mut hex = String::with_capacity(64);
@@ -265,7 +277,7 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 /// where a user's agent cache lives
-fn default_cache() -> Result<PathBuf> {
+pub(crate) fn default_cache() -> Result<PathBuf> {
     Ok(cache_home()?.join("bpd").join("agents"))
 }
 
@@ -324,7 +336,24 @@ fn failed(path: &Path) -> impl FnOnce(io::Error) -> Error + use<> {
 
 /// what an importable extension module is called on this platform
 const fn import_suffix() -> &'static str {
-    if cfg!(windows) { ".pyd" } else { ".so" }
+    if cfg!(windows) {
+        WINDOWS_SUFFIX
+    } else {
+        UNIX_SUFFIX
+    }
+}
+
+/// every name a cache entry's module can have, on any platform
+///
+/// staging writes the running platform's one, and the other is here because
+/// reading an entry is not the same act as writing one: a home directory shared
+/// with another machine can hold an entry this platform would never have
+/// written, and an entry is what it is regardless of which machine made it
+pub(crate) fn module_names() -> [String; 2] {
+    [
+        format!("{MODULE}{UNIX_SUFFIX}"),
+        format!("{MODULE}{WINDOWS_SUFFIX}"),
+    ]
 }
 
 /// where the agent build lives, relative to whatever is running
@@ -332,7 +361,7 @@ const fn import_suffix() -> &'static str {
 /// a test binary sits in `<target>/<profile>/deps`, and `bpd` itself in
 /// `<target>/<profile>`. both are checked, so the same resolution works from a
 /// test and from the installed binary
-fn built_artifact() -> Result<PathBuf> {
+pub(crate) fn built_artifact() -> Result<PathBuf> {
     let running = std::env::current_exe().map_err(|source| Error::LocateAgent {
         reason: format!("the running executable has no path: {source}"),
     })?;

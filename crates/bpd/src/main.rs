@@ -8,6 +8,7 @@
 // entire job
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod cache;
 mod dap;
 mod doctor;
 mod launch;
@@ -40,6 +41,9 @@ enum Command {
 
     /// speak the model context protocol on stdin and stdout, for an ai agent
     Mcp(mcp::Args),
+
+    /// show what the agent staging cache is holding, and reclaim it
+    Cache(cache::Args),
 }
 
 /// print a failure and every cause behind it
@@ -60,5 +64,6 @@ fn main() -> ExitCode {
         Command::Launch(args) => launch::run(&args),
         Command::Dap(args) => dap::run(&args),
         Command::Mcp(args) => mcp::run(&args),
+        Command::Cache(args) => cache::run(&args),
     }
 }
