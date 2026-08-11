@@ -228,6 +228,25 @@ which removed the name — so the break is invisible until the agent is built wi
 also how the guard was arrived at: 3.15 failed first, and the rule was written
 to answer it
 
+**the refusal tests need an interpreter to refuse, and prove nothing without
+one.** `crates/bpd/tests/launch_refusal.rs` and
+`a_client_is_refused_the_same_interpreter_the_command_line_is` both loop over
+`bpd_test::discovered().unsupported()`, and on a machine whose every interpreter
+is 3.13 or newer that loop is empty and the tests pass having asserted nothing.
+`python3.12` is in the probe list so one is *looked for* — it is the newest
+release bpd turns away, and it is on the ubuntu runners as `/usr/bin/python3.12`
+— but it is not required, because requiring it would put an extra interpreter in
+front of every `cargo test` on every platform and windows has no name a probe
+could find it by. so this is the one place the suite depends on what is
+installed, and the way to be sure it is really running is
+
+```sh
+uv python install 3.12
+```
+
+the refusal a missing interpreter gets is asserted separately and needs nothing
+installed, so the "cannot run it at all" half is always live
+
 fixtures must never be run with `-I` or `-E`. isolated mode drops the script's
 directory from `sys.path` entirely, which is one of the values under test.
 `PYTHONSAFEPATH` and `-P` are a *tested* case rather than a banned one: they

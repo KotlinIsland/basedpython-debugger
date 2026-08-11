@@ -776,3 +776,54 @@ impl Drop for Client {
         end(&self.adapter);
     }
 }
+
+/// the refusal a `launch` request gets is the one the command line gets
+///
+/// the check is in `bpd_engine::launch::start`, which every front end goes
+/// through, so this is not a second implementation to keep in step — it is the
+/// assertion that there is only one. an adapter that swallowed the reason and
+/// answered "launch failed" would leave a client with no way to tell an
+/// unsupported interpreter from a missing file, and the parity rule is that an
+/// agent can do everything a human can, including *know why*
+#[test]
+fn a_client_is_refused_the_same_interpreter_the_command_line_is() {
+    for capabilities in bpd_test::discovered().unsupported() {
+        // a program that would announce itself, so "it did not run" is
+        // something the test observes rather than infers
+        let fixture = Fixture::new("never_reached", "print('the-program-ran')\n");
+        let mut client = Client::start();
+
+        client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+        let refused = client.request(
+            "launch",
+            &serde_json::json!({
+                "program": fixture.path(),
+                "python": capabilities.executable,
+            }),
+        );
+
+        assert_eq!(
+            refused["success"], false,
+            "the adapter accepted a launch on python {}, which cannot be \
+             debugged: {refused}",
+            capabilities.version
+        );
+
+        let message = refused["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a failed response carries a message: {refused}"));
+        assert!(
+            message.contains(&capabilities.version.to_string()),
+            "the client must be told which version it got, so it can say so \
+             without probing the interpreter itself, got:\n{message}"
+        );
+        assert!(
+            message.contains(&bpd_core::python::MINIMUM_SUPPORTED.to_string()),
+            "the client must be told the minimum, got:\n{message}"
+        );
+        assert!(
+            !client.output().contains("the-program-ran"),
+            "the program ran before the adapter refused the interpreter"
+        );
+    }
+}
