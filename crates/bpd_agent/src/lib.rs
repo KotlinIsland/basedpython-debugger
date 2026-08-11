@@ -16,6 +16,10 @@ mod conditions;
 mod events;
 mod exceptions;
 mod files;
+// `fork` is posix, and so is `os.register_at_fork`. there is nothing on windows
+// for this to be the answer to
+#[cfg(unix)]
+mod forks;
 mod frames;
 mod pause;
 mod run;
@@ -52,6 +56,8 @@ const TOOL_NAME: &str = "bpd";
 
 #[pymodule]
 mod bpd_agent {
+    #[cfg(unix)]
+    use super::forks;
     use super::{
         BUILT_FOR, DEBUGGER_TOOL_ID, TOOL_NAME, arm, attach, frames, monitoring, run,
         running_version, session, spawns,
@@ -103,6 +109,11 @@ mod bpd_agent {
         // the program runs, because a child started by the program's first
         // statement is one bpd has to have seen
         spawns::install(python)?;
+
+        // the other half of that: a forked child inherits this agent armed, and
+        // the connection's descriptors, and none of the thread that reads them
+        #[cfg(unix)]
+        forks::install(python)?;
 
         // this is the one python frame that belongs to bpd — the `-c` bootstrap
         // the interpreter was entered through — and it is remembered here,

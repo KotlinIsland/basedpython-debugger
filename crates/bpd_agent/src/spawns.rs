@@ -69,16 +69,24 @@
 //!
 //! ## why only the process that attached reports
 //!
-//! a fork inherits the hook, and it inherits the control connection's file
-//! descriptor. two processes writing length-prefixed frames into one socket
+//! a fork inherits the hook, and it inherits both descriptors of the control
+//! connection. two processes writing length-prefixed frames into one socket
 //! desynchronise it, and the engine reports that as a message it does not
 //! understand — the debugger blaming its own protocol for the program having
 //! forked
 //!
 //! so the pid is recorded at attach and compared here. a forked child stays
-//! silent, and the fork that made it is reported by the parent. that is a
-//! stated limit rather than a silence: an `os.exec` inside a forked child is
-//! not reported, and `scratch.subprocess.md` is where closing it is designed
+//! silent, and the fork that made it is reported by the parent
+//!
+//! [`crate::forks`] is the other half of the same rule, and the stronger one: a
+//! forked child gives the session up before it runs a line, so nothing in it
+//! could write a frame even if this comparison were removed. the comparison
+//! stays because it is the cheaper statement of the same thing and because it
+//! is what decides *which* process reports, which is a question the detach does
+//! not answer
+//!
+//! the consequence is a stated limit rather than a silence: an `os.exec`
+//! inside a forked child is not reported, and the `os.fork` that made it is
 
 use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_int, c_void};

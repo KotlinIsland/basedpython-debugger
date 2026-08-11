@@ -258,6 +258,15 @@ pub(crate) fn announce_rebinding(resolved: Vec<bpd_core::Resolved>) {
 /// exactly like a hang in bpd when it is the debuggee waiting for a resume that
 /// never came. saying so is the difference between a hang and a fact
 pub(crate) fn finishing() {
+    // a process that gave up the session has nothing to finish. it is also the
+    // one process that must not read the stop registry: the entries in its copy
+    // name threads that did not survive the fork, and the lock over them can be
+    // held by a thread without the GIL — so a forked child asking what it is
+    // holding could wait on a lock nothing will ever release
+    if attach::detached() {
+        return;
+    }
+
     let held = stops::held_threads();
     if !held.is_empty() {
         attach::send(&FromAgent::Finishing { held });
