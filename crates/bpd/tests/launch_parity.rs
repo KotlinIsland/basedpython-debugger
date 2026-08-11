@@ -513,6 +513,84 @@ fn a_program_that_watches_its_own_audit_events_sees_exactly_the_ones_it_would_ha
     }
 }
 
+/// a program that forks twice: once as it was launched, once with a thread of
+/// its own running
+///
+/// the warning cpython raises on `os.fork()` in a multi-threaded process is
+/// **recorded** rather than printed, which is the point: a program can put it
+/// in its own data with `warnings.catch_warnings(record=True)`, so this is not
+/// a question about stderr. the agent reads the control connection on a thread
+/// of its own, and a thread the program did not start is exactly what this
+/// would report
+///
+/// the second fork is the control. it has to warn — on both runs — or the first
+/// one is being compared against a cpython that stopped counting, and the whole
+/// assertion would pass while proving nothing
+#[cfg(unix)]
+const FORK_PROBE: &str = r"import os
+import threading
+import warnings
+
+
+def forked():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        pid = os.fork()
+        if pid == 0:
+            os._exit(0)
+        os.waitpid(pid, 0)
+    return [warning.category.__name__ for warning in caught]
+
+
+print('as launched:', forked())
+
+running = threading.Event()
+finish = threading.Event()
+thread = threading.Thread(target=lambda: (running.set(), finish.wait()))
+thread.start()
+running.wait()
+print('with a thread of its own:', forked())
+print('threads:', threading.active_count(), sorted(t.name for t in threading.enumerate()))
+finish.set()
+thread.join()
+";
+
+#[cfg(unix)]
+#[test]
+fn a_program_that_forks_records_exactly_the_warnings_it_would_have() {
+    for form in EVERY_FORM {
+        let fixture = Fixture::new("forker", FORK_PROBE);
+        let (bare, debugged) = both(&fixture, form, &[]);
+
+        assert!(
+            bare.success && debugged.success,
+            "the fixture has to run to the end both ways, as {form:?}. bare \
+             exited {:?}:\n{}\ndebugged exited {:?}:\n{}",
+            bare.exit_code,
+            bare.stderr,
+            debugged.exit_code,
+            debugged.stderr
+        );
+        assert_eq!(
+            debugged.stdout, bare.stdout,
+            "the program recorded a different set of warnings for its own fork \
+             under bpd than without it, as {form:?}. a debugger whose reader \
+             thread is on the process while it forks changes what the program \
+             can see about itself"
+        );
+        assert!(
+            bare.stdout.contains("as launched: []")
+                && bare
+                    .stdout
+                    .contains("with a thread of its own: ['DeprecationWarning']"),
+            "this interpreter no longer tells a single-threaded fork from a \
+             multi-threaded one, so the comparison above is vacuous. it \
+             printed:\n{}",
+            bare.stdout
+        );
+    }
+}
+
 /// every module a debuggee has that a bare run of the same program does not,
 /// and why each one is still there
 ///

@@ -346,6 +346,121 @@ fn a_fork_leaves_the_parents_session_exactly_as_it_was() {
     assert_eq!(seen.started.len(), 1, "{:?}", seen.started);
 }
 
+/// a program that forks on one thread while another is held at a breakpoint
+///
+/// the reader of the control connection is taken off the process for every
+/// fork and put back afterwards, so between the two there is a window in which
+/// nothing is reading it. this is that window, opened over and over on purpose:
+/// the worker is held for the whole of it, and every request the session makes
+/// of the held thread has to cross one
+///
+/// the loop is released by the test rather than counted out, so the forking and
+/// the asking really do overlap. the count is a backstop — a program that
+/// forked for ever would hold the test binary's own output pipe open
+const A_FORK_WHILE_A_THREAD_IS_HELD: &str = r#"import os
+import pathlib
+import signal
+import threading
+
+HERE = pathlib.Path(__file__).parent
+
+
+def held_here():
+    return "the worker is held"
+
+
+started = threading.Event()
+
+
+def worker():
+    started.wait()
+    held_here()
+
+
+thread = threading.Thread(target=worker)
+thread.start()
+started.set()
+
+for _ in range(2000):
+    if (HERE / "release").exists():
+        break
+    pid = os.fork()
+    if pid == 0:
+        signal.alarm(120)
+        os._exit(0)
+    os.waitpid(pid, 0)
+
+thread.join()
+"#;
+
+#[test]
+fn a_thread_held_at_a_breakpoint_is_still_answered_while_another_thread_forks() {
+    assert!(A_FORK_WHILE_A_THREAD_IS_HELD.contains(WATCHDOG));
+    let fixture = Fixture::new("forker", A_FORK_WHILE_A_THREAD_IS_HELD);
+    let mut debuggee = launch(&fixture);
+
+    let line = line_of(
+        A_FORK_WHILE_A_THREAD_IS_HELD,
+        r#"return "the worker is held"#,
+    );
+    armed(
+        &debuggee
+            .set_breakpoints(vec![SourceBreakpoint::at(1, fixture.path(), line)])
+            .expect("the breakpoint set was answered"),
+    );
+
+    let mut seen = Children::default();
+    let stop = match run(&mut debuggee, &mut seen) {
+        Running::Stopped { stop, .. } => stop,
+        other => panic!("the worker has a breakpoint and the session answered {other:?}"),
+    };
+
+    // asked while the other thread is forking. a request that arrived in a
+    // window and was dropped would hang here, and one that desynchronised the
+    // stream would come back as a frame this build cannot decode
+    for round in 0..20 {
+        let stack = debuggee
+            .stack(stop.stop, Some(1))
+            .expect("the held thread walked its own stack");
+        assert_eq!(stack.frames[0].line, line, "round {round}");
+
+        let answer = debuggee
+            .evaluate(stack.frames[0].id, "1 + 1", Detail::default())
+            .expect("the held thread evaluated an expression");
+        match answer {
+            Evaluated::Value { value } => assert_eq!(
+                value.content,
+                Content::Int {
+                    text: "2".to_string(),
+                    omitted: None,
+                },
+                "round {round}"
+            ),
+            Evaluated::Raised { error } => panic!("`1 + 1` raised {error} in round {round}"),
+        }
+    }
+
+    std::fs::write(fixture.directory().join("release"), "go")
+        .expect("the forking thread was let go of");
+
+    // the resume is the last thing to cross a window, and a lost one would show
+    // as a program that never ended
+    match run(&mut debuggee, &mut seen) {
+        Running::Exited { status, .. } => assert!(status.success(), "{status}"),
+        Running::StillRunning { .. } => panic!(
+            "the worker was resumed and the program did not end. the resume was \
+             sent while another thread was forking, and nothing delivered it"
+        ),
+        other => panic!("the program did not end: {other:?}"),
+    }
+
+    assert!(
+        !seen.started.is_empty(),
+        "the program has to have forked while the worker was held, or this \
+         asked twenty questions of a session nothing was interfering with"
+    );
+}
+
 /// a program whose forked child outlives it
 ///
 /// the shape of every worker pool and every reloader: the parent's job is over

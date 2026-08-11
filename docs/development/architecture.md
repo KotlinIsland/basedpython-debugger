@@ -274,7 +274,9 @@ that is asked for explicitly, and it names the threads it could not stop
 the registry of held threads, their mailboxes and the parking are native, behind
 mutexes and condition variables that do not assume a GIL. the control connection
 is read by a rust thread that never takes one, because every answer has to be
-computed on the python thread the question is about
+computed on the python thread the question is about — and that thread is not on
+the process while it forks, because cpython counts the ones that are. see
+[child processes](subprocesses.md)
 
 free-threaded builds are a target, not a variant to be tested later. anything in
 the agent that would only be correct under the GIL is a bug on every build,
