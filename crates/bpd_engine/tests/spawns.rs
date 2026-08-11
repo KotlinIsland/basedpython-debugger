@@ -300,6 +300,43 @@ fn a_child_started_the_posix_spawn_way_is_reported_once() {
     assert_eq!(started[0].verdict, Verdict::ThisInterpreter);
 }
 
+/// a child started by calling `os.posix_spawn` directly, with no `subprocess`
+///
+/// the deduplication above keys on the previous watched event on the thread,
+/// and on 3.13 a `subprocess` child raises `subprocess.Popen` first — so a rule
+/// that suppressed **every** `os.posix_spawn` would still report that child,
+/// through the other event, and look correct. this is the case that tells the
+/// two apart: there is no `subprocess.Popen` in front of it, and the report has
+/// to come from `os.posix_spawn` itself
+const DIRECT_POSIX_SPAWN: &str = r#"import os
+import pathlib
+import sys
+
+HERE = pathlib.Path(__file__).parent
+
+pid = os.posix_spawn(
+    sys.executable,
+    [sys.executable, "-c", f"open({str(HERE / 'child')!r}, 'w').write('ran')"],
+    os.environ,
+)
+os.waitpid(pid, 0)
+assert (HERE / "child").read_text() == "ran"
+"#;
+
+#[test]
+fn a_child_spawned_without_subprocess_is_reported_by_the_event_that_started_it() {
+    let started = children_of(DIRECT_POSIX_SPAWN).started;
+
+    assert_eq!(
+        started.len(),
+        1,
+        "one child was started with no `subprocess` anywhere near it, and bpd \
+         reported {started:?}. losing it would be the deduplication reaching \
+         past the pair it is for"
+    );
+    assert_eq!(started[0].verdict, Verdict::ThisInterpreter);
+}
+
 /// a child reached through a launcher, which is the case bpd cannot be sure of
 const LAUNCHER: &str = r#"import pathlib
 import subprocess
