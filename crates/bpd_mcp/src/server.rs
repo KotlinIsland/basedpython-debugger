@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bpd_core::{
-    Detail, HitCondition, LogRecord, Reporting, Request, Response, Running, Scope,
+    Addressed, Detail, HitCondition, LogRecord, Reporting, Request, Response, Running, Scope,
     SourceBreakpoint, StepKind, Stop, Threads, Which, exit_code, only_stop,
 };
 
@@ -686,11 +686,18 @@ impl<'a> Server<'a> {
     // ---- the plumbing -----------------------------------------------------
 
     /// ask the session for something, rendering a failure as a tool failure
+    ///
+    /// the request is addressed before it is sent, and the rule for what to
+    /// address it to is [`bpd_core::Addressed::of`] — in the core, because both
+    /// front ends have to apply it. a tool that is about a stop goes to the
+    /// session that stop was reported from, and one that is about the program
+    /// names none, which is this server's only session
     fn ask(&mut self, request: Request) -> Result<Response, String> {
+        let asked = Addressed::of(request, &self.held_stops());
         let Self { session, said, .. } = self;
         let session = session.as_mut().ok_or_else(|| NO_PROGRAM.to_string())?;
         session
-            .dispatch(request, said)
+            .dispatch(asked, said)
             .map_err(|error| describe(error.as_ref()))
     }
 

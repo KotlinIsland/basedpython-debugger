@@ -152,6 +152,47 @@ pub enum Error {
         held: Vec<u64>,
     },
 
+    /// a request named a session this debugger does not hold
+    ///
+    /// the sibling of [`Self::NoSuchSnapshot`] one level up. a session id names
+    /// one debugged program, and one that resolves to nothing names a session
+    /// that has ended or one this engine never minted — answering it from
+    /// whichever session is nearest would be reporting one program's state as
+    /// another's
+    #[error(
+        "no session of this debugger is {named}, so it cannot be asked for \
+         {wanted}. it holds {}. every stop carries the session it is of, and an \
+         id that resolves to nothing names one that has ended or one that was \
+         never minted here",
+        open.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    NoSuchSession {
+        /// the session that was named
+        named: crate::session::SessionId,
+        /// the sessions this debugger holds
+        open: Vec<crate::session::SessionId>,
+        /// what was asked for
+        wanted: &'static str,
+    },
+
+    /// a request that names no session was made while several were open
+    ///
+    /// the sibling of [`Self::AmbiguousStop`] one level up. answering from
+    /// whichever session happened to be first would be answering about a
+    /// program the caller did not name
+    #[error(
+        "{wanted} is about one session and {} are open: {}. name the session it \
+         is for",
+        open.len(),
+        open.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    AmbiguousSession {
+        /// what was asked for
+        wanted: &'static str,
+        /// the sessions this debugger holds
+        open: Vec<crate::session::SessionId>,
+    },
+
     /// a debug script was refused before any of it ran
     ///
     /// examined rather than attempted: a script that cannot be walked, or one

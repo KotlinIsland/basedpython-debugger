@@ -202,6 +202,22 @@ genuinely cannot carry one says so with the reason rather than leaving a gap.
 the whole of it is [the DAP adapter](dap.md) and
 [the MCP adapter](mcp.md)
 
+### a session is named
+
+`bpd` debugs one program per session, and a session is one control connection to
+one agent. every id an *agent* mints — a stop's number, and the frame and
+snapshot ids built on it — counts from one in the process that minted it, so
+two agents give the same number to different things
+
+so a session carries a `SessionId`, minted by the **engine**, because uniqueness
+is a property of the thing that can see all of them. every `Stop` says which
+session it is of, a request may name one, and a request that names none is the
+only session there is — refused rather than picked when there is more than one,
+which is `only_stop`'s rule one level up
+
+there is one session today and the machinery is what makes a second possible.
+the whole of it is [sessions](sessions.md)
+
 ### one definition, not two
 
 there is **no conversion layer** between the domain types and the wire. the
@@ -217,6 +233,15 @@ of a seam nobody wants
 
 the serde derives on core types are not a wire format in the sense that matters.
 the rule is that `bpd_core` knows nothing about **DAP or MCP**, and it does not
+
+**one message carries less than the type a front end sees, and it is not a
+second model.** a stop crosses as `bpd_core::Reported`, which is everything
+about it the *debuggee* can know; a `bpd_core::Stop` is that plus the session it
+arrived on, which only the engine can know. both are `bpd_core`'s, the
+conversion is `Reported::in_session`, and it is a struct literal — so a field
+added to a stop is a compile error there rather than a field that quietly stops
+crossing. that is the seam this section is about, made visible in one function
+instead of spread over a mapping layer
 
 what is *not* one definition is the request set. `bpd_core::Request` is what a
 client asks of a session; `bpd_protocol::message::FromEngine` is what the

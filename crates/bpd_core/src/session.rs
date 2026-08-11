@@ -12,6 +12,7 @@
 //! program is a resume followed by a wait. what they share is the vocabulary in
 //! this crate, defined once and serialised where it has to be
 
+use std::num::NonZeroU64;
 use std::process::ExitStatus;
 use std::time::Duration;
 
@@ -23,6 +24,116 @@ use crate::spawn::{Blindspot, Spawn};
 use crate::stop::{Mode, StepKind, Stop};
 use crate::thread::{ThreadState, Which};
 use crate::value::{Detail, Entry, Evaluated, Omitted, Value};
+
+/// which debug session something belongs to
+///
+/// a session is one control connection to one agent, which is one debugged
+/// process. every id the **agent** mints — a stop's number, and the
+/// [`crate::FrameId`] and [`crate::SnapshotId`] built on one — counts from one
+/// in the process that minted it, so two agents give the same number to
+/// different things. this is what tells them apart, and it is minted by the
+/// **engine** rather than by an agent because uniqueness is a property of the
+/// thing that can see all of them
+///
+/// it is not a token and grants nothing. it names a session for as long as the
+/// engine holds one, and a request naming an id no session has is refused
+/// rather than answered from whichever session is nearest
+///
+/// it does not cross the control connection and is not serialised anywhere. the
+/// debuggee has no use for it — a stop is named where it **arrives**, by the
+/// engine, which is the only place that can see which connection it arrived on
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionId(NonZeroU64);
+
+impl SessionId {
+    /// the session that number names
+    ///
+    /// zero is not one of them, which is what keeps a session that was never
+    /// minted from being expressible at all
+    #[must_use]
+    pub const fn new(number: NonZeroU64) -> Self {
+        Self(number)
+    }
+
+    /// the number, for a front end with one field to carry it in
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "session {}", self.0)
+    }
+}
+
+/// a request, and the session it is for
+///
+/// the session is beside the request rather than inside it because it is not
+/// something a client asks *about*: every variant of [`Request`] would carry
+/// the same field, and a capability that has to be repeated seventeen times is
+/// a capability that will one day be repeated sixteen
+///
+/// naming none is the ordinary case and means the only session there is — see
+/// [`only_session`], which refuses rather than picks when there is more than one
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Addressed {
+    /// the session it is for, or `None` for the only one open
+    pub session: Option<SessionId>,
+    /// what is being asked
+    pub request: Request,
+}
+
+impl Addressed {
+    /// this request, for whichever session is the only one open
+    #[must_use]
+    pub const fn unnamed(request: Request) -> Self {
+        Self {
+            session: None,
+            request,
+        }
+    }
+
+    /// this request, for one named session
+    #[must_use]
+    pub const fn to(session: SessionId, request: Request) -> Self {
+        Self {
+            session: Some(session),
+            request,
+        }
+    }
+
+    /// this request, for the session of the stop it is about
+    ///
+    /// what a front end addresses with. a request that is about a stop belongs
+    /// to the session that stop was reported from, and the stop says which —
+    /// which is the whole of why [`Stop`] carries one. `known` is the stops the
+    /// front end has been told about
+    ///
+    /// a request that is about the **program** rather than one of its stopped
+    /// threads names no session, and so does one naming a stop that `known`
+    /// does not hold or holds twice. in each of those the number does not name
+    /// one session, and naming none is what makes the engine refuse rather than
+    /// this guess
+    ///
+    /// it lives here rather than in an adapter because both of them have to do
+    /// it, and two front ends deciding separately which session a call is for
+    /// is how the same call comes to mean two things
+    #[must_use]
+    pub fn of(request: Request, known: &[Stop]) -> Self {
+        let session = request.stop().and_then(|wanted| {
+            let mut named = known.iter().filter(|held| held.stop == wanted);
+            match (named.next(), named.next()) {
+                (Some(only), None) => Some(only.session),
+                // two agents both count their stops from one, so two sessions
+                // can hold the same number and it then names two stops
+                _ => None,
+            }
+        });
+        Self { session, request }
+    }
+}
 
 /// everything a client can ask of a debug session
 ///
@@ -277,6 +388,41 @@ impl Request {
             Self::SetVariable { .. } => "writing a variable",
         }
     }
+
+    /// the stop this request is about, when it is about one
+    ///
+    /// what [`Addressed::of`] addresses by. a request that is about one held
+    /// thread names its stop, directly or through the [`FrameId`] of a frame of
+    /// it; one that is about the whole program names none, and neither does
+    /// [`Request::Diff`] — it compares two readings that were already taken,
+    /// and they are not required to be of the same stop
+    ///
+    /// the match is exhaustive and has no catch-all arm, for the reason
+    /// [`Request::name`] is: a capability added to the enum has to say whether
+    /// it is about a stop rather than inherit an answer
+    pub const fn stop(&self) -> Option<u64> {
+        match self {
+            Self::SetBreakpoints { .. }
+            | Self::SetExceptionBreakpoints { .. }
+            | Self::Run { .. }
+            | Self::Wait { .. }
+            | Self::Resume { .. }
+            | Self::Pause
+            | Self::Threads { .. }
+            | Self::Diff { .. } => None,
+
+            Self::Step { stop, .. }
+            | Self::StopTheWorld { stop, .. }
+            | Self::Stack { stop, .. }
+            | Self::RunScript { stop, .. }
+            | Self::Query { stop, .. } => Some(*stop),
+
+            Self::Variables { frame, .. }
+            | Self::TemplateContext { frame, .. }
+            | Self::Evaluate { frame, .. }
+            | Self::SetVariable { frame, .. } => Some(frame.stop),
+        }
+    }
 }
 
 /// what a running debuggee says that is not the answer to a [`Request`]
@@ -497,6 +643,54 @@ pub fn only_stop(held: &[Stop], ended: Option<i64>, wanted: &'static str) -> cra
     }
 }
 
+/// the one session a request is for, when it does not name one
+///
+/// the sibling of [`only_stop`], and the same rule one level up: refuse rather
+/// than pick. a debugger that answered a request from whichever session came
+/// first would be reporting one program's state as another's, which is the
+/// worst thing in this project's list of things it will not do
+///
+/// it lives here for the reason [`only_stop`] does. every front end has to
+/// decide what a request naming no session means, and two of them deciding
+/// separately is how the same call comes to mean two things
+///
+/// `open` is every session the engine holds, and `named` is what the request
+/// asked for. an id no open session has is refused rather than resolved to the
+/// nearest one: it names a session that has ended or one this engine never
+/// minted, and both are things the caller has to know
+pub fn only_session(
+    open: &[SessionId],
+    named: Option<SessionId>,
+    wanted: &'static str,
+) -> crate::Result<SessionId> {
+    if let Some(named) = named {
+        return if open.contains(&named) {
+            Ok(named)
+        } else {
+            Err(crate::Error::NoSuchSession {
+                named,
+                open: open.to_vec(),
+                wanted,
+            })
+        };
+    }
+
+    match open {
+        // whatever holds sessions refuses before it routes among them: a front
+        // end with nothing launched has nothing to be asked, and the engine
+        // holds a session for as long as a debuggee exists
+        [] => unreachable!(
+            "{wanted} was routed among no sessions at all, and a debugger \
+             holding none has nothing to answer it with"
+        ),
+        [only] => Ok(*only),
+        several => Err(crate::Error::AmbiguousSession {
+            wanted,
+            open: several.to_vec(),
+        }),
+    }
+}
+
 /// one held thread's stack
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stack {
@@ -692,15 +886,29 @@ pub struct WorldStopped {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stop::StopReason;
+    use crate::stop::{Reported, StopReason};
+
+    /// the session a stop with no session of its own is put in
+    fn first() -> SessionId {
+        session(1)
+    }
+
+    fn session(number: u64) -> SessionId {
+        SessionId::new(NonZeroU64::new(number).expect("a session is numbered from one"))
+    }
 
     fn held_at(stop: u64) -> Stop {
-        Stop {
+        held_in(first(), stop)
+    }
+
+    fn held_in(session: SessionId, stop: u64) -> Stop {
+        Reported {
             stop,
             thread: 7,
             reason: StopReason::Entry,
             holding: Vec::new(),
         }
+        .in_session(session)
     }
 
     #[test]
@@ -754,5 +962,137 @@ mod tests {
             only_stop(&[held_at(3)], Some(0), "the stack").expect("one is held"),
             3
         );
+    }
+
+    #[test]
+    fn a_request_that_names_no_session_is_the_only_one_and_is_refused_when_there_are_two() {
+        assert_eq!(
+            only_session(&[session(1)], None, "the stack").expect("one is open"),
+            session(1)
+        );
+
+        // the whole of why this exists. two agents both count their stops from
+        // one, so a request that named neither session and was answered from
+        // whichever came first would report one program's state as another's
+        let several =
+            only_session(&[session(1), session(2)], None, "the stack").expect_err("two are open");
+        let said = several.to_string();
+        assert!(
+            said.contains("session 1") && said.contains("session 2"),
+            "the refusal has to name what is open, and said {said}"
+        );
+        assert!(
+            said.contains("name the session"),
+            "the refusal has to say what to do about it, and said {said}"
+        );
+    }
+
+    #[test]
+    fn a_session_id_that_names_nothing_is_refused_rather_than_resolved_to_the_nearest() {
+        assert_eq!(
+            only_session(&[session(1), session(2)], Some(session(2)), "the stack")
+                .expect("session 2 is open"),
+            session(2)
+        );
+
+        let gone = only_session(&[session(1)], Some(session(9)), "the stack")
+            .expect_err("no session of this debugger is 9");
+        let said = gone.to_string();
+        assert!(
+            said.contains("session 9") && said.contains("session 1"),
+            "the refusal has to name what was asked for and what is open, and \
+             said {said}"
+        );
+        assert!(
+            said.contains("the stack"),
+            "the refusal has to name what was asked for, and said {said}"
+        );
+    }
+
+    #[test]
+    fn a_request_about_a_stop_is_addressed_to_the_session_that_stop_came_from() {
+        let known = [held_in(session(2), 1), held_in(session(3), 4)];
+
+        let about_a_stop = Addressed::of(Request::Stack { stop: 4, top: None }, &known);
+        assert_eq!(
+            about_a_stop.session,
+            Some(session(3)),
+            "stop 4 is session 3's, and the request about it is session 3's"
+        );
+
+        // through a frame id, which is the other way a request names a stop
+        let about_a_frame = Addressed::of(
+            Request::Variables {
+                frame: FrameId { stop: 1, depth: 0 },
+                scope: Scope::Local,
+                detail: Detail::default(),
+            },
+            &known,
+        );
+        assert_eq!(about_a_frame.session, Some(session(2)));
+
+        // a request about the program names none, and the only-session rule is
+        // what answers it
+        assert_eq!(
+            Addressed::of(Request::Pause, &known).session,
+            None,
+            "a pause is about the program rather than about a held thread"
+        );
+    }
+
+    #[test]
+    fn a_stop_number_two_sessions_both_hold_addresses_neither() {
+        // an agent counts its stops from one and cannot see another agent doing
+        // the same, so the same number really can name two stops. picking the
+        // first would be answering about a program nobody named — naming
+        // neither is what makes the engine refuse
+        let known = [held_in(session(1), 3), held_in(session(2), 3)];
+        assert_eq!(
+            Addressed::of(Request::Stack { stop: 3, top: None }, &known).session,
+            None
+        );
+
+        // and a stop the front end has not been told about names no session
+        // either. the refusal for that one is the agent's, which lists the
+        // stops it really holds
+        assert_eq!(
+            Addressed::of(Request::Stack { stop: 8, top: None }, &known).session,
+            None
+        );
+    }
+
+    #[test]
+    fn exactly_the_requests_that_are_about_one_held_thread_name_a_stop() {
+        // written out rather than derived, because this is the list a new
+        // capability has to be added to on purpose. one that is about a stop
+        // and says it is not would be addressed to no session, and answered by
+        // the only-session rule instead of by the stop it is about
+        let about_a_stop: Vec<&str> = crate::parity::surface()
+            .iter()
+            .filter(|request| request.stop().is_some())
+            .map(|request| Request::name(request))
+            .collect();
+        assert_eq!(
+            about_a_stop,
+            [
+                "stepping a thread",
+                "stopping the world",
+                "the stack",
+                "the variables of a scope",
+                "the template context of a frame",
+                "evaluating an expression",
+                "writing a variable",
+                "the state of a stop",
+                "running a debug script",
+            ]
+        );
+
+        // and every one of them reports the stop that is in it. the surface
+        // builds them all against stop 1
+        for request in crate::parity::surface() {
+            if let Some(stop) = request.stop() {
+                assert_eq!(stop, 1, "`{}` reported stop {stop}", request.name());
+            }
+        }
     }
 }

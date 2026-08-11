@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use bpd_core::python::Capabilities;
-use bpd_core::{Reporting, Request, Response, Stop};
+use bpd_core::{Addressed, Reporting, Response, Stop};
 use bpd_engine::{Debuggee, Launched, Program};
 use bpd_mcp::{Configuration, Failed, Launcher, ProgramOutput, Session, Started, Stream};
 
@@ -145,10 +145,10 @@ struct Attached(Debuggee);
 impl Session for Attached {
     fn dispatch(
         &mut self,
-        request: Request,
+        asked: Addressed,
         reporting: &mut dyn Reporting,
     ) -> Result<Response, Failed> {
-        Ok(self.0.dispatch(request, reporting)?)
+        Ok(self.0.dispatch(asked, reporting)?)
     }
 
     fn held(&self) -> Vec<Stop> {

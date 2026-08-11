@@ -18,11 +18,13 @@ pub mod launch;
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::num::NonZeroU64;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use bpd_core::{Request, Stop};
+use bpd_core::{Request, SessionId, Stop};
 use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
@@ -232,6 +234,24 @@ const ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
 /// how often the wait for an agent checks whether the debuggee died instead
 const ATTACH_POLL: Duration = Duration::from_millis(5);
 
+/// how many sessions this engine has minted an id for
+///
+/// the engine is where a session id comes from, because uniqueness is a
+/// property of the thing that can see every session and an agent can see only
+/// itself. one counter for the whole process rather than one per listener: two
+/// listeners with their own counters would both mint a first session, which is
+/// the collision this exists to remove
+static SESSIONS: AtomicU64 = AtomicU64::new(0);
+
+/// name a session nothing else will be named
+fn mint_session() -> SessionId {
+    let minted = SESSIONS.fetch_add(1, Ordering::Relaxed) + 1;
+    SessionId::new(
+        NonZeroU64::new(minted)
+            .expect("the count is incremented before it is used, so it is not 0"),
+    )
+}
+
 /// the control plane, waiting for exactly one agent
 #[derive(Debug)]
 pub struct Listener {
@@ -325,6 +345,13 @@ pub struct Session {
     reading: TcpStream,
     writing: Arc<Mutex<Writing>>,
     buffer: Vec<u8>,
+    /// what this connection's debuggee is called, for as long as it lasts
+    ///
+    /// minted here, on the connection, because the connection is the session: a
+    /// second agent is a second connection, and the engine is what sees both.
+    /// every stop that arrives here is named with it, which is the only place a
+    /// [`Stop`] gets one
+    id: SessionId,
 }
 
 impl Session {
@@ -350,7 +377,13 @@ impl Session {
                 requests: 0,
             })),
             buffer: Vec::new(),
+            id: mint_session(),
         })
+    }
+
+    /// what this session is called
+    pub const fn id(&self) -> SessionId {
+        self.id
     }
 
     fn writing(&self) -> MutexGuard<'_, Writing> {
@@ -438,7 +471,7 @@ impl Session {
         const EXPECTED: &str = "the debuggee to stop";
 
         match self.next_event()? {
-            Some(FromAgent::Stopped { stop }) => Ok(stop),
+            Some(FromAgent::Stopped { stop }) => Ok(stop.in_session(self.id)),
             Some(other) => Err(Error::UnexpectedEvent {
                 event: format!("{other:?}"),
                 expected: EXPECTED,

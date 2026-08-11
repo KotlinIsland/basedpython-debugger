@@ -1039,6 +1039,19 @@ mod tests {
         }
     }
 
+    /// a stop as an agent reports one, named by the session it arrived on
+    fn reported(stop: u64, reason: StopReason) -> Stop {
+        crate::stop::Reported {
+            stop,
+            thread: 7,
+            reason,
+            holding: Vec::new(),
+        }
+        .in_session(crate::SessionId::new(
+            NonZeroU64::new(1).expect("1 is not zero"),
+        ))
+    }
+
     fn predicate() -> Predicate {
         Predicate {
             expression: "x > 1".to_string(),
@@ -1130,27 +1143,20 @@ mod tests {
     fn every_place_a_transcript_reports_comes_from_a_stop_reason() {
         // there is no other constructor. a location bpd invented would have to
         // be written here, in the open
-        let entry = At::of(&Stop {
-            stop: 1,
-            thread: 7,
-            reason: StopReason::Entry,
-            holding: Vec::new(),
-        });
+        let entry = At::of(&reported(1, StopReason::Entry));
         assert_eq!(
             entry.place, None,
             "the program has run nothing at entry, so there is no line it is at"
         );
 
-        let stepped = At::of(&Stop {
-            stop: 2,
-            thread: 7,
-            reason: StopReason::Stepped {
+        let stepped = At::of(&reported(
+            2,
+            StopReason::Stepped {
                 kind: StepKind::Over,
                 file: "/tmp/a.py".to_string(),
                 line: 12,
             },
-            holding: Vec::new(),
-        });
+        ));
         assert_eq!(
             stepped.place,
             Some(Place {
