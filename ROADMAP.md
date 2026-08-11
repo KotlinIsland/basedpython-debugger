@@ -548,13 +548,17 @@ what it does that this will not is `:480`, "Will reattempt using pydevd", which
 shells out to gdb. so the contrast is not "PEP 768 versus injection", it is that
 `bpd` needs no python of its own to attach and never falls back
 
-### M9 — reset stack frame to here
+### M9 — reset stack frame to here · done
 
-two operations, separate because their obstacles are different
+two operations, separate because their obstacles are different, per
+[set next statement, and restart frame](docs/development/jumps.md)
 
-**restart frame** — discard the frames above a chosen frame and re-enter it from
-the top with its original arguments. the honest limitation, which the ui states
-rather than buries: side effects already performed are not undone
+**restart frame** — re-enter the frame a thread is executing from the top. it
+re-enters with **what its parameters hold now**, not with the arguments the call
+was made with: nothing captured those, and capturing them would mean copying
+every argument of every call in the process on the event path. the honest
+limitations, which the ui states rather than buries: side effects already
+performed are not undone, and the frames above the chosen one are not discarded
 
 **set next statement** — move execution to another line inside the current frame.
 this was written down as the open question of the milestone, on the grounds that
@@ -580,9 +584,18 @@ establishing it, both about which lines produce an event:
     sent. so where the program now is has to be **derived from the jump**, and a
     debugger that waits to be told will report the line after the one it moved to
 
-that second one also means **restart frame is reachable for the topmost frame**
-by the same mechanism: jump to the first statement and write the original
-arguments back through the PEP 667 proxy. measured working
+that second one also means **restart frame is reachable for the frame a thread
+is executing** by the same mechanism: move to the first line of its code object.
+measured working — and the destination is the line of that code object's first
+*instruction* that carries one, which is not `co_firstlineno`: a module's first
+instruction has line `0` and a closure's has no line at all
+
+a generator, coroutine or async generator frame is refused a restart. the first
+instruction of such a code object is the `RESUME` its driver sends into rather
+than the top of the body, and moving there **ends** the frame — measured on 3.13,
+3.14 and 3.15, the next `next()` raises `StopIteration` and nothing was yielded.
+set next statement to a line of the body works there and is what the refusal
+names
 
 what it does not give is the DAP operation's other half — discarding the frames
 *above* a chosen one. that was checked rather than assumed: there is no public C
@@ -597,8 +610,23 @@ which is a different operation from discarding a frame and has to be described a
 one. so the two halves of this milestone are not equally reachable, and the entry
 should not imply they are
 
-both refuse loudly rather than approximating: a jump into a different block,
-into or out of a `try`, or across a `with` is either correct or rejected
+what cpython refuses it refuses loudly, and that refusal is passed through with
+its reason intact. what it does **not** refuse had to be measured rather than
+assumed, and two of those are the ones a user has to be told about:
+
+- **a jump does not run the cleanup of a block it leaves.** jumping out of a
+    `with` does not call `__exit__` and jumping out of a `try` does not run its
+    `finally` — cpython accepts both. `bpd` does not undo them and does not
+    pretend otherwise
+- **a jump binds every unbound local of the frame to `None`**, warning
+    `RuntimeWarning: assigning None to 2 unbound locals`. that is a change to the
+    program the debugger caused, so the names are read back out of the frame and
+    reported
+
+and one thing cpython accepts that `bpd` refuses: a move in a frame that is
+**suspended in a call**. it is accepted, and the frame then runs on with a value
+stack that no longer matches where it is — a function jumped in this way returned
+a value it never computed. only the frame a thread is executing can move
 
 ### M10 — hot module reloading and hot code replacement
 

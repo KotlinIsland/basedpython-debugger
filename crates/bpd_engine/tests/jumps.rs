@@ -98,8 +98,8 @@ twice(2)
 grown = growing(1)
 list(counter("t"))
 unbound_after()
+(HERE / "ran.txt").write_text(repr(RAN) + " grown " + repr(grown))
 note("finished")
-print("RAN", RAN, "grown", grown)
 "#;
 
 fn interpreter() -> &'static Capabilities {
@@ -206,6 +206,17 @@ fn ran(fixture: &Fixture, name: &str) -> bool {
     fixture.directory().join(name).exists()
 }
 
+/// what the program itself recorded about the lines it ran
+///
+/// read off the program rather than off the debugger, which is the whole point
+/// of it: what a jump claims and what really executed are two different
+/// statements, and only one of them is evidence
+fn recorded(fixture: &Fixture) -> String {
+    let path = fixture.directory().join("ran.txt");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("the program never wrote {}: {error}", path.display()))
+}
+
 #[test]
 fn a_backward_jump_re_executes_the_lines_between_and_says_where_the_frame_is() {
     let fixture = Fixture::new("jumping", PROGRAM);
@@ -234,7 +245,7 @@ fn a_backward_jump_re_executes_the_lines_between_and_says_where_the_frame_is() {
     to_exit(&mut debuggee);
     // `second` twice: the block really re-executed rather than the frame merely
     // reporting a different number
-    let said = fixture.output();
+    let said = recorded(&fixture);
     assert!(
         said.contains("'second', 'second'"),
         "the lines between the destination and where it was did not run again: \
@@ -266,7 +277,7 @@ fn a_breakpoint_on_the_line_a_jump_moves_to_is_named_as_one_that_will_not_fire()
     );
 
     // let it reach `middle`, and move back onto the line breakpoint 1 is on
-    debuggee.the_resume().expect("the thread was resumed");
+    debuggee.resume_all().expect("the thread was resumed");
     let stop = match debuggee
         .wait(&mut bpd_test::reporting::Unreported)
         .expect("the debuggee was waited on")
@@ -297,7 +308,7 @@ fn a_breakpoint_on_the_line_a_jump_moves_to_is_named_as_one_that_will_not_fire()
     debuggee
         .set_breakpoints(vec![on_entered])
         .expect("the breakpoint set was replaced");
-    debuggee.the_resume().expect("the thread was resumed");
+    debuggee.resume_all().expect("the thread was resumed");
     let stop = match debuggee
         .wait(&mut bpd_test::reporting::Unreported)
         .expect("the debuggee was waited on")
@@ -342,7 +353,9 @@ fn a_line_cpython_will_not_move_to_is_refused_in_cpythons_own_words() {
     // cpython's reason, intact. rewriting it into something of bpd's would lose
     // the one part a caller can act on
     assert!(
-        error.message.contains("can't jump into the body of a for loop"),
+        error
+            .message
+            .contains("can't jump into the body of a for loop"),
         "the refusal said {error}"
     );
     // and the frame did not move, read back the same way a move is
@@ -401,8 +414,7 @@ fn a_frame_that_is_not_the_one_the_thread_is_executing_is_refused_with_the_reaso
 
     // and the program is untouched by having been asked
     to_exit(&mut debuggee);
-    let said = fixture.output();
-    assert!(said.contains("RAN"), "the program did not finish: {said}");
+    assert!(ran(&fixture, "deeper_ran"), "the program did not run on");
 }
 
 #[test]
@@ -435,7 +447,7 @@ fn restarting_a_frame_runs_it_again_with_what_its_parameters_hold_now() {
     );
 
     to_exit(&mut debuggee);
-    let said = fixture.output();
+    let said = recorded(&fixture);
     // 1 and then 101: the second run is the frame re-entered with what the
     // parameter holds now, and `bpd` says exactly that rather than claiming the
     // arguments were restored
@@ -467,7 +479,9 @@ fn a_restart_lands_before_the_first_statement_and_a_step_runs_it() {
         .expect("the frame was asked to restart");
     assert_eq!(jumped.at.line, line_of(PROGRAM, "def straight():"));
 
-    debuggee.the_step(StepKind::Over).expect("the thread stepped");
+    debuggee
+        .the_step(StepKind::Over)
+        .expect("the thread stepped");
     let stop = match debuggee
         .wait(&mut bpd_test::reporting::Unreported)
         .expect("the debuggee was waited on")
@@ -504,7 +518,9 @@ fn a_step_after_a_jump_runs_the_destination_and_lands_on_the_line_after_it() {
 
     // a step is armed on the resume, which is after the move — so it steps from
     // where the frame is now. the destination is what it executes
-    debuggee.the_step(StepKind::Over).expect("the thread stepped");
+    debuggee
+        .the_step(StepKind::Over)
+        .expect("the thread stepped");
     let stop = match debuggee
         .wait(&mut bpd_test::reporting::Unreported)
         .expect("the debuggee was waited on")
@@ -562,9 +578,12 @@ fn a_generator_frame_is_refused_a_restart_and_takes_a_jump_to_a_body_line() {
     let fixture = Fixture::new("generating", PROGRAM);
     let mut debuggee = launch(&fixture);
     let yielded = line_of(PROGRAM, "RAN.append(\"yielded\")");
-    let step_one = line_of(PROGRAM, "step_one = tag");
+    let yielding = line_of(PROGRAM, "yield step_one");
 
-    held_at(&mut debuggee, &fixture.path(), yielded);
+    // held on the `yield` itself, so the line the jump goes back to is one that
+    // has already run — otherwise re-running it and never having run it look
+    // exactly the same in what the program recorded
+    held_at(&mut debuggee, &fixture.path(), yielding);
     let frame = top(&mut debuggee);
 
     let refused = debuggee
@@ -584,12 +603,12 @@ fn a_generator_frame_is_refused_a_restart_and_takes_a_jump_to_a_body_line() {
 
     // and it does work: a body line is an ordinary destination in a generator
     let jumped = debuggee
-        .set_next_statement(frame, step_one)
+        .set_next_statement(frame, yielded)
         .expect("a body line is a place a generator frame can be moved to");
-    assert_eq!(jumped.at.line, step_one, "{jumped:?}");
+    assert_eq!(jumped.at.line, yielded, "{jumped:?}");
 
     to_exit(&mut debuggee);
-    let said = fixture.output();
+    let said = recorded(&fixture);
     assert!(
         said.contains("'yielded', 'yielded'"),
         "the generator did not run the line again: {said}"
@@ -600,10 +619,14 @@ fn a_generator_frame_is_refused_a_restart_and_takes_a_jump_to_a_body_line() {
 fn the_entry_stop_cannot_be_moved_and_cpython_says_why() {
     // bpd reports the entry stop from `PY_START`, where cpython refuses a move
     // outright — a frame that has not begun has no line to move from. the
-    // refusal is cpython's and it is passed through rather than pre-empted
+    // refusal is cpython's and it is passed through rather than pre-emptied
     let fixture = Fixture::new("at_entry", PROGRAM);
     let mut debuggee = launch(&fixture);
-    let stop = debuggee.held().first().expect("the entry stop is held").stop;
+    let stop = debuggee
+        .held()
+        .first()
+        .expect("the entry stop is held")
+        .stop;
     assert!(matches!(stop, 1));
 
     let frame = top(&mut debuggee);
