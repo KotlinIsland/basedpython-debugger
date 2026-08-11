@@ -436,10 +436,35 @@ one thing 3.13 cannot see at all, a `multiprocessing` child started with the
 `spawn` or `forkserver` method, is **announced** rather than left as a silence.
 see [child processes](docs/development/subprocesses.md)
 
-what is left is the propagation, and the hard part of it is not the hook: an
-audit hook can **observe** a spawn and cannot rewrite its arguments, so the only
-way into an exec'd child is its environment — which is the one channel the
-parity guarantee currently keeps clean
+**the second step is built too**: a forked child no longer writes into the
+session its parent owns. it inherited the agent's monitoring state and both
+descriptors of the control connection, and two processes putting length-prefixed
+frames into one socket desynchronise it — so the child gives all of it up in
+`os.register_at_fork(after_in_child=…)` before it runs a line. that closed a bug
+reachable without any of the rest of this, and a second one nobody had looked
+for: a child holding those descriptors kept the session open after its parent
+exited, which is the shape of every worker pool and reloader
+
+closing it turned up a parity violation and closed that as well. the agent's
+reader thread made every debuggee multi-threaded, and cpython warns on
+`os.fork()` in a multi-threaded process — which a program **records in its own
+data**, not merely on stderr, so `warnings.catch_warnings(record=True)` returned
+a different list under `bpd` than without it. the reader now stands down across
+the fork and goes back afterwards
+
+what is left is the propagation. the hook is not the hard part and not the
+answer either: an audit hook *can* rewrite a spawn — appending to the argument
+list the `subprocess.Popen` event carries puts the argument in the child, on
+every supported release, and the caller's own list is untouched because what is
+audited is already a copy. it is still not the mechanism, because it works by
+where cpython raises the event relative to reading the list back, which nothing
+documents. so the way into an **exec'd** child remains its environment, which is
+the one channel the parity guarantee keeps clean
+
+a **forked** child needs none of that, because it inherits memory: it already
+holds everything it would need to reconnect. that is the cheapest real
+propagation available and it is the next step, after the session id that having
+two of them requires
 
 ### M8 — attach
 
