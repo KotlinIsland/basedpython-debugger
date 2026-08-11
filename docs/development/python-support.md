@@ -84,7 +84,12 @@ things that a python debugger normally does and `bpd` will not:
 
 - a `sys.settrace` path, for any reason, on any version
 - injecting into a process by ptrace, `gdb`, a signal handler, or writing to
-    another process's memory outside the documented PEP 768 protocol
+    another process's memory outside the documented PEP 768 protocol. this reads
+    as a contrast with debugpy and only half of it still is: debugpy 1.8.21
+    *prefers* PEP 768 where it can (`server/cli.py:455`). what it keeps is the
+    fallback — `:480` logs "Will reattempt using pydevd" and shells out to gdb —
+    and every interpreter below 3.14, where the fallback is the only path. the
+    line above is about the fallback, not about PEP 768
 - monkeypatching stdlib modules to observe them
 - guessing a frame's state from a traceback when the frame itself is gone
 - reporting a value read from a different scope than the one asked for

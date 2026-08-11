@@ -320,6 +320,33 @@ with the exception — and specifically rather than with the engine's
 `string_if_invalid`, which is `''` by default and would be a debugger reporting
 an empty string for a variable that is not there
 
+## `runserver` reloads into a child, and the agent is not in it
+
+**this is the largest practical limitation of the feature**, and it is not about
+templates at all
+
+`django.utils.autoreload.restart_with_reloader` calls `subprocess.run(args)` and
+then does nothing but wait on the exit code. the process `bpd launch` attached to
+is the supervisor; the **child** it spawned serves every request and renders
+every template, and the agent is not in it. so under a plain
+
+```sh
+bpd launch manage.py runserver
+```
+
+no template breakpoint can fire, because the process holding them never renders
+anything. nothing is misreported — the supervisor never imports the template
+engine, so the hook never arms and the breakpoint is reported **unbound**, which
+is true — but the answer looks like a broken feature until you know why
+
+until `bpd` follows a subprocess, the way to use this is to take the reloader out:
+
+```sh
+bpd launch manage.py runserver --noreload
+```
+
+subprocess debugging is `M7a` in [the roadmap](../../ROADMAP.md)
+
 ## what is not covered
 
 - **a `{% block %}` no parent template defines.** django adds every block of an
