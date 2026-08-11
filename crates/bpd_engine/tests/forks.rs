@@ -81,9 +81,9 @@ fn armed(resolved: &[Resolved]) {
 /// deadline
 fn run(debuggee: &mut Debuggee, seen: &mut Children) -> Running {
     match debuggee.dispatch(
-        Request::Run {
+        bpd_core::Addressed::unnamed(Request::Run {
             deadline: Some(LONG_ENOUGH),
-        },
+        }),
         seen,
     ) {
         Ok(Response::Ran(ran)) => ran,

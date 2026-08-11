@@ -28,10 +28,10 @@ use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, FrameId, LogRecord, Reporting,
-    Request, Resolved, Response, Running, Scope, Script, Snapshot, SnapshotId, SourceBreakpoint,
-    Spawn, Stack, StateQuery, StepKind, Stop, TemplateContext, Threads, Transcript, Variables,
-    Which, WorldStopped,
+    Addressed, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, FrameId, LogRecord,
+    Reporting, Request, Resolved, Response, Running, Scope, Script, SessionId, Snapshot,
+    SnapshotId, SourceBreakpoint, Spawn, Stack, StateQuery, StepKind, Stop, TemplateContext,
+    Threads, Transcript, Variables, Which, WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine};
@@ -160,6 +160,15 @@ impl Debuggee {
         &self.held
     }
 
+    /// what this debuggee's session is called
+    ///
+    /// one session per debuggee, minted when its agent attached. every stop it
+    /// reports carries it, and a request may name it — see
+    /// [`bpd_core::Addressed`]
+    pub const fn session(&self) -> SessionId {
+        self.session.id()
+    }
+
     /// how many requests the engine has sent this debuggee's agent
     ///
     /// the agent answers on a thread it is holding, so this is also the number
@@ -193,11 +202,19 @@ impl Debuggee {
     /// request because what it takes is not an answer to anything: a logpoint
     /// fires while the program runs, and so does the acknowledgement of a pause
     /// armed on an [`Interrupt`]
+    ///
+    /// what the request is addressed to is checked first, and against this
+    /// debuggee's own session: a request naming a session that is not this one
+    /// is refused rather than answered here. one that names none is for the
+    /// only session, which is what a debuggee holding one is
     pub fn dispatch(
         &mut self,
-        request: Request,
+        asked: Addressed,
         reporting: &mut dyn Reporting,
     ) -> Result<Response> {
+        let Addressed { session, request } = asked;
+        bpd_core::only_session(&[self.session()], session, request.name())?;
+
         match request {
             Request::SetBreakpoints { breakpoints } => {
                 let resolved = self.resolve_breakpoints(breakpoints.clone(), reporting)?;
@@ -328,7 +345,7 @@ impl Debuggee {
     /// [`Aside`], and the children it collected go back on the queue here
     fn ask_for(&mut self, request: Request) -> Result<Response> {
         let mut aside = Aside::new();
-        let answer = self.dispatch(request, &mut aside);
+        let answer = self.dispatch(Addressed::unnamed(request), &mut aside);
         self.pending_spawns.extend(aside.spawned);
         self.pending_blind.extend(aside.blind);
         answer
@@ -817,7 +834,9 @@ impl Debuggee {
                 {
                     self.pending_rebinds.extend(resolved);
                 }
-                Some(FromAgent::Stopped { stop }) => self.held.push(stop),
+                Some(FromAgent::Stopped { stop }) => {
+                    self.held.push(stop.in_session(self.session.id()));
+                }
                 // an interrupt can arm a pause at any moment, including while
                 // an answer is on its way. it is not the answer to this
                 // request, and it is not something to drop either: an empty
@@ -882,7 +901,10 @@ impl Debuggee {
     /// caller that could only receive one of them would be a caller the rest
     /// went missing at
     pub fn wait(&mut self, reporting: &mut dyn Reporting) -> Result<Running> {
-        match self.dispatch(Request::Wait { deadline: None }, reporting)? {
+        match self.dispatch(
+            Addressed::unnamed(Request::Wait { deadline: None }),
+            reporting,
+        )? {
             Response::Ran(running) => Ok(running),
             other => unreachable!("a wait was answered with {other:?}"),
         }
@@ -893,7 +915,10 @@ impl Debuggee {
     /// the whole-program "continue". it resumes everything held rather than one
     /// thread, and what it waits for is the program, not a particular thread
     pub fn run(&mut self, reporting: &mut dyn Reporting) -> Result<Running> {
-        match self.dispatch(Request::Run { deadline: None }, reporting)? {
+        match self.dispatch(
+            Addressed::unnamed(Request::Run { deadline: None }),
+            reporting,
+        )? {
             Response::Ran(running) => Ok(running),
             other => unreachable!("a run was answered with {other:?}"),
         }
@@ -940,6 +965,10 @@ impl Debuggee {
 
             match self.session.next_event()? {
                 Some(FromAgent::Stopped { stop }) => {
+                    // named here, where the connection it arrived on is known.
+                    // the agent counts its stops from one and cannot see
+                    // another agent doing the same
+                    let stop = stop.in_session(self.session.id());
                     self.held.push(stop.clone());
                     return Ok(Running::Stopped { stop, rebound });
                 }

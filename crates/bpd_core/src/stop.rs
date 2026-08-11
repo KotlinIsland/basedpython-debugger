@@ -5,6 +5,41 @@
 //! others were doing while an answer was taken
 
 use crate::exception::PythonError;
+use crate::session::SessionId;
+
+/// a stop as the agent reported it, before it was named
+///
+/// what crosses the control connection. it is every part of a [`Stop`] the
+/// **debuggee** can know, which is all of it but the session: an agent counts
+/// its stops from one and cannot see another agent doing the same, so the id
+/// that tells two of them apart is added by the engine as the report arrives.
+/// [`Self::in_session`] is the one place that happens, which is what makes a
+/// stop that nothing named impossible to hold rather than merely unlikely
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Reported {
+    /// which stop this is, counting from one in the agent that minted it
+    pub stop: u64,
+    /// the interpreter's identity for the thread that is held
+    pub thread: u64,
+    /// why it stopped
+    pub reason: StopReason,
+    /// what this thread was holding, of the things another thread can wait for
+    pub holding: Vec<Holding>,
+}
+
+impl Reported {
+    /// this stop, named by the session it was reported from
+    #[must_use]
+    pub fn in_session(self, session: SessionId) -> Stop {
+        Stop {
+            session,
+            stop: self.stop,
+            thread: self.thread,
+            reason: self.reason,
+            holding: self.holding,
+        }
+    }
+}
 
 /// one thread, held
 ///
@@ -15,8 +50,15 @@ use crate::exception::PythonError;
 ///
 /// so several of these can be outstanding at once, and each is resumed by
 /// naming its thread
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stop {
+    /// which session this stop is of
+    ///
+    /// `stop` counts from one in the agent that minted it, so it names a stop
+    /// only within one debugged process. this is what makes the pair unique,
+    /// and it is what a request about this stop is addressed to — see
+    /// [`crate::Addressed`]
+    pub session: SessionId,
     /// which stop this is, counting from one
     ///
     /// the number a [`crate::FrameId`] carries, and the number a request

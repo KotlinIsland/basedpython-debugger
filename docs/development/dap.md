@@ -142,6 +142,22 @@ parked in a C call has released the GIL and reaches no monitoring event, so
 nothing can hold it; when there is one, the client gets an `output` event naming
 it and `allThreadsStopped` stays false. see [threads](threads.md)
 
+### a session is the connection
+
+a `bpd_core::Request` may name the session it is for, and a DAP request has no
+field for one — because a DAP session *is* the connection. the spec's answer to
+a second debuggee is the `startDebugging` reverse request, which has the client
+start a whole second session of its own, and a request inside that session needs
+no id for the same reason one inside this session does not
+
+so the adapter addresses every request it makes, and the client never writes a
+session id: a request that is about a stop goes to the session that stop was
+reported from — the `Stop` carries it — and one that is about the program names
+none, which the engine answers with the only session there is. that is
+`Facet::Session` in the parity table, as `Reach::OnItsOwn`, and
+`crates/bpd_dap/tests/coverage.rs` checks the claim against what really arrived.
+see [sessions](sessions.md)
+
 ### a reference is not a frame id
 
 DAP hands a client an opaque number and expects it back later, and that number

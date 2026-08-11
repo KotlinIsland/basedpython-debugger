@@ -39,8 +39,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use bpd_core::{
-    Binding, Detail, Evaluated, FrameId, LogRecord, Reporting, Request, Resolved, Response,
-    Running, Scope, SourceBreakpoint, StepKind, Stop, StopReason, Unbound, Value, Which, exit_code,
+    Addressed, Binding, Detail, Evaluated, FrameId, LogRecord, Reporting, Request, Resolved,
+    Response, Running, Scope, SourceBreakpoint, StepKind, Stop, StopReason, Unbound, Value, Which,
+    exit_code,
 };
 
 use crate::capabilities::capabilities;
@@ -235,7 +236,13 @@ impl Adapter {
                     .session
                     .as_mut()
                     .expect("the adapter only waits once a program has been launched")
-                    .dispatch(Request::Wait { deadline: None }, &mut events);
+                    .dispatch(
+                        // a wait is about the program rather than about a held
+                        // thread, so it names no session and is answered by the
+                        // only one this connection serves
+                        Addressed::unnamed(Request::Wait { deadline: None }),
+                        &mut events,
+                    );
                 let written = events.finish();
                 let outcome = match (waited, written) {
                     (_, Err(error)) => Err(Aborted::Wire(error)),
@@ -1391,13 +1398,23 @@ impl Adapter {
     // ---- the plumbing ---------------------------------------------------
 
     /// ask the session for something, rendering a failure as a refusal
+    ///
+    /// the request is addressed before it is sent, and the rule for what to
+    /// address it to is [`bpd_core::Addressed::of`] — in the core, because both
+    /// front ends have to apply it. a request that is about a stop goes to the
+    /// session that stop was reported from, and one that is about the program
+    /// names none, which is the only session this connection serves
     fn ask(&mut self, request: Request) -> Result<Response, Aborted> {
         let mut events = Events::new(&self.output);
+        let held = self.session.as_ref().map(|session| session.held());
         let answered = self
             .session
             .as_mut()
             .ok_or("nothing has been launched yet")?
-            .dispatch(request, &mut events)
+            .dispatch(
+                Addressed::of(request, &held.unwrap_or_default()),
+                &mut events,
+            )
             .map_err(|error| failed(&error));
         events.finish().map_err(Aborted::Wire)?;
         let answered = answered?;

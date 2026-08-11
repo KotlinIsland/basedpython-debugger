@@ -11,6 +11,14 @@
 //! mismatch outright, so a second model would buy a stability nobody needs at
 //! the price of a seam where a field can be dropped
 //!
+//! a stop is the one message that carries less than the type a front end sees,
+//! and it is not a wire copy either: [`bpd_core::Reported`] is what the
+//! **debuggee** can know, and `bpd_core::Stop` is that plus the session it
+//! arrived on, which only the engine can know. the conversion is
+//! `Reported::in_session`, in the core, and it is a struct literal — so a field
+//! added to a stop is a compile error there rather than a field that quietly
+//! stops crossing
+//!
 //! there is no request id. one would be a field that is parsed and never read
 //! until there are two requests in flight at once, and the first thing to need
 //! it is the concurrency that arrives with breakpoints
@@ -19,7 +27,7 @@ use std::io::{Read, Write};
 
 use bpd_core::{
     ContextLayer, Detail, Entry, Evaluated, Frame, FrameId, LogRecord, Mode, Omitted, Refusal,
-    Resolved, Scope, SourceBreakpoint, StepKind, Stop, ThreadState, Which,
+    Reported, Resolved, Scope, SourceBreakpoint, StepKind, ThreadState, Which,
 };
 
 use crate::frame::{self, Result};
@@ -38,7 +46,14 @@ pub enum FromAgent {
     /// thread that is not running, and nothing would have said so
     Stopped {
         /// the thread, and why
-        stop: Stop,
+        ///
+        /// everything about the stop the debuggee can know, which is all of a
+        /// [`bpd_core::Stop`] but the session it is of. an agent counts its
+        /// stops from one and cannot see another agent doing the same, so the
+        /// id that tells two of them apart is the engine's — added as the
+        /// report arrives, on the connection it arrived on, which is the only
+        /// place that can know
+        stop: Reported,
     },
 
     /// the threads named were let go
@@ -462,7 +477,7 @@ mod tests {
     #[test]
     fn an_agent_event_round_trips() {
         let sent = FromAgent::Stopped {
-            stop: Stop {
+            stop: Reported {
                 stop: 1,
                 thread: 8_482_561_408,
                 reason: StopReason::Entry,
@@ -503,7 +518,7 @@ mod tests {
     #[test]
     fn a_breakpoint_stop_round_trips() {
         let sent = FromAgent::Stopped {
-            stop: Stop {
+            stop: Reported {
                 stop: 3,
                 thread: 8_482_561_408,
                 reason: StopReason::Breakpoint {
@@ -579,7 +594,7 @@ mod tests {
     #[test]
     fn a_condition_that_raised_round_trips_with_its_traceback() {
         let sent = FromAgent::Stopped {
-            stop: Stop {
+            stop: Reported {
                 stop: 1,
                 thread: 8_482_561_408,
                 holding: Vec::new(),

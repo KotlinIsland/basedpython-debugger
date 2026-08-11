@@ -11,7 +11,7 @@
 //! being waited for. everything else a debugger does is a `Request`, which is
 //! the whole point of the capability surface being data
 
-use bpd_core::{Reporting, Request, Response, Stop};
+use bpd_core::{Addressed, Reporting, Request, Response, Stop};
 
 /// something a session could not do, as an adapter has to render it
 ///
@@ -24,14 +24,19 @@ pub type Failed = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// a debug session: something that answers the capability surface
 pub trait Session {
-    /// answer one request
+    /// answer one request, addressed to the session it is for
+    ///
+    /// the address is [`bpd_core::Addressed`] rather than a bare [`Request`]
+    /// because a stop is only unique within one debugged process. the adapter
+    /// puts one on every request it makes; a request that names a session this
+    /// is not is refused rather than answered here
     ///
     /// `reporting` takes what the debuggee says while it runs, which is not the
     /// answer to anything — a logpoint's record, and the acknowledgement of a
     /// pause armed through an [`Interrupt`]
     fn dispatch(
         &mut self,
-        request: Request,
+        asked: Addressed,
         reporting: &mut dyn Reporting,
     ) -> Result<Response, Failed>;
 

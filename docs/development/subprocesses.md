@@ -488,3 +488,9 @@ means giving it something through its environment — which is the one channel t
 parity guarantee currently keeps clean. what that would cost, and what the
 guarantee would become, is designed rather than guessed at, and it is the rest of
 this milestone
+
+what a debugged child needs *before* any of that is a way to say which debuggee
+a stop belongs to, since every id an agent mints counts from one in its own
+process. that part is built: a session is named, a stop says which session it is
+of, and a request may name one — see [sessions](sessions.md). there is still one
+session, and what would produce a second is the propagation above

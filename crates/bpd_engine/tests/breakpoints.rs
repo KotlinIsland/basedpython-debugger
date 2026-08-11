@@ -1010,9 +1010,9 @@ fn a_running_debuggee_refuses_a_request_rather_than_leaving_it_unanswered() {
 
     let running = debuggee
         .dispatch(
-            bpd_core::Request::Run {
+            bpd_core::Addressed::unnamed(bpd_core::Request::Run {
                 deadline: Some(std::time::Duration::from_millis(100)),
-            },
+            }),
             &mut bpd_test::reporting::Unreported,
         )
         .expect("the debuggee was resumed");

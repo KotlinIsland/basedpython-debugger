@@ -82,6 +82,18 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
             "the `detail` object of `variables`, `evaluate`, `set_variable` and \
              `state`, which is per call rather than per session",
         ),
+
+        // the same route DAP has, and for a different reason: this server
+        // holds one session, so there is one thing to address to and an agent
+        // that had to name it would be naming the only one there is. what
+        // arrives with a second session is a tool that lists them, and the
+        // argument that goes with it
+        Facet::Session => Reach::OnItsOwn(
+            "on every request it makes: one that is about a stop is addressed \
+             to the session that stop was reported from, which the stop \
+             carries, and one that is about the program names none — which is \
+             the only session this server holds",
+        ),
     }
 }
 

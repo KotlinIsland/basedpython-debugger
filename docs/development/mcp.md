@@ -151,6 +151,21 @@ held. when several are, it is refused and the refusal lists them. that rule is
 `bpd_core::only_stop`, in the core, because every front end has to apply it and
 two of them applying their own would make the same call mean two things
 
+### no tool takes a session, and every request names one
+
+a stop number is unique in the process that minted it and no further, so a
+`bpd_core::Request` may name the **session** it is for. no tool here takes one
+as an argument, because this server holds one session — an argument for it would
+be an agent naming the only thing there is, and the tool that would make it
+meaningful is one that lists them, which arrives with the second session
+
+what the server does instead is address every request it makes: one that is
+about a stop goes to the session that stop was reported from, which the `Stop`
+carries, and one that is about the program names none and is answered by the
+only session open. with two open, a request naming none is **refused** rather
+than answered from whichever came first — `bpd_core::only_session`, which is
+`only_stop`'s rule one level up. see [sessions](sessions.md)
+
 ### a breakpoint id is its position in the set
 
 `set_breakpoints` replaces **every** breakpoint, so an id can be the position in

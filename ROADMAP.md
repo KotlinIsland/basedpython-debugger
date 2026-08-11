@@ -470,8 +470,16 @@ the one channel the parity guarantee keeps clean
 
 a **forked** child needs none of that, because it inherits memory: it already
 holds everything it would need to reconnect. that is the cheapest real
-propagation available and it is the next step, after the session id that having
-two of them requires
+propagation available and it is the next step
+
+the session id two debuggees require is built, ahead of the propagation rather
+than after it, because nothing above it can be built without one: every id an
+agent mints — a stop's number, and the frame and snapshot ids on it — counts
+from one in its own process, so two agents name two different things the same.
+the engine mints a `SessionId`, a stop says which session it is of, a request may
+name one, and one that names none is the only session there is — refused rather
+than picked when there is more than one. there is still one session; see
+[sessions](docs/development/sessions.md)
 
 ### M8 — attach
 

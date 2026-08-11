@@ -19,9 +19,9 @@ use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 
 use bpd_core::{
-    At, Binding, Content, Did, Entry, Evaluated, Evaluation, Facet, Frame, FrameId, Mode, Outcome,
-    Reach, Record, Reporting, Request, Resolved, Response, Running, Site, Stack, Stop, StopReason,
-    Threads, Value, Variables, WorldStopped,
+    Addressed, At, Binding, Content, Did, Entry, Evaluated, Evaluation, Facet, Frame, FrameId,
+    Mode, Outcome, Reach, Record, Reported, Reporting, Request, Resolved, Response, Running,
+    SessionId, Site, Stack, Stop, StopReason, Threads, Value, Variables, WorldStopped,
 };
 use bpd_dap::{
     Configuration, Failed, Interrupt, Launcher, ProgramOutput, Session, Started, reach_of,
@@ -30,6 +30,16 @@ use bpd_dap::{
 
 /// the interpreter's identity for the one thread this fake ever holds
 const THREAD: u64 = 4242;
+
+/// the session this fake's stops are reported from
+///
+/// the engine mints one per debuggee and a fake has no engine, so this stands
+/// in for one. deliberately not 1: what is under test is that the adapter
+/// addresses a request to the session the **stop** came from, and a number that
+/// could be a default would not show it
+fn session() -> SessionId {
+    SessionId::new(std::num::NonZeroU64::new(7).expect("7 is not zero"))
+}
 
 /// what the session was asked, and what the requests carried
 ///
@@ -41,6 +51,12 @@ const THREAD: u64 = 4242;
 struct Recorder {
     requests: Vec<&'static str>,
     details: Vec<bpd_core::Detail>,
+    /// what every request was addressed to, beside what it asked for
+    ///
+    /// naming the session is a capability like any other, and one the adapter
+    /// makes on its own — so the only way to check the table is honest is to
+    /// look at what really arrived
+    addressed: Vec<(&'static str, Option<SessionId>)>,
 }
 
 /// the recorder, shared with the fake session
@@ -132,6 +148,33 @@ fn every_capability_carried_inside_a_request_is_reached_or_says_why_not() {
             "the launch configuration asked for 7 children per container and \
              the session was asked for {detail:?}"
         );
+    }
+
+    // and the capability the adapter reaches on its own: a DAP request has no
+    // field for a session, so the adapter puts one on every request it makes.
+    // a request about a stop goes to the session that stop was reported from
+    assert!(
+        recorded
+            .addressed
+            .iter()
+            .any(|(_, addressed)| *addressed == Some(session())),
+        "nothing the adapter asked for named the session its stops came from: \
+         {:?}",
+        recorded.addressed
+    );
+
+    // and nothing was ever addressed anywhere else. this fake holds one
+    // session, so a request naming another would be the adapter inventing one
+    for (name, addressed) in &recorded.addressed {
+        if let Some(named) = addressed {
+            assert_eq!(
+                *named,
+                session(),
+                "`{name}` was addressed to {named}, and the only session there \
+                 is is {}",
+                session()
+            );
+        }
     }
 }
 
@@ -629,12 +672,13 @@ impl Launcher for Fake {
 }
 
 fn stop_at(number: u64, reason: StopReason) -> Stop {
-    Stop {
+    Reported {
         stop: number,
         thread: THREAD,
         reason,
         holding: Vec::new(),
     }
+    .in_session(session())
 }
 
 fn integer(text: &str) -> Value {
@@ -721,9 +765,11 @@ impl Session for FakeSession {
     )]
     fn dispatch(
         &mut self,
-        request: Request,
+        asked: Addressed,
         reporting: &mut dyn Reporting,
     ) -> Result<Response, Failed> {
+        let Addressed { session, request } = asked;
+
         // a program starts a child while it runs, so a wait is where one is
         // reported. the fake does it on every wait, which is what makes the
         // adapter's route for it part of this conversation rather than
@@ -735,6 +781,7 @@ impl Session for FakeSession {
         {
             let mut recorder = self.asked.lock().expect("the recorder is not poisoned");
             recorder.requests.push(request.name());
+            recorder.addressed.push((request.name(), session));
             match &request {
                 Request::Variables { detail, .. }
                 | Request::Evaluate { detail, .. }

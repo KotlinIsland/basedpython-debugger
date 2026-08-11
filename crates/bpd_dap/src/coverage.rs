@@ -100,6 +100,18 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
                   rather than answered on whichever convention bpd guessed",
         },
 
+        // a DAP session **is** the connection. the spec's answer to a second
+        // debuggee is the `startDebugging` reverse request, which has the
+        // client start a whole second session of its own — so there is no
+        // field on a DAP request for a session id and a client never writes
+        // one. the adapter addresses every request it makes instead
+        Facet::Session => Reach::OnItsOwn(
+            "on every request it makes: one that is about a stop is addressed \
+             to the session that stop was reported from, which the stop \
+             carries, and one that is about the program names none — which is \
+             the only session a connection serves",
+        ),
+
         // DAP has nowhere on a request to carry them, so they come from the
         // launch configuration instead — one setting for the session rather
         // than one per read. that is a narrower way to reach it, not a gap

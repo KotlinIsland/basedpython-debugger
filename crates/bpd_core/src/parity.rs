@@ -88,17 +88,26 @@ pub enum Facet {
 
     /// how much of a value one request may read — [`Detail`]
     ValueBounds,
+
+    /// which session a request is for — [`crate::Addressed`]
+    ///
+    /// carried beside a [`Request`] rather than inside one, and a capability
+    /// all the same: a front end that never said which session it meant would
+    /// be a front end that cannot reach a second one, and the two of them
+    /// drifting over that is exactly what the parity rule is for
+    Session,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 2] = [Self::HitCondition, Self::ValueBounds];
+    pub const ALL: [Self; 3] = [Self::HitCondition, Self::ValueBounds, Self::Session];
 
     /// what to call this capability in a message about it
     pub const fn name(self) -> &'static str {
         match self {
             Self::HitCondition => "a breakpoint's hit condition",
             Self::ValueBounds => "the bounds on how much of a value is read",
+            Self::Session => "naming the session a request is for",
         }
     }
 }
