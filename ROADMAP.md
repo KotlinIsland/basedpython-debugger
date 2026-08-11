@@ -473,10 +473,26 @@ into the body of a for loop`. pydevd sets `f_trace` first, which is why reading
 it suggests otherwise — that is the `settrace` era's requirement, not this one
 
 so the loud refusal this milestone needs is cpython's own, with a reason already
-in it, and what is left to build is the plumbing. one trap found while
-establishing it: `co_lines()` reports the `def` line, and **no LINE event is ever
-delivered for it**, so a jump origin taken from `co_lines()` can be a line that
-never arrives
+in it, and what is left to build is the plumbing. two traps found while
+establishing it, both about which lines produce an event:
+
+- `co_lines()` reports the `def` line, and **no LINE event is ever delivered for
+    it**, so a jump origin taken from `co_lines()` can be a line that never
+    arrives
+- **no LINE event is delivered for the line jumped *to***. measured on 3.13,
+    3.14 and 3.15: jumping back from `C` to `A` in a three-statement body runs
+    `A, B, A, B, C` while the events are `A, B, C, B, C`. execution really is at
+    the destination and really does run it — the event for it is simply not
+    sent. so where the program now is has to be **derived from the jump**, and a
+    debugger that waits to be told will report the line after the one it moved to
+
+that second one also means **restart frame is reachable for the topmost frame**
+by the same mechanism: jump to the first statement and write the original
+arguments back through the PEP 667 proxy. measured working. what it does not
+give is the DAP operation's other half — discarding the frames *above* a chosen
+one — because nothing in cpython pops a frame from outside it. so the two halves
+of this milestone are not equally reachable, and the entry should not imply they
+are
 
 both refuse loudly rather than approximating: a jump into a different block,
 into or out of a `try`, or across a `with` is either correct or rejected
