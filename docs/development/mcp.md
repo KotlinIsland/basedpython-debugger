@@ -83,9 +83,9 @@ what a timeout says instead is what is true — the program is still running, an
 here is what to do about it:
 
 - **`wait`** carries on waiting and touches nothing. it is the only tool that
-  perturbs the program in no way at all
+    perturbs the program in no way at all
 - **`pause`** arms a line event for the whole program and holds the first thread
-  that reaches one. that is a real stop, and everything is askable again
+    that reaches one. that is a real stop, and everything is askable again
 
 a sampled stack presented as a stopped one is the debugger reporting a state the
 program was not in. a timeout that says nothing about a location is the honest
@@ -93,26 +93,26 @@ shape of what bpd can see from here
 
 ## the tools
 
-| tool | what it is |
-| --- | --- |
-| `launch` | start a program and hold it before its first statement |
-| `set_breakpoints` | replace the whole breakpoint set |
-| `set_exception_breakpoints` | stop where an exception is raised, or leaves the program |
-| `continue_` | let every held thread go, and return the next stop |
-| `step_over`, `step_in`, `step_out` | step one thread, and return where it landed |
-| `wait` | wait without touching the program |
-| `pause` | hold the next thread that reaches a line |
-| `resume` | let held threads go without waiting |
-| `stack` | one held thread's frame chain |
-| `variables` | one scope of one frame |
-| `evaluate` | a python expression, in a frame |
-| `set_variable` | write a name of a frame's scope |
-| `threads` | what every thread is doing, as a sample |
-| `stop_the_world` | hold every thread that can be held |
-| `state` | describe a whole stop in one call, and keep the answer |
-| `diff` | what changed between two of those answers |
-| `run_script` | run a whole investigation, and return what happened at every step |
-| `terminate` | end the debuggee |
+| tool                               | what it is                                                        |
+| ---------------------------------- | ----------------------------------------------------------------- |
+| `launch`                           | start a program and hold it before its first statement            |
+| `set_breakpoints`                  | replace the whole breakpoint set                                  |
+| `set_exception_breakpoints`        | stop where an exception is raised, or leaves the program          |
+| `continue_`                        | let every held thread go, and return the next stop                |
+| `step_over`, `step_in`, `step_out` | step one thread, and return where it landed                       |
+| `wait`                             | wait without touching the program                                 |
+| `pause`                            | hold the next thread that reaches a line                          |
+| `resume`                           | let held threads go without waiting                               |
+| `stack`                            | one held thread's frame chain                                     |
+| `variables`                        | one scope of one frame                                            |
+| `evaluate`                         | a python expression, in a frame                                   |
+| `set_variable`                     | write a name of a frame's scope                                   |
+| `threads`                          | what every thread is doing, as a sample                           |
+| `stop_the_world`                   | hold every thread that can be held                                |
+| `state`                            | describe a whole stop in one call, and keep the answer            |
+| `diff`                             | what changed between two of those answers                         |
+| `run_script`                       | run a whole investigation, and return what happened at every step |
+| `terminate`                        | end the debuggee                                                  |
 
 ### the schema of a script is its documentation
 
@@ -225,13 +225,13 @@ logpoint on a hot line produces
 two shapes, and they are different on purpose:
 
 - a **tool** that could not do what was asked is a successful call whose content
-  is the reason, with `isError: true`. that is what an agent reads, and a
-  refusal here names a cause and an action in the same words `bpd` uses
-  everywhere
+    is the reason, with `isError: true`. that is what an agent reads, and a
+    refusal here names a cause and an action in the same words `bpd` uses
+    everywhere
 - a **protocol** failure — a method that does not exist, a `tools/call` with no
-  `name`, a tool nobody offers, a resource uri nobody serves — is a JSON-RPC
-  error. a client is entitled to hide one of those from the model, which is
-  exactly why nothing about the program goes down that channel
+    `name`, a tool nobody offers, a resource uri nobody serves — is a JSON-RPC
+    error. a client is entitled to hide one of those from the model, which is
+    exactly why nothing about the program goes down that channel
 
 **arguments that are not the shape the schema says are the first of those, not
 the second.** they read like a protocol failure and they are not one: a
@@ -250,10 +250,10 @@ nothing held has two causes and they need opposite things done about them, so
 they are two refusals rather than one:
 
 - the program is **running**, and has to be held before anything can be asked.
-  the refusal says so, and names the two ways: run it to a breakpoint, or pause
-  it
+    the refusal says so, and names the two ways: run it to a breakpoint, or pause
+    it
 - the program has **exited**, and there is nothing left to hold. the refusal
-  names the exit code
+    names the exit code
 
 `bpd_core::only_stop` cannot tell them apart from the held stops alone, so it
 takes the exit as an argument and every caller supplies it — the engine from the
@@ -273,10 +273,10 @@ resource, the tool or the error was the thing that needed fixing
 what is left after that is real, and it is the part neither can carry: not what
 a call takes, but what its answer **claims**, and where the claim stops
 
-| uri | what it is |
-| --- | --- |
-| `bpd://model/stops` | a stop holds one thread and not the program; the frame chain is a snapshot and every value through it is a sample; a timeout carries no location at all and why; what a stop number, a frame depth and a snapshot id each stay valid for |
-| `bpd://model/values` | why the four scopes are never merged; why an `int` arrives as text; what every bound that bit is called where it bit; why source is proved in the debuggee rather than read from disk; what a diff refuses to call unchanged |
+| uri                  | what it is                                                                                                                                                                                                                               |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bpd://model/stops`  | a stop holds one thread and not the program; the frame chain is a snapshot and every value through it is a sample; a timeout carries no location at all and why; what a stop number, a frame depth and a snapshot id each stay valid for |
+| `bpd://model/values` | why the four scopes are never merged; why an `int` arrives as text; what every bound that bit is called where it bit; why source is proved in the debuggee rather than read from disk; what a diff refuses to call unchanged             |
 
 two, and no more, because a third would be padding. a uri nobody serves is a
 JSON-RPC error under MCP's own `-32002` rather than a page saying so — a page of
@@ -291,12 +291,12 @@ investigation a competent agent would otherwise get **wrong** or do the long
 way. a prompt that restates a tool name is a slash command that costs a
 keystroke and teaches nothing
 
-| prompt | what it would otherwise cost |
-| --- | --- |
-| `nth_call` | a counter written into the program, or n resumes counted by hand, rather than a typed hit condition the debuggee evaluates itself |
-| `step_until` | a step and an evaluate per line of the program, rather than one submitted script whose transcript is the answer |
-| `what_changed` | both states shipped to the agent and compared in its head, which spends the context twice and calls a truncated value unchanged |
-| `why_wont_it_stop` | resuming again with a larger deadline, having read a timeout as a location |
+| prompt             | what it would otherwise cost                                                                                                      |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `nth_call`         | a counter written into the program, or n resumes counted by hand, rather than a typed hit condition the debuggee evaluates itself |
+| `step_until`       | a step and an evaluate per line of the program, rather than one submitted script whose transcript is the answer                   |
+| `what_changed`     | both states shipped to the agent and compared in its head, which spends the context twice and calls a truncated value unchanged   |
+| `why_wont_it_stop` | resuming again with a larger deadline, having read a timeout as a location                                                        |
 
 each carries the whole investigation with its arguments substituted. a required
 argument that was not given is refused naming it, because an investigation with
@@ -346,15 +346,15 @@ existed to make writable
 it bites in two places:
 
 - **at compile time.** `bpd_dap::reach_of` and `bpd_mcp::reach_of` match
-  `bpd_core::Request` with no catch-all arm, so a capability added to the core
-  does not compile in either adapter until someone says how that front end gets
-  at it
+    `bpd_core::Request` with no catch-all arm, so a capability added to the core
+    does not compile in either adapter until someone says how that front end gets
+    at it
 - **at test time.** `bpd_core::parity` also enumerates the capabilities carried
-  *inside* a request — a `Facet` — because a front end can implement every
-  variant and still not offer a hit condition. the test compares what the two
-  adapters claim, requires that everything is reachable from at least one of
-  them, and requires that any "cannot" is in a hand written list with the reason
-  beside it
+    *inside* a request — a `Facet` — because a front end can implement every
+    variant and still not offer a hit condition. the test compares what the two
+    adapters claim, requires that everything is reachable from at least one of
+    them, and requires that any "cannot" is in a hand written list with the reason
+    beside it
 
 the list has one entry: DAP and the hit condition. adding a second means editing
 the test, which is the point — a gap that appears quietly is how two front ends
@@ -363,19 +363,19 @@ drift apart
 ## what is not built
 
 - **`run_to` as a *tool***, which is the shape it cannot take. it is either a
-  composition the adapter performs — arming a breakpoint of its own and taking
-  it off again, which is a decision about the program made in a front end — or a
-  capability of the core that DAP has **no** request for, since a DAP client
-  performs run-to-cursor itself by setting a temporary breakpoint. it also has
-  an unsound failure mode under a deadline: a one-shot breakpoint cannot be
-  taken off while the program is running, so a timed-out `run_to` would leave
-  the program armed with a breakpoint the agent did not ask for. it is built as
-  a **step of `run_script`**, where the engine owns the whole composition
-  including the removal — that reasoning, and what became of the failure mode,
-  is [the debug script](scripts.md#run_to-lives-here-and-nowhere-else)
+    composition the adapter performs — arming a breakpoint of its own and taking
+    it off again, which is a decision about the program made in a front end — or a
+    capability of the core that DAP has **no** request for, since a DAP client
+    performs run-to-cursor itself by setting a temporary breakpoint. it also has
+    an unsound failure mode under a deadline: a one-shot breakpoint cannot be
+    taken off while the program is running, so a timed-out `run_to` would leave
+    the program armed with a breakpoint the agent did not ask for. it is built as
+    a **step of `run_script`**, where the engine owns the whole composition
+    including the removal — that reasoning, and what became of the failure mode,
+    is [the debug script](scripts.md#run_to-lives-here-and-nowhere-else)
 - **attach**, which is PEP 768 and needs cpython 3.14. `launch` is the only way
-  in, and a tool that needs a program says so by name
+    in, and a tool that needs a program says so by name
 - **a subscription for a program that stops on its own.** `wait` touches the
-  program in no way and returns whatever it did, so an agent that wants to hear
-  about a background stop asks for one. what is not answered is the agent that is
-  not asking
+    program in no way and returns whatever it did, so an agent that wants to hear
+    about a background stop asks for one. what is not answered is the agent that is
+    not asking

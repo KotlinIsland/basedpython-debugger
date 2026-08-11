@@ -19,7 +19,7 @@ answer is not in the source:
 - an exception comes from somewhere the traceback does not explain
 - a program hangs, or a thread stops making progress
 - a branch is taken that should not be, or a handler is entered with an argument
-  nobody expected
+    nobody expected
 
 do not reach for it to read code, to run tests, or to check that a function
 returns what it says. it starts a process and holds a thread of it, which is
@@ -37,44 +37,44 @@ arrives in the `launch` tool call:
 ## the shape of a session
 
 1. **`launch`** the program. it is held **before its first statement**, which is
-   where a breakpoint binds against a real interpreter rather than a guess about
-   one. name the `python` explicitly: the default is `python3`, which on a great
-   many machines is older than 3.13 and is refused
+    where a breakpoint binds against a real interpreter rather than a guess about
+    one. name the `python` explicitly: the default is `python3`, which on a great
+    many machines is older than 3.13 and is refused
 2. **`set_breakpoints`** while something is held. it replaces the **whole** set,
-   so everything that should stay set goes in the same array. read the answer —
-   it says the line each one really bound to, and a breakpoint that did not bind
-   says why and is never reported as set
+    so everything that should stay set goes in the same array. read the answer —
+    it says the line each one really bound to, and a breakpoint that did not bind
+    says why and is never reported as set
 3. **`continue_`** with a `deadline_ms`. the answer **is** the stop: why it
-   stopped, which thread, and the top of its stack. there is no event to wait for
+    stopped, which thread, and the top of its stack. there is no event to wait for
 4. **`state`** to describe the stop in one call — frames, scopes, expressions,
-   and the source around each line. the tree walk is still there as `stack`,
-   `variables` and `evaluate`, and answers identically; `state` removes the round
-   trips
+    and the source around each line. the tree walk is still there as `stack`,
+    `variables` and `evaluate`, and answers identically; `state` removes the round
+    trips
 5. **`step_over` / `step_in` / `step_out`**, each one call and one answer, or
-   **`run_script`** for a whole investigation in one
+    **`run_script`** for a whole investigation in one
 
 ## the five things that are easy to get wrong
 
 - **a timeout is not a location.** `outcome: "timed_out"` carries no thread, no
-  frames and no reason, because everything the agent inside the debuggee answers
-  it answers on a thread it is **holding** — a running program cannot even be
-  asked what its threads are doing. resuming again with a larger deadline gives
-  the same answer later. call `pause` instead, which holds the next thread that
-  reaches a line and makes everything askable again
+    frames and no reason, because everything the agent inside the debuggee answers
+    it answers on a thread it is **holding** — a running program cannot even be
+    asked what its threads are doing. resuming again with a larger deadline gives
+    the same answer later. call `pause` instead, which holds the next thread that
+    reaches a line and makes everything askable again
 - **a stop holds one thread, not the program.** everything else keeps running, so
-  several stops can be outstanding and a tool that is about one names it. the
-  held thread's own frame chain is a snapshot; every value reached through it is
-  a sample, and `stop_the_world` is how to ask for the other mode
+    several stops can be outstanding and a tool that is about one names it. the
+    held thread's own frame chain is a snapshot; every value reached through it is
+    a sample, and `stop_the_world` is how to ask for the other mode
 - **do not step n times to reach the nth call.** put the count in the breakpoint:
-  `"hits": {"hits": "exactly", "count": 3}`, with a `condition` when only some
-  hits should qualify. the debuggee evaluates both, so it costs one round trip
-  instead of n
+    `"hits": {"hits": "exactly", "count": 3}`, with a `condition` when only some
+    hits should qualify. the debuggee evaluates both, so it costs one round trip
+    instead of n
 - **do not step and evaluate in turn.** `run_script` takes a tree of steps with
-  its own branching and returns the transcript of every one of them. a
-  `while` loop over `step_over` with a python predicate is one call
+    its own branching and returns the transcript of every one of them. a
+    `while` loop over `step_over` with a python predicate is one call
 - **an expression that raises is an answer, not a failure.** it comes back
-  carrying the exception, because the interpreter is the authority on what an
-  expression is. so is one that does not compile
+    carrying the exception, because the interpreter is the authority on what an
+    expression is. so is one that does not compile
 
 ## when something is refused
 

@@ -132,11 +132,11 @@ the refusals that are real are the ones below
 
 ## what is actually refused, and why
 
-| situation | what bpd says |
-| --- | --- |
-| the file is on disk, the interpreter has compiled no python from it, and django is not in the process | `NotLoaded`, unchanged from the python case |
-| the same, and django's template machinery **is** loaded | `NotLoaded`, saying django has not parsed a template from that file yet and that it binds the first time one is loaded |
-| django has parsed the template and no node renders at or after the line | `NoRenderedNode`, naming the last line that does render one, and naming both reasons a line has none — literal text, and `{% extends %}` |
+| situation                                                                                             | what bpd says                                                                                                                            |
+| ----------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| the file is on disk, the interpreter has compiled no python from it, and django is not in the process | `NotLoaded`, unchanged from the python case                                                                                              |
+| the same, and django's template machinery **is** loaded                                               | `NotLoaded`, saying django has not parsed a template from that file yet and that it binds the first time one is loaded                   |
+| django has parsed the template and no node renders at or after the line                               | `NoRenderedNode`, naming the last line that does render one, and naming both reasons a line has none — literal text, and `{% extends %}` |
 
 the second is the template analogue of "a breakpoint in a module that has not
 been imported is unbound and binds later", and it works the same way: it stays
@@ -304,12 +304,12 @@ frame carries — it is python
 
 the difference is not cosmetic, and it is what someone is usually debugging:
 
-| expression | python | django |
-| --- | --- | --- |
+| expression          | python               | django                                                  |
+| ------------------- | -------------------- | ------------------------------------------------------- |
 | `user.profile.name` | attribute, attribute | dict key, then attribute, then list index, at each step |
-| `items.0` | `SyntaxError` | the first element |
-| `called` | the function object | **the result of calling it** |
-| `value\|upper` | `TypeError` | the filter applied |
+| `items.0`           | `SyntaxError`        | the first element                                       |
+| `called`            | the function object  | **the result of calling it**                            |
+| `value\|upper`      | `TypeError`          | the filter applied                                      |
 
 filters resolve because the expression is compiled with django's own
 `FilterExpression` against a `Parser` built from the engine's registered

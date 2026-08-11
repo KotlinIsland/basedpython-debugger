@@ -20,6 +20,14 @@
     "indentWidth": 4,
     "lineLength": 88
   },
+  // `pythonMarkdown` is the four space list continuation the docs are written
+  // with and mkdocs needs; commonMark's align-to-the-marker would put a
+  // continuation under `- [x] ` at six. asterisks because that is what the
+  // prose already uses for emphasis — the plugin's own default is underscores
+  "markdown": {
+    "listIndentKind": "pythonMarkdown",
+    "emphasisKind": "asterisks"
+  },
   // everything the plugins below claim, minus the trees nobody edits by hand.
   // build output and the virtualenv are untracked, but `dprint fmt` with no
   // arguments walks the working directory rather than the index
@@ -31,12 +39,10 @@
     "**/.idea",
     "site"
   ],
-  // toml, python, yaml, and the json and javascript the vs code extension is
-  // made of.
-  //
-  // **no markdown plugin**: dprint's markdown style pads every table cell to
-  // the width of its column, which the docs do not do, and the docs are meant
-  // to read the same as basedpython's
+  // markdown, toml, python, yaml, and the json and javascript the vs code
+  // extension is made of. a python code block inside markdown is formatted by
+  // the ruff plugin, which the markdown plugin reaches through the tag on the
+  // fence
   //
   // **basedpython is not covered**: no plugin claims `.by`, and `buff` is not
   // distributed as a binary this could shell out to. a `.by` file, or a `by`
@@ -46,6 +52,7 @@
   // into its cache, so a url cannot serve different bytes under a version that
   // did not change
   "plugins": [
+    "https://plugins.dprint.dev/markdown-0.22.1.wasm@4906fbb038977732aae0e216e4b0b957e2722f8d79282660ccb36d27dd051f17",
     "https://plugins.dprint.dev/toml-0.7.0.wasm@0126c8112691542d30b52a639076ecc83e07bace877638cee7c6915fd36b8629",
     "https://plugins.dprint.dev/ruff-0.8.2.wasm@d57e5c26a3f9786b478b637b9e29f9e564a5c235e100689081aab0a78f5d2099",
     "https://plugins.dprint.dev/json-0.23.0.wasm@3e1f1b7c1427df6bd8981a11aaa2c466fde8d1115e9dde4c652130458539443c",

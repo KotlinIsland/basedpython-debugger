@@ -62,13 +62,13 @@ bounds inside `variables`
 
 a hard-coded path would be a lie on someone else's machine, so it is a lookup:
 
-| `bpd.executable` | what happens |
-| --- | --- |
-| unset — the default, `bpd` | looked up on `PATH`, entry by entry |
-| a bare name | the same lookup, for that name |
-| an absolute path | used as given, if there is a file there this machine would run |
-| a relative path | **refused** — it would resolve against a directory nobody chose |
-| empty | **refused**, naming the setting |
+| `bpd.executable`           | what happens                                                    |
+| -------------------------- | --------------------------------------------------------------- |
+| unset — the default, `bpd` | looked up on `PATH`, entry by entry                             |
+| a bare name                | the same lookup, for that name                                  |
+| an absolute path           | used as given, if there is a file there this machine would run  |
+| a relative path            | **refused** — it would resolve against a directory nobody chose |
+| empty                      | **refused**, naming the setting                                 |
 
 the `PATH` walk is done by the extension rather than left to the process spawn,
 and that is the whole point of it: a spawn that cannot find its program produces

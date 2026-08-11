@@ -46,10 +46,10 @@ the user gives a path. the interpreter has whatever string was handed to
 `compile`. deciding whether they are the same file is where breakpoints quietly
 fail to bind, so text is not compared at all
 
-| what is really going on | what comparing text does |
-| --- | --- |
-| an editable install symlinks the package into the tree | two paths, one file, no binding |
-| macos `/var` is a symlink to `/private/var` | two paths, one file, no binding |
+| what is really going on                                                  | what comparing text does        |
+| ------------------------------------------------------------------------ | ------------------------------- |
+| an editable install symlinks the package into the tree                   | two paths, one file, no binding |
+| macos `/var` is a symlink to `/private/var`                              | two paths, one file, no binding |
 | a case-insensitive volume holds `Widget.py`, the editor says `widget.py` | two paths, one file, no binding |
 
 so the identity used is the **filesystem's own**: `(device, inode)` on unix, and
@@ -59,11 +59,11 @@ does not correct case at all
 
 a path with no such identity has no identity, and nothing resembles it into one:
 
-| `co_filename` | what it is |
-| --- | --- |
-| `<string>`, `<stdin>` | source that was never on disk |
+| `co_filename`                   | what it is                             |
+| ------------------------------- | -------------------------------------- |
+| `<string>`, `<stdin>`           | source that was never on disk          |
 | `<frozen importlib._bootstrap>` | a module compiled into the interpreter |
-| `/opt/app.zip/pkg/module.py` | a zipimported module |
+| `/opt/app.zip/pkg/module.py`    | a zipimported module                   |
 
 a breakpoint against any of these is reported **unbound**, and the reason says
 that the interpreter has loaded code under exactly that name and that the name
@@ -207,12 +207,12 @@ line
 
 what it declines, and why declining is the point:
 
-| shape | why |
-| --- | --- |
-| `value > 1.5` | parsing a float is a second implementation of python's parser, and one that rounds differently is worse than no fast path |
-| `value == 1_0`, a literal too big for an `i64` | python takes both spellings and rust does not, so both decline rather than differ |
-| `value is 3` | identity is only knowable for `None`, `True` and `False`. against anything else the interpreter compares with the object it put in `co_consts`, which is not the one this would build |
-| `'x' in value`, `value.attr == 1`, `(value == 3)` | not the shape |
+| shape                                             | why                                                                                                                                                                                   |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `value > 1.5`                                     | parsing a float is a second implementation of python's parser, and one that rounds differently is worse than no fast path                                                             |
+| `value == 1_0`, a literal too big for an `i64`    | python takes both spellings and rust does not, so both decline rather than differ                                                                                                     |
+| `value is 3`                                      | identity is only knowable for `None`, `True` and `False`. against anything else the interpreter compares with the object it put in `co_consts`, which is not the one this would build |
+| `'x' in value`, `value.attr == 1`, `(value == 3)` | not the shape                                                                                                                                                                         |
 
 a name that reads natively but is **not a local of that frame** is handed to the
 interpreter too. it is then a global, a builtin, or nothing at all, and deciding

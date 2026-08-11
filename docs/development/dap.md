@@ -18,14 +18,14 @@ how the agent reports something would become what a DAP client sees
 and the difference is worth being blunt about:
 
 - **neovim, through `nvim-dap`** — works today. the adapter is named in the
-  configuration itself, so nothing else has to be installed
+    configuration itself, so nothing else has to be installed
 - **vs code** — needs an extension, because it resolves a configuration's
-  `"type"` through one and offers no way to name an adapter executable from
-  `launch.json` alone. `editors/vscode/` is that extension and it contributes
-  the type, the launch attributes and the lookup for the binary — and nothing
-  else, which is where the MVP's line on editor integration lands. it has
-  **not** been driven by hand in vs code, and
-  [the vs code extension](vscode.md) says exactly what that leaves unverified
+    `"type"` through one and offers no way to name an adapter executable from
+    `launch.json` alone. `editors/vscode/` is that extension and it contributes
+    the type, the launch attributes and the lookup for the binary — and nothing
+    else, which is where the MVP's line on editor integration lands. it has
+    **not** been driven by hand in vs code, and
+    [the vs code extension](vscode.md) says exactly what that leaves unverified
 
 `nvim-dap`, which is the one that works:
 
@@ -79,15 +79,15 @@ the same configuration body is what a vs code `launch.json` entry holds:
 every field here is read. one that were parsed and ignored would be a setting a
 user could see accepted and never get
 
-| field | default | what it does |
-| --- | --- | --- |
-| `program` | required | the script to run |
-| `args` | `[]` | arguments for the program, exactly as it receives them |
-| `python` | `python3` | the interpreter, resolved on `PATH` like any command |
-| `stopOnEntry` | `false` | stay stopped before the first statement |
-| `stopTheWorld` | `false` | hold every thread that can be held, for each stop |
-| `variables` | see below | how much of a value to read |
-| `threadSettleMs` | `50` | how far apart the two samples a thread census compares |
+| field            | default   | what it does                                           |
+| ---------------- | --------- | ------------------------------------------------------ |
+| `program`        | required  | the script to run                                      |
+| `args`           | `[]`      | arguments for the program, exactly as it receives them |
+| `python`         | `python3` | the interpreter, resolved on `PATH` like any command   |
+| `stopOnEntry`    | `false`   | stay stopped before the first statement                |
+| `stopTheWorld`   | `false`   | hold every thread that can be held, for each stop      |
+| `variables`      | see below | how much of a value to read                            |
+| `threadSettleMs` | `50`      | how far apart the two samples a thread census compares |
 
 `bpd` holds **every** program before its first statement — that is how a
 breakpoint binds against a real interpreter rather than against a guess about
@@ -112,16 +112,16 @@ every one of them is a field of `bpd_core::Detail`:
 ```
 
 - `budget`, `children` and `text` are the ones that bite. when one does, the
-  value's own line in the variables pane says which, how much was there, and
-  which of these to raise. that message is only useful to someone who has
-  somewhere to raise it, which is what this exists for
+    value's own line in the variables pane says which, how much was there, and
+    which of these to raise. that message is only useful to someone who has
+    somewhere to raise it, which is what this exists for
 - `repr` is **off** by default because `__repr__` is arbitrary user code. bpd
-  cannot interrupt it once it has started, so a `__repr__` that hangs hangs the
-  debuggee
+    cannot interrupt it once it has started, so a `__repr__` that hangs hangs the
+    debuggee
 - `depth` applies where a value is read once and kept — an evaluated
-  expression, and the value a write left behind. the variables *tree* is a
-  different thing: opening a node re-reads its scope one level deeper, so how
-  far it goes is however far the client has opened it
+    expression, and the value a write left behind. the variables *tree* is a
+    different thing: opening a node re-reads its scope one level deeper, so how
+    far it goes is however far the client has opened it
 
 ## where DAP's model and bpd's differ
 
@@ -185,13 +185,13 @@ advertised: `supportsConfigurationDoneRequest`,
 
 not advertised, and why:
 
-| capability | why not |
-| --- | --- |
-| `supportsHitConditionalBreakpoints` | the string has no agreed meaning — above |
-| `supportsEvaluateForHovers` | an evaluation runs the program's own code, and running it because a mouse passed over an identifier is the debugger changing the program by accident |
-| `supportsDelayedStackTraceLoading` | `Request::Stack` bounds a walk from the top and cannot start part way down. a client paging from the middle would be answered from a walk that started at the top anyway |
-| `supportsTerminateRequest` | there is no *graceful* end. `disconnect` ends the debuggee, and a second request that did the same thing under a name promising more would be a promise nothing keeps |
-| `supportsSetExpression`, `supportsFunctionBreakpoints`, `supportsDataBreakpoints`, `supportsStepBack`, `supportsRestartRequest` | no capability behind them exists |
+| capability                                                                                                                      | why not                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `supportsHitConditionalBreakpoints`                                                                                             | the string has no agreed meaning — above                                                                                                                                 |
+| `supportsEvaluateForHovers`                                                                                                     | an evaluation runs the program's own code, and running it because a mouse passed over an identifier is the debugger changing the program by accident                     |
+| `supportsDelayedStackTraceLoading`                                                                                              | `Request::Stack` bounds a walk from the top and cannot start part way down. a client paging from the middle would be answered from a walk that started at the top anyway |
+| `supportsTerminateRequest`                                                                                                      | there is no *graceful* end. `disconnect` ends the debuggee, and a second request that did the same thing under a name promising more would be a promise nothing keeps    |
+| `supportsSetExpression`, `supportsFunctionBreakpoints`, `supportsDataBreakpoints`, `supportsStepBack`, `supportsRestartRequest` | no capability behind them exists                                                                                                                                         |
 
 `attach` is refused by name: attaching is PEP 768, it needs cpython 3.14, and
 `bpd` refuses rather than injecting by another route
@@ -206,14 +206,14 @@ everything the agent answers, it answers on a thread it is **holding**. that one
 fact shapes the whole adapter:
 
 - the main thread owns the session. when nothing is held it is blocked waiting
-  for the program, which is where a `stopped` event comes from
+    for the program, which is where a `stopped` event comes from
 - a reader thread owns the client's input and an interrupt handle. `pause`,
-  `disconnect` and `terminate` are the three things a *running* program can be
-  asked, and the reader answers them without going through the session
+    `disconnect` and `terminate` are the three things a *running* program can be
+    asked, and the reader answers them without going through the session
 - everything else that arrives while the program is running is queued and
-  answered when it next stops. that is the model rather than a shortcut: the
-  agent cannot bind a breakpoint or read a frame without a python thread to do
-  it on. **to change breakpoints in a program that is running, pause it first**
+    answered when it next stops. that is the model rather than a shortcut: the
+    agent cannot bind a breakpoint or read a frame without a python thread to do
+    it on. **to change breakpoints in a program that is running, pause it first**
 
 a second thread stopping while a first is held arrives on the connection rather
 than as the answer to anything, so the adapter compares what the session is
@@ -296,10 +296,10 @@ request, and a client that does not know about one never sends it
 
 - **`attach`**, which is PEP 768 and needs 3.14
 - **variable paging**. `start`, `count` and `filter` are refused rather than
-  ignored: a value is read with a stated bound on how many children come back,
-  and the answer says when the bound bit
+    ignored: a value is read with a stated bound on how many children come back,
+    and the answer says when the bound bit
 - **`restart`**, **function breakpoints**, **data breakpoints**, **goto**,
-  **step back**, and **`setExpression`**
+    **step back**, and **`setExpression`**
 
 what is built but **unverified in the editor it is for**: the vs code extension.
 its schema is pinned to `bpd_dap::Configuration` by a test that fails if either

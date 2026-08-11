@@ -29,7 +29,7 @@ stop both ways and compares them frame for frame, entry for entry
 {
   "frames": 2,
   "scopes": ["local"],
-  "expressions": [ { "expression": "amount * 2", "frame": 0 } ],
+  "expressions": [{ "expression": "amount * 2", "frame": 0 }],
   "source": 2,
   "detail": { "depth": 3, "budget": 8192 }
 }
@@ -93,12 +93,12 @@ proven and lines outside it are not
 
 every way it cannot answer says which:
 
-| why | what it means |
-| --- | --- |
-| `not_a_file` | `co_filename` is not a file — `<string>`, a frozen module, a module in a zip |
-| `does_not_compile` | what is on disk cannot be what the interpreter compiled, because the interpreter compiled it |
-| `not_the_same_code` | the file compiles and this code object is not in it: it has been edited since |
-| `not_utf8` | it compiled under an encoding it declared, and deciding that encoding again here would be a second implementation of a rule cpython owns |
+| why                 | what it means                                                                                                                            |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `not_a_file`        | `co_filename` is not a file — `<string>`, a frozen module, a module in a zip                                                             |
+| `does_not_compile`  | what is on disk cannot be what the interpreter compiled, because the interpreter compiled it                                             |
+| `not_the_same_code` | the file compiles and this code object is not in it: it has been edited since                                                            |
+| `not_utf8`          | it compiled under an encoding it declared, and deciding that encoding again here would be a second implementation of a rule cpython owns |
 
 `a_file_edited_since_the_interpreter_read_it_shows_no_lines_and_says_why` edits
 the fixture underneath a held program and asserts that the answer stops showing
@@ -144,14 +144,27 @@ cannot be asked again
 
 ```json
 {
-  "before": { "snapshot": "2:719f…", "stop": 2, "mode": "non-stop…",
-              "stop_has_ended": true },
-  "after":  { "snapshot": "3:bf52…", "stop": 3, "stop_has_ended": false },
-  "changed": [ { "subject": { "subject": "variable", "frame": 0,
-                              "scope": "local", "name": "total" },
-                 "before": { "seen": "value", "…": "…" },
-                 "after":  { "seen": "value", "…": "…" } } ],
-  "added": [], "removed": [],
+  "before": {
+    "snapshot": "2:719f…",
+    "stop": 2,
+    "mode": "non-stop…",
+    "stop_has_ended": true
+  },
+  "after": { "snapshot": "3:bf52…", "stop": 3, "stop_has_ended": false },
+  "changed": [
+    {
+      "subject": {
+        "subject": "variable",
+        "frame": 0,
+        "scope": "local",
+        "name": "total"
+      },
+      "before": { "seen": "value", "…": "…" },
+      "after": { "seen": "value", "…": "…" }
+    }
+  ],
+  "added": [],
+  "removed": [],
   "unchanged": ["`items` in the local scope of frame 0"],
   "not_compared": []
 }

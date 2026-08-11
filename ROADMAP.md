@@ -27,81 +27,81 @@ breakpoint is not already solid
 **launching**
 
 - [x] `bpd` runs a script, a module (`-m`), and a package the same way the
-      interpreter would: same `__main__` identity, same `sys.argv`, same
-      `sys.path[0]`, same exit code, same stdout and stderr interleaving
+        interpreter would: same `__main__` identity, same `sys.argv`, same
+        `sys.path[0]`, same exit code, same stdout and stderr interleaving
 - [ ] it runs on cpython 3.13 and 3.14, on linux, macos and windows, on gil and
-      free-threaded builds
+        free-threaded builds
 - [ ] an unsupported interpreter is refused before anything is launched, by name
 
 **breakpoints**
 
 - [x] a breakpoint binds through the whole code object tree — inside a
-      comprehension, a lambda, a nested function, a class body
+        comprehension, a lambda, a nested function, a class body
 - [x] a breakpoint on a non-executable line moves to the next executable line
-      and the response says where it moved to
+        and the response says where it moved to
 - [x] a breakpoint in a module that is not imported yet is reported **unbound**,
-      and binds when the module is imported
+        and binds when the module is imported
 - [x] conditions, hit counts and logpoints evaluate in the debuggee, not over
-      the wire
+        the wire
 - [x] a condition that raises reports the exception, and the breakpoint still
-      stops — it never silently behaves as false
+        stops — it never silently behaves as false
 
 **execution control**
 
 - [x] step over, step in, step out, continue, and pause
 - [x] stepping is correct across generators, coroutines, comprehensions,
-      exception unwinding, and re-entrant calls
+        exception unwinding, and re-entrant calls
 - [x] with several threads running, a stop holds **one** thread and the others
-      keep running, on every build, and the stop names the thread it holds
+        keep running, on every build, and the stop names the thread it holds
 - [x] stop-the-world is available as an explicit mode, and a thread parked in a
-      C call is reported as running in native code rather than counted as held
+        C call is reported as running in native code rather than counted as held
 - [x] a stop that blocks other threads because the held thread owns a lock is
-      detected and reported, not left looking like `bpd` hanging
+        detected and reported, not left looking like `bpd` hanging
 
 **state**
 
 - [x] the stack, with each frame's source location, for every **held** thread
 - [x] a thread that is not held has no stack reported for it, because reading
-      one off a running thread describes a moment that has gone. what it gets
-      instead is a census saying whether it moved, labelled as the sample it is
+        one off a running thread describes a moment that has gone. what it gets
+        instead is a census saying whether it moved, labelled as the sample it is
 - [x] locals, globals and closure variables read from the scope that was asked
-      for
+        for
 - [x] a local can be **written**, and the write is visible to the program
 - [x] object graph expansion with an explicit budget, and an explicit statement
-      of what was left out when the budget is hit
+        of what was left out when the budget is hit
 - [x] expression evaluation in a chosen frame, where a failure returns the
-      exception
+        exception
 
 **the two front ends**
 
 - [x] a DAP adapter a real client drives end to end — a breakpoint, the stack,
-      a variable read and written, a step, a resume. driven by a test and by
-      `nvim-dap`, which names the executable in its own configuration
+        a variable read and written, a step, a resume. driven by a test and by
+        `nvim-dap`, which names the executable in its own configuration
 - [ ] the registration stub vs code needs to name the executable at all. it
-      resolves a configuration's `type` through an extension contributing a
-      `debuggers` entry and offers no way to point at a binary, so without one
-      no vs code user can run `bpd` however complete the adapter is.
-      **built and not ticked**: `editors/vscode/` contributes the type, the
-      launch attributes and a `PATH` lookup for the binary, and
-      `crates/bpd_dap/tests/vscode.rs` fails if its schema and
-      `bpd_dap::Configuration` disagree — but nobody has installed it in vs
-      code and started a session, and this project does not tick a box on a
-      thing it has not seen work. see
-      [the vs code extension](docs/development/vscode.md)
+        resolves a configuration's `type` through an extension contributing a
+        `debuggers` entry and offers no way to point at a binary, so without one
+        no vs code user can run `bpd` however complete the adapter is.
+        **built and not ticked**: `editors/vscode/` contributes the type, the
+        launch attributes and a `PATH` lookup for the binary, and
+        `crates/bpd_dap/tests/vscode.rs` fails if its schema and
+        `bpd_dap::Configuration` disagree — but nobody has installed it in vs
+        code and started a session, and this project does not tick a box on a
+        thing it has not seen work. see
+        [the vs code extension](docs/development/vscode.md)
 - [x] an MCP server exposing the same session
 - [x] a parity test that enumerates the capabilities in `bpd_core` and fails if
-      either adapter is missing one. the rule is enforced by CI, not by review
+        either adapter is missing one. the rule is enforced by CI, not by review
 
 **evidence**
 
 - [x] a benchmark in the tree comparing a run under `bpd` with no breakpoints
-      against the same program run bare, and with breakpoints against debugpy.
-      `crates/bpd/benches/overhead.rs`, reported in
-      [what bpd costs](docs/development/overhead.md) — which also records what
-      it contradicted, since two of the claims it was written to check turned
-      out to be wrong
+        against the same program run bare, and with breakpoints against debugpy.
+        `crates/bpd/benches/overhead.rs`, reported in
+        [what bpd costs](docs/development/overhead.md) — which also records what
+        it contradicted, since two of the claims it was written to check turned
+        out to be wrong
 - [ ] integration tests that spawn real interpreters across the version and
-      build matrix
+        build matrix
 
 ### explicitly not in the MVP
 
@@ -472,8 +472,9 @@ executors sever it, and what is left does not say who is responsible:
 async def h():
     raise TypeError("Something broke in h")
 
+
 async def g():
-    asyncio.create_task(h())   # the chain ends here
+    asyncio.create_task(h())  # the chain ends here
 ```
 
 the traceback for that is **one frame** — `h`, and nothing above it — and the
