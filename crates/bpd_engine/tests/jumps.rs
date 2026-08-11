@@ -269,7 +269,7 @@ fn a_breakpoint_on_the_line_a_jump_moves_to_is_named_as_one_that_will_not_fire()
     let on_middle = SourceBreakpoint::at(2, &file, middle);
 
     // the first call reaches `entered` first, which is breakpoint 1
-    let stop = stopped_by(&mut debuggee, &[on_entered.clone(), on_middle.clone()]);
+    let stop = stopped_by(&mut debuggee, &[on_entered.clone(), on_middle]);
     assert!(
         matches!(&stop.reason, StopReason::Breakpoint { breakpoints, .. } if breakpoints == &[1]),
         "expected breakpoint 1 to fire first, got {:?}",
@@ -309,13 +309,13 @@ fn a_breakpoint_on_the_line_a_jump_moves_to_is_named_as_one_that_will_not_fire()
         .set_breakpoints(vec![on_entered])
         .expect("the breakpoint set was replaced");
     debuggee.resume_all().expect("the thread was resumed");
-    let stop = match debuggee
+    match debuggee
         .wait(&mut bpd_test::reporting::Unreported)
         .expect("the debuggee was waited on")
     {
-        Running::Stopped { stop, .. } => stop,
+        Running::Stopped { .. } => {}
         other => panic!("expected the second call to stop, got {other:?}"),
-    };
+    }
 
     // the pass the jump landed in ran `entered` without being offered it. the
     // breakpoint is still set, and this is `twice(2)` reaching it

@@ -74,6 +74,7 @@ over_each_transport!(
     a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so,
     an_editor_can_run_a_whole_investigation_the_way_an_agent_can,
     an_editor_can_ask_what_changed_between_two_stops,
+    an_editor_can_move_where_the_program_carries_on_from,
     a_capability_that_is_not_advertised_is_refused_rather_than_guessed_at,
     a_client_is_refused_the_same_interpreter_the_command_line_is,
 );
@@ -540,6 +541,140 @@ fn an_editor_can_ask_what_changed_between_two_stops(transport: Transport) {
         "the program printed what the diff said it computed"
     );
     client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+/// a program where running a line twice is visible in what it prints
+const REPEATING: &str = r#"import sys
+
+
+def work(seed):
+    total = seed + 1
+    total = total + 10
+    doubled = total * 2
+    print("total", total, flush=True)
+    print("doubled", doubled, flush=True)
+    return total, doubled
+
+
+work(1)
+sys.exit(0)
+"#;
+
+fn an_editor_can_move_where_the_program_carries_on_from(transport: Transport) {
+    // set next statement, as an editor really reaches it: `gotoTargets` for the
+    // line the user picked, then `goto` with the target it minted. what proves
+    // the move happened is the **program's own output** — a line that ran twice
+    // prints a different number
+    let fixture = Fixture::new("moving", REPEATING);
+    let elsewhere = fixture.sibling("elsewhere", "value = 1\n");
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+
+    let again = line_of(REPEATING, "total = total + 10");
+    let held = line_of(REPEATING, "doubled = total * 2");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": held } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint");
+    let thread = stopped["body"]["threadId"].clone();
+
+    // a line in a file no held thread is executing has no target. a line number
+    // means nothing without its file, and cpython would take the same number
+    // against whatever file the frame happens to be running
+    let none = client.request(
+        "gotoTargets",
+        &serde_json::json!({ "source": { "path": elsewhere }, "line": again }),
+    );
+    assert_eq!(
+        none["body"]["targets"],
+        serde_json::json!([]),
+        "a file nothing is executing was offered a place to move to: {none}"
+    );
+
+    let targets = client.request(
+        "gotoTargets",
+        &serde_json::json!({ "source": { "path": fixture.path() }, "line": again }),
+    );
+    let target = targets["body"]["targets"][0].clone();
+    assert_eq!(
+        target["line"], again,
+        "the target has to be the line the client asked about: {targets}"
+    );
+    assert!(
+        target["label"]
+            .as_str()
+            .expect("a target has a label")
+            .contains("work"),
+        "the label has to say which frame it is about: {targets}"
+    );
+
+    client.request(
+        "goto",
+        &serde_json::json!({ "threadId": thread, "targetId": target["id"] }),
+    );
+
+    // the thread was never resumed, so DAP's answer to a move is a `stopped`
+    // event of its own — and this is where a client learns where the frame is
+    let moved = client.event("stopped");
+    assert_eq!(moved["body"]["reason"], "goto", "the event was {moved}");
+    assert_eq!(moved["body"]["threadId"], thread);
+
+    // and the stack agrees. no line event is delivered for the line a jump
+    // moves to, so this is derived from the move rather than waited for
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    assert_eq!(
+        stack["body"]["stackFrames"][0]["line"], again,
+        "the stack was {stack}"
+    );
+
+    // the breakpoint is on a line the move went back **over**, so it fires
+    // again when that line runs again. only the destination's own line is
+    // passed over, and only for the pass the jump landed in
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    let again_at = client.event("stopped");
+    assert_eq!(
+        again_at["body"]["reason"], "breakpoint",
+        "a breakpoint on a line the jump went back over has to fire when the \
+         line runs again: {again_at}"
+    );
+
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [],
+        }),
+    );
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    let exited = client.event("exited");
+    assert_eq!(exited["body"]["exitCode"], 0);
+    client.event("terminated");
+
+    let said = client.output();
+    assert!(
+        said.contains("total 22"),
+        "the line the frame moved to did not run again: {said:?}"
+    );
+    assert!(
+        said.contains("doubled 44"),
+        "the lines after the destination ran against the old value: {said:?}"
+    );
+
     client.request("disconnect", &serde_json::json!({}));
     client.finish();
 }

@@ -649,11 +649,20 @@ impl<'py> Stopped<'py> {
             frame.setattr("f_lineno", line)
         };
 
+        // read off the frame rather than assumed from the line that was asked
+        // for: no `LINE` event is delivered for the destination, so the frame
+        // itself is the only thing that can say where the program is now — and
+        // after a refusal it says the same way that nothing moved
+        let at = describe_where(&frame)?;
+
         let outcome = match moved {
             Ok(()) => Jump::Moved {
                 from,
                 bound_to_none: bound_to_none(&frame, &unbound)?,
-                unannounced: crate::breakpoints::bound_at(code.as_ptr() as usize, line),
+                // against the line the frame is on now rather than the line that
+                // was asked for. they are the same line, and one of them is a
+                // reading and the other is an expectation
+                unannounced: crate::breakpoints::bound_at(code.as_ptr() as usize, at.line),
             },
             Err(error) => Jump::Refused {
                 wanted: line,
@@ -663,12 +672,7 @@ impl<'py> Stopped<'py> {
 
         Ok(FromAgent::Jumped {
             jumped: Jumped {
-                // read off the frame rather than assumed from the line that was
-                // asked for: no `LINE` event is delivered for the destination,
-                // so the frame itself is the only thing that can say where the
-                // program is now — and after a refusal it says the same way that
-                // nothing moved
-                at: describe_where(&frame)?,
+                at,
                 outcome,
                 mode: world::mode(),
             },
