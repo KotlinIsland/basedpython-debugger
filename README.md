@@ -11,9 +11,14 @@ a debugger for python and [basedpython](https://github.com/KotlinIsland/basedpyt
     cache instead of a fresh copy per launch. one machine, ten runs a
     figure, written down in
     [what bpd costs](docs/development/overhead.md)
-- **speaks DAP** — the debug adapter protocol, the same protocol vs code,
-    pycharm, neovim and the rest already know how to drive. `bpd` is a debug
-    adapter, so an editor needs a launch configuration, not a bespoke plugin
+- **speaks DAP** — the debug adapter protocol. `bpd` is a debug adapter, so an
+    editor needs a launch configuration rather than a bespoke plugin. **vs
+    code** is proven: `editors/vscode/` registers the type and a test drives a
+    real session through it. **neovim** drives it through `nvim-dap`, which
+    names the executable itself. **pycharm is a hard requirement and is not
+    done** — its own python debugging is pydevd, and DAP reaches it through a
+    plugin rather than natively, so see [ROADMAP.md](ROADMAP.md) for what that
+    turns on
 - **and MCP, at parity** — ai agents get the same session through an interface
     shaped for them rather than for a ui. both are thin adapters over one
     session core, and a capability exists in both or in neither

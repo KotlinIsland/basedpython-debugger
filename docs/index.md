@@ -12,10 +12,13 @@ compatibility layer holding it back:
     run, on a loop of eighteen million line locations with a breakpoint held in
     the same function. what a session *does* cost is the 55 ms it takes to
     attach, and that is on the same page
-- **speaks DAP** — the [debug adapter protocol](https://microsoft.github.io/debug-adapter-protocol/), the same
-    protocol vs code, pycharm, neovim and the rest already know how to drive.
+- **speaks DAP** — the [debug adapter protocol](https://microsoft.github.io/debug-adapter-protocol/).
     `bpd` is a debug adapter, so an editor needs a launch configuration rather
-    than a bespoke plugin
+    than a bespoke plugin. **vs code** is proven, by a test that drives a real
+    session through the extension; **neovim** drives it through `nvim-dap`.
+    **pycharm is a hard requirement and is not done** — its own python
+    debugging is pydevd, and DAP reaches it through a plugin rather than
+    natively
 - **and MCP, at parity** — ai agents get the same session through an interface
     shaped for them rather than for a ui. both are thin adapters over the same
     session core, and a capability exists in both or in neither

@@ -11,8 +11,9 @@ agent rather than being a human interface with a wrapper on it
     debugging concept would have to be smuggled through custom requests, and
     nothing about LSP's document synchronisation would earn its keep
 - **DAP** is the right protocol for editors, and `bpd` speaks it, because that
-    is how it plugs into vs code, pycharm and neovim. it is the wrong shape for
-    an agent, for reasons below
+    is how it plugs into vs code and neovim — and, through a plugin rather than
+    natively, into pycharm. it is the wrong shape for an agent, for reasons
+    below
 - **MCP** is what agents already speak, and its tool model matches how an agent
     thinks: call a thing, get the answer, decide what to do
 
