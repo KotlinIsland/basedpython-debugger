@@ -11,6 +11,13 @@
 # committed
 scratch.*
 
+# what running the vs code suite leaves behind. `package-lock.json` is committed
+# beside them, which is what pins the versions these hold
+node_modules/
+# a whole vs code, downloaded by `@vscode/test-electron` — the better part of a
+# gigabyte, and cached between runs
+/editors/vscode/.vscode-test
+
 .DS_Store
 *.pyc
 __pycache__/

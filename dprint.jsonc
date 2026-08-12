@@ -37,7 +37,12 @@
     "**/.venv",
     "**/.cache",
     "**/.idea",
-    "site"
+    "site",
+    // a whole vs code, downloaded by the extension's test suite. it is json and
+    // javascript all the way down, and none of it is ours
+    "**/.vscode-test",
+    // npm writes it and npm's format is what `npm ci` compares against
+    "**/package-lock.json"
   ],
   // markdown, toml, python, yaml, and the json and javascript the vs code
   // extension is made of. a python code block inside markdown is formatted by

@@ -130,17 +130,13 @@ function resolve(folder) {
 const factory = {
   createDebugAdapterDescriptor(session) {
     const folder = session.workspaceFolder;
-    let command;
-    try {
-      command = resolve(folder);
-    } catch (reason) {
-      // how vs code renders an error thrown out of here is not something this
-      // project has checked by hand, and a diagnostic that might not be shown
-      // is not a diagnostic. so it is shown, and thrown as well — the throw is
-      // what stops the session
-      vscode.window.showErrorMessage(reason.message);
-      throw reason;
-    }
+    // throwing is the whole of the failure path: it stops the session, and vs
+    // code puts the message in front of the user itself. that last part used to
+    // be a guess, and the error was shown with `showErrorMessage` here as well
+    // in case it was wrong — until `test/session.js` drove a session whose
+    // `bpd.executable` names nothing and found vs code rendering the thrown
+    // error, so the belt and the braces were the same sentence twice
+    const command = resolve(folder);
     // the debuggee inherits the adapter's working directory, and a program can
     // see it. the folder the configuration came from is the one a user means;
     // whatever vs code itself was started in is not
