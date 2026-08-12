@@ -954,6 +954,25 @@ impl Client {
         }
     }
 
+    /// the next reverse request of this name the adapter has sent
+    ///
+    /// DAP is not one-directional, and `startDebugging` is the one this adapter
+    /// sends: it asks the client to start a second debug session, because a DAP
+    /// session **is** a connection and there is nowhere on one to put a second
+    /// program. the same cursor as an event, and for the same reason
+    fn reverse_request(&mut self, command: &str) -> serde_json::Value {
+        loop {
+            while self.taken < self.seen.len() {
+                let message = self.seen[self.taken].clone();
+                self.taken += 1;
+                if message["type"] == "request" && message["command"] == command {
+                    return message;
+                }
+            }
+            self.next_message();
+        }
+    }
+
     /// where this adapter is listening, and what a connection to it presents
     ///
     /// what a **second** connection needs, which is what a `startDebugging`
@@ -1162,6 +1181,12 @@ fn a_client_is_refused_the_same_interpreter_the_command_line_is(transport: Trans
 /// never sends anything at all
 struct Bystander {
     socket: TcpStream,
+    /// the reading end, kept
+    ///
+    /// one buffer for the whole connection rather than one per message: a
+    /// `BufReader` made and dropped around each read throws away whatever it
+    /// read past the message, which is most of the next one
+    reads: BufReader<TcpStream>,
 }
 
 impl Bystander {
@@ -1172,7 +1197,8 @@ impl Bystander {
         socket
             .set_read_timeout(Some(PATIENCE))
             .expect("a connected socket takes a read timeout");
-        Self { socket }
+        let reads = BufReader::new(socket.try_clone().expect("a connected socket clones"));
+        Self { socket, reads }
     }
 
     /// send one framed message, with whatever headers were asked for
@@ -1193,7 +1219,7 @@ impl Bystander {
 
     /// the next message of any kind
     fn next_message(&mut self) -> serde_json::Value {
-        let mut reader = BufReader::new(&self.socket);
+        let reader = &mut self.reads;
         let mut length = None;
         loop {
             let mut line = String::new();
@@ -1249,6 +1275,210 @@ impl Bystander {
 
 /// a program that runs long enough to be interrupted by a second connection
 const WAITING: &str = "import sys\nx = 1\nsys.exit(0)\n";
+
+/// a program that forks, so that there is a second session to be handed over
+///
+/// the parent waits on the child, so it does not end until the child has been
+/// resumed — which is what makes the handover observable rather than a race
+const A_FORK: &str = r"import os
+import signal
+
+pid = os.fork()
+if pid == 0:
+    signal.alarm(120)
+    os._exit(7)
+
+_, status = os.waitpid(pid, 0)
+assert os.waitstatus_to_exitcode(status) == 7, status
+";
+
+#[test]
+fn debugging_a_forked_child_is_refused_when_the_client_could_not_take_one_up() {
+    // a debugged fork **stops**, and DAP's only way to hand a second program to
+    // a client is to ask it to start a second session. a client that cannot be
+    // asked would leave the child held with nothing able to reach it — so this
+    // is refused at `launch`, before anything has forked, which is the only
+    // moment at which refusing costs nothing
+    let fixture = Fixture::new("forker", A_FORK);
+    let mut client = Client::start(Transport::Loopback);
+
+    // deliberately without `supportsStartDebuggingRequest`, which is a *client*
+    // capability and the only one this adapter reads
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    let refused = client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "debugChildren": true,
+        }),
+    );
+    assert_eq!(refused["success"], false, "{refused}");
+    let said = refused["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a refusal says why: {refused}"));
+    assert!(
+        said.contains("startDebugging"),
+        "the refusal has to name what the client is missing, and said {said:?}"
+    );
+    assert!(
+        said.contains("held"),
+        "and what would happen to the child, and said {said:?}"
+    );
+    assert!(
+        said.contains("take `debugChildren` out"),
+        "and what to do instead, and said {said:?}"
+    );
+
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+#[test]
+fn debugging_a_forked_child_is_refused_on_a_transport_a_second_session_cannot_reach() {
+    // the same refusal for the other half of the same question. on stdio the
+    // session `startDebugging` asks for would be another `bpd dap` process,
+    // with an engine of its own that this debuggee is not in
+    let fixture = Fixture::new("forker", A_FORK);
+    let mut client = Client::start(Transport::Stdio);
+
+    client.request(
+        "initialize",
+        &serde_json::json!({ "adapterID": "bpd", "supportsStartDebuggingRequest": true }),
+    );
+    let refused = client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "debugChildren": true,
+        }),
+    );
+    assert_eq!(refused["success"], false, "{refused}");
+    let said = refused["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a refusal says why: {refused}"));
+    assert!(
+        said.contains("--listen"),
+        "the refusal has to say what to run instead, and said {said:?}"
+    );
+    assert!(
+        said.contains("engine of its own"),
+        "and why this transport cannot carry it, and said {said:?}"
+    );
+
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+#[test]
+fn a_forked_child_reaches_a_second_client_through_the_start_debugging_request() {
+    // the whole of slice five in one conversation: the program forks, the child
+    // opens a session of its own on the engine this adapter already holds, and
+    // the adapter asks the client to start a second debug session for it. the
+    // client obeys by opening a second connection to **this** adapter — which
+    // is why the listener serves more than one
+    let fixture = Fixture::new("forker", A_FORK);
+    let mut client = Client::start(Transport::Loopback);
+
+    client.request(
+        "initialize",
+        &serde_json::json!({ "adapterID": "bpd", "supportsStartDebuggingRequest": true }),
+    );
+    client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "debugChildren": true,
+        }),
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let asked = client.reverse_request("startDebugging");
+    assert_eq!(
+        asked["arguments"]["request"], "attach",
+        "the child is already running, so what the client is asked to start is \
+         an attach: {asked}"
+    );
+    let configuration = asked["arguments"]["configuration"].clone();
+    let session = configuration["bpdSession"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the configuration names the session: {configuration}"));
+
+    // the settings the parent's session was launched with come with it, which
+    // is what makes a fork of a fork debugged too
+    assert_eq!(configuration["debugChildren"], true, "{configuration}");
+
+    // and it says how to reach **this** adapter. a client that started a fresh
+    // one would start a fresh engine, which does not hold the child
+    let connect = configuration["bpdConnect"].clone();
+    let port = u16::try_from(
+        connect["port"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("the configuration names the port: {connect}")),
+    )
+    .expect("a port is sixteen bits");
+    let token = connect["token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the configuration names the token: {connect}"))
+        .to_string();
+    let (endpoint, expected) = client.listening_at();
+    assert_eq!(port, endpoint.port(), "{connect}");
+    assert_eq!(token, expected, "one listener, one token: {connect}");
+
+    // the client obeys, and what it gets is the child, held at the line that
+    // forked with a session of its own
+    let mut second = Bystander::connect(endpoint);
+    second.send(
+        &format!("X-Bpd-Token: {token}\r\n"),
+        &format!(
+            r#"{{"seq":1,"type":"request","command":"attach","arguments":{{"bpdSession":{session},"program":"{}"}}}}"#,
+            fixture.path().display()
+        ),
+    );
+    let answered = second.next_message();
+    assert_eq!(answered["command"], "attach", "{answered}");
+    assert_eq!(
+        answered["success"], true,
+        "the session is already held and taking it up starts nothing: {answered}"
+    );
+
+    second.send(
+        "",
+        r#"{"seq":2,"type":"request","command":"configurationDone","arguments":{}}"#,
+    );
+    let stopped = loop {
+        let message = second.next_message();
+        if message["type"] == "event" && message["event"] == "stopped" {
+            break message;
+        }
+    };
+    let described = stopped["body"]["description"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a stop says what it is: {stopped}"));
+    assert!(
+        described.contains("forked from"),
+        "the child's first stop is its fork, and said {described:?}"
+    );
+    assert!(
+        described.contains("run nothing of its own"),
+        "and that nothing of it has run, and said {described:?}"
+    );
+
+    // letting the child go lets the parent finish, which is the proof that the
+    // two connections really were driving one debuggee
+    second.send(
+        "",
+        r#"{"seq":3,"type":"request","command":"continue","arguments":{"threadId":1}}"#,
+    );
+    let exited = client.event("exited");
+    assert_eq!(exited["body"]["exitCode"], 0, "{exited}");
+
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
 
 /// one raw connection that presents this listener's token, and its `initialize`
 ///
