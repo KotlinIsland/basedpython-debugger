@@ -650,6 +650,21 @@ pub enum Running {
         rebound: Vec<Resolved>,
     },
 
+    /// the debuggee's connection closed, and its exit is **not bpd's to read**
+    ///
+    /// a session bpd launched ends with [`Self::Exited`], because bpd holds the
+    /// child and can wait on it. a session that arrived on bpd's listener from
+    /// a process bpd did not start has no child: bpd is not its parent, so it
+    /// cannot reap it and never learns what it exited with
+    ///
+    /// so this says the program is over and says nothing about how, which is
+    /// the whole of why it is a variant rather than an [`Self::Exited`] with a
+    /// number in it. the number would be invented
+    Ended {
+        /// what loading a file changed about the breakpoint set on the way
+        rebound: Vec<Resolved>,
+    },
+
     /// the deadline passed and the program is **still running**
     ///
     /// only ever the answer to a [`Request::Run`] or [`Request::Wait`] that
@@ -695,6 +710,31 @@ pub fn exit_code(status: ExitStatus) -> i64 {
     unreachable!("an exit status is either a code or a signal, and this was {status}")
 }
 
+/// how a session's program ended
+///
+/// deliberately closed, and deliberately not an `i64` with a sentinel. bpd
+/// knows an exit code when it started the process and holds the child; when the
+/// process connected to bpd's listener instead, bpd is not its parent and never
+/// learns one. those are different facts and a front end has to be able to tell
+/// them apart, because "exited with 0" and "over, and what with is unknown"
+/// lead a reader to opposite conclusions
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    /// what the program exited with, as one number — see [`exit_code`]
+    Code(i64),
+    /// the program is over and bpd cannot say what it exited with
+    Unknown,
+}
+
+impl std::fmt::Display for Exit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Code(code) => write!(formatter, "{code}"),
+            Self::Unknown => formatter.write_str("an exit bpd cannot read"),
+        }
+    }
+}
+
 /// the one stop that is held, for a request that is about one thread
 ///
 /// refuses rather than picking when several are held. a debugger that answered
@@ -705,14 +745,15 @@ pub fn exit_code(status: ExitStatus) -> i64 {
 /// request that names no stop means, and two front ends deciding it separately
 /// is how the same call comes to mean two things
 ///
-/// `ended` is what the program exited with, when it has. nothing held has two
-/// causes that need opposite things done about them — the program is running and
-/// has to be stopped, or it is over and there is nothing to stop — and a caller
-/// that knows which has to say so, because this cannot tell from `held` alone
-pub fn only_stop(held: &[Stop], ended: Option<i64>, wanted: &'static str) -> crate::Result<u64> {
+/// `exit` is how the program ended, when it has. nothing held has causes that
+/// need opposite things done about them — the program is running and has to be
+/// stopped, or it is over and there is nothing to stop — and a caller that
+/// knows which has to say so, because this cannot tell from `held` alone
+pub fn only_stop(held: &[Stop], exit: Option<Exit>, wanted: &'static str) -> crate::Result<u64> {
     match held {
-        [] => Err(match ended {
-            Some(code) => crate::Error::ProgramExited { code, wanted },
+        [] => Err(match exit {
+            Some(Exit::Code(code)) => crate::Error::ProgramExited { code, wanted },
+            Some(Exit::Unknown) => crate::Error::ProgramEnded { wanted },
             None => crate::Error::NotStopped { wanted },
         }),
         [stop] => Ok(stop.stop),
@@ -1025,7 +1066,7 @@ mod tests {
         // "nothing is held" invites holding something. a program that has ended
         // cannot be held at all, and a client told the first would go on pausing
         // a process that is not there
-        let over = only_stop(&[], Some(3), "the stack").expect_err("nothing is held");
+        let over = only_stop(&[], Some(Exit::Code(3)), "the stack").expect_err("nothing is held");
         let said = over.to_string();
         assert!(
             said.contains("exited with 3"),
@@ -1039,7 +1080,7 @@ mod tests {
         // and an exit is only ever the reason when nothing is held. a stop that
         // is held is a thread that is still there to answer
         assert_eq!(
-            only_stop(&[held_at(3)], Some(0), "the stack").expect("one is held"),
+            only_stop(&[held_at(3)], Some(Exit::Code(0)), "the stack").expect("one is held"),
             3
         );
     }

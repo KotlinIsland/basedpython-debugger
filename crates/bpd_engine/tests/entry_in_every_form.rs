@@ -76,7 +76,8 @@ fn the_program_has_run_nothing_while_it_is_stopped_in_any_form() {
             Err(error) => panic!("{described} did not launch: {error}"),
         };
 
-        let [held] = debuggee.held() else {
+        let held_now = debuggee.held();
+        let [held] = held_now.as_slice() else {
             panic!("one thread is held at entry, and got {:?}", debuggee.held())
         };
         assert_eq!(held.reason, StopReason::Entry, "for {described}");

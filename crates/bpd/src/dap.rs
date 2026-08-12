@@ -172,11 +172,11 @@ impl Session for Attached {
     }
 
     fn held(&self) -> Vec<Stop> {
-        self.0.held().to_vec()
+        self.0.held()
     }
 
     fn interrupt(&self) -> Result<Box<dyn bpd_dap::Interrupt>, Failed> {
-        Ok(Box::new(Reaching(self.0.interrupt())))
+        Ok(Box::new(Reaching(self.0.interrupt(None)?)))
     }
 }
 

@@ -32,7 +32,7 @@ use bpd_core::{
 use bpd_protocol::message::{FromAgent, FromEngine};
 use sha2::{Digest as _, Sha256};
 
-use super::{Debuggee, unexpected};
+use super::{Attached, unexpected};
 use crate::Result;
 
 /// how many hex characters of the digest name a state
@@ -42,7 +42,7 @@ use crate::Result;
 /// state twice gives the same id back
 const DIGEST: usize = 32;
 
-impl Debuggee {
+impl Attached {
     /// describe one stop's state, and keep the answer under an id
     pub(super) fn describe(
         &mut self,

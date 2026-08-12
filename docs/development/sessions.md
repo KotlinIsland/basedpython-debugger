@@ -1,8 +1,8 @@
 # sessions
 
 a **session** is one control connection, to one agent, in one debugged process.
-`bpd` runs exactly one of them today. this page is about the fact that it is
-*named*, which is what has to be true before there can be a second
+a debuggee can hold more than one of them, and an ordinary one holds one. this
+page is about how they are named and how a request says which it is for
 
 ## why an id exists at all
 
@@ -97,17 +97,53 @@ other capability: `crates/bpd_dap/tests/coverage.rs` and
 conversation and assert that a request really was addressed to the session its
 stop came from, and that nothing was ever addressed anywhere else
 
+## a second session
+
+the listener a debuggee attached on is **kept open** for the life of that
+debuggee. an agent that connects to it and presents that debuggee's session
+token becomes a second session of the same `Debuggee`, with its own breakpoint
+set, its own stop numbering and its own held threads
+
+what a connection arriving there is treated as is decided by the token and by
+nothing else. any local process can open a socket to a loopback port; one that
+cannot answer the handshake is closed and is not counted, and the session it
+interrupted carries on. it is not reported, because a peer that said nothing has
+said nothing *about the program* — and the handshake is given a short deadline of
+its own so that a peer which connects and stays silent cannot hold up the wait it
+arrived in
+
+the wait is what watches the door. a session spends almost all of its time
+waiting for its program, so the wait polls the connection **and** the listener
+rather than blocking on the connection alone. the other sessions' connections
+are deliberately not read during it: a wait is addressed to one session, a stop
+that arrived on another has nowhere in the answer to go, and unread bytes stay
+in the kernel until a wait addressed to that session reads them
+
+### a program bpd did not start
+
+the second session is over a process bpd is not the parent of, and two things
+follow that a front end has to be told rather than left to assume:
+
+- **its exit is not bpd's to read.** bpd cannot reap it and never learns its
+    status. the connection closing is the whole of what bpd observes, so the
+    outcome is `Running::Ended` — the program is over, and there is no number.
+    MCP renders it as `"outcome": "ended"` with no `exit_code` field at all, and
+    DAP as `terminated` with **no** `exited`, because DAP's `exited` event
+    carries an `exitCode` and there is none. a zero there would be the adapter
+    inventing the one field the event is for
+- **it cannot be terminated.** ending a debuggee is signalling the child bpd
+    holds; there is no child. `terminate` is refused **by name**, because a
+    `terminate` that quietly did nothing is one a client reads as a program that
+    has been ended
+
 ## what is not built
 
-**a second session.** there is one `Debuggee`, it holds one `Session`, and the
-listener still accepts exactly one agent. what exists is the naming:
-
-- nothing lists the sessions, because there is one to list
+- nothing lists the sessions, so nothing but the engine's own api can learn a
+    second one is there
 - no tool takes a session argument and no DAP request carries one
-- a whole-program request from either front end names no session, so with two
-    open it would be refused rather than routed. giving a front end a way to say
-    which one is the same work as giving it a way to *learn* there are two, and
-    both belong with the feature that produces one
-
-the feature that produces one is a debugged child process — see
-[child processes](subprocesses.md)
+- so a whole-program request from either front end names no session, and with
+    two open it is **refused** rather than routed — `bpd_core::only_session`,
+    which is `only_stop`'s rule one level up. that is the honest behaviour and
+    it is not a usable one, which is why the front ends come next
+- nothing yet *produces* a second session on its own. what will is a debugged
+    child process — see [child processes](subprocesses.md)

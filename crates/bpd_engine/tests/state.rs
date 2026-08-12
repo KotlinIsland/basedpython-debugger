@@ -120,6 +120,12 @@ fn stop_at(debuggee: &mut Debuggee, file: &Path, line: u32) {
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
         ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -140,6 +146,12 @@ fn to_exit(debuggee: &mut Debuggee) {
         Running::StillRunning { waited, .. } => unreachable!(
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
+        ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
         ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
@@ -616,6 +628,12 @@ fn a_stack_holds_no_frame_of_bpds_even_where_an_expression_of_bpds_just_ran() {
         Running::StillRunning { waited, .. } => unreachable!(
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
+        ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
         ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")

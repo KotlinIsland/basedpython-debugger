@@ -24,6 +24,13 @@ use bpd_core::{
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
 
+/// how many requests the engine has sent the only session's agent
+fn requests_sent(debuggee: &Debuggee) -> u64 {
+    debuggee
+        .requests_sent()
+        .expect("this debuggee holds the one session the test launched")
+}
+
 /// a loop whose body has every kind of local a condition might read
 ///
 /// `VISITED` is written on the line above the breakpoint, so a stop can say
@@ -159,6 +166,12 @@ fn run_to_exit(debuggee: &mut Debuggee, mut at_stop: impl FnMut(&StopReason)) {
             Running::StillRunning { waited, .. } => unreachable!(
                 "this wait carries no deadline and was answered after {waited:?} \
                  with the program still running"
+            ),
+            // bpd launched this program and holds its child, so it is bpd that
+            // reads the exit
+            Running::Ended { .. } => unreachable!(
+                "the program bpd launched ended without an exit status, and bpd \
+                 holds its child"
             ),
             Running::Finishing { threads, .. } => {
                 panic!("nothing was held, and the debuggee ended holding {threads:?}")
@@ -383,6 +396,12 @@ fn a_breakpoint_asked_for_again_unchanged_keeps_its_hit_count() {
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
         ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -423,6 +442,12 @@ fn a_breakpoint_that_changed_starts_counting_again() {
         Running::StillRunning { waited, .. } => unreachable!(
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
+        ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
         ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
@@ -636,6 +661,12 @@ fn a_condition_that_raises_stops_and_reports_the_exception() {
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
         ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -708,6 +739,12 @@ fn a_condition_that_raises_inside_a_call_carries_the_frames_it_raised_in() {
         Running::StillRunning { waited, .. } => unreachable!(
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
+        ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
         ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
@@ -827,6 +864,12 @@ fn a_logpoint_reports_what_the_frame_held_and_does_not_stop() {
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
         ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -872,6 +915,12 @@ fn a_log_message_that_raises_stops_and_reports_it() {
         Running::StillRunning { waited, .. } => unreachable!(
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
+        ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
         ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
@@ -925,7 +974,7 @@ fn a_logpoint_on_a_hot_line_costs_no_round_trips() {
         ])
         .expect("the breakpoint request was answered");
 
-    let before = debuggee.requests_sent();
+    let before = requests_sent(&debuggee);
     let mut counted = Counted::default();
     match debuggee
         .run(&mut counted)
@@ -936,6 +985,12 @@ fn a_logpoint_on_a_hot_line_costs_no_round_trips() {
         Running::StillRunning { waited, .. } => unreachable!(
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
+        ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
         ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
@@ -949,7 +1004,7 @@ fn a_logpoint_on_a_hot_line_costs_no_round_trips() {
     // show up here as a million of them — and the debuggee would have waited
     // for every one
     assert_eq!(
-        debuggee.requests_sent(),
+        requests_sent(&debuggee),
         before + 1,
         "resuming is one request, and a million log records must not add any"
     );
@@ -1079,6 +1134,12 @@ fn a_file_only_half_seen_binds_nothing_and_says_which_half_is_missing() {
             Running::StillRunning { waited, .. } => unreachable!(
                 "this wait carries no deadline and was answered after {waited:?} \
                  with the program still running"
+            ),
+            // bpd launched this program and holds its child, so it is bpd that
+            // reads the exit
+            Running::Ended { .. } => unreachable!(
+                "the program bpd launched ended without an exit status, and bpd \
+                 holds its child"
             ),
             Running::Finishing { threads, .. } => {
                 panic!("nothing was held, and the debuggee ended holding {threads:?}")

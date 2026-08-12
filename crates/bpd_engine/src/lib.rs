@@ -234,6 +234,15 @@ const ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
 /// how often the wait for an agent checks whether the debuggee died instead
 const ATTACH_POLL: Duration = Duration::from_millis(5);
 
+/// how long a connection that arrived on a live listener has to handshake
+///
+/// short on purpose, and shorter than [`ATTACH_TIMEOUT`], because the two are
+/// not the same situation. at launch nothing else is happening and a cold
+/// interpreter is allowed to be slow. a connection arriving mid-session lands
+/// in the middle of a wait on a program that is running, and a peer that
+/// connects and says nothing must not be able to hold that wait up
+const HANDSHAKE_PATIENCE: Duration = Duration::from_secs(2);
+
 /// how many sessions this engine has minted an id for
 ///
 /// the engine is where a session id comes from, because uniqueness is a
@@ -293,6 +302,32 @@ impl Listener {
         hex
     }
 
+    /// a connection that has arrived and handshaked, if one has
+    ///
+    /// what makes a **second** agent possible: the listener outlives the launch
+    /// that bound it, and this is how the engine looks at it without giving up
+    /// the wait it is in
+    ///
+    /// a connection that arrives here is not assumed to be anything. the
+    /// session token is the whole of the evidence, the handshake is where it is
+    /// checked, and a peer that cannot present it is dropped — `Ok(None)`,
+    /// exactly as if nothing had connected. that is not a failure being
+    /// swallowed: any local process can open a socket to a loopback port, and
+    /// one that could not answer the handshake has said nothing about the
+    /// program for the debugger to report
+    ///
+    /// the handshake itself is given [`HANDSHAKE_PATIENCE`] and no more. a peer
+    /// that connects and then says nothing would otherwise hold up the wait
+    /// this is called from for as long as it liked
+    pub fn arrived(&self) -> Result<Option<Session>> {
+        let stream = match self.listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(source) => return Err(Error::Listen { source }),
+        };
+        Ok(Session::attach(stream, &self.token, HANDSHAKE_PATIENCE).ok())
+    }
+
     /// wait for the agent, giving up if the debuggee dies or takes too long
     ///
     /// `still_running` is polled so that a debuggee which exits during startup —
@@ -306,7 +341,7 @@ impl Listener {
 
         loop {
             match self.listener.accept() {
-                Ok((stream, _)) => return Session::attach(stream, &self.token),
+                Ok((stream, _)) => return Session::attach(stream, &self.token, ATTACH_TIMEOUT),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(source) => return Err(Error::Listen { source }),
             }
@@ -355,13 +390,27 @@ pub struct Session {
 }
 
 impl Session {
-    fn attach(mut stream: TcpStream, token: &[u8; TOKEN_LEN]) -> Result<Self> {
+    /// complete the handshake and take the connection, or refuse it
+    ///
+    /// `patience` bounds the handshake alone. it is a parameter rather than a
+    /// constant because the two callers are in different situations, and both
+    /// are stated where they call — see [`Listener::arrived`]
+    fn attach(mut stream: TcpStream, token: &[u8; TOKEN_LEN], patience: Duration) -> Result<Self> {
         stream
             .set_nonblocking(false)
+            .map_err(|source| Error::Listen { source })?;
+        stream
+            .set_read_timeout(Some(patience))
             .map_err(|source| Error::Listen { source })?;
 
         frame::read_handshake(&mut stream, token)?;
         frame::write_handshake(&mut stream, token)?;
+
+        // the session reads this connection for as long as the program runs,
+        // and the deadline above was about the handshake and nothing else
+        stream
+            .set_read_timeout(None)
+            .map_err(|source| Error::Listen { source })?;
 
         // one handle for reading and one for writing, on the same socket. the
         // session blocks on the reading end for as long as the program runs,
@@ -466,6 +515,51 @@ impl Session {
         }
     }
 
+    /// whether the agent has closed this connection
+    ///
+    /// what a session with **no child** has instead of an exit status. bpd is
+    /// not that process's parent, so there is nothing to reap and the only
+    /// thing it can observe about the program being over is that the agent
+    /// stopped being on the other end
+    ///
+    /// a non-blocking peek rather than a read, so it says what is true now and
+    /// takes nothing off the stream: zero bytes with the socket readable is the
+    /// peer having closed, and anything else — bytes waiting, or nothing yet —
+    /// is a connection that is still there
+    pub fn hung_up(&self) -> Result<bool> {
+        self.reading
+            .set_nonblocking(true)
+            .map_err(|source| Error::Control {
+                source: frame::Error::Io(source),
+            })?;
+
+        let mut first = [0u8; 1];
+        let closed = match self.reading.peek(&mut first) {
+            Ok(0) => Ok(true),
+            Ok(_) => Ok(false),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(source) => Err(Error::Control {
+                source: frame::Error::Io(source),
+            }),
+        };
+
+        self.reading
+            .set_nonblocking(false)
+            .map_err(|source| Error::Control {
+                source: frame::Error::Io(source),
+            })?;
+        closed
+    }
+
     /// wait for the agent to report a stop, and say why it stopped
     pub fn expect_stop(&mut self) -> Result<Stop> {
         const EXPECTED: &str = "the debuggee to stop";
@@ -512,16 +606,23 @@ fn write_to(writing: &mut Writing, request: &FromEngine) -> Result<()> {
 /// [`bpd_core::Reporting::pausing`]
 #[derive(Debug)]
 pub struct Interrupt {
+    session: SessionId,
     writing: Arc<Mutex<Writing>>,
-    child: Arc<Mutex<std::process::Child>>,
+    /// `None` when bpd did not start this process — see [`Self::terminate`]
+    child: Option<Arc<Mutex<std::process::Child>>>,
 }
 
 impl Interrupt {
     pub(crate) const fn new(
+        session: SessionId,
         writing: Arc<Mutex<Writing>>,
-        child: Arc<Mutex<std::process::Child>>,
+        child: Option<Arc<Mutex<std::process::Child>>>,
     ) -> Self {
-        Self { writing, child }
+        Self {
+            session,
+            writing,
+            child,
+        }
     }
 
     /// send a request without waiting for the answer to it
@@ -550,8 +651,23 @@ impl Interrupt {
     /// be asked anything, so a client that wants to be finished with one has
     /// nothing else to say. the agent is not told, because there is no thread
     /// of the debuggee's waiting to be told
+    ///
+    /// # errors
+    ///
+    /// when bpd did not start the process. ending one is signalling the child
+    /// bpd holds and reaping it, and a session that arrived on bpd's listener
+    /// has no child — bpd is not its parent, so there is nothing to signal and
+    /// nothing to wait on. it is **refused by name**, because a `terminate`
+    /// that quietly did nothing is one a client reads as a program that has
+    /// been ended
     pub fn terminate(&mut self) -> Result<()> {
-        let mut child = self.child.lock().expect(
+        let Some(held) = self.child.as_ref() else {
+            return Err(bpd_core::Error::NotOurProcess {
+                session: self.session,
+            }
+            .into());
+        };
+        let mut child = held.lock().expect(
             "nothing panics holding the debuggee: every path through it is a kill or a wait",
         );
         // std refuses to signal a child it has already reaped, which is what a

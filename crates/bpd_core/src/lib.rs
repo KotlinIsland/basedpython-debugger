@@ -57,7 +57,7 @@ pub use script::{
     Script, Step, Transcript,
 };
 pub use session::{
-    Addressed, ContextLayer, ExceptionBreakpoints, Reporting, Request, Response, Running,
+    Addressed, ContextLayer, ExceptionBreakpoints, Exit, Reporting, Request, Response, Running,
     SessionId, Shadowed, Stack, TemplateContext, Threads, Variables, WorldStopped, exit_code,
     only_session, only_stop,
 };

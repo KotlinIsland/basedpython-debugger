@@ -457,9 +457,11 @@ pub fn tools() -> Vec<Tool> {
             description: "resume everything bpd is holding and wait for what the \
                 program does next — **the stop is the return value**. the answer \
                 is one of: `stopped` (with the stop and its top frames), \
-                `exited` (with the exit code), `finishing` (the program ran to \
-                its end with threads still held, so it cannot exit until they \
-                are resumed), or `timed_out`."
+                `exited` (with the exit code), `ended` (the program is over and \
+                bpd cannot say what it exited with, because bpd did not start \
+                that process), `finishing` (the program ran to its end with \
+                threads still held, so it cannot exit until they are resumed), \
+                or `timed_out`."
                 .to_string(),
             schema: object(
                 serde_json::json!({

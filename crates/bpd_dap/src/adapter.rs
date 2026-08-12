@@ -1543,6 +1543,7 @@ impl Adapter {
         let rebound = match &running {
             Running::Stopped { rebound, .. }
             | Running::Exited { rebound, .. }
+            | Running::Ended { rebound }
             | Running::Finishing { rebound, .. }
             | Running::StillRunning { rebound, .. } => rebound.clone(),
         };
@@ -1561,6 +1562,21 @@ impl Adapter {
                 self.event(
                     "exited",
                     &serde_json::json!({ "exitCode": exit_code(status) }),
+                )?;
+                self.event("terminated", &serde_json::json!({}))
+            }
+            // `terminated` and **no `exited`**, which is the protocol saying
+            // exactly what is true. DAP's `exited` event carries an `exitCode`
+            // and there is none: bpd did not start this process, is not its
+            // parent, and never learns what it exited with. sending the event
+            // with a zero in it would be the adapter inventing the one field it
+            // is for
+            Running::Ended { .. } => {
+                self.exited = true;
+                self.say(
+                    "the program is over. bpd did not start that process and is not its \
+                     parent, so what it exited with is not bpd's to read — there is no \
+                     exit code to report\n",
                 )?;
                 self.event("terminated", &serde_json::json!({}))
             }

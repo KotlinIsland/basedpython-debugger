@@ -100,6 +100,12 @@ fn next_stop(debuggee: &mut Debuggee) -> Stop {
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
         ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("the debuggee ended holding {threads:?} instead of stopping")
         }
@@ -119,6 +125,12 @@ fn to_exit(debuggee: &mut Debuggee) {
         Running::StillRunning { waited, .. } => unreachable!(
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
+        ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
         ),
         Running::Finishing { threads, .. } => {
             panic!("the debuggee ended holding {threads:?}")
@@ -831,6 +843,12 @@ fn a_program_that_ends_with_a_thread_still_held_says_so_rather_than_looking_like
         Running::StillRunning { waited, .. } => unreachable!(
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
+        ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
         ),
         Running::Finishing { threads, .. } => assert_eq!(threads, [stop.thread]),
         other => panic!("expected the program to report what it still holds, got {other:?}"),

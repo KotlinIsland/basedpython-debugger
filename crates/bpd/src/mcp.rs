@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use bpd_core::python::Capabilities;
-use bpd_core::{Addressed, Reporting, Response, Stop};
+use bpd_core::{Addressed, Exit, Reporting, Response, Stop};
 use bpd_engine::{Debuggee, Launched, Program};
 use bpd_mcp::{Configuration, Failed, Launcher, ProgramOutput, Session, Started, Stream};
 
@@ -152,14 +152,14 @@ impl Session for Attached {
     }
 
     fn held(&self) -> Vec<Stop> {
-        self.0.held().to_vec()
+        self.0.held()
     }
 
-    fn ended(&self) -> Option<i64> {
+    fn ended(&self) -> Option<Exit> {
         self.0.exited()
     }
 
     fn terminate(&mut self) -> Result<(), Failed> {
-        Ok(self.0.interrupt().terminate()?)
+        Ok(self.0.interrupt(None)?.terminate()?)
     }
 }

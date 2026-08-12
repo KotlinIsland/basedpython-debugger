@@ -215,7 +215,12 @@ session it is of, a request may name one, and a request that names none is the
 only session there is — refused rather than picked when there is more than one,
 which is `only_stop`'s rule one level up
 
-there is one session today and the machinery is what makes a second possible.
+a debuggee can hold more than one. the listener it attached on is kept open, an
+agent that presents its token becomes a second session of the same debuggee, and
+a request that names none of them is refused rather than routed. what does not
+exist yet is a front end that can name one, or anything that produces a second
+without being told to
+
 the whole of it is [sessions](sessions.md)
 
 ### one definition, not two

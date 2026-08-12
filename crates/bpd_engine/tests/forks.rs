@@ -614,6 +614,12 @@ fn a_child_forked_while_threads_are_registering_stops_runs_to_the_end() {
                  waits for ever in the agent's exit path, and its parent waits \
                  for it in `waitpid`"
             ),
+            // bpd launched this program and holds its child, so it is bpd that
+            // reads the exit
+            Running::Ended { .. } => unreachable!(
+                "the program bpd launched ended without an exit status, and bpd \
+                 holds its child"
+            ),
             finishing @ Running::Finishing { .. } => {
                 panic!("the program did not end: {finishing:?}")
             }

@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bpd_core::{Addressed, Reporting, Response, Stop};
+use bpd_core::{Addressed, Exit, Reporting, Response, Stop};
 
 /// something a session could not do, as an adapter has to render it
 ///
@@ -50,13 +50,18 @@ pub trait Session {
     /// against this through [`bpd_core::only_stop`]
     fn held(&self) -> Vec<Stop>;
 
-    /// what the program exited with, or `None` while it is still there
+    /// how the program ended, or `None` while it is still there
     ///
     /// a program with nothing held is in one of two states that need opposite
     /// things done about them: running, and therefore to be paused, or over, and
     /// therefore not. [`bpd_core::only_stop`] cannot tell them apart from the
     /// stops alone, so the session says which
-    fn ended(&self) -> Option<i64>;
+    ///
+    /// [`bpd_core::Exit`] rather than a number because "over" has two shapes.
+    /// bpd reads an exit status off a process it started; one that connected to
+    /// bpd's listener has no parent here and no status to read, and those are
+    /// different things to tell a caller
+    fn ended(&self) -> Option<Exit>;
 
     /// end the debuggee
     ///
