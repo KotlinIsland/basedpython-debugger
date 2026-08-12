@@ -103,6 +103,33 @@ against a specific interpreter:
 BPD_TEST_PYTHONS=/path/to/python3.14 cargo test --workspace
 ```
 
+## the platforms you are not on
+
+the tree carries over a hundred `cfg` sites. the fork handlers, the audit event
+list and `os.posix_spawn` are unix only; the process cache path and
+`_winapi.CreateProcess` are windows only. **a `cfg` arm that stopped compiling
+is invisible to the platform it is not for**, and the whole suite passing on a
+mac says nothing about either of the other two
+
+`cargo check` needs the target's std and no linker, so one machine can answer
+for all of them in about a minute:
+
+```sh
+rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-msvc
+cargo check --workspace --exclude bpd_agent --all-features --all-targets \
+    --target x86_64-unknown-linux-gnu
+```
+
+`bpd_agent` is excluded because it is a cpython extension and pyo3 resolves an
+interpreter **for the target** at build time, which is not something a mac has
+for linux. so this checks everything except the agent, and the agent is what
+every entry of CI's `test` matrix builds for real
+
+CI runs this as its own `cross` job rather than leaving it to the matrix,
+because the matrix only reaches a compiler after installing an interpreter — a
+runner that cannot install one fails having told you nothing about whether the
+code builds
+
 ## building the agent
 
 the agent is a cpython extension module and it is **not** `abi3` — it reads
