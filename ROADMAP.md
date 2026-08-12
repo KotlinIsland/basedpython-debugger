@@ -84,16 +84,22 @@ breakpoint is not already solid
 - [x] a DAP adapter a real client drives end to end — a breakpoint, the stack,
         a variable read and written, a step, a resume. driven by a test and by
         `nvim-dap`, which names the executable in its own configuration
-- [ ] the registration stub vs code needs to name the executable at all. it
+- [x] the registration stub vs code needs to name the executable at all. it
         resolves a configuration's `type` through an extension contributing a
         `debuggers` entry and offers no way to point at a binary, so without one
         no vs code user can run `bpd` however complete the adapter is.
-        **built and not ticked**: `editors/vscode/` contributes the type, the
-        launch attributes and a `PATH` lookup for the binary, and
-        `crates/bpd_dap/tests/vscode.rs` fails if its schema and
-        `bpd_dap::Configuration` disagree — but nobody has installed it in vs
-        code and started a session, and this project does not tick a box on a
-        thing it has not seen work. see
+        `editors/vscode/` contributes the type, the launch attributes and a
+        `PATH` lookup for the binary, and `crates/bpd_dap/tests/vscode.rs` fails
+        if its schema and `bpd_dap::Configuration` disagree.
+        **what ticked it**: `editors/vscode/test/` downloads a pinned vs code
+        and starts a session through the extension — a breakpoint set with
+        `vscode.debug.addBreakpoints`, a stop observed as the frame vs code
+        focuses, the stack and a local read, and a resume that ends with the
+        program's own exit. the assertions are the editor's debug state, not
+        bpd's output, and CI runs it headless under `xvfb`. driving it also
+        found a bug nothing else could: vs code renders an error thrown out of
+        `createDebugAdapterDescriptor` itself, so the `showErrorMessage` beside
+        the throw was the same sentence in front of the user twice. see
         [the vs code extension](docs/development/vscode.md)
 - [ ] **intellij drives it.** a hard requirement, not a nice-to-have, and a
         different problem from vs code rather than the same one twice
@@ -281,7 +287,7 @@ exception breakpoints. see [the stopped state](docs/development/state.md),
 [stepping](docs/development/stepping.md) and
 [threads](docs/development/threads.md)
 
-### M4 — DAP · the adapter is built, the extension is unverified
+### M4 — DAP · the adapter is built, and vs code has driven it
 
 `bpd dap` speaks the debug adapter protocol on stdin and stdout. a breakpoint is
 set, hit, the frame's locals read, a local written, and a step taken — proved
@@ -299,14 +305,15 @@ a per-client convention, and bpd refuses one rather than guessing which was
 meant. `supportsSingleThreadExecutionRequests` is on, because a stop holds one
 thread and a client told otherwise would render a stop that never happened
 
-**the registration vs code needs is built, and has not been driven.**
+**the registration vs code needs is built, and vs code has driven it.**
 `editors/vscode/` contributes `"type": "bpd"`, the launch attributes, and a
 lookup that finds `bpd` on `PATH` or says which of two things to do about it —
 and nothing else, no panel and no view. its schema cannot drift from
-`bpd_dap::Configuration` without `cargo test` failing. what has **not** happened
-is anyone installing it and starting a session, so the criterion stays unticked;
-[the vs code extension](docs/development/vscode.md) lists what that leaves
-unverified. `nvim-dap` names the executable in the configuration itself and has
+`bpd_dap::Configuration` without `cargo test` failing, and `editors/vscode/test/`
+starts a real session inside a real vs code, so "it loads, it activates, it
+stops on a breakpoint" is a test rather than a hope;
+[the vs code extension](docs/development/vscode.md) says what that still leaves
+uncovered. `nvim-dap` names the executable in the configuration itself and has
 worked since the adapter was built
 
 the whole of it is [the DAP adapter](docs/development/dap.md)

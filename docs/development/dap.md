@@ -149,9 +149,10 @@ and the difference is worth being blunt about:
     `"type"` through one and offers no way to name an adapter executable from
     `launch.json` alone. `editors/vscode/` is that extension and it contributes
     the type, the launch attributes and the lookup for the binary — and nothing
-    else, which is where the MVP's line on editor integration lands. it has
-    **not** been driven by hand in vs code, and
-    [the vs code extension](vscode.md) says exactly what that leaves unverified
+    else, which is where the MVP's line on editor integration lands. a real vs
+    code drives a real session through it in `editors/vscode/test/`, and
+    [the vs code extension](vscode.md) says what that covers and what it does
+    not
 
 `nvim-dap`, which is the one that works:
 
@@ -548,8 +549,9 @@ request, and a client that does not know about one never sends it
 - **`restart`**, **function breakpoints**, **data breakpoints**, **goto**,
     **step back**, and **`setExpression`**
 
-what is built but **unverified in the editor it is for**: the vs code extension.
-its schema is pinned to `bpd_dap::Configuration` by a test that fails if either
-side moves, and nobody has yet installed it and started a session — which is a
-different sentence from "it works", and [that page](vscode.md) is the one that
-says so
+the vs code extension is **driven in the editor it is for**. its schema is
+pinned to `bpd_dap::Configuration` by a test that fails if either side moves,
+and `editors/vscode/test/` downloads a real vs code and starts a real session
+through it — a breakpoint hit, the stack and a local read, a resume that ends
+with the program's own exit. what that still leaves uncovered is on
+[that page](vscode.md), and it is a shorter list than it was
