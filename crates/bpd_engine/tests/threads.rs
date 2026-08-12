@@ -436,20 +436,40 @@ fn a_thread_piled_up_behind_a_lock_the_held_thread_took_is_reported_as_getting_n
     // then asked for the lock, and it is getting nowhere
     expect(&fixture, "waiter_started");
     let waiter = ident(&fixture, "waiter");
-    let census = debuggee
-        .threads(SETTLE)
-        .expect("the threads were reported on");
-    let state = census
-        .get(waiter)
-        .unwrap_or_else(|| panic!("the census left out thread {waiter}"));
+
+    // `waiter_started` is written on the line **before** `with gate:`, so the
+    // marker proves the thread reached the lock and not that it is behind it —
+    // a census taken the moment it appears can still catch the thread executing
+    // the python that writes the marker. so the wait is on the **state**, which
+    // is what the earlier flake in `stopping_the_world_...` was fixed to do:
+    // waiting for time makes a test that fails under load, waiting for a
+    // condition makes one that fails only when the condition never comes
+    let deadline = Instant::now() + PATIENCE;
+    let (census, state) = loop {
+        let census = debuggee
+            .threads(SETTLE)
+            .expect("the threads were reported on");
+        let state = census
+            .get(waiter)
+            .unwrap_or_else(|| panic!("the census left out thread {waiter}"))
+            .clone();
+        let arrived = state.progress == Progress::Still
+            && state.at.as_ref().is_some_and(|at| at.function == "waiter");
+        if arrived {
+            break (census, state);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the waiter never settled behind the lock the held thread took. it \
+             is blocked on `gate` and nothing can release it while the holder \
+             is held, so this is the debugger failing to see a thread that is \
+             getting nowhere. the last sample was progress {:?} at {:?}",
+            state.progress,
+            state.at
+        );
+    };
 
     assert_eq!(state.held, None, "bpd is not holding the waiter");
-    assert_eq!(
-        state.progress,
-        Progress::Still,
-        "the waiter is behind a lock the held thread took, and got nowhere \
-         between the two samples"
-    );
     let at = state.at.as_ref().expect("the waiter has a python frame");
     assert_eq!(
         Path::new(&at.file),
