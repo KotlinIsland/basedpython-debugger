@@ -18,7 +18,9 @@ already speaks it
 nothing is published to the marketplace, and the repository does not build a
 `.vsix`. what there is, is a directory vs code can load as it stands — the
 extension is plain commonjs javascript with no dependencies and no build step,
-which is the reason it is javascript rather than typescript
+which is the reason it is javascript rather than typescript. the one
+`devDependency` is `@vscode/test-electron`, which nothing in `extension.js`
+loads and only [driving it](#driving-it) needs
 
 ```sh
 ln -s "$PWD/editors/vscode" ~/.vscode/extensions/bpd
@@ -114,10 +116,73 @@ extension's:
     `launch.json` starts as and what completion offers inside one; it does not
     synthesise a configuration for a file with no `launch.json` at all
 
+## driving it
+
+a real vs code, downloaded by the test suite, starting a real session through
+this extension. that is what `editors/vscode/test/` is, and it is the reason the
+MVP criterion for vs code is ticked
+
+```sh
+cargo build -p bpd_agent
+cargo build --bin bpd
+cd editors/vscode
+npm ci
+BPD_PYTHON=python3.14 npm test
+```
+
+`BPD_PYTHON` has to name the **same interpreter the agent was built against** —
+the agent is a cpython extension and is not abi3, so an agent built for one
+interpreter will not import into another. it defaults to `python3`, and the
+runner asks `bpd doctor` about it before downloading anything, so an interpreter
+that could not run a session is refused by name rather than at the far end of a
+session that fails to start. `BPD_EXECUTABLE` overrides the binary, which
+otherwise is the `target/debug/bpd` those two builds produce
+
+it is two halves, because half of it cannot run in an editor and half of it
+cannot run outside one:
+
+- `test/run.js` runs in plain node. it finds the binary and the interpreter and
+    checks both, lays out a throwaway workspace holding `test/program.py` and a
+    `.vscode/settings.json` naming the binary, and hands the lot to
+    `@vscode/test-electron`, which downloads a pinned vs code and launches it
+- `test/session.js` runs **inside** that vs code's extension host, so
+    `require("vscode")` is the editor's own api. it is where the assertions are
+
+what one run does: opens the program, puts a breakpoint on the line holding the
+marker comment through `vscode.debug.addBreakpoints`, starts a `bpd` launch
+configuration with `vscode.debug.startDebugging`, waits for vs code to focus a
+stack frame, reads the stack and a local, resumes with the editor's own continue
+command, and waits for the session to end. then it spoils `bpd.executable` and
+starts a second session that must not start
+
+**the evidence is taken from vs code, not from bpd.** whether the adapter
+answers a `stackTrace` correctly is settled by the rust suite, and re-reading
+bpd's output here would prove that again rather than the thing in question. so
+what is asserted is the editor's state — that vs code activated the extension,
+that vs code holds a live session of type `bpd`, that vs code focused a frame
+because the program stopped. the program writes a file as its last statement,
+which is how "the session ended because the program exited" is told apart from
+"the session was killed"
+
+the vs code version is **pinned**, for the same reason every action in the
+workflow is pinned by sha: a suite whose subject changes underneath it cannot
+say what it tested. `test/run.js` holds the version, and the download is cached
+in `editors/vscode/.vscode-test`
+
+it runs headless. vs code is an electron app and wants a display even with no
+window to show, so CI runs it under `xvfb-run -a`; on macos it runs as it
+stands, and opens a window that closes itself
+
 ## what was checked, and what was not
 
-this matters more than usual here, because the rust test suite cannot drive vs
-code and a `package.json` that parses is not evidence that an extension works
+this matters more than usual here, because a `package.json` that parses is not
+evidence that an extension works
+
+**checked by driving a real vs code**, in `editors/vscode/test/` — the list
+above. it is a separate `vscode` job in CI rather than a step of the test
+matrix, because it needs node and the better part of a gigabyte of editor, and
+neither belongs in a matrix that runs on five interpreter and platform
+combinations
 
 **checked mechanically, in `cargo test`** — `crates/bpd_dap/tests/vscode.rs`:
 
@@ -135,19 +200,28 @@ code and a `package.json` that parses is not evidence that an extension works
     which loads and never activates
 - a breakpoint may be set in every language the debugger claims
 
-**not checked, and not claimed.** nobody has installed this in vs code and
-clicked through it. the contribution points it uses — `debuggers`,
-`breakpoints`, `configuration`, `onDebugResolve:` activation, and
-`registerDebugAdapterDescriptorFactory` — are vs code's documented ones and are
-used the way the documentation describes them, but "documented correctly" and
-"verified working" are different claims and only the first one is being made
-here. so the MVP criterion this belongs to is **not ticked**
+**what driving it settled.** this page used to list two things nobody had
+checked, and both now have answers:
 
-two specific things to check first, by someone who can:
+1. **the extension activates and the session starts.** it does. the session
+    stops on a breakpoint set through the editor, reports the frame vs code
+    focuses, and ends when the program exits
+1. **the error from a missing `bpd` reaches the user, once.** vs code renders an
+    error thrown out of `createDebugAdapterDescriptor` itself — the extension's
+    own sentence, remedy and all, is what comes back out of `startDebugging`.
+    so the `showErrorMessage` that used to stand beside the throw was the same
+    sentence in front of the user twice, and it is **gone**
 
-1. that the extension activates and the session starts at all — the whole point
-1. that the error from a missing `bpd` reaches the user. it is both shown with
-    `showErrorMessage` and thrown, because how vs code renders an error thrown
-    out of `createDebugAdapterDescriptor` is not something this project has
-    seen. if it renders it, the sentence appears twice and one of the two should
-    go
+    the doubling itself is not something the suite asserts, and that is
+    deliberate rather than an omission: in an extension host the dialog service
+    throws instead of showing anything, so the extension's own call throws too
+    and replaces the error it was about to rethrow. the message that comes back
+    is byte for byte identical with the `showErrorMessage` there and without it.
+    it was measured both ways, and a check that cannot fail is not written down
+    as if it could
+
+**still not checked.** the suite drives one platform per run, and CI drives
+linux. windows `PATHEXT` lookup in `onPath` has no coverage from it — the rust
+suite does not reach that function at all, because it is javascript. `attach` is
+not offered so there is nothing to drive, and no snippet or initial
+configuration is exercised, only a configuration built in the test

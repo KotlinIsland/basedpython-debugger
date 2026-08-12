@@ -20,6 +20,12 @@
   "activationEvents": [
     "onDebugResolve:bpd"
   ],
+  "scripts": {
+    "test": "node test/run.js"
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "3.1.0"
+  },
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
@@ -182,5 +188,8 @@
         ]
       }
     ]
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "3.1.0"
   }
 }

@@ -110,6 +110,48 @@ jobs:
       # entry of the `test` matrix builds for real
       - run: cargo check --workspace --exclude bpd_agent --all-features --all-targets --target ${{ matrix.target }}
 
+  vscode:
+    name: vs code
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      # `@vscode/test-electron` declares node 22 or newer
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      # the extension is what makes bpd reachable from vs code at all, and no
+      # rust test can reach it: `crates/bpd_dap/tests/vscode.rs` reads the
+      # manifest off disk, which says nothing about whether vs code loads it or
+      # whether the javascript runs. this job downloads a real vs code and
+      # starts a real session through the extension, which is the only thing
+      # that answers that
+      #
+      # it is its own job rather than a step of `test` because it needs node and
+      # a 900 MB editor, and neither belongs in the matrix that runs on five
+      # interpreter and platform combinations
+      - run: cargo build -p bpd_agent
+      - run: cargo build --bin bpd
+      - run: npm ci
+        working-directory: editors/vscode
+      # vs code is an electron app and wants a display even with no window to
+      # show. xvfb is the display, and `-a` picks a free one rather than
+      # colliding with a server the runner already has
+      #
+      # `python` is the interpreter setup-python put first on PATH, which is
+      # the one `cargo build -p bpd_agent` above compiled the agent against —
+      # the runner has to name the same one twice or the agent will not import
+      - run: xvfb-run -a npm test
+        working-directory: editors/vscode
+        env:
+          BPD_PYTHON: python
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest

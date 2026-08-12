@@ -19,9 +19,10 @@
 //!
 //! what this **cannot** check is that the extension loads, that vs code accepts
 //! the manifest, or that the javascript runs, because none of those is
-//! reachable from a rust test runner. `docs/development/vscode.md` says which
-//! of those was verified by hand and which was not, and the answer today is
-//! none of them
+//! reachable from a rust test runner. what checks those is `editors/vscode/test/`,
+//! which downloads a real vs code and starts a real session through the
+//! extension — a different suite, run by a different job, and the one that
+//! answers whether any of this works at all
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
