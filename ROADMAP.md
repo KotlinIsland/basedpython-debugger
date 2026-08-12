@@ -95,6 +95,27 @@ breakpoint is not already solid
         code and started a session, and this project does not tick a box on a
         thing it has not seen work. see
         [the vs code extension](docs/development/vscode.md)
+- [ ] **intellij drives it.** a hard requirement, not a nice-to-have, and it is
+        a different problem from vs code rather than the same one twice. what
+        was established before it was written down here:
+        - the intellij platform has **no general DAP client**. CLion 2025.3
+        added one for C and C++ debuggers, which is a different surface
+        from a python debug session; platform-wide support is
+        [IJPL-83441](https://youtrack.jetbrains.com/issue/IJPL-83441)
+        - what exists today is
+        [LSP4IJ](https://github.com/redhat-developer/lsp4ij), Red Hat's
+        free LSP and DAP client, EPL 2.0, on the marketplace, for **all**
+        intellij flavours from IDEA 2024.2. its DAP client covers
+        breakpoints and conditional breakpoints, exception breakpoints,
+        variables and set-value, evaluate, stepping and step-in targets —
+        which is most of what `bpd` answers
+        - **what its documentation does not cover is `startDebugging` or more
+        than one concurrent session**, which is exactly what child
+        debugging needs. so the shape of this is unknown until somebody
+        drives it, and the answer decides whether this is a launch
+        configuration or a plugin of our own
+        - the same bar as vs code applies: nobody ticks this until a session
+        has been started and a breakpoint has been hit
 - [x] an MCP server exposing the same session
 - [x] a parity test that enumerates the capabilities in `bpd_core` and fails if
         either adapter is missing one. the rule is enforced by CI, not by review
@@ -121,6 +142,14 @@ registration stub is in scope**: an extension that contributes a `debuggers`
 entry naming the executable and nothing else. what stays out is everything
 built *on top* of that — panels, custom views, an inline value renderer, any UI
 of our own
+
+**intellij is the case that may not fit that rule**, and the exclusion is
+written narrowly for it rather than bent. vs code needs an extension because it
+resolves a configuration's `type` through one; if intellij can reach `bpd`
+through LSP4IJ's existing DAP run configuration then it needs no plugin at all
+and this stays a launch configuration. if it cannot, then the minimum that makes
+`bpd` reachable is in scope on the same grounds the vs code stub is — and
+everything above that minimum is still out
 
 ## before the MVP
 
