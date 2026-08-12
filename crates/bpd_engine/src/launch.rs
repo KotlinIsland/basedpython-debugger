@@ -29,9 +29,9 @@ use std::time::{Duration, Instant};
 use bpd_core::python::Capabilities;
 use bpd_core::{
     Addressed, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, Exit, FrameId,
-    Jumped, LogRecord, Replaced, Reporting, Request, Resolved, Response, Running, Scope, Script,
-    SessionId, Snapshot, SnapshotId, SourceBreakpoint, Spawn, Stack, StateQuery, StepKind, Stop,
-    TemplateContext, Threads, Transcript, Variables, Which, WorldStopped,
+    Joined, Jumped, LogRecord, Replaced, Reporting, Request, Resolved, Response, Running, Scope,
+    Script, SessionId, Snapshot, SnapshotId, SourceBreakpoint, Spawn, Stack, StateQuery, StepKind,
+    Stop, TemplateContext, Threads, Transcript, Variables, Which, WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine};
@@ -54,6 +54,8 @@ struct Aside {
     spawned: Vec<Spawn>,
     /// the blind spots announced while it was
     blind: Vec<Blindspot>,
+    /// the sessions that joined while it was
+    joined: Vec<SessionId>,
 }
 
 impl Aside {
@@ -61,6 +63,7 @@ impl Aside {
         Self {
             spawned: Vec::new(),
             blind: Vec::new(),
+            joined: Vec::new(),
         }
     }
 }
@@ -85,6 +88,10 @@ impl Reporting for Aside {
 
     fn blind_to(&mut self, blindspot: Blindspot) {
         self.blind.push(blindspot);
+    }
+
+    fn attached(&mut self, session: SessionId) {
+        self.joined.push(session);
     }
 }
 
@@ -158,6 +165,14 @@ struct Attached {
     /// the three: it is the message that stops a silence being read as "there
     /// was no child"
     pending_blind: Vec<Blindspot>,
+    /// sessions that joined the debuggee while the engine was waiting
+    ///
+    /// a debugged child connects while the program runs, so one can arrive
+    /// while a request is in flight. it is the least droppable of all of them:
+    /// a child that joined is a process **held** at the line that forked, and a
+    /// front end that never learns of it has a stopped program nothing can
+    /// resume
+    pending_joined: Vec<SessionId>,
     /// every state a query has read, under the id it was given out as
     ///
     /// nothing evicts one. a snapshot is a reading that was already taken rather
@@ -214,6 +229,35 @@ impl Debuggee {
             .iter()
             .map(|attached| attached.session.id())
             .collect()
+    }
+
+    /// every session this debuggee holds, with what a front end has to know
+    /// about each
+    ///
+    /// what makes a second session **learnable** rather than merely present.
+    /// [`Self::sessions`] is the ids alone, which is what routing needs; this is
+    /// what a client is shown — including whether bpd started the process, which
+    /// decides whether it can be terminated or its exit read
+    pub fn joined(&self) -> Vec<Joined> {
+        self.attached
+            .iter()
+            .map(|attached| Joined {
+                session: attached.session.id(),
+                ours: attached.child.is_some(),
+                held: attached.held.clone(),
+                exit: attached.exited(),
+            })
+            .collect()
+    }
+
+    /// how one session's program ended, or `None` while it is still there
+    ///
+    /// naming none means the only session there is, which is every request's
+    /// rule. it is `None` with more than one open and none named, for the reason
+    /// [`Self::exited`] is
+    pub fn exit_of(&self, session: Option<SessionId>) -> Option<Exit> {
+        let id = bpd_core::only_session(&self.sessions(), session, "the exit").ok()?;
+        self.at(id).exited()
     }
 
     /// how many requests the engine has sent the only session's agent
@@ -345,6 +389,9 @@ impl Debuggee {
                     self.attached[at].arm_exceptions(raised, uncaught, reporting)?,
                 ))
             }
+            Request::DebugChildren { on } => Ok(Response::DebuggingChildren {
+                on: self.attached[at].debug_children(on, reporting)?,
+            }),
             Request::Run { deadline } => {
                 // the deadline bounds the wait rather than the whole request:
                 // the resume is answered on a thread that is already held, so
@@ -485,6 +532,7 @@ impl Debuggee {
         let answer = self.dispatch(Addressed::to(id, request), &mut aside);
         self.attached[at].pending_spawns.extend(aside.spawned);
         self.attached[at].pending_blind.extend(aside.blind);
+        self.attached[at].pending_joined.extend(aside.joined);
         answer
     }
 
@@ -507,6 +555,18 @@ impl Debuggee {
         match self.ask_for(Request::SetBreakpoints { breakpoints })? {
             Response::BreakpointsResolved { resolved } => Ok(resolved),
             other => unreachable!("a breakpoint set was answered with {other:?}"),
+        }
+    }
+
+    /// decide whether a forked child of the program becomes a session of its own
+    ///
+    /// off by default. what comes back is what the agent says is set, and it is
+    /// the debuggee's own memory that carries it into a child — see
+    /// [`bpd_core::Request::DebugChildren`]
+    pub fn debug_children(&mut self, on: bool) -> Result<bool> {
+        match self.ask_for(Request::DebugChildren { on })? {
+            Response::DebuggingChildren { on } => Ok(on),
+            other => unreachable!("debugging children was answered with {other:?}"),
         }
     }
 
@@ -793,6 +853,9 @@ impl Debuggee {
         for blindspot in self.attached[at].pending_blind.drain(..) {
             reporting.blind_to(blindspot);
         }
+        for joined in self.attached[at].pending_joined.drain(..) {
+            reporting.attached(joined);
+        }
         let mut rebound = std::mem::take(&mut self.attached[at].pending_rebinds);
 
         let started = Instant::now();
@@ -800,6 +863,11 @@ impl Debuggee {
 
         loop {
             if let Some(arrived) = self.listener.arrived()? {
+                // said as it happens rather than left to be discovered. an
+                // agent that connects here is a **held** process — a debugged
+                // fork is stopped at the line that forked — so a front end that
+                // is never told has a stopped program it cannot reach
+                reporting.attached(arrived.id());
                 self.attached.push(Attached::connected(arrived));
             }
 
@@ -901,6 +969,7 @@ impl Attached {
             pending_rebinds: Vec::new(),
             pending_spawns: Vec::new(),
             pending_blind: Vec::new(),
+            pending_joined: Vec::new(),
             snapshots: Vec::new(),
         }
     }
@@ -965,6 +1034,22 @@ impl Attached {
             FromAgent::ExceptionBreakpointsSet { raised, uncaught } => {
                 Ok(ExceptionBreakpoints { raised, uncaught })
             }
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// decide what a forked child of this session's program does
+    ///
+    /// the answer is what the **agent** says is set, not what was asked for. a
+    /// setting the fork handler never received would leave a client waiting for
+    /// child sessions that are never going to arrive, and on a platform with no
+    /// `fork` there is nothing for it to be true of at all — which the agent
+    /// refuses by name
+    fn debug_children(&mut self, on: bool, reporting: &mut dyn Reporting) -> Result<bool> {
+        const EXPECTED: &str = "what a forked child will do";
+
+        match self.ask(&FromEngine::DebugChildren { on }, EXPECTED, reporting)? {
+            FromAgent::DebuggingChildren { on } => Ok(on),
             other => Err(unexpected(&other, EXPECTED)),
         }
     }

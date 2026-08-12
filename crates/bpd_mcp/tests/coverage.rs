@@ -344,6 +344,16 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)]) -> Transcript 
         "set_exception_breakpoints",
         &serde_json::json!({ "uncaught": true }),
     );
+
+    // what a forked child of the program does, and the tool that makes a second
+    // session learnable. both name the session explicitly, which is what puts
+    // the `session` argument's route through this conversation rather than
+    // leaving it to a test that needs a real fork
+    client.call(
+        "debug_children",
+        &serde_json::json!({ "on": true, "session": session().get() }),
+    );
+    client.call("sessions", &serde_json::json!({}));
     client.call("threads", &serde_json::json!({ "settle_ms": 10 }));
     client.call("stop_the_world", &serde_json::json!({}));
     client.call("stack", &serde_json::json!({}));
@@ -571,6 +581,8 @@ fn tool_order() -> Vec<&'static str> {
         "launch",
         "set_breakpoints",
         "set_exception_breakpoints",
+        "debug_children",
+        "sessions",
         "threads",
         "stop_the_world",
         "stack",
@@ -896,14 +908,24 @@ impl Session for FakeSession {
         self.held.clone()
     }
 
+    /// one session, over a program bpd started
+    fn sessions(&self) -> Vec<bpd_core::Joined> {
+        vec![bpd_core::Joined {
+            session: session(),
+            ours: true,
+            held: self.held.clone(),
+            exit: None,
+        }]
+    }
+
     /// this fake's program never ends: the whole conversation it drives happens
     /// against one that is there, and a fake that claimed an exit would answer
     /// every refusal with the wrong one of the two reasons
-    fn ended(&self) -> Option<Exit> {
+    fn ended(&self, _session: Option<SessionId>) -> Option<Exit> {
         None
     }
 
-    fn terminate(&mut self) -> Result<(), Failed> {
+    fn terminate(&mut self, _session: Option<SessionId>) -> Result<(), Failed> {
         self.held.clear();
         Ok(())
     }
@@ -956,6 +978,7 @@ impl Session for FakeSession {
             Request::SetExceptionBreakpoints { raised, uncaught } => {
                 Response::ExceptionBreakpoints(bpd_core::ExceptionBreakpoints { raised, uncaught })
             }
+            Request::DebugChildren { on } => Response::DebuggingChildren { on },
             Request::Run { .. } => {
                 self.output
                     .wrote(bpd_mcp::Stream::Stdout, "the program said this\n");

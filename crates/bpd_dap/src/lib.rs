@@ -61,4 +61,6 @@ pub use capabilities::capabilities;
 pub use configuration::Configuration;
 pub use coverage::{reach_of, reach_of_facet, surface};
 pub use listen::Listening;
-pub use session::{Failed, Interrupt, Launcher, ProgramOutput, Session, Started, Stream, describe};
+pub use session::{
+    Failed, Interrupt, Launcher, ProgramOutput, Reachable, Session, Started, Stream, describe,
+};

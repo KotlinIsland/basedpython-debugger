@@ -40,8 +40,8 @@ use std::sync::{Arc, Mutex};
 
 use bpd_core::{
     Addressed, Binding, Detail, Evaluated, FrameId, LogRecord, Reporting, Request, Resolved,
-    Response, Running, Scope, SourceBreakpoint, StepKind, Stop, StopReason, Unbound, Value, Which,
-    exit_code,
+    Response, Running, Scope, SessionId, SourceBreakpoint, StepKind, Stop, StopReason, Unbound,
+    Value, Which, exit_code,
 };
 
 use crate::capabilities::capabilities;
@@ -49,7 +49,7 @@ use crate::configuration::Configuration;
 use crate::handles::{Handle, Handles, Step};
 use crate::render::{expandable, summary};
 use crate::session::{
-    Failed, Interrupt, Launcher, ProgramOutput, Session, Started, Stream, describe,
+    Failed, Interrupt, Launcher, ProgramOutput, Reachable, Session, Started, Stream, describe,
 };
 use crate::wire::{Incoming, Reader, Writer};
 
@@ -65,9 +65,10 @@ type Held = Arc<Mutex<Option<Box<dyn Interrupt>>>>;
 /// it: a client that vanishes leaves a program running with nothing watching
 /// it, which is the state the agent itself refuses to be in
 pub fn serve(
-    launcher: &mut dyn Launcher,
+    launcher: &dyn Launcher,
     input: Box<dyn Read + Send>,
     output: Box<dyn Write + Send>,
+    reachable: &Reachable,
 ) -> Result<(), crate::wire::Error> {
     let output: Output = Arc::new(Mutex::new(Writer::new(output)));
     let interrupt: Held = Arc::new(Mutex::new(None));
@@ -84,7 +85,7 @@ pub fn serve(
         })
         .map_err(|source| crate::wire::Error::Connection { source })?;
 
-    let mut adapter = Adapter::new(output, interrupt, stopping);
+    let mut adapter = Adapter::new(output, interrupt, stopping, reachable.clone());
     let served = adapter.run(launcher, &commands);
 
     // the reader owns the client's input and ends when the client hangs up.
@@ -170,6 +171,28 @@ fn end_debuggee(interrupt: &Held) {
     }
 }
 
+/// how long one turn of the adapter's wait sits on the program
+///
+/// the wait is sliced rather than open ended, and it is the price of a second
+/// connection. two DAP connections serve two sessions of **one** debuggee, and
+/// the engine is one object: a wait that blocked in it until the program stopped
+/// would hold it for as long as the program ran, and the other connection could
+/// not ask anything — including the resume a held child is waiting for
+///
+/// nothing is reported at the end of a slice. the client's `continue` was
+/// answered before the wait began, so there is nothing outstanding for a timeout
+/// to be the answer to, and the loop simply waits again. the engine already
+/// polls its listener inside a wait, so this changes what is held rather than
+/// what is done
+const WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// the field a `startDebugging` configuration names the session in
+///
+/// bpd's own, because DAP has no field for one: a session **is** a connection
+/// there, so what the spec provides is this reverse request and a configuration
+/// the adapter fills in
+const SESSION_FIELD: &str = "bpdSession";
+
 const WRITING: &str =
     "nothing panics holding the client's output: every path through it is a write";
 const REACHING: &str =
@@ -180,6 +203,19 @@ struct Adapter {
     output: Output,
     interrupt: Held,
     stopping: Arc<AtomicBool>,
+    /// where a second session of this debuggee could reach this adapter
+    ///
+    /// read once, when a launch asks for the program's forked children to be
+    /// debugged: a `startDebugging` reverse request is only honest if the
+    /// session it asks for can arrive
+    reachable: Reachable,
+    /// whether the client said it can start a session this adapter asks for
+    ///
+    /// `supportsStartDebuggingRequest` is a **client** capability, in
+    /// `initialize`'s arguments, so it is recorded rather than advertised. a
+    /// client without it is not sent one, and asking for a debugged child is
+    /// refused before anything forks
+    start_debugging: bool,
     session: Option<Box<dyn Session>>,
     configuration: Option<Configuration>,
     /// whether the client has finished sending its configuration
@@ -208,11 +244,18 @@ struct Adapter {
 }
 
 impl Adapter {
-    fn new(output: Output, interrupt: Held, stopping: Arc<AtomicBool>) -> Self {
+    fn new(
+        output: Output,
+        interrupt: Held,
+        stopping: Arc<AtomicBool>,
+        reachable: Reachable,
+    ) -> Self {
         Self {
             output,
             interrupt,
             stopping,
+            reachable,
+            start_debugging: false,
             session: None,
             configuration: None,
             configured: false,
@@ -229,7 +272,7 @@ impl Adapter {
     /// answer requests, and wait for the program whenever nothing is held
     fn run(
         &mut self,
-        launcher: &mut dyn Launcher,
+        launcher: &dyn Launcher,
         commands: &Receiver<Incoming>,
     ) -> Result<(), crate::wire::Error> {
         loop {
@@ -239,9 +282,6 @@ impl Adapter {
 
             if self.waiting() {
                 let mut events = Events::new(&self.output);
-                // no deadline: the answer to whatever resumed the program has
-                // already been sent, so nothing is waiting on this wait and a
-                // timeout would be the answer to no question
                 let waited = self
                     .session
                     .as_mut()
@@ -250,15 +290,19 @@ impl Adapter {
                         // a wait is about the program rather than about a held
                         // thread, so it names no session and is answered by the
                         // only one this connection serves
-                        Addressed::unnamed(Request::Wait { deadline: None }),
+                        Addressed::unnamed(Request::Wait {
+                            deadline: Some(WAIT_SLICE),
+                        }),
                         &mut events,
                     );
                 let written = events.finish();
                 let outcome = match (waited, written) {
                     (_, Err(error)) => Err(Aborted::Wire(error)),
-                    (Ok(Response::Ran(running)), Ok(())) => self.report(running),
-                    (Ok(other), Ok(())) => unreachable!("a wait was answered with {other:?}"),
-                    (Err(error), Ok(())) => {
+                    (Ok(Response::Ran(running)), Ok(joined)) => self
+                        .tell_the_client_to_start(&joined)
+                        .and_then(|()| self.report(running)),
+                    (Ok(other), Ok(_)) => unreachable!("a wait was answered with {other:?}"),
+                    (Err(error), Ok(_)) => {
                         if self.stopping.load(Ordering::Relaxed) {
                             return Ok(());
                         }
@@ -299,7 +343,16 @@ impl Adapter {
         self.session.is_some() && self.configured && !self.exited && self.announced.is_empty()
     }
 
-    fn handle(&mut self, launcher: &mut dyn Launcher, message: &Incoming) -> Answered {
+    fn handle(&mut self, launcher: &dyn Launcher, message: &Incoming) -> Answered {
+        // the client answering a reverse request. `startDebugging` is the only
+        // one this adapter sends and there is nothing to do about the answer:
+        // the session it asked for arrives on a connection of its own, or it
+        // does not and the child stays held, which is a fact the client already
+        // has. what must not happen is this being refused as an unknown
+        // request, which is what every other `type` gets
+        if message.kind == "response" {
+            return Ok(());
+        }
         if message.kind != "request" {
             return Err(Aborted::Refuse(format!(
                 "a debug adapter is sent requests, and this was a `{}`",
@@ -310,12 +363,7 @@ impl Adapter {
         match message.command.as_deref() {
             Some("initialize") => self.initialize(message),
             Some("launch") => self.launch(launcher, message),
-            Some("attach") => Err(Aborted::Refuse(
-                "bpd cannot attach to a running process yet. attaching is PEP 768, which \
-                 needs cpython 3.14, and bpd refuses rather than injecting by another \
-                 route. use a `launch` configuration"
-                    .to_string(),
-            )),
+            Some("attach") => self.attach(launcher, message),
             Some("configurationDone") => self.configuration_done(message),
             Some("setBreakpoints") => self.set_breakpoints(message),
             Some("setExceptionBreakpoints") => self.set_exception_breakpoints(message),
@@ -386,11 +434,57 @@ impl Adapter {
             )));
         }
 
+        // a **client** capability, and the only one this adapter reads. it is
+        // what decides whether a debugged child can be offered at all: a client
+        // that cannot start a session this adapter asks for would leave one held
+        // for ever, so asking for one is refused rather than half delivered
+        self.start_debugging =
+            message.arguments["supportsStartDebuggingRequest"] == serde_json::Value::Bool(true);
+
         self.respond(message, Some(capabilities()))?;
         Ok(())
     }
 
-    fn launch(&mut self, launcher: &mut dyn Launcher, message: &Incoming) -> Answered {
+    /// take up a session of a debuggee this adapter's process already holds
+    ///
+    /// what a connection that arrived because of a `startDebugging` reverse
+    /// request sends. it is not PEP 768 attaching — nothing is injected into
+    /// anything — and the two are told apart by the `bpdSession` the reverse
+    /// request put in the configuration it handed the client
+    fn attach(&mut self, launcher: &dyn Launcher, message: &Incoming) -> Answered {
+        let Some(named) = message.arguments[SESSION_FIELD].as_u64() else {
+            return Err(Aborted::Refuse(
+                "bpd cannot attach to a running process. attaching is PEP 768, which \
+                 needs cpython 3.14, and bpd refuses rather than injecting by another \
+                 route — use a `launch` configuration.\n\nan `attach` that names \
+                 `bpdSession` is a different thing: it takes up a session this adapter \
+                 already holds, which is what the `startDebugging` reverse request asks \
+                 a client to start"
+                    .to_string(),
+            ));
+        };
+        if self.session.is_some() {
+            return Err("this connection already has a program".into());
+        }
+
+        let Started::Stopped(session) = launcher.attach(named).map_err(|error| failed(&error))?
+        else {
+            unreachable!("a session that is already held cannot have exited before stopping")
+        };
+        let reaching = session.interrupt().map_err(|error| failed(&error))?;
+        *self.interrupt.lock().expect(REACHING) = Some(reaching);
+        self.session = Some(session);
+        // the configuration is the one the reverse request handed the client,
+        // which carries no program: this connection did not start anything
+        self.configuration = Some(serde_json::from_value(message.arguments.clone()).map_err(
+            |error| Aborted::Refuse(format!("the attach configuration is not usable: {error}")),
+        )?);
+        self.respond(message, None)?;
+        self.event("initialized", &serde_json::json!({}))?;
+        Ok(())
+    }
+
+    fn launch(&mut self, launcher: &dyn Launcher, message: &Incoming) -> Answered {
         if self.session.is_some() {
             return Err("this session already has a program running".into());
         }
@@ -399,6 +493,10 @@ impl Adapter {
             .map_err(|error| {
                 Aborted::Refuse(format!("the launch configuration is not usable: {error}"))
             })?;
+
+        if configuration.debug_children {
+            self.can_debug_children()?;
+        }
 
         if configuration.no_debug {
             return Err(Aborted::Refuse(
@@ -447,6 +545,26 @@ impl Adapter {
     fn configuration_done(&mut self, message: &Incoming) -> Answered {
         self.configured = true;
         self.respond(message, None)?;
+
+        // before the program runs a line, because the handler that acts on it
+        // runs inside `os.fork()` and a program can fork in its first statement.
+        // only when it was asked for: the agent's default is off, and a request
+        // saying so on every session would be a round trip for nothing
+        if self.configuration().debug_children {
+            match self.ask(Request::DebugChildren { on: true })? {
+                Response::DebuggingChildren { on: true } => {}
+                // read back off the agent rather than assumed. a client told
+                // this took would wait for child sessions that never arrive
+                Response::DebuggingChildren { on: false } => {
+                    return Err(Aborted::Refuse(
+                        "the debuggee did not take `debugChildren`, and a forked \
+                         child of it will not be debugged"
+                            .to_string(),
+                    ));
+                }
+                other => unreachable!("debugging children was answered with {other:?}"),
+            }
+        }
 
         if self.configuration().stop_on_entry {
             self.announce()?;
@@ -1552,10 +1670,11 @@ impl Adapter {
         match running {
             // only a wait that carried a deadline can be answered with this,
             // and this adapter never sends one — see `coverage::reach_of`
-            Running::StillRunning { waited, .. } => unreachable!(
-                "a DAP wait carries no deadline and was answered after {waited:?} \
-                 with the program still running"
-            ),
+            // the slice passed and the program is running. it is not a stop and
+            // nothing is said about it: the client's `continue` was answered
+            // before the wait began, so there is nothing outstanding for a
+            // timeout to be the answer to. the loop goes round and waits again
+            Running::StillRunning { .. } => Ok(()),
             Running::Stopped { .. } => self.announce(),
             Running::Exited { status, .. } => {
                 self.exited = true;
@@ -1720,7 +1839,8 @@ impl Adapter {
                 &mut events,
             )
             .map_err(|error| failed(&error));
-        events.finish().map_err(Aborted::Wire)?;
+        let joined = events.finish().map_err(Aborted::Wire)?;
+        self.tell_the_client_to_start(&joined)?;
         let answered = answered?;
         // a request answered on one thread can arrive with another thread's stop
         // behind it. saying nothing about that one would leave a client
@@ -1729,6 +1849,116 @@ impl Adapter {
             self.announce()?;
         }
         Ok(answered)
+    }
+
+    /// whether a debugged child could be delivered on this connection at all
+    ///
+    /// asked **before** anything forks, because that is the only moment at which
+    /// refusing costs nothing. a child that has already opened a session is a
+    /// held process, and a client that cannot be told to take it up would leave
+    /// it held for ever — so both halves are checked here and neither is
+    /// discovered later
+    fn can_debug_children(&self) -> Result<(), Aborted> {
+        if !self.start_debugging {
+            return Err(Aborted::Refuse(
+                "`debugChildren` needs the client to support the `startDebugging` \
+                 reverse request, and this one did not say it does in \
+                 `initialize`. a debugged fork **stops**, at the line that \
+                 forked, and DAP's only way to hand a second program to a client \
+                 is to ask it to start a second session — so bpd would have a \
+                 held process nothing could reach. take `debugChildren` out and \
+                 the fork is reported and left running undebugged, which is what \
+                 bpd does without it"
+                    .to_string(),
+            ));
+        }
+        if matches!(self.reachable, Reachable::Nowhere) {
+            return Err(Aborted::Refuse(
+                "`debugChildren` needs this adapter to be reachable by a second \
+                 connection, and it is speaking on the pipes it was spawned \
+                 with. the second session `startDebugging` asks for would be \
+                 another `bpd dap` process, with an engine of its own that this \
+                 debuggee is not in. run `bpd dap --listen <PORT>` and connect \
+                 to it instead — the same listener serves the child's session"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// ask the client to start a session for each debuggee that joined
+    ///
+    /// the standard `startDebugging` reverse request, and **not** debugpy's
+    /// `debugpyAttach` event: that predates the spec having an answer, and this
+    /// is the answer the spec has
+    ///
+    /// the configuration it carries is what the client hands back on its
+    /// `attach`. it names the session and how to reach this adapter, because the
+    /// second session has to arrive at **this** process — a client that started
+    /// a fresh adapter would start a fresh engine, which does not hold the child
+    fn tell_the_client_to_start(&mut self, joined: &[SessionId]) -> Answered {
+        for session in joined {
+            let Reachable::At {
+                host,
+                port,
+                header,
+                token,
+            } = &self.reachable
+            else {
+                // `debugChildren` is refused unless a second session can arrive,
+                // so a debuggee that joined without one is a session the engine
+                // produced that nothing asked for
+                unreachable!(
+                    "{session} joined this debuggee and nothing can reach this \
+                     adapter, so nothing asked for it"
+                );
+            };
+            // written out of the configuration this connection was launched
+            // with, so the child's session carries the same settings its
+            // parent's does — the same `stopTheWorld`, the same value bounds,
+            // and the same `debugChildren`, which is what makes a fork of a
+            // fork debugged as well
+            let mut configuration = serde_json::to_value(self.configuration())
+                .expect("a launch configuration is json and serialises");
+            let extra = serde_json::json!({
+                "name": format!("bpd: forked child ({session})"),
+                "type": "bpd",
+                "request": "attach",
+                SESSION_FIELD: session.get(),
+                // how to reach this adapter. one listener and one token for
+                // every session of a debuggee: the connection being asked for
+                // is asked for by an adapter this client is already
+                // authenticated to, and a token per child would be a second
+                // lifetime to get wrong for no boundary it does not already have
+                "bpdConnect": {
+                    "host": host,
+                    "port": port,
+                    "header": header,
+                    "token": token,
+                },
+            });
+            for (key, value) in extra
+                .as_object()
+                .expect("the object above is an object")
+                .clone()
+            {
+                configuration[key] = value;
+            }
+            self.output
+                .lock()
+                .expect(WRITING)
+                .request(
+                    "startDebugging",
+                    &serde_json::json!({ "request": "attach", "configuration": configuration }),
+                )
+                .map_err(Aborted::Wire)?;
+            self.say(&format!(
+                "the program forked and the child is **held** at the line that forked. \
+                 it is {session}, and this adapter has asked the client to start a \
+                 debug session for it\n"
+            ))?;
+        }
+        Ok(())
     }
 
     fn stored(&mut self, stop: u64, value: &Value) -> i64 {
@@ -2078,6 +2308,14 @@ impl ProgramOutput for Console {
 struct Events<'a> {
     output: &'a Output,
     failed: Option<crate::wire::Error>,
+    /// the sessions that joined the debuggee while this was the sink
+    ///
+    /// not written from here. a `startDebugging` is a request rather than an
+    /// event, and one written in the middle of answering something else would
+    /// interleave with the answer the adapter is part way through — so it is
+    /// collected and sent by the caller, which is the one place that knows the
+    /// answer is finished
+    joined: Vec<SessionId>,
 }
 
 impl<'a> Events<'a> {
@@ -2085,13 +2323,14 @@ impl<'a> Events<'a> {
         Self {
             output,
             failed: None,
+            joined: Vec::new(),
         }
     }
 
-    fn finish(self) -> Result<(), crate::wire::Error> {
+    fn finish(self) -> Result<Vec<SessionId>, crate::wire::Error> {
         match self.failed {
             Some(error) => Err(error),
-            None => Ok(()),
+            None => Ok(self.joined),
         }
     }
 
@@ -2160,6 +2399,14 @@ impl Reporting for Events<'_> {
             "category": "important",
             "output": format!("{blindspot}\n"),
         }));
+    }
+
+    /// a debugged fork opened a session of its own
+    ///
+    /// kept rather than written, and the caller turns each into a
+    /// `startDebugging` reverse request — see the field
+    fn attached(&mut self, session: SessionId) {
+        self.joined.push(session);
     }
 }
 

@@ -9,8 +9,22 @@ use std::path::PathBuf;
 use bpd_core::{Detail, Threads};
 
 /// what a `launch` request carries
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+/// `Serialize` as well as `Deserialize`, and for one reason: a debugged fork is
+/// a second session of the same program, and what tells a client how to start it
+/// is a configuration this adapter writes. writing it out of the one it was
+/// given is what makes the child's session carry the same settings as its
+/// parent's — the same `stopTheWorld`, the same value bounds, and the same
+/// `debugChildren`, so that a fork of a fork is debugged too
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "it is a wire schema: every field is one a client writes in its \
+              `launch.json`, and each is an independent yes-or-no about the \
+              session. folding them into a state machine would make the \
+              configuration a client writes and the one this parses two \
+              different shapes"
+)]
 pub struct Configuration {
     /// the program to run
     pub program: PathBuf,
@@ -56,6 +70,24 @@ pub struct Configuration {
     /// apart. the default is [`Threads::SETTLE`]
     #[serde(default = "Configuration::settle_ms")]
     pub thread_settle_ms: u32,
+
+    /// debug a child the program **forks**
+    ///
+    /// off by default, and deliberately not debugpy's default of on: a debugged
+    /// fork **stops**, at the line that forked, and a setting that produced
+    /// stopped processes without being asked for would be a debugger that
+    /// hangs programs by default
+    ///
+    /// it needs two things of the client, and both are refused up front rather
+    /// than discovered when a child is already held: the client has to support
+    /// the `startDebugging` reverse request, and this adapter has to be
+    /// reachable by a second connection — `bpd dap --listen`. a fork on a
+    /// platform that has none is refused by the agent
+    ///
+    /// a child that was **exec'd** rather than forked is a fresh interpreter
+    /// with none of this process's memory in it, and this does not reach one
+    #[serde(default)]
+    pub debug_children: bool,
 
     /// run the program without debugging it
     ///

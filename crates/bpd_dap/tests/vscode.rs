@@ -151,6 +151,7 @@ fn every_contributed_attribute_declares_the_type_and_the_default_the_adapter_use
             }
             "stopOnEntry" => flag(schema, adapter.stop_on_entry),
             "stopTheWorld" => flag(schema, adapter.stop_the_world),
+            "debugChildren" => flag(schema, adapter.debug_children),
             "threadSettleMs" => whole(schema, adapter.thread_settle_ms),
             "variables" => {
                 assert_eq!(schema["type"], "object");

@@ -888,6 +888,18 @@ fn describe(slot: &Slot<'_>, id: FrameId) -> PyResult<Frame> {
     }
 }
 
+/// the file and line one frame is at
+///
+/// what a [`StopReason`](bpd_core::StopReason) carries, for the one stop that is
+/// not reported from a monitoring callback: a forked child is held in
+/// `after_in_child`, where there is no event to have been handed a location by,
+/// and the frame chain of the `os.fork()` caller is what says where it is
+pub(crate) fn file_and_line(frame: &Bound<'_, PyAny>) -> PyResult<(String, u32)> {
+    let file = frame.getattr("f_code")?.getattr("co_filename")?.extract()?;
+    let line = frame.getattr("f_lineno")?.extract()?;
+    Ok((file, line))
+}
+
 /// where one frame is, without a frame id — there is no stop behind it
 ///
 /// what a thread bpd is **not** holding gets, because a frame id is a handle

@@ -150,6 +150,18 @@ impl bpd_core::Reporting for Watching {
     fn blind_to(&mut self, blindspot: bpd_core::Blindspot) {
         eprintln!("bpd: {blindspot}");
     }
+
+    /// another agent joined this debuggee
+    ///
+    /// `bpd launch` never asks for one — debugging a forked child is a
+    /// [`bpd_core::Request::DebugChildren`] and this command sends none — so a
+    /// session arriving here is one nothing asked for
+    fn attached(&mut self, session: bpd_core::SessionId) {
+        unreachable!(
+            "`bpd launch` does not ask for a forked child to be debugged, and \
+             {session} joined this debuggee"
+        )
+    }
 }
 
 pub(crate) fn run(args: &Args) -> ExitCode {

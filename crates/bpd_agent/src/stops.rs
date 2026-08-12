@@ -239,6 +239,10 @@ pub(crate) fn route(request: FromEngine) {
         FromEngine::SetExceptionBreakpoints { .. } => {
             Address::Any("the exception breakpoints to set")
         }
+        // about the process rather than about one held thread, and about a
+        // process that does not exist yet at that. it is answered on a held
+        // thread because everything is
+        FromEngine::DebugChildren { .. } => Address::Any("what a forked child does"),
         FromEngine::Threads { .. } => Address::Any("what the threads are doing"),
         // about the process rather than about one held thread: it replaces the
         // code of a file, and which held thread answers makes no difference to

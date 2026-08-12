@@ -16,9 +16,49 @@ use bpd_core::{
     Snapshot, Source, SourceBreakpoint, Stack, Stop, Threads, Transcript, Variables, WorldStopped,
 };
 
+/// every session this debuggee holds
+///
+/// what makes a second one learnable. an agent that had to infer a session from
+/// a stop number would be inferring it from a number two sessions can both hold
+pub fn sessions(joined: &[bpd_core::Joined]) -> Vec<serde_json::Value> {
+    joined
+        .iter()
+        .map(|session| {
+            let mut rendered = serde_json::json!({
+                "session": session.session.get(),
+                // whether bpd started this process. `false` is a debugged fork,
+                // and it is not a detail: bpd is not its parent, so it cannot be
+                // terminated and its exit code is not bpd's to read
+                "ours": session.ours,
+                "held": session.held.iter().map(stop).collect::<Vec<_>>(),
+            });
+            match session.exit {
+                None => rendered["outcome"] = "running".into(),
+                Some(bpd_core::Exit::Code(code)) => {
+                    rendered["outcome"] = "exited".into();
+                    rendered["exit_code"] = code.into();
+                }
+                // deliberately without an `exit_code` field rather than with a
+                // null one: the program is over and the number would be invented
+                Some(bpd_core::Exit::Unknown) => {
+                    rendered["outcome"] = "ended".into();
+                    rendered["note"] = "the program is over and bpd cannot say what it \
+                                        exited with — bpd did not start that process"
+                        .into();
+                }
+            }
+            rendered
+        })
+        .collect()
+}
+
 /// one held thread, as the answer to a control tool
 pub fn stop(stopped: &Stop) -> serde_json::Value {
     serde_json::json!({
+        // which debugged process this stop is of. two agents both count their
+        // stops from one, so the number alone does not name a stop once a
+        // program has forked into a debugged child
+        "session": stopped.session.get(),
         "stop": stopped.stop,
         "thread": stopped.thread,
         "reason": stopped.reason,

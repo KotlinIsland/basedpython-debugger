@@ -56,6 +56,14 @@ const STOP: &str = "which stop this is about. a stop holds one thread and the \
     when exactly one is — when several are, the call is refused and the refusal \
     lists them";
 
+/// what a tool that is about one session says about naming it
+const SESSION: &str = "which session this is about. a debuggee holds one \
+    ordinarily, and a **debugged fork** is a second — `sessions` lists them. \
+    omit it when there is one; when there are several, a call that names none \
+    is refused and the refusal lists them. a call that is about a stop needs \
+    none either way: the stop carries the session it was reported from, and a \
+    `session` that disagrees with it is refused rather than believed";
+
 /// what a tool that is about one frame says about naming it
 const FRAME: &str = "how far down that stop's stack, with 0 the frame the \
     program is in now. a frame belongs to the stop it was reported at: once \
@@ -111,6 +119,7 @@ pub(crate) fn detail() -> serde_json::Value {
 /// the arguments a tool about one frame's value shares
 fn frame_properties() -> serde_json::Value {
     serde_json::json!({
+        "session": integer(SESSION),
         "stop": integer(STOP),
         "frame": integer(FRAME),
         "detail": detail(),
@@ -305,6 +314,7 @@ fn step(name: &'static str, title: &'static str, what: &str) -> Tool {
         ),
         schema: object(
             serde_json::json!({
+                "session": integer(SESSION),
                 "stop": integer(STOP),
                 "deadline_ms": integer(DEADLINE),
                 "frames": integer(FRAMES),
@@ -370,6 +380,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "breakpoints": {
                         "type": "array",
                         "description": "the whole set. an empty array clears them all",
@@ -443,6 +454,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "raised": { "type": "boolean", "description":
                         "stop where an exception is raised, caught or not" },
                     "uncaught": { "type": "boolean", "description":
@@ -450,6 +462,58 @@ pub fn tools() -> Vec<Tool> {
                 }),
                 &[],
             ),
+        },
+        Tool {
+            name: "debug_children",
+            title: "debug the program's forked children",
+            description: "**off by default.** a program that forks makes a copy \
+                of itself, and with this on the copy opens a debug session of \
+                its own and is held at the line that forked — a second session, \
+                with its own stops and its own numbering, which `sessions` \
+                lists and the `session` argument reaches.\n\n\
+                with it off a forked child gives the whole session up before \
+                `os.fork()` returns and runs exactly as it would have without a \
+                debugger. that is reported and it is not debugged.\n\n\
+                it must be set **before** the program forks: the handler that \
+                acts on it runs inside `os.fork()`, in the child, with nothing \
+                left to ask. it reaches the child through inherited memory, so \
+                it changes nothing a program can see about its own environment \
+                or import path.\n\n\
+                a child that was **exec'd** — `subprocess`, `multiprocessing` \
+                with `spawn` — is a fresh interpreter with none of this memory \
+                in it, and this does not reach one. those are reported and not \
+                debugged. so is a fork on a platform that has none, where this \
+                is refused rather than accepted and never acted on.\n\n\
+                the answer is what the agent says is set, read back rather than \
+                echoed."
+                .to_string(),
+            schema: object(
+                serde_json::json!({
+                    "session": integer(SESSION),
+                    "on": { "type": "boolean", "description":
+                        "whether a forked child of this session's program opens \
+                         a session of its own" },
+                }),
+                &["on"],
+            ),
+        },
+        Tool {
+            name: "sessions",
+            title: "every session this debuggee holds",
+            description: "list the debugged processes. one is ordinary; a second \
+                appears when the program **forked** and `debug_children` was on \
+                — this server writes nothing that is not an answer, so this is \
+                how a session that arrived while the program was running is \
+                found.\n\n\
+                each says whether bpd started that process. one bpd did not \
+                start — a debugged fork — cannot be terminated and has no exit \
+                code to read: bpd is not its parent, so what it exited with is \
+                not bpd's to give, and both are refused by name rather than \
+                invented.\n\n\
+                every other tool takes the `session` of one of these. a call \
+                that is about a stop needs none."
+                .to_string(),
+            schema: object(serde_json::json!({}), &[]),
         },
         Tool {
             name: "continue_",
@@ -465,6 +529,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "deadline_ms": integer(DEADLINE),
                     "frames": integer(FRAMES),
                 }),
@@ -505,6 +570,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "deadline_ms": integer(DEADLINE),
                     "frames": integer(FRAMES),
                 }),
@@ -529,6 +595,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "deadline_ms": integer(DEADLINE),
                     "frames": integer(FRAMES),
                 }),
@@ -546,6 +613,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "threads": { "type": "array", "items": integer("a thread identity"),
                         "description": "the interpreter's thread identities to \
                                         let go, as reported on a stop. omit for \
@@ -565,6 +633,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "stop": integer(STOP),
                     "top": integer("how many frames to report, from the one that \
                                     stopped. omit for all of them"),
@@ -589,6 +658,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "stop": integer(STOP),
                     "frame": integer(FRAME),
                     "scope": { "type": "string", "enum": ["local", "cell", "free", "global"],
@@ -621,6 +691,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "stop": integer(STOP),
                     "frame": integer(FRAME),
                     "detail": detail(),
@@ -720,6 +791,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "stop": integer(STOP),
                     "frame": integer(FRAME),
                     "line": integer("the line of that frame's file to move to. it \
@@ -753,6 +825,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "stop": integer(STOP),
                     "frame": integer(FRAME),
                 }),
@@ -793,6 +866,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "file": {
                         "type": "string",
                         "description": "the file whose code to replace, on the \
@@ -820,6 +894,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "settle_ms": integer("how far apart to take the two samples. \
                                           defaults to 50ms, which is long enough \
                                           that a thread going round an ordinary \
@@ -843,6 +918,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "stop": integer(STOP),
                     "settle_ms": integer("how long to wait for the other threads \
                                           to arrive. defaults to 50ms"),
@@ -877,6 +953,7 @@ pub fn tools() -> Vec<Tool> {
             schema: {
                 let mut schema = object(
                     serde_json::json!({
+                    "session": integer(SESSION),
                         "stop": integer(STOP),
                         "steps": {
                             "type": "array",
@@ -917,6 +994,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "stop": integer(STOP),
                     "frames": integer(
                         "how many frames to describe, from the one that stopped. \
@@ -980,6 +1058,7 @@ pub fn tools() -> Vec<Tool> {
                 .to_string(),
             schema: object(
                 serde_json::json!({
+                    "session": integer(SESSION),
                     "before": { "type": "string", "description":
                         "the snapshot id to compare from, as `state` gave it out" },
                     "after": { "type": "string", "description":
@@ -996,7 +1075,7 @@ pub fn tools() -> Vec<Tool> {
                 this is what is left when it will not stop on its own. the \
                 session has no program after it."
                 .to_string(),
-            schema: object(serde_json::json!({}), &[]),
+            schema: object(serde_json::json!({ "session": integer(SESSION) }), &[]),
         },
     ]
 }

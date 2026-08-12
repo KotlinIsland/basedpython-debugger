@@ -17,12 +17,12 @@
 
 use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader, Read, Write as _};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bpd_core::python::Capabilities;
-use bpd_core::{Addressed, Reporting, Request, Response, Stop};
+use bpd_core::{Addressed, Reporting, Request, Response, SessionId, Stop};
 use bpd_dap::{
-    Configuration, Failed, Launcher, Listening, ProgramOutput, Session, Started, Stream,
+    Configuration, Failed, Launcher, Listening, ProgramOutput, Reachable, Session, Started, Stream,
 };
 use bpd_engine::{Debuggee, Launched, Program};
 
@@ -54,10 +54,15 @@ pub(crate) struct Args {
 pub(crate) fn run(args: &Args) -> std::process::ExitCode {
     let served = match args.listen {
         Some(port) => listen(port).map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
+        // nothing else can connect to a pair of pipes somebody spawned, and
+        // that is what makes `debugChildren` refusable on this transport rather
+        // than half deliverable: a second session would be a second `bpd dap`
+        // process, with an engine of its own that this debuggee is not in
         None => bpd_dap::serve(
-            &mut Engine,
+            &Engine::default(),
             Box::new(std::io::stdin()),
             Box::new(std::io::stdout()),
+            &Reachable::Nowhere,
         )
         .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
     };
@@ -89,18 +94,50 @@ fn listen(port: u16) -> Result<(), bpd_dap::listen::Error> {
         panic!("the endpoint could not be written to stdout, so nothing can learn it: {error}");
     }
 
-    listening.serve(&mut Engine, &|said| eprintln!("bpd dap: {said}"))
+    listening.serve(&Engine::default(), &|said| eprintln!("bpd dap: {said}"))
 }
 
 /// the engine, as the adapter's launcher
-struct Engine;
+///
+/// it holds the debuggee rather than handing one out and forgetting it, because
+/// a debugged fork is a second **session of the same debuggee** — two DAP
+/// connections, one engine. the mutex is what the two share it through, and
+/// [`Attached`] is one connection's view of one session of it
+#[derive(Default)]
+struct Engine {
+    debuggee: Mutex<Option<Arc<Mutex<Debuggee>>>>,
+}
+
+/// what a lock on the engine's own field is only ever held to do
+const HOLDING: &str =
+    "nothing panics holding the debuggee: every path through it is one dispatch or one read";
+
+impl Engine {
+    /// the debuggee, once something has launched one
+    fn held(&self) -> Result<Arc<Mutex<Debuggee>>, Failed> {
+        self.debuggee
+            .lock()
+            .expect(HOLDING)
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                Failed::from(
+                    "nothing has been launched on this adapter yet, so there is no                      session to take up",
+                )
+            })
+    }
+}
 
 impl Launcher for Engine {
     fn launch(
-        &mut self,
+        &self,
         configuration: &Configuration,
         output: Arc<dyn ProgramOutput>,
     ) -> Result<Started, Failed> {
+        if self.debuggee.lock().expect(HOLDING).is_some() {
+            return Err("this adapter already has a program. a second connection to it                         takes up a session of that one, which is what a `startDebugging`                         reverse request asks a client to do"
+                .into());
+        }
         let interpreter = Capabilities::probe(&configuration.python)?;
         let arguments: Vec<OsString> = configuration
             .args
@@ -119,12 +156,47 @@ impl Launcher for Engine {
         )?;
 
         Ok(match launched {
-            Launched::Stopped(debuggee) => Started::Stopped(Box::new(Attached(debuggee))),
+            Launched::Stopped(debuggee) => {
+                let session = only_session_of(&debuggee)?;
+                let held = Arc::new(Mutex::new(debuggee));
+                *self.debuggee.lock().expect(HOLDING) = Some(Arc::clone(&held));
+                Started::Stopped(Box::new(Attached {
+                    debuggee: held,
+                    session,
+                }))
+            }
             Launched::ExitedBeforeStopping(status) => Started::ExitedBeforeStopping {
                 code: status.code(),
             },
         })
     }
+
+    fn attach(&self, session: u64) -> Result<Started, Failed> {
+        let held = self.held()?;
+        let named = std::num::NonZeroU64::new(session)
+            .map(SessionId::new)
+            .ok_or_else(|| Failed::from("sessions are numbered from one, and 0 is not one"))?;
+        {
+            let debuggee = held.lock().expect(HOLDING);
+            // refused rather than resolved to the nearest, which is the rule
+            // every request naming a session already follows
+            bpd_core::only_session(&debuggee.sessions(), Some(named), "taking up a session")?;
+        }
+        Ok(Started::Stopped(Box::new(Attached {
+            debuggee: held,
+            session: named,
+        })))
+    }
+}
+
+/// the session a freshly launched debuggee holds, which is its only one
+fn only_session_of(debuggee: &Debuggee) -> Result<SessionId, Failed> {
+    let sessions = debuggee.sessions();
+    Ok(bpd_core::only_session(
+        &sessions,
+        None,
+        "the session a launch produced",
+    )?)
 }
 
 /// copy one of the program's streams to the client, a line at a time
@@ -159,8 +231,23 @@ fn forward(stream: impl Read + Send + 'static, which: Stream, output: &Arc<dyn P
     }
 }
 
-/// a launched debuggee, as the adapter's session
-struct Attached(Debuggee);
+/// one DAP connection's view of one session of a debuggee
+///
+/// a DAP session **is** a connection, so this is where "the session this
+/// connection serves" is written down. a request that names none is the
+/// adapter's own — a wait, a resume, the breakpoint set — and it means this
+/// connection's session rather than "whichever there is": with a debugged fork
+/// open there are two, and the only-session rule would refuse rather than pick
+struct Attached {
+    debuggee: Arc<Mutex<Debuggee>>,
+    session: SessionId,
+}
+
+impl Attached {
+    fn debuggee(&self) -> std::sync::MutexGuard<'_, Debuggee> {
+        self.debuggee.lock().expect(HOLDING)
+    }
+}
 
 impl Session for Attached {
     fn dispatch(
@@ -168,15 +255,30 @@ impl Session for Attached {
         asked: Addressed,
         reporting: &mut dyn Reporting,
     ) -> Result<Response, Failed> {
-        Ok(self.0.dispatch(asked, reporting)?)
+        let asked = match asked.session {
+            Some(_) => asked,
+            None => Addressed::to(self.session, asked.request),
+        };
+        Ok(self.debuggee().dispatch(asked, reporting)?)
     }
 
+    /// the stops **this connection's** session holds
+    ///
+    /// filtered rather than all of them: another connection's stops are another
+    /// program's threads, and a client shown one would be shown a thread it can
+    /// neither walk nor resume
     fn held(&self) -> Vec<Stop> {
-        self.0.held()
+        self.debuggee()
+            .held()
+            .into_iter()
+            .filter(|stop| stop.session == self.session)
+            .collect()
     }
 
     fn interrupt(&self) -> Result<Box<dyn bpd_dap::Interrupt>, Failed> {
-        Ok(Box::new(Reaching(self.0.interrupt(None)?)))
+        Ok(Box::new(Reaching(
+            self.debuggee().interrupt(Some(self.session))?,
+        )))
     }
 }
 

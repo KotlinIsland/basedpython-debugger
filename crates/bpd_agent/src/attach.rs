@@ -45,7 +45,7 @@ use std::os::unix::net::UnixStream;
 #[cfg(unix)]
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
 
 use bpd_protocol::message::{FromAgent, FromEngine};
@@ -175,15 +175,48 @@ const fn no_reader() -> Reader {
     }
 }
 
+/// where the engine listens, and what this session presents to it
+///
+/// kept for the life of the process so that a **forked child** can open a
+/// connection of its own. a fork inherits memory, so nothing about debugging one
+/// has to go through the environment — which is why this is the only channel a
+/// child needs and why the parity guarantee is untouched by it
+///
+/// a [`OnceLock`] rather than anything larger because of where it is read: in a
+/// fork handler, where taking a lock a thread the fork did not keep was holding
+/// would wait for ever. reading one is an atomic load
+static ENGINE: OnceLock<Engine> = OnceLock::new();
+
+/// the endpoint and token [`attach`] was given
+struct Engine {
+    endpoint: String,
+    token: [u8; TOKEN_LEN],
+}
+
 /// connect to the engine, complete the handshake, and start reading
 pub(crate) fn attach(endpoint: &str, token_hex: &str) -> io::Result<()> {
     let token = decode_token(token_hex)?;
+    ENGINE
+        .set(Engine {
+            endpoint: endpoint.to_string(),
+            token,
+        })
+        .unwrap_or_else(|_| unreachable!("the agent's entry point attaches once"));
+    connect(endpoint, &token)
+}
+
+/// open a control connection of this process's own, and start reading it
+///
+/// the same work for the first connection and for the one a forked child makes:
+/// there is one description of what a session's transport is, rather than one
+/// that is correct and one that has to be kept in step with it
+fn connect(endpoint: &str, token: &[u8; TOKEN_LEN]) -> io::Result<()> {
     let mut stream = TcpStream::connect(endpoint)?;
 
     // the agent announces itself first: an engine that is listening for
     // something else finds out before it has sent anything
-    frame::write_handshake(&mut stream, &token).map_err(|error| framing(&error))?;
-    frame::read_handshake(&mut stream, &token).map_err(|error| framing(&error))?;
+    frame::write_handshake(&mut stream, token).map_err(|error| framing(&error))?;
+    frame::read_handshake(&mut stream, token).map_err(|error| framing(&error))?;
 
     // one handle for reading and one for writing, on the same socket. the
     // reader is blocked on the reading one whenever the session is idle, and a
@@ -440,6 +473,57 @@ pub(crate) fn detach() -> bool {
     READER.abandon();
     stops::abandon();
     true
+}
+
+/// open a session of this forked child's own, on the endpoint it inherited
+///
+/// called from `os.register_at_fork(after_in_child=…)`, **after** [`detach`] has
+/// closed the four descriptors this process inherited and replaced the three
+/// cells they lived in. so what this opens is a fifth descriptor rather than a
+/// second owner of the parent's, and there is no instant at which this process
+/// holds a writable handle on a socket it does not own
+///
+/// the endpoint and the token come out of [`ENGINE`], which is inherited memory.
+/// nothing goes through the environment, nothing is written to disk, and a
+/// program that reads its own `os.environ` and its own `sys.path` sees exactly
+/// what it would have — the fork's whole advantage over an exec
+///
+/// the engine keeps the listener the first agent attached on open for the life
+/// of the debuggee, and a peer that presents that debuggee's token becomes a
+/// second session of it. so this needs no new token and no new port: a second
+/// token would be a second lifetime to get wrong, and this connection is
+/// authenticated by exactly the thing the first one was
+///
+/// **[`DETACHED`] is cleared before the connection is made**, and the ordering
+/// is safe for a reason that is about the process rather than about the code: a
+/// fork keeps only the calling thread, this *is* that thread, and it is inside a
+/// fork handler. there is no other thread in this process that could reach
+/// [`send`] in the window, and the reader that could route a request into one
+/// does not exist until the last line
+#[cfg(unix)]
+pub(crate) fn reattach() -> io::Result<()> {
+    let engine = ENGINE
+        .get()
+        .unwrap_or_else(|| unreachable!("a forked child inherits the endpoint `attach` stored"));
+    DETACHED.store(false, Ordering::SeqCst);
+    match connect(&engine.endpoint, &engine.token) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // back to what a child gets with child debugging off. it is not a
+            // debuggee, so nothing of it may write to a connection it does not
+            // have — and the caller says so on this process's own stderr
+            DETACHED.store(true, Ordering::SeqCst);
+            Err(error)
+        }
+    }
+}
+
+/// where the engine listens, for a message about not having reached it
+#[cfg(unix)]
+pub(crate) fn endpoint() -> &'static str {
+    ENGINE
+        .get()
+        .map_or("the engine", |engine| engine.endpoint.as_str())
 }
 
 /// tell the engine something

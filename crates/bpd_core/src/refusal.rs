@@ -141,6 +141,19 @@ pub enum Refusal {
         /// what was asked for
         wanted: String,
     },
+
+    /// this platform has no `fork`, so there is no forked child to debug
+    ///
+    /// windows makes every child with `CreateProcess`, which is an exec: the
+    /// child is a fresh interpreter with none of this process's memory in it, so
+    /// there is nothing for `os.register_at_fork` to be the answer to and no
+    /// `os.register_at_fork` either. refused rather than accepted and quietly
+    /// never acted on, because a client told the setting took would wait for
+    /// child sessions that cannot arrive
+    NoFork {
+        /// the platform the debuggee is running on
+        platform: String,
+    },
 }
 
 impl std::fmt::Display for Refusal {
@@ -261,6 +274,15 @@ impl std::fmt::Display for Refusal {
                  the agent runs the interpreter's own api on a thread it is \
                  holding and at no other time — hold one first, by letting the \
                  program run to a breakpoint or by pausing it"
+            ),
+            Self::NoFork { platform } => write!(
+                formatter,
+                "the debuggee is running on {platform}, which has no `fork`. \
+                 every child a program starts there is a fresh interpreter with \
+                 none of this process's memory in it, so there is nothing to \
+                 inherit a session and no `os.register_at_fork` to hand one \
+                 over in. debugging a child that was **exec'd** is a different \
+                 mechanism and bpd does not have it"
             ),
         }
     }

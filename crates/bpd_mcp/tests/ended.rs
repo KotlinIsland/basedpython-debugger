@@ -17,8 +17,8 @@
 use std::sync::Arc;
 
 use bpd_core::{
-    Addressed, Exit, Mode, Reported, Reporting, Request, Response, Running, SessionId, Stack, Stop,
-    StopReason,
+    Addressed, Exit, Joined, Mode, Reported, Reporting, Request, Response, Running, SessionId,
+    Stack, Stop, StopReason,
 };
 use bpd_mcp::{Configuration, Failed, Launcher, ProgramOutput, Session, Started};
 
@@ -72,12 +72,22 @@ impl Session for NotOurs {
         self.held.clone()
     }
 
-    fn ended(&self) -> Option<Exit> {
+    /// one session, over a process bpd did not start
+    fn sessions(&self) -> Vec<Joined> {
+        vec![Joined {
+            session: session(),
+            ours: false,
+            held: self.held.clone(),
+            exit: self.ended(None),
+        }]
+    }
+
+    fn ended(&self, _session: Option<SessionId>) -> Option<Exit> {
         // the point of the whole file: over, and with no number to give
         self.over.then_some(Exit::Unknown)
     }
 
-    fn terminate(&mut self) -> Result<(), Failed> {
+    fn terminate(&mut self, _session: Option<SessionId>) -> Result<(), Failed> {
         Err("bpd did not start that process and is not its parent".into())
     }
 }

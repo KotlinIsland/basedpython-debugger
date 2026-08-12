@@ -91,8 +91,8 @@
 use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use bpd_core::{Blindspot, Spawn, Verdict};
 use bpd_protocol::message::FromAgent;
@@ -100,6 +100,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString};
 
 use crate::attach;
+use crate::cells::ForkCell;
 
 /// the audit events that make a process, on 3.14 and later
 ///
@@ -165,12 +166,31 @@ static ATTACHED: AtomicU32 = AtomicU32::new(0);
 /// a different path to the same file is still recognised
 static INTERPRETER: OnceLock<Option<String>> = OnceLock::new();
 
-/// the blind spot this interpreter has, and whether it has still to be said
+/// the blind spot this interpreter has, whether or not it has been said
 ///
-/// `None` on an interpreter that has none. it is taken out when it is said, so
-/// it is said once — a program that imports `multiprocessing` in fifty modules
-/// has one blind spot, not fifty
-static BLINDSPOT: Mutex<Option<Blindspot>> = Mutex::new(None);
+/// `None` on an interpreter that has none. it is what [`BLINDSPOT`] holds when
+/// it is fresh, which is at attach and again in a forked child that opened a
+/// session of its own — the blind spot is a property of the interpreter, and a
+/// second session on the same interpreter has it too
+static OF_THIS_INTERPRETER: OnceLock<Option<Blindspot>> = OnceLock::new();
+
+/// the blind spot still to be announced on this session
+///
+/// taken out when it is said, so it is said once per session — a program that
+/// imports `multiprocessing` in fifty modules has one blind spot, not fifty
+///
+/// in a [`ForkCell`] for the reason the session's other state is: a forked child
+/// that opens a session of its own runs this hook again, and a mutex a thread
+/// the fork did not keep was holding would never be released. the child replaces
+/// the cell rather than taking it, and what it finds is
+/// [`OF_THIS_INTERPRETER`] — the same interpreter, a session that has not been
+/// told
+static BLINDSPOT: ForkCell<Option<Blindspot>> = ForkCell::new(not_yet_said);
+
+/// what the blind spot is before anything has said it, in any session
+fn not_yet_said() -> Option<Blindspot> {
+    OF_THIS_INTERPRETER.get().cloned().flatten()
+}
 
 thread_local! {
     /// whether the last watched event on this thread was `subprocess.Popen`
@@ -288,17 +308,40 @@ fn watch_what_this_interpreter_raises(major: u8, minor: u8) {
     // `_winapi.CreateProcess`, which has been an audit event since 3.8 — so the
     // blind spot is a posix one and claiming it anywhere else would be bpd
     // reporting a limit it does not have
-    #[cfg(not(windows))]
-    if before_314 {
-        *lock() = Some(Blindspot::MultiprocessingSpawn {
+    let here = if cfg!(windows) || !before_314 {
+        None
+    } else {
+        Some(Blindspot::MultiprocessingSpawn {
             interpreter: format!("{major}.{minor}"),
-        });
-    }
+        })
+    };
+    OF_THIS_INTERPRETER
+        .set(here.clone())
+        .unwrap_or_else(|_| unreachable!("the agent installs the audit hook once"));
+    *lock() = here;
+}
+
+/// this process is the one that reports its children now
+///
+/// the hook is inherited by a forked child and compares the pid against the one
+/// recorded at attach, which is what keeps a child that gave the session up off
+/// the parent's socket. a child that opened a session of **its own** is a
+/// debuggee, and its children are its session's to report — so it records itself
+///
+/// an atomic store and nothing else, because it is called from a fork handler
+#[cfg(unix)]
+pub(crate) fn now_this_process() {
+    ATTACHED.store(std::process::id(), Ordering::Relaxed);
+    // the blind spot is the interpreter's, so this session has it too and has
+    // not been told about it. the cell is replaced rather than emptied for the
+    // reason every other one a fork handler touches is — see [`BLINDSPOT`]
+    BLINDSPOT.abandon();
 }
 
 /// the blind spot still to be announced
 fn lock() -> std::sync::MutexGuard<'static, Option<Blindspot>> {
     BLINDSPOT
+        .get()
         .lock()
         .expect("nothing panics holding the blind spot: every path through it is a take or a set")
 }

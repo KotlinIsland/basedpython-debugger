@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use bpd_core::{
     Addressed, Detail, Exit, HitCondition, LogRecord, Reporting, Request, Response, Running, Scope,
-    SourceBreakpoint, StepKind, Stop, Threads, Which, exit_code, only_stop,
+    SessionId, SourceBreakpoint, StepKind, Stop, Threads, Which, exit_code, only_stop,
 };
 
 use crate::prompts::prompts;
@@ -283,10 +283,13 @@ impl<'a> Server<'a> {
             }
             "set_exception_breakpoints" => {
                 let args: ExceptionArgs = parse(name, arguments)?;
-                match self.ask(Request::SetExceptionBreakpoints {
-                    raised: args.raised,
-                    uncaught: args.uncaught,
-                })? {
+                match self.ask_in(
+                    args.session,
+                    Request::SetExceptionBreakpoints {
+                        raised: args.raised,
+                        uncaught: args.uncaught,
+                    },
+                )? {
                     Response::ExceptionBreakpoints(armed) => Ok(serde_json::json!({
                         // read back off the agent rather than echoed from the
                         // request: what is armed is what the agent says is armed
@@ -296,33 +299,72 @@ impl<'a> Server<'a> {
                     other => unreachable!("exception breakpoints were answered with {other:?}"),
                 }
             }
+            "debug_children" => {
+                let args: DebugChildrenArgs = parse(name, arguments)?;
+                match self.ask_in(args.session, Request::DebugChildren { on: args.on })? {
+                    Response::DebuggingChildren { on } => Ok(serde_json::json!({
+                        // read back off the agent rather than echoed from the
+                        // request: what is set is what the process that will
+                        // fork says is set
+                        "debugging_children": on,
+                        "note": if on {
+                            "a forked child of this program will open a session \
+                             of its own and be **held** at the line that forked. \
+                             it is a second session: `sessions` lists it, and \
+                             every tool takes its `session`. it has to be \
+                             resumed like any other stop"
+                        } else {
+                            "a forked child of this program gives the session up \
+                             before `os.fork()` returns and runs undebugged. the \
+                             fork is still reported"
+                        },
+                    })),
+                    other => unreachable!("debugging children was answered with {other:?}"),
+                }
+            }
+            "sessions" => {
+                let _: Empty = parse(name, arguments)?;
+                if self.session.is_none() {
+                    return Err(NO_PROGRAM.to_string());
+                }
+                Ok(serde_json::json!({ "sessions": render::sessions(&self.joined()) }))
+            }
             "continue_" => {
                 let args: Waiting = parse(name, arguments)?;
-                let ran = self.ran(Request::Run {
-                    deadline: Some(args.deadline()),
-                })?;
-                self.outcome(ran, args.frames)
+                let ran = self.ran_in(
+                    args.session,
+                    Request::Run {
+                        deadline: Some(args.deadline()),
+                    },
+                )?;
+                self.outcome(ran, args.session, args.frames)
             }
             "step_over" => self.step(name, arguments, StepKind::Over),
             "step_in" => self.step(name, arguments, StepKind::In),
             "step_out" => self.step(name, arguments, StepKind::Out),
             "wait" => {
                 let args: Waiting = parse(name, arguments)?;
-                let ran = self.ran(Request::Wait {
-                    deadline: Some(args.deadline()),
-                })?;
-                self.outcome(ran, args.frames)
+                let ran = self.ran_in(
+                    args.session,
+                    Request::Wait {
+                        deadline: Some(args.deadline()),
+                    },
+                )?;
+                self.outcome(ran, args.session, args.frames)
             }
             "pause" => {
                 let args: Waiting = parse(name, arguments)?;
-                let running = match self.ask(Request::Pause)? {
+                let running = match self.ask_in(args.session, Request::Pause)? {
                     Response::Pausing { running } => running,
                     other => unreachable!("a pause was answered with {other:?}"),
                 };
-                let ran = self.ran(Request::Wait {
-                    deadline: Some(args.deadline()),
-                })?;
-                let mut answer = self.outcome(ran, args.frames)?;
+                let ran = self.ran_in(
+                    args.session,
+                    Request::Wait {
+                        deadline: Some(args.deadline()),
+                    },
+                )?;
+                let mut answer = self.outcome(ran, args.session, args.frames)?;
                 answer["running"] = serde_json::json!(running);
                 if running.is_empty() {
                     // `running` is what the agent saw *excluding* what it is
@@ -358,7 +400,7 @@ impl<'a> Server<'a> {
                     Some(threads) => Which::Named { threads },
                     None => Which::All,
                 };
-                match self.ask(Request::Resume { which })? {
+                match self.ask_in(args.session, Request::Resume { which })? {
                     Response::Resumed { threads } => Ok(serde_json::json!({
                         "resumed": threads,
                         "held": self.held_now(),
@@ -368,156 +410,217 @@ impl<'a> Server<'a> {
             }
             "stack" => {
                 let args: StackArgs = parse(name, arguments)?;
-                let stop = self.stop_of(args.stop, "the stack")?;
-                match self.ask(Request::Stack {
-                    stop,
-                    top: args.top,
-                })? {
+                let stop = self.stop_of(args.stop, args.session, "the stack")?;
+                match self.ask_in(
+                    args.session,
+                    Request::Stack {
+                        stop,
+                        top: args.top,
+                    },
+                )? {
                     Response::Stack(walked) => Ok(render::stack(&walked)),
                     other => unreachable!("a stack walk was answered with {other:?}"),
                 }
             }
             "variables" => {
                 let args: VariablesArgs = parse(name, arguments)?;
-                let frame = self.frame_of(args.stop, args.frame, "the variables of a scope")?;
-                match self.ask(Request::Variables {
-                    frame,
-                    scope: args.scope,
-                    detail: args.detail,
-                })? {
+                let frame = self.frame_of(
+                    args.stop,
+                    args.session,
+                    args.frame,
+                    "the variables of a scope",
+                )?;
+                match self.ask_in(
+                    args.session,
+                    Request::Variables {
+                        frame,
+                        scope: args.scope,
+                        detail: args.detail,
+                    },
+                )? {
                     Response::Variables(read) => Ok(render::variables(&read)),
                     other => unreachable!("a scope read was answered with {other:?}"),
                 }
             }
             "template_context" => {
                 let args: TemplateContextArgs = parse(name, arguments)?;
-                let frame =
-                    self.frame_of(args.stop, args.frame, "the template context of a frame")?;
-                match self.ask(Request::TemplateContext {
-                    frame,
-                    detail: args.detail,
-                })? {
+                let frame = self.frame_of(
+                    args.stop,
+                    args.session,
+                    args.frame,
+                    "the template context of a frame",
+                )?;
+                match self.ask_in(
+                    args.session,
+                    Request::TemplateContext {
+                        frame,
+                        detail: args.detail,
+                    },
+                )? {
                     Response::TemplateContext(context) => Ok(render::template_context(&context)),
                     other => unreachable!("a template context was answered with {other:?}"),
                 }
             }
             "evaluate" => {
                 let args: EvaluateArgs = parse(name, arguments)?;
-                let frame = self.frame_of(args.stop, args.frame, "evaluating an expression")?;
-                match self.ask(Request::Evaluate {
-                    frame,
-                    expression: args.expression,
-                    detail: args.detail,
-                })? {
+                let frame = self.frame_of(
+                    args.stop,
+                    args.session,
+                    args.frame,
+                    "evaluating an expression",
+                )?;
+                match self.ask_in(
+                    args.session,
+                    Request::Evaluate {
+                        frame,
+                        expression: args.expression,
+                        detail: args.detail,
+                    },
+                )? {
                     Response::Evaluated(result) => Ok(render::evaluated(&result)),
                     other => unreachable!("an evaluation was answered with {other:?}"),
                 }
             }
             "set_variable" => {
                 let args: SetVariableArgs = parse(name, arguments)?;
-                let frame = self.frame_of(args.stop, args.frame, "writing a variable")?;
-                match self.ask(Request::SetVariable {
-                    frame,
-                    scope: args.scope,
-                    name: args.name,
-                    value: args.value,
-                    detail: args.detail,
-                })? {
+                let frame =
+                    self.frame_of(args.stop, args.session, args.frame, "writing a variable")?;
+                match self.ask_in(
+                    args.session,
+                    Request::SetVariable {
+                        frame,
+                        scope: args.scope,
+                        name: args.name,
+                        value: args.value,
+                        detail: args.detail,
+                    },
+                )? {
                     Response::Evaluated(result) => Ok(render::evaluated(&result)),
                     other => unreachable!("a variable write was answered with {other:?}"),
                 }
             }
             "set_next_statement" => {
                 let args: SetNextStatementArgs = parse(name, arguments)?;
-                let frame = self.frame_of(args.stop, args.frame, "setting the next statement")?;
-                match self.ask(Request::SetNextStatement {
-                    frame,
-                    line: args.line,
-                })? {
+                let frame = self.frame_of(
+                    args.stop,
+                    args.session,
+                    args.frame,
+                    "setting the next statement",
+                )?;
+                match self.ask_in(
+                    args.session,
+                    Request::SetNextStatement {
+                        frame,
+                        line: args.line,
+                    },
+                )? {
                     Response::Jumped(jumped) => Ok(render::jumped(&jumped)),
                     other => unreachable!("a jump was answered with {other:?}"),
                 }
             }
             "restart_frame" => {
                 let args: RestartFrameArgs = parse(name, arguments)?;
-                let frame = self.frame_of(args.stop, args.frame, "restarting a frame")?;
-                match self.ask(Request::RestartFrame { frame })? {
+                let frame =
+                    self.frame_of(args.stop, args.session, args.frame, "restarting a frame")?;
+                match self.ask_in(args.session, Request::RestartFrame { frame })? {
                     Response::Jumped(jumped) => Ok(render::jumped(&jumped)),
                     other => unreachable!("a restart was answered with {other:?}"),
                 }
             }
             "replace_code" => {
                 let args: ReplaceCodeArgs = parse(name, arguments)?;
-                match self.ask(Request::ReplaceCode { file: args.file })? {
+                match self.ask_in(args.session, Request::ReplaceCode { file: args.file })? {
                     Response::Replaced(replaced) => Ok(render::replaced(&replaced)),
                     other => unreachable!("a code replacement was answered with {other:?}"),
                 }
             }
             "threads" => {
                 let args: ThreadsArgs = parse(name, arguments)?;
-                match self.ask(Request::Threads {
-                    settle: args.settle(),
-                })? {
+                match self.ask_in(
+                    args.session,
+                    Request::Threads {
+                        settle: args.settle(),
+                    },
+                )? {
                     Response::Threads(census) => Ok(render::threads(&census)),
                     other => unreachable!("a thread census was answered with {other:?}"),
                 }
             }
             "stop_the_world" => {
                 let args: WorldArgs = parse(name, arguments)?;
-                let stop = self.stop_of(args.stop, "stopping the world")?;
-                match self.ask(Request::StopTheWorld {
-                    stop,
-                    settle: args.settle(),
-                })? {
+                let stop = self.stop_of(args.stop, args.session, "stopping the world")?;
+                match self.ask_in(
+                    args.session,
+                    Request::StopTheWorld {
+                        stop,
+                        settle: args.settle(),
+                    },
+                )? {
                     Response::WorldStopped(stopped) => Ok(render::world(&stopped)),
                     other => unreachable!("stopping the world was answered with {other:?}"),
                 }
             }
             "run_script" => {
                 let args: RunScript = parse(name, arguments)?;
-                let stop = self.stop_of(args.stop, "running a debug script")?;
-                match self.ask(Request::RunScript {
-                    stop,
-                    script: bpd_core::Script {
-                        steps: args.steps,
-                        budget: args.budget,
+                let stop = self.stop_of(args.stop, args.session, "running a debug script")?;
+                match self.ask_in(
+                    args.session,
+                    Request::RunScript {
+                        stop,
+                        script: bpd_core::Script {
+                            steps: args.steps,
+                            budget: args.budget,
+                        },
                     },
-                })? {
+                )? {
                     Response::Transcript(ran) => Ok(render::transcript(&ran)),
                     other => unreachable!("a debug script was answered with {other:?}"),
                 }
             }
             "state" => {
                 let args: StateArgs = parse(name, arguments)?;
-                let stop = self.stop_of(args.stop, "the state of a stop")?;
-                match self.ask(Request::Query {
-                    stop,
-                    query: args.query(),
-                })? {
+                let session = args.session;
+                let stop = self.stop_of(args.stop, session, "the state of a stop")?;
+                match self.ask_in(
+                    session,
+                    Request::Query {
+                        stop,
+                        query: args.query(),
+                    },
+                )? {
                     Response::State(snapshot) => Ok(render::state(&snapshot)),
                     other => unreachable!("a state query was answered with {other:?}"),
                 }
             }
             "diff" => {
                 let args: DiffArgs = parse(name, arguments)?;
-                match self.ask(Request::Diff {
-                    before: args.before,
-                    after: args.after,
-                })? {
+                match self.ask_in(
+                    args.session,
+                    Request::Diff {
+                        before: args.before,
+                        after: args.after,
+                    },
+                )? {
                     Response::Difference(difference) => Ok(render::difference(&difference)),
                     other => unreachable!("a difference was answered with {other:?}"),
                 }
             }
             "terminate" => {
-                let _: Empty = parse(name, arguments)?;
-                let session = self
+                let args: SessionOnly = parse(name, arguments)?;
+                let named = self.session_named(args.session, "ending the program")?;
+                let last = self.session_ids().len() <= 1;
+                let held = self
                     .session
                     .as_mut()
                     .ok_or_else(|| NO_PROGRAM.to_string())?;
-                session
-                    .terminate()
+                held.terminate(named)
                     .map_err(|error| describe(error.as_ref()))?;
-                self.session = None;
+                // the debuggee goes when its last session does. ending one of
+                // several leaves the others, and a server that forgot the whole
+                // debuggee would strand every process it still holds
+                if last {
+                    self.session = None;
+                }
                 Ok(serde_json::json!({ "terminated": true }))
             }
             other => unreachable!("`{other}` was accepted as a tool and has no implementation"),
@@ -557,7 +660,7 @@ impl<'a> Server<'a> {
                 })?;
                 let mut answer = render::stop(&entry);
                 answer["outcome"] = "stopped".into();
-                self.with_frames(&mut answer, entry.stop, args.frames)?;
+                self.with_frames(&mut answer, None, entry.stop, args.frames)?;
                 Ok(answer)
             }
             Started::ExitedBeforeStopping { code } => Ok(serde_json::json!({
@@ -572,6 +675,7 @@ impl<'a> Server<'a> {
     }
 
     fn set_breakpoints(&mut self, args: SetBreakpoints) -> Answered {
+        let session = args.session;
         // the id is the position in the set, counting from one. there is nothing
         // to remember: the request replaces the whole set, so an id means the
         // same thing to the client and to the agent without a table in between
@@ -594,9 +698,12 @@ impl<'a> Server<'a> {
             .collect();
         self.requested.clone_from(&breakpoints);
 
-        match self.ask(Request::SetBreakpoints {
-            breakpoints: breakpoints.clone(),
-        })? {
+        match self.ask_in(
+            session,
+            Request::SetBreakpoints {
+                breakpoints: breakpoints.clone(),
+            },
+        )? {
             Response::BreakpointsResolved { resolved } => Ok(serde_json::json!({
                 "breakpoints": render::breakpoints(&resolved, &breakpoints),
             })),
@@ -606,28 +713,31 @@ impl<'a> Server<'a> {
 
     fn step(&mut self, name: &str, arguments: &serde_json::Value, kind: StepKind) -> Answered {
         let args: Stepping = parse(name, arguments)?;
-        let stop = self.stop_of(args.stop, "stepping a thread")?;
-        match self.ask(Request::Step { stop, kind })? {
+        let stop = self.stop_of(args.stop, args.session, "stepping a thread")?;
+        match self.ask_in(args.session, Request::Step { stop, kind })? {
             Response::Resumed { .. } => {}
             other => unreachable!("a step was answered with {other:?}"),
         }
-        let ran = self.ran(Request::Wait {
-            deadline: Some(args.deadline()),
-        })?;
-        self.outcome(ran, args.frames)
+        let ran = self.ran_in(
+            args.session,
+            Request::Wait {
+                deadline: Some(args.deadline()),
+            },
+        )?;
+        self.outcome(ran, args.session, args.frames)
     }
 
     // ---- what the program did --------------------------------------------
 
-    fn ran(&mut self, request: Request) -> Result<Running, String> {
-        match self.ask(request)? {
+    fn ran_in(&mut self, session: Option<u64>, request: Request) -> Result<Running, String> {
+        match self.ask_in(session, request)? {
             Response::Ran(running) => Ok(running),
             other => unreachable!("a wait was answered with {other:?}"),
         }
     }
 
     /// what a control tool answers: the stop it produced, or why there is none
-    fn outcome(&mut self, running: Running, frames: u32) -> Answered {
+    fn outcome(&mut self, running: Running, session: Option<u64>, frames: u32) -> Answered {
         let rebound = match &running {
             Running::Stopped { rebound, .. }
             | Running::Exited { rebound, .. }
@@ -640,7 +750,7 @@ impl<'a> Server<'a> {
             Running::Stopped { stop, .. } => {
                 let mut stopped = render::stop(&stop);
                 stopped["outcome"] = "stopped".into();
-                self.with_frames(&mut stopped, stop.stop, frames)?;
+                self.with_frames(&mut stopped, session, stop.stop, frames)?;
                 stopped
             }
             Running::Exited { status, .. } => serde_json::json!({
@@ -696,16 +806,20 @@ impl<'a> Server<'a> {
     fn with_frames(
         &mut self,
         answer: &mut serde_json::Value,
+        session: Option<u64>,
         stop: u64,
         frames: u32,
     ) -> Result<(), String> {
         if frames == 0 {
             return Ok(());
         }
-        match self.ask(Request::Stack {
-            stop,
-            top: Some(frames),
-        })? {
+        match self.ask_in(
+            session,
+            Request::Stack {
+                stop,
+                top: Some(frames),
+            },
+        )? {
             Response::Stack(walked) => {
                 let rendered = render::stack(&walked);
                 for (key, value) in rendered
@@ -730,13 +844,83 @@ impl<'a> Server<'a> {
     /// front ends have to apply it. a tool that is about a stop goes to the
     /// session that stop was reported from, and one that is about the program
     /// names none, which is this server's only session
-    fn ask(&mut self, request: Request) -> Result<Response, String> {
+    /// ask one session for something, rendering a failure as a tool failure
+    ///
+    /// the address comes from two places and they are not equals. a request
+    /// that is about a **stop** belongs to the session that stop was reported
+    /// from, and the stop carries it — which is unforgeable, because the engine
+    /// names a stop on the connection it arrived on. a `session` argument is
+    /// what a request about the *program* has instead, and it is the only thing
+    /// there is when there are two sessions and nothing else says which
+    ///
+    /// so the two are checked against each other rather than one overriding the
+    /// other. an argument that disagrees with the stop is a caller that believes
+    /// something false about which program it is looking at, and answering
+    /// either way would confirm half of it
+    fn ask_in(&mut self, named: Option<u64>, request: Request) -> Result<Response, String> {
+        let wanted = request.name();
+        let named = self.session_named(named, wanted)?;
         let asked = Addressed::of(request, &self.held_stops());
+        let asked = match (asked.session, named) {
+            (Some(by_stop), Some(named)) if by_stop != named => {
+                return Err(format!(
+                    "{wanted} names {named} and is about a stop that was \
+                     reported from {by_stop}. a stop belongs to the session it \
+                     arrived on and that is not something an argument can \
+                     change — drop the `session`, or name the stop of {named}"
+                ));
+            }
+            (Some(by_stop), _) => Addressed::to(by_stop, asked.request),
+            (None, Some(named)) => Addressed::to(named, asked.request),
+            (None, None) => asked,
+        };
         let Self { session, said, .. } = self;
         let session = session.as_mut().ok_or_else(|| NO_PROGRAM.to_string())?;
         session
             .dispatch(asked, said)
             .map_err(|error| describe(error.as_ref()))
+    }
+
+    /// the session a tool named, refused when this debuggee holds no such one
+    ///
+    /// naming none is the ordinary case and stays `None`, which is what
+    /// [`bpd_core::only_session`] answers against — refusing rather than picking
+    /// when there is more than one. an id nothing holds is refused here rather
+    /// than resolved to the nearest, for the reason that rule refuses one
+    fn session_named(
+        &self,
+        given: Option<u64>,
+        wanted: &'static str,
+    ) -> Result<Option<SessionId>, String> {
+        let Some(given) = given else {
+            return Ok(None);
+        };
+        let open = self.session_ids();
+        let named = std::num::NonZeroU64::new(given)
+            .map(SessionId::new)
+            .ok_or_else(|| {
+                format!(
+                    "session 0 is not a session — they are numbered from one. \
+                     what is open: {open:?}"
+                )
+            })?;
+        bpd_core::only_session(&open, Some(named), wanted)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    fn session_ids(&self) -> Vec<SessionId> {
+        self.joined()
+            .into_iter()
+            .map(|joined| joined.session)
+            .collect()
+    }
+
+    fn joined(&self) -> Vec<bpd_core::Joined> {
+        self.session
+            .as_ref()
+            .map(|session| session.sessions())
+            .unwrap_or_default()
     }
 
     fn held_stops(&self) -> Vec<Stop> {
@@ -750,28 +934,47 @@ impl<'a> Server<'a> {
         self.held_stops().iter().map(render::stop).collect()
     }
 
-    /// how the program ended, or `None` while there is one
-    fn ended(&self) -> Option<Exit> {
-        self.session.as_ref().and_then(|session| session.ended())
+    /// how one session's program ended, or `None` while there is one
+    fn ended(&self, session: Option<SessionId>) -> Option<Exit> {
+        self.session.as_ref().and_then(|held| held.ended(session))
     }
 
     /// the stop a tool is about, or the rule for why it cannot be decided
-    fn stop_of(&self, given: Option<u64>, wanted: &'static str) -> Result<u64, String> {
-        match given {
-            Some(stop) => Ok(stop),
-            None => only_stop(&self.held_stops(), self.ended(), wanted)
-                .map_err(|error| error.to_string()),
+    ///
+    /// naming a session narrows the stops it is decided among, which is the
+    /// whole use of the argument on a tool that is about one thread: two
+    /// sessions each holding one stop is two stops, and "the only one" is then
+    /// a question about a program rather than about the debugger
+    fn stop_of(
+        &self,
+        given: Option<u64>,
+        session: Option<u64>,
+        wanted: &'static str,
+    ) -> Result<u64, String> {
+        if let Some(stop) = given {
+            return Ok(stop);
         }
+        let named = self.session_named(session, wanted)?;
+        let held: Vec<Stop> = match named {
+            Some(named) => self
+                .held_stops()
+                .into_iter()
+                .filter(|stop| stop.session == named)
+                .collect(),
+            None => self.held_stops(),
+        };
+        only_stop(&held, self.ended(named), wanted).map_err(|error| error.to_string())
     }
 
     fn frame_of(
         &self,
         stop: Option<u64>,
+        session: Option<u64>,
         depth: u32,
         wanted: &'static str,
     ) -> Result<bpd_core::FrameId, String> {
         Ok(bpd_core::FrameId {
-            stop: self.stop_of(stop, wanted)?,
+            stop: self.stop_of(stop, session, wanted)?,
             depth,
         })
     }
@@ -790,6 +993,9 @@ impl<'a> Server<'a> {
         if let Some(children) = self.said.children() {
             answer["spawned"] = children;
         }
+        if let Some(joined) = self.said.joined() {
+            answer["attached"] = joined;
+        }
         if !answer.is_object() {
             unreachable!("every tool answers with an object, and one answered with {answer}");
         }
@@ -801,8 +1007,15 @@ impl<'a> Server<'a> {
     /// thing left that could be told is the process that has just been asked to
     /// stop existing
     fn end(&mut self) {
-        if let Some(session) = self.session.as_mut() {
-            let ended = session.terminate();
+        let Some(held) = self.session.as_mut() else {
+            return;
+        };
+        // every session, not the only one: a debugged fork is a second process
+        // and one left running with nothing watching it is exactly the state
+        // this exists to prevent. one bpd did not start refuses, which is not a
+        // failure to report here — there is nobody left to report it to
+        for joined in held.sessions() {
+            let ended = held.terminate(Some(joined.session));
             drop(ended);
         }
     }
@@ -1029,6 +1242,7 @@ struct Said {
     children: Vec<bpd_core::Spawn>,
     children_dropped: usize,
     blind: Vec<bpd_core::Blindspot>,
+    joined: Vec<SessionId>,
 }
 
 impl Said {
@@ -1055,6 +1269,28 @@ impl Said {
             rendered["pause_armed_while_running"] = serde_json::json!(pausing);
         }
         Some(rendered)
+    }
+
+    /// the sessions that joined since the last answer, if any
+    ///
+    /// its own key, and the one an agent must not miss: a debugged fork arrives
+    /// **held** at the line that forked, so a session listed here is a process
+    /// waiting for this agent to do something about it
+    fn joined(&mut self) -> Option<serde_json::Value> {
+        if self.joined.is_empty() {
+            return None;
+        }
+        let sessions: Vec<u64> = std::mem::take(&mut self.joined)
+            .iter()
+            .map(|session| session.get())
+            .collect();
+        Some(serde_json::json!({
+            "sessions": sessions,
+            "note": "the program forked and the child opened a debug session of \
+                     its own. it is **held**, at the line that forked, and it \
+                     stays there until something resumes it. `sessions` lists \
+                     them all; every tool takes the `session` of one",
+        }))
     }
 
     /// the children the program started since the last answer, if any
@@ -1124,6 +1360,16 @@ impl Reporting for Said {
     fn blind_to(&mut self, blindspot: bpd_core::Blindspot) {
         self.blind.push(blindspot);
     }
+
+    /// a debugged fork opened a session of its own
+    ///
+    /// unbounded, for the reason a blind spot is and more so: every one of these
+    /// is a **held** process. one that was dropped to save room would be a
+    /// stopped program nothing was ever told about, which is the hang this
+    /// whole feature is arranged to avoid
+    fn attached(&mut self, session: SessionId) {
+        self.joined.push(session);
+    }
 }
 
 // ---- the arguments, one struct per tool ----------------------------------
@@ -1135,6 +1381,23 @@ impl Reporting for Said {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Empty {}
+
+/// a tool that takes nothing but the session it is about
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionOnly {
+    #[serde(default)]
+    session: Option<u64>,
+}
+
+/// what a forked child of the program should do
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DebugChildrenArgs {
+    #[serde(default)]
+    session: Option<u64>,
+    on: bool,
+}
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1159,6 +1422,8 @@ const fn frames() -> u32 {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SetBreakpoints {
+    #[serde(default)]
+    session: Option<u64>,
     breakpoints: Vec<Wanted>,
 }
 
@@ -1179,6 +1444,8 @@ struct Wanted {
 #[serde(deny_unknown_fields)]
 struct ExceptionArgs {
     #[serde(default)]
+    session: Option<u64>,
+    #[serde(default)]
     raised: bool,
     #[serde(default)]
     uncaught: bool,
@@ -1187,6 +1454,8 @@ struct ExceptionArgs {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Waiting {
+    #[serde(default)]
+    session: Option<u64>,
     deadline_ms: u64,
     #[serde(default = "frames")]
     frames: u32,
@@ -1201,6 +1470,8 @@ impl Waiting {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stepping {
+    #[serde(default)]
+    session: Option<u64>,
     deadline_ms: u64,
     #[serde(default = "frames")]
     frames: u32,
@@ -1218,12 +1489,16 @@ impl Stepping {
 #[serde(deny_unknown_fields)]
 struct Resume {
     #[serde(default)]
+    session: Option<u64>,
+    #[serde(default)]
     threads: Option<Vec<u64>>,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StackArgs {
+    #[serde(default)]
+    session: Option<u64>,
     #[serde(default)]
     stop: Option<u64>,
     #[serde(default)]
@@ -1233,6 +1508,8 @@ struct StackArgs {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VariablesArgs {
+    #[serde(default)]
+    session: Option<u64>,
     #[serde(default)]
     stop: Option<u64>,
     #[serde(default)]
@@ -1246,6 +1523,8 @@ struct VariablesArgs {
 #[serde(deny_unknown_fields)]
 struct TemplateContextArgs {
     #[serde(default)]
+    session: Option<u64>,
+    #[serde(default)]
     stop: Option<u64>,
     #[serde(default)]
     frame: u32,
@@ -1256,6 +1535,8 @@ struct TemplateContextArgs {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EvaluateArgs {
+    #[serde(default)]
+    session: Option<u64>,
     #[serde(default)]
     stop: Option<u64>,
     #[serde(default)]
@@ -1268,6 +1549,8 @@ struct EvaluateArgs {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SetVariableArgs {
+    #[serde(default)]
+    session: Option<u64>,
     #[serde(default)]
     stop: Option<u64>,
     #[serde(default)]
@@ -1283,6 +1566,8 @@ struct SetVariableArgs {
 #[serde(deny_unknown_fields)]
 struct SetNextStatementArgs {
     #[serde(default)]
+    session: Option<u64>,
+    #[serde(default)]
     stop: Option<u64>,
     #[serde(default)]
     frame: u32,
@@ -1292,6 +1577,8 @@ struct SetNextStatementArgs {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RestartFrameArgs {
+    #[serde(default)]
+    session: Option<u64>,
     #[serde(default)]
     stop: Option<u64>,
     #[serde(default)]
@@ -1305,6 +1592,8 @@ struct RestartFrameArgs {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReplaceCodeArgs {
+    #[serde(default)]
+    session: Option<u64>,
     file: PathBuf,
 }
 
@@ -1316,6 +1605,8 @@ struct ReplaceCodeArgs {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunScript {
+    #[serde(default)]
+    session: Option<u64>,
     #[serde(default)]
     stop: Option<u64>,
     steps: Vec<bpd_core::Step>,
@@ -1331,6 +1622,8 @@ struct RunScript {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StateArgs {
+    #[serde(default)]
+    session: Option<u64>,
     #[serde(default)]
     stop: Option<u64>,
     #[serde(default = "one_frame")]
@@ -1365,6 +1658,8 @@ impl StateArgs {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DiffArgs {
+    #[serde(default)]
+    session: Option<u64>,
     before: bpd_core::SnapshotId,
     after: bpd_core::SnapshotId,
 }
@@ -1372,6 +1667,8 @@ struct DiffArgs {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadsArgs {
+    #[serde(default)]
+    session: Option<u64>,
     #[serde(default)]
     settle_ms: Option<u64>,
 }
@@ -1386,6 +1683,8 @@ impl ThreadsArgs {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorldArgs {
+    #[serde(default)]
+    session: Option<u64>,
     #[serde(default)]
     stop: Option<u64>,
     #[serde(default)]
@@ -1542,6 +1841,8 @@ mod tests {
         "launch" => Launch,
         "set_breakpoints" => SetBreakpoints,
         "set_exception_breakpoints" => ExceptionArgs,
+        "debug_children" => DebugChildrenArgs,
+        "sessions" => Empty,
         "continue_" => Waiting,
         "step_over" => Stepping,
         "step_in" => Stepping,
@@ -1562,7 +1863,7 @@ mod tests {
         "run_script" => RunScript,
         "state" => StateArgs,
         "diff" => DiffArgs,
-        "terminate" => Empty,
+        "terminate" => SessionOnly,
     }
 
     #[test]

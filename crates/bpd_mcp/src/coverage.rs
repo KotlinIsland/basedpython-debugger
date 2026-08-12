@@ -25,6 +25,7 @@ pub const fn reach_of(request: &Request) -> Reach {
     match request {
         Request::SetBreakpoints { .. } => Reach::Direct("set_breakpoints"),
         Request::SetExceptionBreakpoints { .. } => Reach::Direct("set_exception_breakpoints"),
+        Request::DebugChildren { .. } => Reach::Direct("debug_children"),
 
         // the composed form DAP cannot use is the one an agent wants: the
         // answer to `continue_` **is** the stop it produced, so there is no
@@ -86,16 +87,15 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
              `state`, which is per call rather than per session",
         ),
 
-        // the same route DAP has, and for a different reason: this server
-        // holds one session, so there is one thing to address to and an agent
-        // that had to name it would be naming the only one there is. what
-        // arrives with a second session is a tool that lists them, and the
-        // argument that goes with it
-        Facet::Session => Reach::OnItsOwn(
-            "on every request it makes: one that is about a stop is addressed \
-             to the session that stop was reported from, which the stop \
-             carries, and one that is about the program names none — which is \
-             the only session this server holds",
+        // MCP has no push, so a second session has to be **learnable**: the
+        // `sessions` tool is how an agent finds out one exists, and the
+        // `session` argument is how it says which one a call is for. it is
+        // optional everywhere, because naming none still means the only session
+        // there is
+        Facet::Session => Reach::Direct(
+            "sessions, which lists them, and the optional `session` argument of \
+             every tool that is about one. a tool that is about a stop needs \
+             neither: the stop carries the session it was reported from",
         ),
     }
 }

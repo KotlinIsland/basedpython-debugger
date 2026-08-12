@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bpd_core::{Addressed, Exit, Reporting, Response, Stop};
+use bpd_core::{Addressed, Exit, Joined, Reporting, Response, SessionId, Stop};
 
 /// something a session could not do, as an adapter has to render it
 ///
@@ -43,14 +43,25 @@ pub trait Session {
         reporting: &mut dyn Reporting,
     ) -> Result<Response, Failed>;
 
-    /// the stops held right now, in the order the session learned of them
+    /// the stops held right now, across every session, in the order they
+    /// arrived
     ///
     /// a stop holds one thread and the rest of the program keeps running, so
     /// several can be outstanding at once. a tool that names no stop is answered
-    /// against this through [`bpd_core::only_stop`]
+    /// against this through [`bpd_core::only_stop`], and every stop carries the
+    /// session it was reported from — which is how a tool that names one is
+    /// addressed without an argument
     fn held(&self) -> Vec<Stop>;
 
-    /// how the program ended, or `None` while it is still there
+    /// every session this debuggee holds, and what an agent has to know about
+    /// each
+    ///
+    /// MCP has no push. a debugged fork opens a session of its own while the
+    /// program runs, and this is what makes one **learnable** rather than
+    /// something an agent has to have been watching for
+    fn sessions(&self) -> Vec<Joined>;
+
+    /// how one session's program ended, or `None` while it is still there
     ///
     /// a program with nothing held is in one of two states that need opposite
     /// things done about them: running, and therefore to be paused, or over, and
@@ -61,14 +72,22 @@ pub trait Session {
     /// bpd reads an exit status off a process it started; one that connected to
     /// bpd's listener has no parent here and no status to read, and those are
     /// different things to tell a caller
-    fn ended(&self) -> Option<Exit>;
+    ///
+    /// naming none means the only session there is, which is every request's
+    /// rule — [`bpd_core::only_session`]
+    fn ended(&self, session: Option<SessionId>) -> Option<Exit>;
 
-    /// end the debuggee
+    /// end one session's debuggee
     ///
     /// the last resort rather than a resume: a program that is running cannot be
     /// asked anything, so a client that wants to be finished with one has
     /// nothing else to say
-    fn terminate(&mut self) -> Result<(), Failed>;
+    ///
+    /// it is **refused** for a session bpd did not start. ending a debuggee is
+    /// signalling the child bpd holds, and a debugged fork has no such child —
+    /// a `terminate` that quietly did nothing is one a client reads as a program
+    /// that has been ended
+    fn terminate(&mut self, session: Option<SessionId>) -> Result<(), Failed>;
 }
 
 /// which of its own streams the program wrote to
