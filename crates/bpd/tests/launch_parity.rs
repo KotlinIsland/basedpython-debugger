@@ -417,6 +417,11 @@ fn a_program_that_reads_its_own_environment_finds_no_debugger_in_it() {
     //
     // the whole environment is compared rather than the names beginning `BPD`,
     // because the one that gave this away was `PYTHONPATH`
+    //
+    // **this is the off case, and it is the default.** child debugging is the
+    // one thing that changes it, and what it changes is enumerated in
+    // `a_program_whose_children_are_debugged_can_tell_and_only_that_much`
+    // below. not one byte of this assertion moved when that arrived
     for form in EVERY_FORM {
         let fixture = Fixture::new(
             "environment",
@@ -439,12 +444,305 @@ fn a_program_that_reads_its_own_import_path_finds_no_debugger_on_it() {
     // under `PYTHONSAFEPATH` it lands in slot zero, ahead of the stdlib. a
     // directory searched before everything else is the debugger deciding what
     // the program imports
+    //
+    // the off case, like the one above, and the same note applies: child
+    // debugging appends **one** entry and nothing else touches this
     for form in EVERY_FORM {
         let fixture = Fixture::new("import_path", "import sys\nprint('\\n'.join(sys.path))\n");
         let (bare, debugged) = both(&fixture, form, &[]);
 
         assert_eq!(debugged.stdout, bare.stdout, "as {form:?}");
     }
+}
+
+// ---- the on case ---------------------------------------------------------
+//
+// everything above this line is the guarantee that a program cannot tell it is
+// being debugged, and nothing below it weakens one of those assertions. what
+// follows is the **other** rule, which is the one child debugging made
+// necessary:
+//
+// > a program run under `bpd` cannot tell it is being debugged. a program run
+// > under `bpd` **with child debugging asked for** can — it has `PYTHONPATH`
+// > ending in a directory holding a `sitecustomize`, three `BPD_CHILD_*` names,
+// > and exactly one extra `sys.path` entry, which is the last one. it can see
+// > nothing else, and off is the default
+//
+// it has to be tested in both directions, and it is: the off case above is
+// untouched, and the enumerated list below fails on a fourth name
+
+/// a program that writes down its whole environment and its whole import path
+///
+/// one program rather than two, because the two halves of this fingerprint have
+/// to agree: the directory `PYTHONPATH` gains is the directory `sys.path` gains,
+/// and a test that read them in separate runs could not say so
+const WHAT_THE_PROGRAM_CAN_SEE: &str = "import os\n\
+     import sys\n\
+     print('ENVIRONMENT')\n\
+     for name, value in sorted(os.environ.items()):\n    \
+         print(f'{name}={value}')\n\
+     print('PATH')\n\
+     for entry in sys.path:\n    \
+         print(entry)\n";
+
+/// every name a debuggee's environment gains when child debugging is asked for,
+/// and why each one has to be there
+///
+/// the reasons are the point, exactly as they are in [`ALLOWED`]. a bare list of
+/// names is something people add to when it fails; a reason is something they
+/// have to disagree with — and this is the one list in the project that
+/// enumerates a way for a program to notice the debugger
+const ALLOWED_WITH_CHILD_DEBUGGING: &[(&str, &str)] = &[
+    (
+        "PYTHONPATH",
+        "the channel itself, and there is no second candidate. an interpreter \
+         that has not started yet reads nothing bpd could write but this and \
+         the files it opens at startup, and a child that was `exec`'d is a \
+         fresh interpreter with none of this process's memory in it. the \
+         directory is **appended**, where it cannot shadow a module of the \
+         program's own — the agent's own staged directory is prepended, and \
+         that is what the off case above exists to catch",
+    ),
+    (
+        "BPD_CHILD_ENDPOINT",
+        "where a child connects, which is this debuggee's own listener. it is \
+         in the environment rather than in memory because an `exec` inherits no \
+         memory — that is the whole difference between this and a debugged fork, \
+         which needs no variable at all",
+    ),
+    (
+        "BPD_CHILD_TOKEN",
+        "what a child presents, and **not** the session token. this one is \
+         readable by every descendant and by anything that can read this \
+         process's environment, so its whole power is to open a session of its \
+         own — a session token here would let any of them write into the \
+         session bpd is already answering",
+    ),
+    (
+        "BPD_CHILD_AGENT",
+        "where the agent is staged. the `sitecustomize` that enters a child is \
+         alone in its directory, so the agent's directory has to be named \
+         somewhere — the child puts it on `sys.path` for one import and the \
+         agent takes it off again before the child is held",
+    ),
+];
+
+/// what the probe wrote down, split back into its two halves
+struct Seen {
+    environment: std::collections::BTreeMap<String, String>,
+    path: Vec<String>,
+}
+
+fn parsed(run: &Run) -> Seen {
+    assert!(
+        run.success,
+        "the probe exited with {:?}\nstderr:\n{}",
+        run.exit_code, run.stderr
+    );
+
+    let mut environment = std::collections::BTreeMap::new();
+    let mut path = Vec::new();
+    let mut in_path = false;
+    for line in run.stdout.lines() {
+        match line {
+            "ENVIRONMENT" => {}
+            "PATH" => in_path = true,
+            entry if in_path => path.push(entry.to_string()),
+            variable => {
+                let (name, value) = variable
+                    .split_once('=')
+                    .unwrap_or_else(|| panic!("`{variable}` is not `name=value`"));
+                environment.insert(name.to_string(), value.to_string());
+            }
+        }
+    }
+    assert!(
+        in_path,
+        "the probe never reached its import path:\n{}",
+        run.stdout
+    );
+    Seen { environment, path }
+}
+
+/// the two forms this can be driven in
+///
+/// **not** `-m`. the on case has to go through the engine — there is no
+/// `bpd launch` flag for child debugging, and there must not be one, because
+/// the CLI has no way to drive the second session a debugged child arrives as —
+/// and `bpd_engine::launch` takes no working directory, which is the one thing
+/// `-m` is resolved through. the off case above covers all three, and that is
+/// where the forms differ: what this adds is written at a **stop**, after the
+/// form has already decided everything it decides
+const WITHOUT_A_WORKING_DIRECTORY: [Form; 2] = [Form::Script, Form::Command];
+
+/// run a fixture under the engine, with child debugging on, and collect what it
+/// printed
+fn with_children_debugged(fixture: &Fixture, form: Form) -> Run {
+    use std::io::Read as _;
+    use std::sync::{Arc, Mutex};
+
+    let program = match form {
+        Form::Script => bpd_engine::Program::Script(fixture.path()),
+        Form::Command => bpd_engine::Program::Command(fixture.source().to_string()),
+        Form::Module => unreachable!("`-m` is resolved through a working directory"),
+    };
+
+    let collected: Arc<Mutex<(String, String)>> =
+        Arc::new(Mutex::new((String::new(), String::new())));
+    let writing = Arc::clone(&collected);
+    let launched = bpd_engine::launch_piped(interpreter(), &program, &[], move |stdout, stderr| {
+        for (mut stream, which) in [
+            (Box::new(stdout) as Box<dyn std::io::Read + Send>, 0_usize),
+            (Box::new(stderr) as Box<dyn std::io::Read + Send>, 1),
+        ] {
+            let into = Arc::clone(&writing);
+            std::thread::spawn(move || {
+                let mut read = String::new();
+                // a pipe nobody reads fills up and stops the process, so both
+                // are drained for as long as the program has them open
+                let _finished = stream.read_to_string(&mut read);
+                let mut held = into.lock().expect("nothing panics holding the output");
+                if which == 0 {
+                    held.0.push_str(&read);
+                } else {
+                    held.1.push_str(&read);
+                }
+            });
+        }
+    })
+    .expect("the debuggee launched");
+
+    let mut debuggee = match launched {
+        bpd_engine::Launched::Stopped(debuggee) => debuggee,
+        bpd_engine::Launched::ExitedBeforeStopping(status) => {
+            panic!("the debuggee exited with {status} instead of stopping")
+        }
+    };
+    assert!(
+        debuggee
+            .debug_children(true)
+            .expect("the debuggee took the setting"),
+        "the agent has to say the setting took, or this measures the off case"
+    );
+
+    let mut seen = bpd_test::reporting::Children::default();
+    let status = match debuggee.run(&mut seen).expect("the program was resumed") {
+        bpd_core::Running::Exited { status, .. } => status,
+        other => panic!("the probe prints and ends: {other:?}"),
+    };
+    drop(debuggee);
+
+    // every writer is gone once the process has exited and the debuggee is
+    // dropped, so the reading threads have finished or are about to
+    for _ in 0..200 {
+        if Arc::strong_count(&collected) == 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let held = collected.lock().expect("nothing panics holding the output");
+    Run {
+        exit_code: status.code(),
+        success: status.success(),
+        stdout: held.0.clone(),
+        stderr: held.1.clone(),
+    }
+}
+
+#[test]
+fn a_program_whose_children_are_debugged_can_tell_and_only_that_much() {
+    for form in WITHOUT_A_WORKING_DIRECTORY {
+        let fixture = Fixture::new("what_it_sees", WHAT_THE_PROGRAM_CAN_SEE);
+        let bare = fixture.run(interpreter(), form, &[]);
+        let bare = parsed(&bare);
+        let on = parsed(&with_children_debugged(&fixture, form));
+
+        for (name, value) in &on.environment {
+            let same = bare.environment.get(name) == Some(value);
+            assert!(
+                same || ALLOWED_WITH_CHILD_DEBUGGING
+                    .iter()
+                    .any(|(allowed, _)| allowed == name),
+                "as {form:?} a debuggee with child debugging on has `{name}` in \
+                 its environment, which a bare run of the same program does not \
+                 have — or has differently — and which nothing in this list \
+                 accounts for:\n{}\n\
+                 this is the **one** list in bpd that enumerates a way for a \
+                 program to notice the debugger. a name added here is a name \
+                 every program run this way carries, so it needs a reason \
+                 somebody can disagree with, not an entry",
+                child_reasons()
+            );
+        }
+
+        let lost: Vec<&String> = bare
+            .environment
+            .keys()
+            .filter(|name| !on.environment.contains_key(*name))
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "as {form:?} the debuggee is missing {lost:?}, which a bare run has. \
+             child debugging adds a channel and takes nothing away"
+        );
+
+        for (name, _) in ALLOWED_WITH_CHILD_DEBUGGING {
+            assert!(
+                on.environment.contains_key(*name),
+                "as {form:?} the list claims `{name}`, and the program could not \
+                 read it. a reason nobody needs is a reason nobody reads — and a \
+                 channel that is not there is a child that will not attach"
+            );
+        }
+
+        // the two halves have to agree: what `PYTHONPATH` gained is what
+        // `sys.path` gained, and it is the **last** entry of both
+        let gained: Vec<&String> = on
+            .path
+            .iter()
+            .filter(|entry| !bare.path.contains(entry))
+            .collect();
+        assert_eq!(
+            gained.len(),
+            1,
+            "as {form:?} child debugging put {gained:?} on the import path. it \
+             is one directory, holding one file"
+        );
+        let added = gained[0];
+        assert_eq!(
+            on.path.last(),
+            Some(added),
+            "as {form:?} the entry is **appended**. anywhere else and it is a \
+             directory searched before something of the program's own, which is \
+             the debugger deciding what the program imports"
+        );
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        assert_eq!(
+            on.environment["PYTHONPATH"]
+                .rsplit(separator)
+                .next()
+                .expect("a split has a last part"),
+            added.as_str(),
+            "as {form:?} `PYTHONPATH` and `sys.path` name different directories. \
+             a variable saying this interpreter imports from somewhere it does \
+             not is a lie about this process, and programs read it back"
+        );
+        assert_ne!(
+            on.environment["BPD_CHILD_AGENT"], *added,
+            "as {form:?} the agent's directory and the hook's are the same one. \
+             the hook is appended to every descendant's path, so anything beside \
+             it there is a module bpd added to programs it is not debugging"
+        );
+    }
+}
+
+/// the child-debugging list, spelled out for a failure to print
+fn child_reasons() -> String {
+    ALLOWED_WITH_CHILD_DEBUGGING
+        .iter()
+        .map(|(name, reason)| format!("  - `{name}`: {reason}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// the audit event `bpd` watches a `subprocess` child by, on this interpreter
