@@ -57,6 +57,10 @@ def registered():
     return "before"
 
 
+def spread(one, /, two, *rest, three, **extra):
+    return ("before", one)
+
+
 class Widget:
     def describe(self):
         return "before"
@@ -95,6 +99,10 @@ def keep(function):
 @keep
 def registered():
     return "after"
+
+
+def spread(one, /, two, *rest, three, **extra):
+    return ("after", one)
 
 
 class Widget:
@@ -372,10 +380,15 @@ fn a_file_that_is_already_what_the_process_runs_replaces_nothing_and_says_so() {
 
 #[test]
 fn a_changed_signature_is_refused_by_name_and_nothing_at_all_is_applied() {
-    let edited = EDITED.replace(
-        "def plain(value):\n    return (\"after\", value * 10)",
-        "def plain(value, scale):\n    return (\"after\", value * scale)",
-    );
+    let edited = EDITED
+        .replace(
+            "def plain(value):\n    return (\"after\", value * 10)",
+            "def plain(value, scale):\n    return (\"after\", value * scale)",
+        )
+        .replace(
+            "def spread(one, /, two, *rest, three, **extra):",
+            "def spread(one, /, two, *, three, **extra):",
+        );
     let (fixture, victim) = laid_out(VICTIM);
     let mut debuggee = launch(&fixture);
     held_before_the_report(&mut debuggee, &fixture);
@@ -395,6 +408,29 @@ fn a_changed_signature_is_refused_by_name_and_nothing_at_all_is_applied() {
     };
     assert_eq!(function, "plain");
     assert_eq!((was.as_str(), now.as_str()), ("(value)", "(value, scale)"));
+
+    // and the whole parameter grammar, written as a person wrote it. the
+    // compiler lays `*rest` out *after* the keyword-only parameters in
+    // `co_varnames`, so a refusal that copied the slots straight out would show
+    // a signature nobody typed
+    let spread = because
+        .iter()
+        .find_map(|reason| match reason {
+            Unreplaceable::SignatureChanged { function, was, now } if function == "spread" => {
+                Some((was.clone(), now.clone()))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the second changed signature was not named: {because:#?}"));
+    assert_eq!(
+        spread,
+        (
+            "(one, /, two, *rest, three, **extra)".to_string(),
+            // the bare `*` that makes the rest keyword-only, which is what the
+            // edit wrote in place of `*rest`
+            "(one, /, two, *, three, **extra)".to_string()
+        )
+    );
 
     // the whole of the point: everything *else* in that file was replaceable,
     // and none of it was replaced
