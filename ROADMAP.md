@@ -548,6 +548,27 @@ what it does that this will not is `:480`, "Will reattempt using pydevd", which
 shells out to gdb. so the contrast is not "PEP 768 versus injection", it is that
 `bpd` needs no python of its own to attach and never falls back
 
+**measured, and it moves this milestone**: on macOS PEP 768 needs privileges
+this project cannot assume. `sys.remote_exec` on 3.14 refuses with
+
+```text
+PermissionError: Cannot get task port for PID 69506 (kern_return_t: 5).
+This typically requires running as root or having the
+'com.apple.system-task-ports' entitlement.
+```
+
+and it refuses the same way when the caller is the target's **own parent**, so
+it is a blanket `task_for_pid` restriction rather than anything about process
+relationship. writing the protocol in rust does not change that: the restriction
+is the kernel's, and it applies to whoever reads the memory
+
+so attach is a **linux-first** feature, and the honest consequence is that the
+one machine this project has been developed on cannot run it without `sudo`
+— which means nobody here can watch it work, which is the bar this page sets.
+what has to come with M8 is therefore a refusal naming the entitlement and the
+remedy, and a decision about whether an unverifiable-on-macOS milestone is
+started before the cross-platform work it depends on
+
 ### M9 — reset stack frame to here · done
 
 two operations, separate because their obstacles are different, per
