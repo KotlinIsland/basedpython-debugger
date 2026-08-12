@@ -50,7 +50,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::session::Launcher;
+use crate::session::{Launcher, Reachable};
 use crate::wire::{self, TOKEN_HEADER, Writer};
 
 /// how many bytes of randomness a session token is
@@ -67,17 +67,13 @@ const TOKEN_BYTES: usize = 32;
 /// busy. a DAP client's first act is `initialize`, so this is generous
 const PRESENTATION: Duration = Duration::from_secs(10);
 
-/// how often the thread turning away extra connections checks whether the
-/// session it is protecting has ended
-const REFUSAL_POLL: Duration = Duration::from_millis(20);
+/// what the list of open connections is only ever held to do
+const SERVING: &str = "nothing panics holding the open connections: every path \
+                       through it is one push or one shutdown";
 
-/// what a second connection is told
-///
-/// a session **is** the connection — that is DAP's own model, and it is why a
-/// second debuggee is a second session rather than a second field on a request
-const BUSY: &str = "this adapter is already serving a client, and a debug \
-                    session is one connection. a second session is a second \
-                    `bpd dap --listen`";
+/// how often the thread watching for more connections checks whether the first
+/// client's session has ended
+const ACCEPT_POLL: Duration = Duration::from_millis(20);
 
 /// listening could not start, or the client connection failed
 #[derive(Debug, thiserror::Error)]
@@ -139,7 +135,18 @@ pub enum Error {
     },
 }
 
-/// a loopback port waiting for one DAP client
+/// a loopback port serving the DAP clients of one debuggee
+///
+/// **one listener, one token, any number of sessions.** it used to serve exactly
+/// one client and turn every other connection away, and that made it impossible
+/// to honour the thing it exists to make possible: `startDebugging` asks a
+/// client to open a second connection, and the adapter that sent it would have
+/// been the thing refusing it
+///
+/// a token per child was the alternative and it is not better. the connection
+/// being asked for is asked for by *this* adapter, to a client that has already
+/// presented this token — a second one would be a second lifetime to get wrong
+/// for a boundary that is already drawn
 #[derive(Debug)]
 pub struct Listening {
     listener: TcpListener,
@@ -199,41 +206,41 @@ impl Listening {
         .to_string()
     }
 
-    /// serve the first client that presents this session's token
+    /// serve every client that presents this session's token
     ///
-    /// returns when that client hangs up or disconnects, exactly as the stdio
-    /// transport does — the transport is where a client's bytes come from, and
-    /// nothing past that point knows which one it was
+    /// returns when the **first** client hangs up or disconnects, exactly as
+    /// the stdio transport does when its one client goes. that client is the
+    /// one that launched the program, and a debuggee whose original session
+    /// has ended is a program with nothing watching it — so the rest go with
+    /// it rather than being left driving a process the launcher has abandoned
     ///
-    /// a connection that fails to authenticate is turned away and **the
-    /// listener keeps waiting**: if a bad connection ended the adapter, or held
-    /// the one slot, anything that could reach the port could stop the session
-    /// the person was starting. `say` is where the person running `bpd` is told
-    /// about each one, since a refusal nobody sees is a session that mysteriously
-    /// never starts
+    /// the later connections are the ones a `startDebugging` reverse request
+    /// asked for: a debugged fork is a session of the **same** debuggee, and
+    /// what makes that possible is that `launcher` is shared rather than one
+    /// per connection. a connection that fails to authenticate is turned away
+    /// and the listener keeps waiting: if a bad connection ended the adapter,
+    /// anything that could reach the port could stop the session the person was
+    /// starting. `say` is where the person running `bpd` is told about each one
     ///
-    /// takes `self` by value: this serves one session and the thread that turns
-    /// away extra connections leaves the listener non-blocking behind it, so a
-    /// second call would spin rather than wait. one listener is one session, and
-    /// the type says so rather than a comment saying so
+    /// takes `self` by value: one listener is one debuggee, and the listener is
+    /// left non-blocking behind this
     pub fn serve(
         self,
-        launcher: &mut dyn Launcher,
+        launcher: &(dyn Launcher + Sync),
         say: &(dyn Fn(&str) + Send + Sync),
     ) -> Result<(), Error> {
-        loop {
+        let first = loop {
             let (stream, peer) = self.listener.accept().map_err(|source| Error::Accept {
                 port: self.port,
                 source,
             })?;
-
             match self.admit(&stream) {
-                Ok(admitted) => return self.hold(launcher, say, stream, admitted),
-                Err(reason) => {
-                    say(&turn_away(&stream, peer, &reason));
-                }
+                Ok(admitted) => break (stream, admitted),
+                Err(reason) => say(&turn_away(&stream, peer, &reason)),
             }
-        }
+        };
+
+        self.hold(launcher, say, first.0, first.1)
     }
 
     /// read the first message's headers and check the token on them
@@ -282,10 +289,10 @@ impl Listening {
         Ok(Admitted { headers, buffered })
     }
 
-    /// serve the admitted client, turning away everything else that connects
+    /// serve the first client, and every later connection beside it
     fn hold(
         &self,
-        launcher: &mut dyn Launcher,
+        launcher: &(dyn Launcher + Sync),
         say: &(dyn Fn(&str) + Send + Sync),
         stream: TcpStream,
         admitted: Admitted,
@@ -302,23 +309,39 @@ impl Listening {
             })?;
 
         let ended = AtomicBool::new(false);
-        // scoped, so `say` can be borrowed rather than owned: what a refusal is
-        // told to is the caller's stderr, and the caller outlives this
+        let reachable = self.reachable();
+        // scoped, so `say` and `launcher` can be borrowed rather than owned:
+        // what the later connections serve is a session of the **same**
+        // debuggee, which is the thing the launcher holds
         std::thread::scope(|scope| {
-            let refusing = scope.spawn(|| refuse_the_rest(&extra, &ended, say));
+            let more = scope.spawn(|| {
+                admit_the_rest(self, &extra, &ended, launcher, say, &reachable);
+            });
 
             let input = Cursor::new(admitted.headers).chain(admitted.buffered);
-            let served = crate::adapter::serve(launcher, Box::new(input), Box::new(stream));
+            let served =
+                crate::adapter::serve(launcher, Box::new(input), Box::new(stream), &reachable);
 
             ended.store(true, Ordering::Relaxed);
-            match refusing.join() {
+            match more.join() {
                 Ok(()) => served.map_err(|source| Error::Client { source }),
-                // a panic there means a second client was left waiting on a
-                // socket nothing answers, which is the hang this exists to
-                // rule out. it is carried rather than summarised
+                // a panic there means a client that was told to start a session
+                // was left waiting on a socket nothing answers, which is the
+                // hang this exists to rule out. it is carried rather than
+                // summarised
                 Err(panicked) => std::panic::resume_unwind(panicked),
             }
         })
+    }
+
+    /// what a second session of this debuggee is told to connect to
+    fn reachable(&self) -> Reachable {
+        Reachable::At {
+            host: Ipv4Addr::LOCALHOST.to_string(),
+            port: self.port,
+            header: TOKEN_HEADER,
+            token: self.token.clone(),
+        }
     }
 }
 
@@ -330,31 +353,130 @@ struct Admitted {
     buffered: BufReader<TcpStream>,
 }
 
-/// turn away every connection that arrives while a client is being served
+/// serve every connection that arrives while the first client is being served
 ///
-/// a queue would look exactly like a hang from the other end, and a client
-/// waiting on a socket that will never answer has nothing to report to whoever
-/// is waiting on it
-fn refuse_the_rest(listener: &TcpListener, ended: &AtomicBool, say: &(dyn Fn(&str) + Send + Sync)) {
-    while !ended.load(Ordering::Relaxed) {
-        match listener.accept() {
-            Ok((stream, peer)) => say(&turn_away(&stream, peer, BUSY)),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(REFUSAL_POLL);
-            }
-            Err(error) => {
-                // nothing was refused and nothing was accepted, so the loop
-                // keeps going: an exhausted descriptor table is a state a
-                // machine gets out of, and stopping here would turn it into a
-                // port that queues silently forever
-                say(&format!(
-                    "a connection could not be accepted while a client was being \
-                     served, and it was not turned away: {error}"
-                ));
-                std::thread::sleep(REFUSAL_POLL);
+/// each is a session of the same debuggee, on a thread of its own, and each is
+/// authenticated the same way the first was. a connection that cannot present
+/// the token is dropped and the listener goes on waiting
+///
+/// **the authentication happens on the connection's own thread**, not here.
+/// [`Listening::admit`] waits up to [`PRESENTATION`] for a token, and doing that
+/// on the accept loop would let anything that can reach the port hold up the
+/// session a `startDebugging` reverse request asked a client to start — by
+/// connecting and saying nothing. that is the same slot-holding this used to
+/// refuse a second client to prevent, and it is what has to stay prevented now
+/// that a second client is the point
+///
+/// the threads are scoped to this one, so when the first client goes every
+/// session it opened is waited for rather than abandoned mid-write — and it is
+/// **shut down** first. a later session's thread is blocked reading its own
+/// client, which would never return on its own, and a debuggee whose original
+/// client has gone is a program with nothing watching it: the adapter does not
+/// outlive the client that launched, and neither does anything it opened
+fn admit_the_rest(
+    listening: &Listening,
+    listener: &TcpListener,
+    ended: &AtomicBool,
+    launcher: &(dyn Launcher + Sync),
+    say: &(dyn Fn(&str) + Send + Sync),
+    reachable: &Reachable,
+) {
+    // every later connection, so that each can be shut down when the first
+    // client goes. a `shutdown` is what ends the read its thread is blocked in;
+    // nothing else in this process can reach that thread
+    let open: std::sync::Mutex<Vec<TcpStream>> = std::sync::Mutex::new(Vec::new());
+
+    std::thread::scope(|scope| {
+        while !ended.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, peer)) => {
+                    let open = &open;
+                    scope.spawn(move || {
+                        // the listener this was accepted from is non-blocking,
+                        // and on the BSDs — macos among them — an accepted
+                        // socket **inherits** that flag where on linux it does
+                        // not. a connection left non-blocking answers every
+                        // read with `EAGAIN`, which the adapter reads as the
+                        // client having failed the instant it connected
+                        if let Err(error) = stream.set_nonblocking(false) {
+                            say(&turn_away(
+                                &stream,
+                                peer,
+                                &format!(
+                                    "the connection would not go back to blocking, so \
+                                     nothing could be read from it: {error}"
+                                ),
+                            ));
+                            return;
+                        }
+                        match stream.try_clone() {
+                            Ok(shutting) => open.lock().expect(SERVING).push(shutting),
+                            Err(error) => {
+                                // without a handle to shut it down, this
+                                // connection would hold the adapter open after
+                                // its client had gone
+                                say(&turn_away(
+                                    &stream,
+                                    peer,
+                                    &format!(
+                                        "the connection could not be split, so it could \
+                                         not be ended with the session: {error}"
+                                    ),
+                                ));
+                                return;
+                            }
+                        }
+
+                        let admitted = match listening.admit(&stream) {
+                            Ok(admitted) => admitted,
+                            Err(reason) => {
+                                say(&turn_away(&stream, peer, &reason));
+                                return;
+                            }
+                        };
+                        let input = Cursor::new(admitted.headers).chain(admitted.buffered);
+                        let served = crate::adapter::serve(
+                            launcher,
+                            Box::new(input),
+                            Box::new(stream),
+                            reachable,
+                        );
+                        if let Err(error) = served {
+                            // it is one session of several, so this is not the
+                            // adapter's outcome. saying nothing would leave a
+                            // session that ended badly invisible
+                            say(&format!(
+                                "the session with the client from {peer} failed: {}",
+                                crate::describe(&error)
+                            ));
+                        }
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(ACCEPT_POLL);
+                }
+                Err(error) => {
+                    // nothing was accepted and nothing was refused, so the loop
+                    // keeps going: an exhausted descriptor table is a state a
+                    // machine gets out of, and stopping here would turn it into
+                    // a port that queues silently forever
+                    say(&format!(
+                        "a connection could not be accepted while a client was \
+                         being served: {error}"
+                    ));
+                    std::thread::sleep(ACCEPT_POLL);
+                }
             }
         }
-    }
+
+        // the first client has gone, so every session it opened goes with it.
+        // a failure here is nothing to report: the connection is being ended
+        // and one that was already closed is the request already satisfied
+        for connection in open.lock().expect(SERVING).iter() {
+            let shut = connection.shutdown(std::net::Shutdown::Both);
+            drop(shut);
+        }
+    });
 }
 
 /// tell a connection why it is not being served, and describe that for the log

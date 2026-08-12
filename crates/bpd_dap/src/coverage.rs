@@ -26,6 +26,19 @@ pub const fn reach_of(request: &Request) -> Reach {
         Request::SetBreakpoints { .. } => Reach::Direct("setBreakpoints"),
         Request::SetExceptionBreakpoints { .. } => Reach::Direct("setExceptionBreakpoints"),
 
+        // DAP has no request for it and does not need one: it is a property of
+        // the session rather than something asked mid-flight, and the launch
+        // configuration is where a DAP session's properties are. the adapter
+        // sends it at `configurationDone`, before the program has run a line,
+        // because a program can fork in its first statement
+        Request::DebugChildren { .. } => Reach::OnItsOwn(
+            "at `configurationDone`, when `debugChildren` is set in the launch \
+             configuration. it is refused up front unless the client supports \
+             the `startDebugging` reverse request and this adapter is reachable \
+             by a second connection, because a debugged fork stops and a client \
+             that cannot take it up would leave it held",
+        ),
+
         Request::Run { .. } => Reach::Composed {
             of: &["resuming a thread", "waiting for the program"],
             why: "a `continue` has to be answered before the program stops \
@@ -36,10 +49,13 @@ pub const fn reach_of(request: &Request) -> Reach {
 
         Request::Wait { .. } => Reach::OnItsOwn(
             "whenever no thread is held, which is what the adapter does between \
-             a resume and the `stopped` event that follows it. it never carries \
-             a deadline: the answer to a DAP `continue` has already been sent, \
-             so there is nothing waiting on the wait and nothing a timeout \
-             would be the answer to",
+             a resume and the `stopped` event that follows it. it carries a \
+             deadline and nothing is reported when one passes: the answer to a \
+             DAP `continue` has already been sent, so there is nothing waiting \
+             on the wait and nothing a timeout would be the answer to. the \
+             deadline is there because two connections serve two sessions of one \
+             debuggee, and a wait that blocked in the engine until the program \
+             stopped would hold it against the other",
         ),
 
         Request::Resume { .. } => Reach::Direct("continue"),
@@ -116,16 +132,20 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
                   rather than answered on whichever convention bpd guessed",
         },
 
-        // a DAP session **is** the connection. the spec's answer to a second
-        // debuggee is the `startDebugging` reverse request, which has the
-        // client start a whole second session of its own — so there is no
-        // field on a DAP request for a session id and a client never writes
-        // one. the adapter addresses every request it makes instead
+        // a DAP session **is** the connection, so a client never writes a
+        // session id on a request and there is no field for one. the spec's
+        // answer to a second debuggee is the `startDebugging` reverse request:
+        // the adapter asks the client to start a second session, and that
+        // session's connection is what names it — in the configuration the
+        // reverse request handed over, which the client sends straight back on
+        // its `attach`
         Facet::Session => Reach::OnItsOwn(
             "on every request it makes: one that is about a stop is addressed \
              to the session that stop was reported from, which the stop \
-             carries, and one that is about the program names none — which is \
-             the only session a connection serves",
+             carries, and one that is about the program names the session this \
+             connection serves. which session that is comes from the \
+             `startDebugging` reverse request for a second one, and from the \
+             launch for the first",
         ),
 
         // DAP has nowhere on a request to carry them, so they come from the

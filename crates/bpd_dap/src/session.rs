@@ -22,8 +22,49 @@ use bpd_core::{Addressed, Reporting, Request, Response, Stop};
 /// failures carry the socket or the process that actually went wrong
 pub type Failed = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+/// where a **second** session of this adapter's debuggee can be reached
+///
+/// DAP's answer to a debuggee that became two processes is the `startDebugging`
+/// reverse request: the adapter asks the client to start a second debug session.
+/// that only works if the second session can reach the same engine — a client
+/// that spawned this adapter on a pipe would start another `bpd dap` process,
+/// and another process has another engine, with no [`Session`] of the first one
+/// in it
+///
+/// so this is the difference between the two transports, and it is a difference
+/// in what is **possible** rather than in what is configured. a debugged child
+/// is refused on a transport that cannot carry a second session, with the reason
+/// and what to run instead — a client that was told to start a session it cannot
+/// have would leave the child held for ever, which is the hang this whole
+/// feature is arranged around
+#[derive(Debug, Clone)]
+pub enum Reachable {
+    /// nothing else can connect: this adapter is on the pipes it was spawned with
+    Nowhere,
+
+    /// a client can open a second connection to this adapter
+    At {
+        /// the loopback address to connect to
+        host: String,
+        /// the port
+        port: u16,
+        /// the header a connection presents its token in
+        header: &'static str,
+        /// the token, which is this listener's and is the same for every session
+        ///
+        /// one token rather than one per child, and deliberately: a second token
+        /// is a second lifetime to get wrong, and the connection that would use
+        /// it is being asked for by an adapter the client has **already**
+        /// authenticated to with this one
+        token: String,
+    },
+}
+
 /// a debug session: something that answers the capability surface
-pub trait Session {
+///
+/// `Send` because a second connection is served on a thread of its own, and
+/// what it serves is a session of the same debuggee
+pub trait Session: Send {
     /// answer one request, addressed to the session it is for
     ///
     /// the address is [`bpd_core::Addressed`] rather than a bare [`Request`]
@@ -97,17 +138,35 @@ pub trait ProgramOutput: Send + Sync + 'static {
 }
 
 /// something that starts a debuggee from a client's launch configuration
-pub trait Launcher {
+///
+/// `&self` and `Sync` because more than one connection can be served at once:
+/// a debugged fork is a second session of the **same** debuggee, so the two
+/// connections reach one of these and it is what holds the thing they share
+pub trait Launcher: Sync {
     /// start a program and return it held before its first statement
     ///
     /// `output` is where the program's own stdout and stderr go, and it has to
     /// be reading them before anything waits on the process: a pipe nobody
     /// reads fills up, and a process whose pipe is full stops
     fn launch(
-        &mut self,
+        &self,
         configuration: &crate::Configuration,
         output: std::sync::Arc<dyn ProgramOutput>,
     ) -> Result<Started, Failed>;
+
+    /// take up a session this launcher's debuggee already holds
+    ///
+    /// what a connection that arrived because of a `startDebugging` reverse
+    /// request asks for. it starts nothing: the process is already there, it is
+    /// already **held** — a debugged fork stops at the line that forked — and
+    /// what this hands back is a second view of the one debuggee
+    ///
+    /// # errors
+    ///
+    /// when nothing has been launched yet, and when the id names no session this
+    /// debuggee holds. an id that resolved to the nearest session would be a
+    /// connection driving a program nobody named
+    fn attach(&self, session: u64) -> Result<Started, Failed>;
 }
 
 /// what came of a launch

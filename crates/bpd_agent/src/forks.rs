@@ -117,10 +117,38 @@
 //! it has given the session up by then, and both halves check that before they
 //! touch anything
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use bpd_core::StopReason;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 
-use crate::{attach, events};
+use crate::{attach, events, frames, session, spawns};
+
+/// whether a forked child opens a session of its own
+///
+/// **off unless the engine says otherwise**, and off is what every version of
+/// this before child debugging did: the child gives the session up and runs
+/// exactly as it would have without a debugger. on means it stops, and a stop
+/// nothing can resume is a hung program — so the decision belongs to a front end
+/// that knows whether it can reach a second session, and not to a default
+///
+/// an atomic because of where it is read: in `after_in_child`, on the only
+/// thread the fork kept, where a lock another thread was holding at the instant
+/// of the fork would never be released. it is inherited memory, which is the
+/// whole of how the child learns — the engine cannot be asked once the fork has
+/// started, so it has to have been told before
+static DEBUGGING_CHILDREN: AtomicBool = AtomicBool::new(false);
+
+/// what a forked child of this process will do from now on
+pub(crate) fn debugging_children() -> bool {
+    DEBUGGING_CHILDREN.load(Ordering::SeqCst)
+}
+
+/// decide what a forked child of this process does
+pub(crate) fn debug_children(on: bool) {
+    DEBUGGING_CHILDREN.store(on, Ordering::SeqCst);
+}
 
 /// arrange for a fork to change nothing the program can see, and for a forked
 /// child to stop being a debuggee
@@ -200,5 +228,78 @@ fn gave_up_the_session(python: Python<'_>) -> PyResult<()> {
     if !attach::detach() {
         return Ok(());
     }
-    events::disarm(python)
+    if !debugging_children() {
+        return events::disarm(python);
+    }
+
+    if let Err(error) = attach::reattach() {
+        // said on this process's own stderr because there is no other channel
+        // left: the connection it inherited has been closed, and one of its own
+        // is what could not be opened. it is not silence and it is not a
+        // process left half instrumented either — what follows puts the child
+        // back to exactly what it would have been with child debugging off
+        say(&format!(
+            "this program forked, and the child could not open a debug session \
+             of its own on {}: {error}. the child is not being debugged and is \
+             running as it would have without bpd",
+            attach::endpoint()
+        ));
+        return events::disarm(python);
+    }
+
+    hold_where_it_forked(python)
+}
+
+/// report this child's first stop and hold it there
+///
+/// the line that forked is the right place, and it is reachable: measured on
+/// 3.13, 3.14, 3.15 and a free-threaded 3.14, `after_in_child` runs with the
+/// python frame chain of the `os.fork()` caller intact and with
+/// `sys.monitoring.get_tool` still naming this tool. so the child has a stack to
+/// walk, a breakpoint table it inherited, and one thread — which is the whole
+/// program it has
+///
+/// it is the child's [`StopReason::Entry`]: nothing of the child has run, and
+/// what a client does with it is what it does with an entry stop. the parent's
+/// pid is carried because the two sessions are otherwise unrelated numbers
+fn hold_where_it_forked(python: Python<'_>) -> PyResult<()> {
+    // this process's children are this session's to report now. the hook
+    // compares the pid against the one recorded at attach and stayed silent in
+    // a forked child, which was right while the child had no session of its own
+    spawns::now_this_process();
+
+    let frame = events::current_frame(python)?;
+    let (file, line) = frames::file_and_line(&frame)?;
+    session::stop(
+        python,
+        events::thread_ident(python)?,
+        StopReason::Forked {
+            parent: parent_process(),
+            file,
+            line,
+        },
+    )
+}
+
+/// the process this one was forked from
+fn parent_process() -> u32 {
+    // SAFETY: `getppid` takes nothing, returns the parent's pid, and cannot
+    // fail. it is not in `std`, and rustix's process module is already a
+    // dependency of this crate for `poll`
+    rustix::process::getppid().map_or(0, |parent| parent.as_raw_nonzero().get().unsigned_abs())
+}
+
+/// say something on the child's own stderr
+///
+/// the child of a debuggee shares the program's stderr, so this reaches whoever
+/// is watching the program. it is prefixed `bpd:` for the reason everything else
+/// the debugger says is: it is the debugger talking and not the program
+#[expect(
+    clippy::print_stderr,
+    reason = "a forked child that could not reach the engine has no other \
+              channel — the connection it inherited is closed and the one it \
+              would have used is what failed"
+)]
+fn say(reason: &str) {
+    eprintln!("bpd: {reason}");
 }

@@ -99,7 +99,7 @@ struct Fake;
 
 impl Launcher for Fake {
     fn launch(
-        &mut self,
+        &self,
         _configuration: &Configuration,
         _output: Arc<dyn ProgramOutput>,
     ) -> Result<Started, Failed> {
@@ -115,6 +115,15 @@ impl Launcher for Fake {
             ],
         })))
     }
+
+    /// this fake launches, and nothing takes up a session of it
+    ///
+    /// a second session only exists when a program forked under a debugger, and
+    /// this fake has no program at all — so an `attach` naming one is a request
+    /// for something that was never there
+    fn attach(&self, session: u64) -> Result<Started, Failed> {
+        Err(format!("this fake holds no session {session}").into())
+    }
 }
 
 #[test]
@@ -123,7 +132,12 @@ fn a_session_whose_exit_bpd_cannot_read_is_terminated_and_never_exited() {
     let (reads, from_adapter) = std::io::pipe().expect("a pipe is available");
 
     let served = std::thread::spawn(move || {
-        bpd_dap::serve(&mut Fake, Box::new(to_adapter), Box::new(from_adapter))
+        bpd_dap::serve(
+            &Fake,
+            Box::new(to_adapter),
+            Box::new(from_adapter),
+            &bpd_dap::Reachable::Nowhere,
+        )
     });
 
     let mut reader = Messages::new(reads);

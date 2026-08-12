@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Binding, Content, Detail, Evaluated, Request, Resolved, Response, Running, SourceBreakpoint,
-    StopReason, Verdict,
+    Binding, Content, Detail, Evaluated, Request, Resolved, Response, Running, SessionId,
+    SourceBreakpoint, StopReason, Verdict,
 };
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, Form, line_of};
@@ -44,6 +44,14 @@ fn launch(fixture: &Fixture) -> Debuggee {
             panic!("the debuggee exited with {status} instead of stopping")
         }
         Err(error) => panic!("the debuggee did not launch: {error}"),
+    }
+}
+
+/// the one session a freshly launched debuggee holds
+fn the_only_session(debuggee: &Debuggee) -> SessionId {
+    match debuggee.sessions().as_slice() {
+        [only] => *only,
+        open => panic!("this debuggee holds {open:?} and the test launched one program"),
     }
 }
 
@@ -159,6 +167,16 @@ fn a_forked_child_never_reports_a_stop_on_the_session_its_parent_owns() {
         seen.started
     );
     assert_eq!(seen.started[0].verdict, Verdict::ThisProcess);
+
+    // and nothing joined the debuggee, because nothing asked for one to. this
+    // is the default and it is what every test above this line is about: a
+    // child that opened a session of its own without being asked would be a
+    // process **held** by a debugger nobody pointed at it
+    assert!(
+        seen.joined.is_empty(),
+        "debugging a forked child is off unless it is asked for, and {:?} joined",
+        seen.joined
+    );
 }
 
 /// what a forked child can see of the debugger that was in it a moment ago
@@ -748,4 +766,442 @@ fn a_fork_of_a_fork_gives_up_a_session_that_was_already_given_up() {
         seen.started
     );
     assert_eq!(seen.started[0].verdict, Verdict::ThisProcess);
+}
+
+// ---- a fork that **is** debugged -------------------------------------------
+//
+// everything above is what a fork does when nothing asked for one to be
+// debugged, which is the default and is what a program gets unless a front end
+// says otherwise. what follows is the other half: with `debug_children` on, the
+// child gives the inherited connection up and opens one of its own, and is held
+// at the line that forked
+//
+// nothing goes through the environment and nothing is written to disk. a fork
+// inherits memory, so the endpoint and the token the child presents are the
+// ones its parent was given — which is why `crates/bpd/tests/launch_parity.rs`
+// is untouched by any of this
+
+/// how long a wait that is only looking for a session to arrive is given
+///
+/// short, because it is polled: the listener is looked at from inside a wait,
+/// so this is how long one turn of that spends on a program that is not talking
+const A_MOMENT: Duration = Duration::from_secs(2);
+
+/// ask one session for something, and require it to be answered
+fn ask(debuggee: &mut Debuggee, at: SessionId, request: Request, seen: &mut Children) -> Response {
+    match debuggee.dispatch(bpd_core::Addressed::to(at, request), seen) {
+        Ok(answer) => answer,
+        Err(error) => panic!("{at} was not answered: {error}"),
+    }
+}
+
+/// resume one session and wait for what its program does next
+fn run_in(debuggee: &mut Debuggee, at: SessionId, seen: &mut Children) -> Running {
+    match ask(
+        debuggee,
+        at,
+        Request::Run {
+            deadline: Some(LONG_ENOUGH),
+        },
+        seen,
+    ) {
+        Response::Ran(ran) => ran,
+        other => panic!("a run was answered with {other:?}"),
+    }
+}
+
+/// wait on one session until the debuggee holds `wanted` sessions
+///
+/// the listener is looked at from inside a wait, which is what makes a session
+/// that arrives while the program runs arrive at all. so this drives a wait on
+/// a session that has nothing to say and reads the count back
+fn until_sessions(debuggee: &mut Debuggee, at: SessionId, wanted: usize, seen: &mut Children) {
+    for _ in 0..15 {
+        if debuggee.sessions().len() >= wanted {
+            return;
+        }
+        match ask(
+            debuggee,
+            at,
+            Request::Wait {
+                deadline: Some(A_MOMENT),
+            },
+            seen,
+        ) {
+            Response::Ran(Running::StillRunning { .. }) => {}
+            Response::Ran(other) => panic!(
+                "the session being waited on was supposed to be busy with its \
+                 child, and answered {other:?}"
+            ),
+            other => panic!("a wait was answered with {other:?}"),
+        }
+    }
+    panic!(
+        "the debuggee holds {:?} and a forked child was supposed to have joined \
+         it",
+        debuggee.sessions()
+    );
+}
+
+/// the one session a debuggee holds that is not one of `known`
+fn the_new_one(debuggee: &Debuggee, known: &[SessionId]) -> SessionId {
+    let open = debuggee.sessions();
+    let mut fresh = open.iter().filter(|id| !known.contains(id));
+    match (fresh.next(), fresh.next()) {
+        (Some(only), None) => *only,
+        _ => panic!(
+            "one session was supposed to have joined {known:?}, and the debuggee holds {open:?}"
+        ),
+    }
+}
+
+/// a program that forks once, and whose child does something the test can see
+///
+/// the parent writes its own pid **before** the fork, so that the child — which
+/// is held before it runs anything of its own — already has it on disk. that is
+/// what `StopReason::Forked`'s `parent` is checked against, rather than against
+/// a number bpd could have invented
+const A_FORK_TO_DEBUG: &str = r#"import os
+import pathlib
+import signal
+
+HERE = pathlib.Path(__file__).parent
+(HERE / "parent").write_text(str(os.getpid()))
+
+pid = os.fork()
+if pid == 0:
+    signal.alarm(120)
+    (HERE / "child").write_text(str(os.getpid()))
+    os._exit(7)
+
+_, status = os.waitpid(pid, 0)
+assert os.waitstatus_to_exitcode(status) == 7, status
+"#;
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "it is one program's whole life with a debugged child in it — the \
+              setting, the fork, the session that joins, where the child is \
+              held, and both processes ending. splitting it would launch the \
+              same program several times and assert on a different half of one \
+              sequence each time"
+)]
+fn a_forked_child_opens_a_session_of_its_own_and_is_held_where_it_forked() {
+    assert!(A_FORK_TO_DEBUG.contains(WATCHDOG));
+    let fixture = Fixture::new("forker", A_FORK_TO_DEBUG);
+    let mut debuggee = launch(&fixture);
+    let parent = the_only_session(&debuggee);
+
+    // read back off the agent rather than assumed from the request: a setting
+    // the fork handler never received would leave this test waiting for a
+    // session that is never going to arrive
+    assert!(
+        debuggee
+            .debug_children(true)
+            .expect("the debuggee took the setting"),
+        "the agent has to say the setting took"
+    );
+
+    let mut seen = Children::default();
+    match ask(
+        &mut debuggee,
+        parent,
+        Request::Run {
+            deadline: Some(A_MOMENT),
+        },
+        &mut seen,
+    ) {
+        Response::Ran(Running::StillRunning { .. }) => {}
+        other => panic!(
+            "the parent forks and then waits on its child, so it does not end \
+             until the child is resumed: {other:?}"
+        ),
+    }
+    until_sessions(&mut debuggee, parent, 2, &mut seen);
+    let child = the_new_one(&debuggee, &[parent]);
+
+    // it was **reported** as it arrived. a session that joined is a held
+    // process, so a front end that is never told has a stopped program it
+    // cannot reach — which is the whole reason this is opt-in
+    assert_eq!(
+        seen.joined,
+        vec![child],
+        "the child's session was not reported as it joined"
+    );
+
+    // and the fork itself is still reported, exactly as it is with this off.
+    // the two are different claims: one says a child exists, and the other says
+    // bpd is now debugging it
+    assert_eq!(seen.started.len(), 1, "{:?}", seen.started);
+    assert_eq!(seen.started[0].verdict, Verdict::ThisProcess);
+
+    // now the thing this feature is: the child is **held**, at the line that
+    // forked, before it has run anything of its own
+    let stop = match ask(
+        &mut debuggee,
+        child,
+        Request::Wait {
+            deadline: Some(LONG_ENOUGH),
+        },
+        &mut seen,
+    ) {
+        Response::Ran(Running::Stopped { stop, .. }) => stop,
+        other => panic!("the child was supposed to be held at the fork: {other:?}"),
+    };
+    assert_eq!(stop.session, child, "a stop is named where it arrives");
+
+    let StopReason::Forked {
+        parent: above,
+        file,
+        line,
+    } = stop.reason.clone()
+    else {
+        panic!(
+            "the child's first stop is its fork, and was {:?}",
+            stop.reason
+        )
+    };
+    assert_eq!(
+        file,
+        fixture.path().display().to_string(),
+        "the child is held in the program's own file"
+    );
+    assert_eq!(
+        line,
+        line_of(A_FORK_TO_DEBUG, "pid = os.fork()"),
+        "the child is held at the line that forked"
+    );
+    let recorded: u32 = std::fs::read_to_string(fixture.directory().join("parent"))
+        .expect("the parent wrote its pid before it forked")
+        .trim()
+        .parse()
+        .expect("a pid is a number");
+    assert_eq!(
+        above, recorded,
+        "the stop has to name the process this one was forked from"
+    );
+
+    // the child's own stack is there to walk, which is what makes the stop
+    // worth having: `after_in_child` runs with the frame chain of the
+    // `os.fork()` caller intact
+    let walked = match ask(
+        &mut debuggee,
+        child,
+        Request::Stack {
+            stop: stop.stop,
+            top: None,
+        },
+        &mut seen,
+    ) {
+        Response::Stack(walked) => walked,
+        other => panic!("the child's stack was answered with {other:?}"),
+    };
+    assert_eq!(walked.frames[0].line, line, "{walked:?}");
+
+    // the stop counter is **inherited**, so the child's first stop is not 1.
+    // that is the point of it living outside the table it numbers: a child that
+    // started again at one would reissue, immediately, numbers its parent has
+    // already reported — and the parent's entry stop is 1
+    assert!(
+        stop.stop > 1,
+        "the child carried on the parent's stop numbering, and its first stop \
+         was {}",
+        stop.stop
+    );
+
+    // and it runs on when it is let go. bpd is not its parent, so what it
+    // exited with is not bpd's to read — it ends, and says nothing about how
+    match run_in(&mut debuggee, child, &mut seen) {
+        Running::Ended { .. } => {}
+        Running::Exited { status, .. } => {
+            panic!("bpd did not start that process and cannot have read {status} off it")
+        }
+        other => panic!("the child did not end: {other:?}"),
+    }
+    let below: u32 = std::fs::read_to_string(fixture.directory().join("child"))
+        .expect("the child ran on after it was resumed")
+        .trim()
+        .parse()
+        .expect("a pid is a number");
+    assert_ne!(
+        below, recorded,
+        "the process that ran on is the child rather than the parent"
+    );
+
+    // and the parent, which was let go before the child joined and has been in
+    // `waitpid` ever since, finishes. it is waited for rather than resumed:
+    // nothing of it is held, and a resume of a running program is refused
+    match ask(
+        &mut debuggee,
+        parent,
+        Request::Wait {
+            deadline: Some(LONG_ENOUGH),
+        },
+        &mut seen,
+    ) {
+        Response::Ran(Running::Exited { status, .. }) => assert!(status.success(), "{status}"),
+        other => panic!("the parent did not end: {other:?}"),
+    }
+}
+
+/// a program whose child forks again
+///
+/// the handler is inherited by every generation, and a child that opened a
+/// session of its own is a debuggee like any other — so its own fork is a third
+/// session rather than a process that quietly stopped being debugged
+const A_DEBUGGED_FORK_OF_A_FORK: &str = r#"import os
+import pathlib
+import signal
+
+HERE = pathlib.Path(__file__).parent
+
+pid = os.fork()
+if pid == 0:
+    signal.alarm(120)
+    inner = os.fork()
+    if inner == 0:
+        signal.alarm(120)
+        (HERE / "grandchild").write_text("here")
+        os._exit(9)
+    _, below = os.waitpid(inner, 0)
+    os._exit(os.waitstatus_to_exitcode(below))
+
+_, status = os.waitpid(pid, 0)
+assert os.waitstatus_to_exitcode(status) == 9, status
+"#;
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "three generations of one program, in the order they happen. what \
+              is under test is the sequence itself, and it cannot be cut in \
+              half without launching it twice"
+)]
+fn a_fork_of_a_fork_is_a_third_session_rather_than_a_process_that_slipped_out() {
+    assert!(A_DEBUGGED_FORK_OF_A_FORK.contains(WATCHDOG));
+    let fixture = Fixture::new("forker", A_DEBUGGED_FORK_OF_A_FORK);
+    let mut debuggee = launch(&fixture);
+    let parent = the_only_session(&debuggee);
+    assert!(
+        debuggee
+            .debug_children(true)
+            .expect("the debuggee took the setting")
+    );
+
+    let mut seen = Children::default();
+    match ask(
+        &mut debuggee,
+        parent,
+        Request::Run {
+            deadline: Some(A_MOMENT),
+        },
+        &mut seen,
+    ) {
+        Response::Ran(Running::StillRunning { .. }) => {}
+        other => panic!("the parent waits on its child: {other:?}"),
+    }
+    until_sessions(&mut debuggee, parent, 2, &mut seen);
+    let child = the_new_one(&debuggee, &[parent]);
+
+    // the child is held at its own fork line, and the setting reached it
+    // through inherited memory rather than through anything it was told
+    match ask(
+        &mut debuggee,
+        child,
+        Request::Wait {
+            deadline: Some(LONG_ENOUGH),
+        },
+        &mut seen,
+    ) {
+        Response::Ran(Running::Stopped { stop, .. }) => {
+            assert!(
+                matches!(stop.reason, StopReason::Forked { .. }),
+                "{:?}",
+                stop.reason
+            );
+        }
+        other => panic!("the child was supposed to be held at the fork: {other:?}"),
+    }
+
+    // letting it go makes it fork in its turn, and the grandchild joins
+    match ask(
+        &mut debuggee,
+        child,
+        Request::Run {
+            deadline: Some(A_MOMENT),
+        },
+        &mut seen,
+    ) {
+        Response::Ran(Running::StillRunning { .. }) => {}
+        other => panic!("the child waits on its own child: {other:?}"),
+    }
+    until_sessions(&mut debuggee, child, 3, &mut seen);
+    let grandchild = the_new_one(&debuggee, &[parent, child]);
+    assert_eq!(
+        seen.joined,
+        vec![child, grandchild],
+        "every generation that joined has to be reported as it arrives"
+    );
+
+    match ask(
+        &mut debuggee,
+        grandchild,
+        Request::Wait {
+            deadline: Some(LONG_ENOUGH),
+        },
+        &mut seen,
+    ) {
+        Response::Ran(Running::Stopped { stop, .. }) => {
+            let StopReason::Forked { line, .. } = stop.reason.clone() else {
+                panic!(
+                    "the grandchild's first stop is its fork, and was {:?}",
+                    stop.reason
+                )
+            };
+            assert_eq!(
+                line,
+                line_of(A_DEBUGGED_FORK_OF_A_FORK, "inner = os.fork()"),
+                "the grandchild is held at the line **its** parent forked on"
+            );
+        }
+        other => panic!("the grandchild was supposed to be held at the fork: {other:?}"),
+    }
+
+    // and the three of them end from the bottom up, which is the order the
+    // program itself waits in. the child is **not** resumed again: it was let
+    // go above and has been sitting in `waitpid` ever since, so what it needs
+    // is to be waited for rather than resumed
+    match run_in(&mut debuggee, grandchild, &mut seen) {
+        Running::Ended { .. } => {}
+        other => panic!("the grandchild did not end: {other:?}"),
+    }
+    match ask(
+        &mut debuggee,
+        child,
+        Request::Wait {
+            deadline: Some(LONG_ENOUGH),
+        },
+        &mut seen,
+    ) {
+        Response::Ran(Running::Ended { .. }) => {}
+        other => panic!("the child did not end: {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(fixture.directory().join("grandchild"))
+            .expect("the grandchild ran on after it was resumed")
+            .trim(),
+        "here"
+    );
+    match ask(
+        &mut debuggee,
+        parent,
+        Request::Wait {
+            deadline: Some(LONG_ENOUGH),
+        },
+        &mut seen,
+    ) {
+        Response::Ran(Running::Exited { status, .. }) => assert!(status.success(), "{status}"),
+        other => panic!("the parent did not end: {other:?}"),
+    }
 }

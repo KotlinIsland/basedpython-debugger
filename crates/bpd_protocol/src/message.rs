@@ -86,6 +86,17 @@ pub enum FromAgent {
         uncaught: bool,
     },
 
+    /// whether a forked child of this process becomes a session of its own
+    ///
+    /// read back off the agent rather than assumed from the request, for the
+    /// reason [`Self::ExceptionBreakpointsSet`] is: what is set is what the
+    /// process says is set, and a fork handler that never received the setting
+    /// would leave a client believing children are being debugged
+    DebuggingChildren {
+        /// what a fork will do from now on
+        on: bool,
+    },
+
     /// what every thread of the debuggee was doing
     Threads {
         /// one entry per thread the interpreter knows about
@@ -330,6 +341,24 @@ pub enum FromEngine {
         raised: bool,
         /// stop where an exception leaves the outermost frame
         uncaught: bool,
+    },
+
+    /// decide what a forked child of this process does
+    ///
+    /// a fork copies the agent, the breakpoint table and the control
+    /// connection's descriptors into a process with none of the thread that
+    /// reads them. with this **off** the child gives the whole session up
+    /// before `os.fork()` returns and runs undebugged; with it on the child
+    /// gives the inherited connection up and opens one of its own, becoming a
+    /// second session of the same debuggee
+    ///
+    /// it has to be sent **before** the fork, because the handler that acts on
+    /// it runs inside `os.fork()` with nothing to ask. the child reads it out
+    /// of inherited memory, which is the whole reason a fork needs no
+    /// environment channel
+    DebugChildren {
+        /// whether a forked child reconnects
+        on: bool,
     },
 
     /// replace the whole breakpoint set

@@ -71,6 +71,36 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// one session of a debuggee, as a front end lists it
+///
+/// what makes a second session **learnable**. MCP has no push, so an agent finds
+/// out that a program forked into a debugged child by asking; DAP is told, and
+/// still has to be able to say what it was told about. the shape is the same
+/// either way, in the core, so that the two front ends cannot come to disagree
+/// about what a session is
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Joined {
+    /// what it is called, and what a request names to reach it
+    pub session: SessionId,
+
+    /// whether bpd started this process
+    ///
+    /// false for a session that arrived on bpd's listener — a debugged fork.
+    /// bpd is not its parent, so it has no exit status to read and cannot
+    /// terminate it, and a front end that assumed otherwise would offer two
+    /// things that are refused
+    pub ours: bool,
+
+    /// the stops this session is holding now
+    ///
+    /// a debugged fork arrives **held**, at the line that forked, so this is
+    /// not usually empty
+    pub held: Vec<Stop>,
+
+    /// how this session's program ended, or `None` while it is still there
+    pub exit: Option<Exit>,
+}
+
 /// a request, and the session it is for
 ///
 /// the session is beside the request rather than inside it because it is not
@@ -163,6 +193,29 @@ pub enum Request {
         raised: bool,
         /// stop where an exception leaves the outermost frame
         uncaught: bool,
+    },
+
+    /// decide whether a forked child of the program becomes a session of its own
+    ///
+    /// **off by default, and it stays that way.** a fork copies the agent, the
+    /// breakpoint table and the control connection's descriptors into a process
+    /// with none of the thread that reads them, so a child either gives the
+    /// whole session up — which is what off means, and what happens without
+    /// this — or opens a connection of its own and is held at the line that
+    /// forked
+    ///
+    /// on means a child **stops**, and something has to be able to resume it. a
+    /// front end that cannot address a second session must not turn this on: a
+    /// child held by a debugger nothing can reach is a hung program, which is
+    /// worse than an undebugged one
+    ///
+    /// it reaches the child through inherited memory rather than through the
+    /// environment, so it changes nothing a program can see about itself — and
+    /// it has to be set **before** the fork, because the handler that acts on
+    /// it runs inside `os.fork()` with nothing left to ask
+    DebugChildren {
+        /// whether a forked child reconnects
+        on: bool,
     },
 
     /// let every held thread go and wait for what the program does next
@@ -431,6 +484,7 @@ impl Request {
         match self {
             Self::SetBreakpoints { .. } => "setting the breakpoints",
             Self::SetExceptionBreakpoints { .. } => "setting the exception breakpoints",
+            Self::DebugChildren { .. } => "debugging the program's forked children",
             Self::Run { .. } => "running the program",
             Self::Wait { .. } => "waiting for the program",
             Self::Resume { .. } => "resuming a thread",
@@ -467,6 +521,9 @@ impl Request {
         match self {
             Self::SetBreakpoints { .. }
             | Self::SetExceptionBreakpoints { .. }
+            // about the whole process, and about a process that does not exist
+            // yet at that
+            | Self::DebugChildren { .. }
             | Self::Run { .. }
             | Self::Wait { .. }
             | Self::Resume { .. }
@@ -539,6 +596,18 @@ pub trait Reporting {
     /// this is what keeps "`bpd` says so when it cannot know" true of a
     /// feature whose normal output is silence. see [`Blindspot`]
     fn blind_to(&mut self, blindspot: Blindspot);
+
+    /// another agent joined this debuggee, and it is a session of its own
+    ///
+    /// what [`Request::DebugChildren`] produces: a forked child opened a
+    /// connection of its own and is **held**, at the line that forked. it is
+    /// news rather than an answer — the program forked without asking — and it
+    /// is the only thing that tells a front end a second session exists at all
+    ///
+    /// a front end that ignored one would leave a stopped process nothing can
+    /// reach, which is a hung program. that is why there is no default body
+    /// here any more than on the others
+    fn attached(&mut self, session: SessionId);
 }
 
 /// what a session answered a [`Request`] with
@@ -556,6 +625,15 @@ pub enum Response {
 
     /// what the exception breakpoints are set to now
     ExceptionBreakpoints(ExceptionBreakpoints),
+
+    /// what a forked child of the program will do from now on
+    ///
+    /// read back off the agent rather than echoed from the request: what is set
+    /// is what the process that will fork says is set
+    DebuggingChildren {
+        /// whether a forked child becomes a session of its own
+        on: bool,
+    },
 
     /// what the program did next
     Ran(Running),

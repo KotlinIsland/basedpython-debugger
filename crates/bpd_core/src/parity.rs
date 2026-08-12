@@ -126,6 +126,7 @@ pub fn surface() -> Vec<Request> {
             raised: false,
             uncaught: true,
         },
+        Request::DebugChildren { on: true },
         Request::Run { deadline: None },
         Request::Wait { deadline: None },
         Request::Resume { which: Which::All },

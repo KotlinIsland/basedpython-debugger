@@ -132,6 +132,7 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
                 refresh_events(python)?;
                 attach::send(&FromAgent::ExceptionBreakpointsSet { raised, uncaught });
             }
+            FromEngine::DebugChildren { on } => debug_children(on),
             FromEngine::Stack { top, .. } => {
                 let answer = stopped.stack(top)?;
                 attach::send(&answer);
@@ -215,6 +216,39 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
     // discovery costs a native call per code object first reached, and it buys
     // nothing once there is nothing left that could stop
     refresh_events(python)
+}
+
+/// decide what a forked child of this process does, and say what is set now
+///
+/// answered on a held thread like everything else, and it needs nothing of the
+/// interpreter: it is one atomic store, and the process that will fork is the
+/// one that has to be holding the answer in its own memory when it does. that
+/// is the whole mechanism — a fork handler runs inside `os.fork()` and has
+/// nobody left to ask
+#[cfg(unix)]
+fn debug_children(on: bool) {
+    crate::forks::debug_children(on);
+    attach::send(&FromAgent::DebuggingChildren { on });
+}
+
+/// the same, where there is no `fork`
+///
+/// turning it **off** is answered rather than refused, and that is not a special
+/// case: off is what this platform already does, so the answer is the truth
+/// about the process. turning it on is refused, because there is nothing here
+/// that could make it true and a client told it took would wait for child
+/// sessions that cannot arrive
+#[cfg(not(unix))]
+fn debug_children(on: bool) {
+    if on {
+        attach::send(&FromAgent::Refused {
+            reason: bpd_core::Refusal::NoFork {
+                platform: std::env::consts::OS.to_string(),
+            },
+        });
+    } else {
+        attach::send(&FromAgent::DebuggingChildren { on });
+    }
 }
 
 /// hold every thread that can be held, and name the ones that cannot be

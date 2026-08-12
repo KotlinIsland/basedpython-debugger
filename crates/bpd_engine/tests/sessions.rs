@@ -229,10 +229,20 @@ fn join(debuggee: &Debuggee, program: &Path) -> Child {
 ///
 /// the listener is looked at from inside a wait, which is the whole point of
 /// the wait being a poll — so this drives one and reads the count back
-fn until_sessions(debuggee: &mut Debuggee, at: SessionId, wanted: usize) {
+///
+/// the sink is a [`bpd_test::reporting::Joining`] and it is handed back: an
+/// agent joining is **reported** as it happens, which is the only thing that
+/// tells a front end a second session exists. a caller that never looked at it
+/// would be leaving a held process to be discovered
+fn until_sessions(
+    debuggee: &mut Debuggee,
+    at: SessionId,
+    wanted: usize,
+) -> bpd_test::reporting::Joining {
+    let mut joining = bpd_test::reporting::Joining::default();
     for _ in 0..10 {
         if debuggee.sessions().len() >= wanted {
-            return;
+            return joining;
         }
         match debuggee.dispatch(
             Addressed::to(
@@ -241,7 +251,7 @@ fn until_sessions(debuggee: &mut Debuggee, at: SessionId, wanted: usize) {
                     deadline: Some(A_MOMENT),
                 },
             ),
-            &mut bpd_test::reporting::Unreported,
+            &mut joining,
         ) {
             Ok(Response::Ran(Running::StillRunning { .. })) => {}
             Ok(other) => panic!("the held session had nothing to say, and answered {other:?}"),
@@ -274,7 +284,7 @@ fn an_agent_that_presents_the_token_on_the_retained_listener_becomes_a_second_se
 
     let joining = Fixture::new("joining", RUNS_AND_ENDS);
     let mut child = join(&debuggee, &joining.path());
-    until_sessions(&mut debuggee, first, 2);
+    let reported = until_sessions(&mut debuggee, first, 2);
 
     let open = debuggee.sessions();
     let second = *open
@@ -282,6 +292,15 @@ fn an_agent_that_presents_the_token_on_the_retained_listener_becomes_a_second_se
         .find(|id| **id != first)
         .unwrap_or_else(|| unreachable!("two sessions are open and one of them is the first"));
     assert_ne!(first, second, "two sessions were given one id");
+
+    // and it was **reported** rather than left to be discovered. a session that
+    // joined is a held process — a debugged fork stops at the line that forked
+    // — so a front end that is never told has a stopped program it cannot reach
+    assert_eq!(
+        reported.joined,
+        vec![second],
+        "the agent that joined was not reported as it arrived"
+    );
 
     // a request that names none of them is refused rather than answered from
     // whichever came first. that is `only_session`'s rule and this is the first

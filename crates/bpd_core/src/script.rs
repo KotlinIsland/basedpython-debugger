@@ -426,7 +426,8 @@ fn place_of(reason: &StopReason) -> Option<Place> {
         | StopReason::Paused { file, line }
         | StopReason::Raised { file, line, .. }
         | StopReason::Uncaught { file, line, .. }
-        | StopReason::EvaluationFailed { file, line, .. } => (file, line),
+        | StopReason::EvaluationFailed { file, line, .. }
+        | StopReason::Forked { file, line, .. } => (file, line),
     };
     Some(Place {
         file: file.clone(),

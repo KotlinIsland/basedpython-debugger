@@ -86,6 +86,11 @@
                 "default": false,
                 "description": "hold every thread that can be held for the duration of each stop. off by default: a stop holds one thread and the rest of the program keeps running. a thread parked in a C call cannot be held and is named rather than counted as held"
               },
+              "debugChildren": {
+                "type": "boolean",
+                "default": false,
+                "description": "debug a child the program forks. off by default: a debugged fork stops at the line that forked, and a second debug session is started for it through the startDebugging reverse request. it needs bpd to be reachable by a second connection, which means `bpd dap --listen`. a child that was exec'd rather than forked is a fresh interpreter and is reported rather than debugged"
+              },
               "threadSettleMs": {
                 "type": "integer",
                 "minimum": 0,

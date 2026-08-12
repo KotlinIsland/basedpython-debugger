@@ -276,6 +276,28 @@ pub enum StopReason {
         line: u32,
     },
 
+    /// this process is a forked child, and it has just become a session of its
+    /// own
+    ///
+    /// a fork copies the debugged process, and with child debugging on the copy
+    /// gives the inherited control connection up and opens one of its own
+    /// before `os.fork()` has returned. so the thread that is held is the one
+    /// that forked, at the line it forked on, and the child has run nothing of
+    /// its own yet — which makes this the child's [`StopReason::Entry`]
+    ///
+    /// it carries the parent's pid because that is the only thing tying the two
+    /// sessions together: the ids the engine mints are its own, and a client
+    /// shown two sessions with nothing between them cannot tell which program
+    /// made which
+    Forked {
+        /// the process this one was forked from
+        parent: u32,
+        /// the `co_filename` of the code object that called `os.fork()`
+        file: String,
+        /// the line of it the fork returned to
+        line: u32,
+    },
+
     /// a breakpoint's condition or log message raised
     ///
     /// the program is held rather than resumed. an expression that raises has

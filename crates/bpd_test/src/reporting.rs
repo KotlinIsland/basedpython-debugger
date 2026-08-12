@@ -7,7 +7,7 @@
 //! program arriving where nobody looks is how a test passes while proving
 //! something else
 
-use bpd_core::{Blindspot, LogRecord, Reporting, Spawn};
+use bpd_core::{Blindspot, LogRecord, Reporting, SessionId, Spawn};
 
 /// a sink nothing is supposed to reach, which panics naming what did
 ///
@@ -31,6 +31,10 @@ impl Reporting for Unreported {
 
     fn blind_to(&mut self, blindspot: Blindspot) {
         panic!("this interpreter announced a blind spot nothing here is about: {blindspot}")
+    }
+
+    fn attached(&mut self, session: SessionId) {
+        panic!("nothing here debugs a forked child, and {session} joined this debuggee")
     }
 }
 
@@ -60,6 +64,44 @@ impl Reporting for Logs {
     fn blind_to(&mut self, blindspot: Blindspot) {
         panic!("this interpreter announced a blind spot nothing here is about: {blindspot}")
     }
+
+    fn attached(&mut self, session: SessionId) {
+        panic!("nothing here debugs a forked child, and {session} joined this debuggee")
+    }
+}
+
+/// a sink for a test in which a **second session** joins the debuggee
+///
+/// a debugged fork opens a connection of its own, and the engine says so as it
+/// happens. it is the one report that must not be absorbed: the session that
+/// joined is **held**, so a test that ignored it would be a test leaving a
+/// stopped process behind
+#[derive(Debug, Default)]
+pub struct Joining {
+    /// every session that joined, in the order they arrived
+    pub joined: Vec<SessionId>,
+}
+
+impl Reporting for Joining {
+    fn logged(&mut self, record: LogRecord) {
+        panic!("no logpoint was set, and the agent sent {record:?}")
+    }
+
+    fn pausing(&mut self, running: Vec<u64>) {
+        panic!("no pause was armed, and the agent acknowledged one naming {running:?}")
+    }
+
+    fn spawned(&mut self, child: Spawn) {
+        panic!("this program was not expected to start a child, and it started {child}")
+    }
+
+    fn blind_to(&mut self, blindspot: Blindspot) {
+        panic!("this interpreter announced a blind spot nothing here is about: {blindspot}")
+    }
+
+    fn attached(&mut self, session: SessionId) {
+        self.joined.push(session);
+    }
 }
 
 /// a sink that keeps every child the program started
@@ -75,6 +117,11 @@ pub struct Children {
     /// a test that asserts on `started` has to be able to tell "no child" from
     /// "no child bpd can see", or it is a test that passes on a blind spot
     pub unseen: Vec<Blindspot>,
+    /// every session that joined the debuggee, in the order they arrived
+    ///
+    /// a debugged fork is one. it is **held** when it arrives, so a test that
+    /// ignored these would be a test that left a stopped process behind
+    pub joined: Vec<SessionId>,
 }
 
 impl Reporting for Children {
@@ -92,5 +139,15 @@ impl Reporting for Children {
 
     fn blind_to(&mut self, blindspot: Blindspot) {
         self.unseen.push(blindspot);
+    }
+
+    /// a debugged fork opened a session of its own
+    ///
+    /// kept beside the children rather than a panic: `Children` is the sink for
+    /// a test about a program that starts them, and one that forks under
+    /// `debug_children` produces both — the report of the fork, and the session
+    /// the child then opened
+    fn attached(&mut self, session: SessionId) {
+        self.joined.push(session);
     }
 }

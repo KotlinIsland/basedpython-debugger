@@ -312,10 +312,19 @@ fn drive(asked: &Asked) -> Transcript {
     let served = std::thread::spawn({
         let asked = Arc::clone(asked);
         move || {
+            // reachable, because `debugChildren` is refused on a transport a
+            // second session cannot arrive on — and this conversation asks for
+            // it, which is the only route DAP has to that capability
             bpd_dap::serve(
-                &mut Fake { asked },
+                &Fake { asked },
                 Box::new(to_adapter),
                 Box::new(from_adapter),
+                &bpd_dap::Reachable::At {
+                    host: "127.0.0.1".to_string(),
+                    port: 4711,
+                    header: "X-Bpd-Token",
+                    token: "00".repeat(32),
+                },
             )
         }
     });
@@ -347,7 +356,10 @@ fn drive(asked: &Asked) -> Transcript {
         &mut client_writes,
         &mut reader,
         "initialize",
-        serde_json::json!({}),
+        // the one **client** capability this adapter reads. without it a
+        // debugged fork is refused, because a client that cannot start the
+        // session `startDebugging` asks for would leave the child held
+        serde_json::json!({ "supportsStartDebuggingRequest": true }),
     );
     answer(
         &mut client_writes,
@@ -357,6 +369,9 @@ fn drive(asked: &Asked) -> Transcript {
             "program": "/tmp/fake.py",
             "stopOnEntry": true,
             "stopTheWorld": true,
+            // the only route DAP has to `Request::DebugChildren`, which the
+            // adapter sends at `configurationDone`
+            "debugChildren": true,
             // the only route DAP has to `bpd_core::Detail`, which is a
             // capability of the core that no DAP *request* can carry
             "variables": { "children": 7 },
@@ -700,7 +715,7 @@ struct FakeSession {
 
 impl Launcher for Fake {
     fn launch(
-        &mut self,
+        &self,
         _configuration: &Configuration,
         _output: Arc<dyn ProgramOutput>,
     ) -> Result<Started, Failed> {
@@ -716,6 +731,15 @@ impl Launcher for Fake {
                 },
             )],
         })))
+    }
+
+    /// this fake launches, and nothing takes up a session of it
+    ///
+    /// a second session only exists when a program forked under a debugger, and
+    /// this fake has no program at all — so an `attach` naming one is a request
+    /// for something that was never there
+    fn attach(&self, session: u64) -> Result<Started, Failed> {
+        Err(format!("this fake holds no session {session}").into())
     }
 }
 
@@ -860,6 +884,7 @@ impl Session for FakeSession {
             Request::SetExceptionBreakpoints { raised, uncaught } => {
                 Response::ExceptionBreakpoints(bpd_core::ExceptionBreakpoints { raised, uncaught })
             }
+            Request::DebugChildren { on } => Response::DebuggingChildren { on },
             Request::Run { .. } => {
                 unreachable!("DAP resumes and waits, and never composes the two")
             }

@@ -1057,6 +1057,10 @@ impl bpd_core::Reporting for Counted {
     fn blind_to(&mut self, blindspot: bpd_core::Blindspot) {
         panic!("this interpreter announced a blind spot nothing here is about: {blindspot}")
     }
+
+    fn attached(&mut self, session: bpd_core::SessionId) {
+        panic!("this program does not fork, and {session} joined this debuggee")
+    }
 }
 
 /// a program whose condition is the first thing to run another module

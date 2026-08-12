@@ -374,6 +374,27 @@ impl<W: Write> Writer<W> {
         }))
     }
 
+    /// ask the **client** for something
+    ///
+    /// DAP is not one-directional: a handful of requests go the other way, and
+    /// `startDebugging` — the one this adapter sends — is how the spec answers a
+    /// debuggee that became two processes. it asks the client to start a whole
+    /// second debug session, because a DAP session **is** a connection and there
+    /// is nowhere on one to put a second program
+    ///
+    /// nothing waits for the answer. the client's response arrives on the same
+    /// stream as its requests and carries the `request_seq` this message's `seq`
+    /// becomes; what the adapter does about it is decline to treat it as a
+    /// request, because a client that started the session has already done the
+    /// only thing that was asked of it
+    pub fn request(&mut self, command: &str, arguments: &serde_json::Value) -> Result<(), Error> {
+        self.send(serde_json::json!({
+            "type": "request",
+            "command": command,
+            "arguments": arguments,
+        }))
+    }
+
     /// say something that answers nothing
     pub fn event(&mut self, event: &str, body: &serde_json::Value) -> Result<(), Error> {
         self.send(serde_json::json!({

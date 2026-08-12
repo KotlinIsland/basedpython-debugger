@@ -954,12 +954,17 @@ impl Client {
         }
     }
 
-    /// where this adapter is listening, when it is
-    fn endpoint(&self) -> SocketAddr {
-        self.listening
+    /// where this adapter is listening, and what a connection to it presents
+    ///
+    /// what a **second** connection needs, which is what a `startDebugging`
+    /// reverse request asks a client to open: one listener, one token, and as
+    /// many sessions of the debuggee as it has
+    fn listening_at(&self) -> (SocketAddr, String) {
+        let listening = self
+            .listening
             .as_ref()
-            .expect("this client was started on the loopback transport")
-            .endpoint
+            .expect("this client was started on the loopback transport");
+        (listening.endpoint, listening.token.clone())
     }
 
     /// everything the program and bpd have said so far, as one string
@@ -1186,8 +1191,8 @@ impl Bystander {
         self.socket.flush().expect("the adapter is reading it");
     }
 
-    /// the text of the next `output` event, whatever else arrives first
-    fn told(&mut self) -> String {
+    /// the next message of any kind
+    fn next_message(&mut self) -> serde_json::Value {
         let mut reader = BufReader::new(&self.socket);
         let mut length = None;
         loop {
@@ -1212,9 +1217,12 @@ impl Bystander {
         reader
             .read_exact(&mut body)
             .expect("the adapter wrote as many bytes as it promised");
-        let message: serde_json::Value =
-            serde_json::from_slice(&body).expect("a refusal is a DAP message");
+        serde_json::from_slice(&body).expect("what the adapter wrote is a DAP message")
+    }
 
+    /// the text of the next `output` event, whatever else arrives first
+    fn told(&mut self) -> String {
+        let message = self.next_message();
         assert_eq!(
             message["event"], "output",
             "an unsolicited message is an event, since a refused connection sent \
@@ -1242,15 +1250,33 @@ impl Bystander {
 /// a program that runs long enough to be interrupted by a second connection
 const WAITING: &str = "import sys\nx = 1\nsys.exit(0)\n";
 
+/// one raw connection that presents this listener's token, and its `initialize`
+///
+/// enough to establish that a connection was **served** rather than turned away,
+/// which is the whole of what a second one used to be denied
+fn admitted(endpoint: SocketAddr, token: &str, seq: i64) -> (Bystander, serde_json::Value) {
+    let mut connection = Bystander::connect(endpoint);
+    connection.send(
+        &format!("X-Bpd-Token: {token}\r\n"),
+        &format!(
+            r#"{{"seq":{seq},"type":"request","command":"initialize","arguments":{{"adapterID":"bpd"}}}}"#
+        ),
+    );
+    let answered = connection.next_message();
+    (connection, answered)
+}
+
 #[test]
-fn a_second_client_is_told_the_adapter_is_busy_rather_than_left_waiting() {
-    // a session **is** the connection — that is DAP's model. so a second one
-    // gets an answer. a queue would be indistinguishable from a hang at the
-    // other end, and a client waiting on a socket that never answers has
-    // nothing to report to whoever is waiting on it
-    let fixture = Fixture::new("occupied", WAITING);
+fn a_second_client_that_presents_the_token_is_served_beside_the_first() {
+    // this used to be refused: one listener meant one session, and a second
+    // connection was told the adapter was busy. that was right then and is
+    // wrong now — a debugged fork is a second session of the **same** debuggee,
+    // and the `startDebugging` reverse request asks the client to open exactly
+    // this connection. an adapter that refused it would be turning away the
+    // thing it had just asked for
+    let fixture = Fixture::new("shared", WAITING);
     let mut client = Client::start(Transport::Loopback);
-    let endpoint = client.endpoint();
+    let (endpoint, token) = client.listening_at();
 
     client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
     client.request(
@@ -1259,21 +1285,79 @@ fn a_second_client_is_told_the_adapter_is_busy_rather_than_left_waiting() {
     );
     client.event("initialized");
 
-    // nothing is sent on this one: the refusal has to be the adapter's first
-    // move, or a client that is waiting to be spoken to first would wait forever
-    let mut second = Bystander::connect(endpoint);
-    let told = second.told();
+    let (mut second, answered) = admitted(endpoint, &token, 1);
+    assert_eq!(
+        answered["type"], "response",
+        "a second connection is served, so what it gets is the answer to what it \
+         sent: {answered}"
+    );
+    assert_eq!(answered["command"], "initialize", "{answered}");
+    assert_eq!(answered["success"], true, "{answered}");
+
+    // and it reached the **same** launcher, which is the point of it being a
+    // second connection rather than a second adapter: this debuggee is already
+    // launched, and a second program on it is refused by name
+    second.send(
+        "",
+        &format!(
+            r#"{{"seq":2,"type":"request","command":"launch","arguments":{{"program":"{}"}}}}"#,
+            fixture.path().display()
+        ),
+    );
+    let refused = second.next_message();
+    assert_eq!(refused["success"], false, "{refused}");
+    let said = refused["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a refusal says why: {refused}"));
     assert!(
-        told.contains("already serving"),
-        "the second connection has to be told why, and was told {told:?}"
+        said.contains("already has a program"),
+        "the refusal has to say what stood in the way, and said {said:?}"
     );
     assert!(
-        told.contains("--listen"),
-        "and what to do about it, and was told {told:?}"
+        said.contains("startDebugging"),
+        "and what a second connection is for, and said {said:?}"
     );
-    second.hung_up();
 
     // and the session that was already running is untouched by any of it
+    client.request("configurationDone", &serde_json::json!({}));
+    let exited = client.event("exited");
+    assert_eq!(exited["body"]["exitCode"], 0);
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+#[test]
+fn a_connection_that_says_nothing_takes_no_slot_and_holds_nothing_up() {
+    // the half of the old refusal that still matters. anything on this machine
+    // can open a socket to a loopback port, and one that connects and then says
+    // nothing must not be able to stop the session a `startDebugging` asked a
+    // client to start — which it could if the wait for a token happened on the
+    // thread that accepts
+    let fixture = Fixture::new("silent", WAITING);
+    let mut client = Client::start(Transport::Loopback);
+    let (endpoint, token) = client.listening_at();
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+
+    // it says nothing at all, and is deliberately still connected below: this
+    // is not about it eventually being dropped on its deadline, it is about it
+    // not being in the way while it sits there
+    let _silent = Bystander::connect(endpoint);
+
+    let (_admitted, answered) = admitted(endpoint, &token, 1);
+    assert_eq!(
+        answered["command"], "initialize",
+        "a connection that presented the token was answered while a silent one \
+         was still open: {answered}"
+    );
+    assert_eq!(answered["success"], true, "{answered}");
+
+    // and the session that was already running is untouched by both of them
     client.request("configurationDone", &serde_json::json!({}));
     let exited = client.event("exited");
     assert_eq!(exited["body"]["exitCode"], 0);
