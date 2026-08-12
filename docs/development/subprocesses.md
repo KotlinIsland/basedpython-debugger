@@ -5,13 +5,19 @@ its work somewhere the debugger is not, and until something says so the only
 symptom is a breakpoint that never fires
 
 that is what this page is about. `bpd` **notices** a python child and reports
-it, and it does not debug one yet
+it, and a child the program **forked** it can debug if it is asked to
 
-a child that was started — by `subprocess`, by `multiprocessing`, by `exec` — is
-not touched at all: it runs exactly as it would have. a child that was
-**forked** is the one case where something has to happen, because a fork copies
-the debugger into it. what happens is that it stops being a debuggee, which
-leaves it running exactly as it would have too
+a child that was started — by `subprocess`, by `multiprocessing` with `spawn`,
+by `exec` — is not touched at all: it runs exactly as it would have. a child
+that was **forked** is the one case where something has to happen, because a
+fork copies the debugger into it. what happens is one of two things, and the
+default is the first:
+
+- it **stops being a debuggee**, which leaves it running exactly as it would
+    have too
+- with [`debugChildren`](#a-fork-that-is-debugged) asked for, it gives the
+    connection it inherited up and opens one of its own, and is **held** at the
+    line that forked
 
 ## the case this exists for
 
@@ -210,9 +216,11 @@ before it ran a line, and that `bpd` is not debugging it as a session of its own
 
 ### the child stops being a debuggee
 
-that report is only true because of what the child then does, which is: give the
-whole session up, before `os.fork()` has returned to python, and run exactly as
-it would have if the program had never been launched under `bpd`
+this is what a fork does **unless [`debugChildren`](#a-fork-that-is-debugged)
+was asked for**, and it is the default. that report is only true because of what
+the child then does, which is: give the whole session up, before `os.fork()` has
+returned to python, and run exactly as it would have if the program had never
+been launched under `bpd`
 
 it is arranged with `os.register_at_fork(after_in_child=…)`, registered once from
 the agent at attach, in the same call as the `before` and `after_in_parent`
@@ -368,7 +376,8 @@ now it reads it like any other process
 
 the audit hook is inherited by a forked child too. it compares the pid against
 the one recorded at attach and stays silent when they differ, so a child never
-writes into the parent's socket
+writes into the parent's socket. a child that opened a session of **its own**
+records itself instead, because its children are then its session's to report
 
 the consequence is stated rather than hidden: an `os.exec` performed **inside** a
 forked child is not reported, and the `os.fork` that made it is. `os.spawnv` is
@@ -505,7 +514,9 @@ the same words:
     where it was asked, and a location taken from whichever frame happened to be
     running is a location nobody can act on
 - **MCP** — a `spawned` key on the answer of the call the program was running
-    during. this server writes nothing that is not an answer, so there is no
+    during. a session that joined is a separate key, `attached`, because it is a
+    separate claim: `spawned` says a child exists, and `attached` says one is
+    **held** and waiting to be told what to do. this server writes nothing that is not an answer, so there is no
     event to correlate. beside the sentence it carries the event, the executable,
     the arguments, the verdict, `certain`, and `debugged: false` — an agent that
     assumed the child was being debugged would set breakpoints in it and wait for
@@ -540,27 +551,113 @@ through. a program that walks its own `/dev/fd` sees them. that is the session
 itself rather than anything on this page, and it is the one fingerprint that
 cannot go while the agent is talking to an engine at all
 
+## a fork that is debugged
+
+**off by default, and it stays off.** a debugged fork *stops*, and a setting
+that produced stopped processes without being asked for would be a debugger that
+hangs programs by default. debugpy defaults its equivalent to on and that is the
+one thing in its design not to copy
+
+it is `bpd_core::Request::DebugChildren`, reached as the `debugChildren` field
+of a DAP launch configuration and as MCP's `debug_children` tool. what comes
+back is what the **agent** says is set, read off the process that will fork
+rather than echoed from the request
+
+### the child needs nothing it was not born with
+
+a fork inherits memory, so the endpoint and the token the child presents are the
+ones its parent was given — held in a `OnceLock` since attach. **no environment
+variable, no `sitecustomize`, no path entry, and no file.** every assertion in
+`crates/bpd/tests/launch_parity.rs` is untouched by this feature, including the
+two that compare the whole environment and the whole `sys.path` against a bare
+run
+
+the setting reaches the child the same way, and it has to have been set
+**before** the fork: `after_in_child` runs inside `os.fork()`, on the only
+thread the fork kept, with nobody left to ask. it is an atomic, read without a
+lock, for the reason everything else that handler touches is
+
+### what the handler does instead of disarming
+
+the same first two steps — give the inherited session up, close the four
+descriptors, replace the cells — and then, instead of taking the tool off the
+process:
+
+1. **open a connection of its own**, to the endpoint it inherited, presenting
+    the token it inherited. that is a fifth descriptor rather than a second owner
+    of its parent's: the parent's four were closed first, so there is no instant
+    at which this process holds a writable handle on a socket it does not own
+1. **record itself as the process that reports children**, so that its own
+    subprocesses are its session's to report. the audit hook compares the pid
+    against the one recorded at attach, which is what kept a detached child off
+    its parent's socket
+1. **report a stop and hold there.** measured on 3.13, 3.14, 3.15 and a
+    free-threaded 3.14: in `after_in_child` the python frame chain of the
+    `os.fork()` caller is intact and `sys.monitoring.get_tool` still names this
+    tool — so the child has a stack to walk and a breakpoint table it inherited,
+    and the line that forked is where it is held
+
+the reason is `StopReason::Forked`, carrying the file, the line and the
+**parent's pid**. it is the child's `Entry`: nothing of the child has run. the
+parent's pid is on it because the two sessions are otherwise unrelated numbers,
+and a client shown two with nothing between them cannot tell which program made
+which
+
+the stop **number** is not 1. the counter lives outside the table it numbers and
+is inherited, so a child carries on from where its parent had got to — a child
+starting again at one would reissue, immediately, numbers its parent has already
+reported
+
+### a fork of a fork
+
+the handler is inherited by every generation, and a child that opened a session
+of its own is a debuggee like any other: its own fork is a third session, held
+at the line **it** forked on. `debugChildren` reaches it because the atomic is
+inherited too, and on DAP because the `startDebugging` configuration is written
+out of the parent's — so the child's session carries the same settings, this one
+among them
+
+### if it cannot reconnect
+
+the child says so on its own stderr, prefixed `bpd:`, naming the endpoint and
+the failure, and then does exactly what it does with child debugging off: takes
+the tool off the process and runs undebugged. there is no other channel — the
+connection it inherited has been closed and the one of its own is what failed —
+and it is not silence
+
+it is deliberately not the exit the agent takes when the debugger vanishes
+mid-session. that rule is about a session that *existed* and was lost; this
+child never had one, and killing a worker because the debugger could not reach
+it would be the debugger changing what the program did
+
+### what it costs, and is not claimed away
+
+the child inherits the whole of the session's state, and that includes its
+locks. the three the fork handler itself needs — the writing end, the reader,
+the stop registry — are `ForkCell`s and are replaced rather than taken, so
+reconnecting and stopping need no lock at all. what is **not** replaced is
+everything the child goes on to use as a debuggee: the breakpoint table, the
+code registry, the armed set. those have to survive the fork with their contents
+— they are the point — so they cannot be abandoned
+
+on a gil build `os.fork()` holds the GIL and so does every thread that could be
+holding one of them, which keeps them apart. on a free-threaded build nothing
+does, beyond the stop-the-world `os.fork()` was measured to perform there — and
+that is an observation about one interpreter rather than a guarantee. it is the
+same exposure any program has when it forks from a multi-threaded process, which
+is why cpython reinitialises its own locks in `PyOS_AfterFork_Child`, and it is
+stated here rather than left to be discovered
+
 ## what is not built
 
-propagation, including for a fork. a forked child gives the session up and is
-not handed a new one, which is the honest default rather than the final answer:
-a fork inherits memory, so a child could be told how to reconnect without
-anything going through the environment at all. that is a feature, and it is not
-this one
+**an `exec`'d child.** `subprocess`, and `multiprocessing` with the `spawn` or
+`forkserver` start method, reach a fresh interpreter with none of this process's
+memory in it. there is nothing for it to inherit an endpoint through, so telling
+one how to reach the session means giving it something through its environment —
+which is the one channel the parity guarantee keeps clean. django's reloader is
+here. what that would cost, and what the guarantee would become, is designed
+rather than guessed at
 
-the child is not debugged, and telling an exec'd one how to reach the session
-means giving it something through its environment — which is the one channel the
-parity guarantee currently keeps clean. what that would cost, and what the
-guarantee would become, is designed rather than guessed at, and it is the rest of
-this milestone
-
-what a debugged child needs *before* any of that is built. a session is named, a
-stop says which session it is of, a request may name one, and the engine can hold
-more than one: the listener a debuggee attached on is kept open, and an agent
-that presents that debuggee's token becomes a second session of it. a program bpd
-did not start ends without an exit status and refuses to be terminated, rather
-than pretending to either — see [sessions](sessions.md)
-
-what is missing is anything that hands a child the endpoint and the token, and
-any way for a front end to say which session a request is for. with two open,
-every request that names none is refused
+so `--noreload` is still the answer for django, and the fork case is the one
+this feature covers: `multiprocessing` with the `fork` start method, and every
+program that forks a worker per core

@@ -44,11 +44,31 @@ got. that is the point of it: a client that had to pick a number would be racing
 every other program on the machine for it, and a client that had to guess when
 the adapter was ready would be racing the adapter
 
-one client at a time. a session **is** the connection — that is DAP's own model,
-and it is why a second debuggee is a second session rather than a second field on
-a request. a second connection is **answered**, with an `output` event saying so
-and then a close, rather than queued: a queue is indistinguishable from a hang
-at the other end
+**one listener, one token, any number of sessions.** a session *is* the
+connection — that is DAP's own model, and it is why a second debuggee is a
+second session rather than a second field on a request. so a second connection
+that presents this listener's token is served beside the first, over the same
+`Debuggee`
+
+it used to be turned away with an `output` event saying the adapter was busy and
+that "a second session is a second `bpd dap --listen`". that was right while one
+listener meant one session and is wrong now: `startDebugging` asks a client to
+open exactly this connection, and the adapter would have been refusing the thing
+it had just asked for. a token per child was the alternative and is not better —
+the connection is asked for by *this* adapter, to a client that has already
+presented this token, so a second token would be a second lifetime to get wrong
+for a boundary that is already drawn
+
+what the refusal was protecting still holds, and it is now what the tests are
+about. anything on this machine can open a socket to a loopback port, and one
+that connects and then says nothing must not be able to take a slot or hold up
+the session a `startDebugging` asked for — so the wait for a token happens on
+the connection's **own** thread, never on the one that accepts. a connection
+that presents nothing is dropped on its deadline and the listener carries on
+
+every session the first client opened goes when the first client does. a
+debuggee whose original client has gone is a program with nothing watching it,
+and the adapter does not outlive it
 
 ### why a socket needs a token and stdin does not
 
@@ -192,6 +212,7 @@ user could see accepted and never get
 | `python`         | `python3` | the interpreter, resolved on `PATH` like any command   |
 | `stopOnEntry`    | `false`   | stay stopped before the first statement                |
 | `stopTheWorld`   | `false`   | hold every thread that can be held, for each stop      |
+| `debugChildren`  | `false`   | debug a child the program **forks** — see below        |
 | `variables`      | see below | how much of a value to read                            |
 | `threadSettleMs` | `50`      | how far apart the two samples a thread census compares |
 
@@ -199,6 +220,55 @@ user could see accepted and never get
 breakpoint binds against a real interpreter rather than against a guess about
 one. `stopOnEntry` decides whether the client is told about it, not whether it
 happens
+
+### `debugChildren`
+
+off by default, and deliberately not debugpy's default of on. a debugged fork
+**stops**, at the line that forked, and a setting that produced stopped
+processes without being asked for would be a debugger that hangs programs by
+default
+
+it is refused up front — at `launch`, before anything has forked — unless two
+things are true, because the alternative is discovering them when a child is
+already held:
+
+- the client advertised **`supportsStartDebuggingRequest`** in `initialize`.
+    that is a *client* capability, not one bpd advertises, and it is the only one
+    this adapter reads. DAP's only way to hand a second program to a client is to
+    ask it to start a second session, so a client that cannot be asked would
+    leave the child held with nothing able to reach it
+- the adapter is **reachable by a second connection**, which means
+    `bpd dap --listen`. on stdio the second session `startDebugging` asks for
+    would be another `bpd dap` process, with an engine of its own that this
+    debuggee is not in
+
+a client that gets the refusal has the honest outcome rather than a hang: take
+`debugChildren` out and the fork is reported on the `console` category and the
+child runs undebugged, which is what bpd does without it
+
+when a child does join, the adapter sends `startDebugging` with `request:
+"attach"` and a configuration written out of the one this connection was
+launched with — so the child's session carries the same `stopTheWorld`, the same
+`variables` bounds and the same `debugChildren`, which is what makes a fork of a
+fork debugged too. two fields are bpd's own, because DAP has none for either:
+
+```json
+{
+  "bpdSession": 2,
+  "bpdConnect": {
+    "host": "127.0.0.1",
+    "port": 4711,
+    "header": "X-Bpd-Token",
+    "token": "…"
+  }
+}
+```
+
+the client connects to that endpoint with that header and sends `attach` with
+that `bpdSession`. it is **not** PEP 768 attaching and nothing is injected into
+anything: the process is already there and already held, and what the second
+connection takes up is a session the engine already holds. an `attach` that does
+not name `bpdSession` is still refused with the PEP 768 reason
 
 ### `variables`
 
@@ -258,11 +328,30 @@ no id for the same reason one inside this session does not
 
 so the adapter addresses every request it makes, and the client never writes a
 session id: a request that is about a stop goes to the session that stop was
-reported from — the `Stop` carries it — and one that is about the program names
-none, which the engine answers with the only session there is. that is
-`Facet::Session` in the parity table, as `Reach::OnItsOwn`, and
-`crates/bpd_dap/tests/coverage.rs` checks the claim against what really arrived.
-see [sessions](sessions.md)
+reported from — the `Stop` carries it — and one that is about the program is the
+session **this connection** serves. which session that is comes from the launch,
+for the first connection, and from the `bpdSession` in the `startDebugging`
+configuration for every later one. that is `Facet::Session` in the parity table,
+as `Reach::OnItsOwn`, and `crates/bpd_dap/tests/coverage.rs` checks the claim
+against what really arrived. see [sessions](sessions.md)
+
+each connection sees **its own** session's stops and no others. another
+connection's stops are another program's threads, and a client shown one would
+be shown a thread it can neither walk nor resume
+
+#### what a second connection costs
+
+two connections serve two sessions of one `Debuggee`, and the engine is one
+object. a wait that blocked in it until the program stopped would hold it for as
+long as the program ran, and the other connection could not ask anything —
+including the resume a held child is waiting for
+
+so the adapter's wait carries a **deadline** and is sliced. a slice that passes
+reports nothing: the client's `continue` was answered before the wait began, so
+there is nothing outstanding for a timeout to be the answer to, and the loop
+waits again. it changes what is held rather than what is done — the engine
+already polls its listener from inside a wait, which is how a session that
+arrives while the program runs arrives at all
 
 ### a reference is not a frame id
 
