@@ -308,15 +308,18 @@ impl<'a> Server<'a> {
                         // fork says is set
                         "debugging_children": on,
                         "note": if on {
-                            "a forked child of this program will open a session \
-                             of its own and be **held** at the line that forked. \
-                             it is a second session: `sessions` lists it, and \
-                             every tool takes its `session`. it has to be \
-                             resumed like any other stop"
+                            "a child of this program will open a session of its \
+                             own and arrive **held** — a fork at the line that \
+                             forked, and one that was `exec`'d at its own \
+                             interpreter startup, before its program has been \
+                             compiled. it is a second session: `sessions` lists \
+                             it, and every tool takes its `session`. it has to \
+                             be resumed like any other stop"
                         } else {
-                            "a forked child of this program gives the session up \
-                             before `os.fork()` returns and runs undebugged. the \
-                             fork is still reported"
+                            "a child of this program runs undebugged: a forked \
+                             one gives the session up before `os.fork()` \
+                             returns, and one that was `exec`'d is never \
+                             reached. the child is still reported"
                         },
                     })),
                     other => unreachable!("debugging children was answered with {other:?}"),
@@ -1273,9 +1276,9 @@ impl Said {
 
     /// the sessions that joined since the last answer, if any
     ///
-    /// its own key, and the one an agent must not miss: a debugged fork arrives
-    /// **held** at the line that forked, so a session listed here is a process
-    /// waiting for this agent to do something about it
+    /// its own key, and the one an agent must not miss: a debugged child arrives
+    /// **held**, so a session listed here is a process waiting for this agent to
+    /// do something about it
     fn joined(&mut self) -> Option<serde_json::Value> {
         if self.joined.is_empty() {
             return None;
@@ -1286,10 +1289,13 @@ impl Said {
             .collect();
         Some(serde_json::json!({
             "sessions": sessions,
-            "note": "the program forked and the child opened a debug session of \
-                     its own. it is **held**, at the line that forked, and it \
-                     stays there until something resumes it. `sessions` lists \
-                     them all; every tool takes the `session` of one",
+            "note": "the program made a child and the child opened a debug \
+                     session of its own. it is **held** — a fork at the line \
+                     that forked, and one that was `exec`'d at its own startup, \
+                     where it has no line and no stack because nothing of its \
+                     program has run — and it stays there until something \
+                     resumes it. `sessions` lists them all; every tool takes the \
+                     `session` of one",
         }))
     }
 

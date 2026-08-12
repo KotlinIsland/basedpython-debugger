@@ -158,8 +158,9 @@ pub trait Launcher: Sync {
     ///
     /// what a connection that arrived because of a `startDebugging` reverse
     /// request asks for. it starts nothing: the process is already there, it is
-    /// already **held** — a debugged fork stops at the line that forked — and
-    /// what this hands back is a second view of the one debuggee
+    /// already **held** — a debugged fork at the line that forked, and a
+    /// debugged `exec` at its own interpreter startup — and what this hands back
+    /// is a second view of the one debuggee
     ///
     /// # errors
     ///
