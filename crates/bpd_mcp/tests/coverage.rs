@@ -16,7 +16,7 @@ use std::io::{BufRead as _, BufReader, Write};
 use std::sync::{Arc, Mutex};
 
 use bpd_core::{
-    Addressed, At, Binding, Content, Detail, Did, Entry, Evaluated, Evaluation, Facet, Frame,
+    Addressed, At, Binding, Content, Detail, Did, Entry, Evaluated, Evaluation, Exit, Facet, Frame,
     FrameId, HitCondition, Mode, Outcome, Reach, Record, Reported, Reporting, Request, Resolved,
     Response, Running, SessionId, Site, SourceBreakpoint, Stack, Stop, StopReason, Threads, Value,
     Variables, WorldStopped,
@@ -899,7 +899,7 @@ impl Session for FakeSession {
     /// this fake's program never ends: the whole conversation it drives happens
     /// against one that is there, and a fake that claimed an exit would answer
     /// every refusal with the wrong one of the two reasons
-    fn ended(&self) -> Option<i64> {
+    fn ended(&self) -> Option<Exit> {
         None
     }
 

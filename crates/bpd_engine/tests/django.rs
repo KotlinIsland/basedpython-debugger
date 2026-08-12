@@ -196,6 +196,12 @@ fn run_to_stop(debuggee: &mut Debuggee) -> (StopReason, Vec<(u32, Binding)>) {
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
         ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -216,6 +222,12 @@ fn run_to_exit(debuggee: &mut Debuggee) -> Vec<(u32, Binding)> {
         Running::StillRunning { waited, .. } => unreachable!(
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
+        ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
         ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")

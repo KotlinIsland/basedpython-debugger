@@ -493,24 +493,24 @@ binds loopback with no address to widen and refuses a connection that cannot
 present the session token it printed when it bound. see
 [the two transports](docs/development/dap.md#the-two-transports)
 
-**the reconnect itself is scoped and deliberately parked**, and the scoping is
-the useful artefact. it was attempted twice and abandoned twice before any code
-was written, which was the right answer both times: what it needs is five pieces,
-of which the one originally asked for is about a fifth
+**the reconnect itself is five pieces**, and the first two are built
 
-1. **the agent's shared statics made fork-replaceable.** the child must keep the
-    stop counter it inherited — resetting it to one, the obvious hygiene move,
-    makes frame ids collide across sessions immediately — and that counter lives
-    *inside* a mutex it must not take, because on a free-threaded build a program
-    thread can hold it at the instant of a fork. today's disarm path is safe
-    precisely because it locks nothing: it is atomics and closing descriptors by
-    number. a reconnect cannot be
-1. **the engine holding two sessions** — the listener kept alive rather than
-    dropped with the local it is bound to, a poll across sockets, a `Running`
-    outcome for "the connection closed and the exit is not mine to read" because
-    bpd is not a forked child's parent and cannot reap it, and `terminate`
-    refusing by name on a child session rather than silently doing nothing
-    through a `std::process::Child` that does not exist
+1. ~~**the agent's shared statics made fork-replaceable.**~~ done. the writing
+    end, the reader and the held-thread table are cells behind an atomic pointer
+    and a forked child replaces all three with a store apiece, taking none of
+    them. the stop counter came out of the table into an atomic of its own,
+    because a child has to **keep** it: resetting to one reissues numbers the
+    parent has already reported. what had been keeping the hazard out of reach
+    was the GIL on a gil build and — measured on 3.14t — `os.fork()`'s
+    stop-the-world on a free-threaded one, neither of which is a property of
+    this agent
+1. ~~**the engine holding two sessions.**~~ done. the listener a debuggee
+    attached on is kept open, an agent that presents its token becomes a second
+    session of it, and the wait polls the connection and the listener rather
+    than blocking on one. a program bpd did not start ends as `Running::Ended` —
+    over, with no exit status, because bpd is not its parent and never learns
+    one — and `terminate` on it is refused by name. with two open, a request
+    that names none is refused by `only_session`
 1. **the child reconnecting** — opt-in, decided at fork time from a flag the
     engine set earlier, because the child forks before anyone could be asked
 1. **MCP's `sessions` tool and a session argument**

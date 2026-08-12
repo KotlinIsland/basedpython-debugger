@@ -210,6 +210,16 @@ pub(crate) fn run(args: &Args) -> ExitCode {
             Ok(Running::Finishing { threads, .. }) => {
                 unreachable!("nothing was held, and the debuggee ended holding {threads:?}")
             }
+            // `bpd launch` starts the process itself and holds its child, so
+            // its exit is bpd's to read. this is the answer for a session that
+            // connected to bpd's listener instead, and `bpd launch` waits on
+            // the one it launched
+            Ok(Running::Ended { .. }) => {
+                unreachable!(
+                    "the program bpd launched ended without an exit status, and \
+                     bpd holds its child"
+                )
+            }
             Err(error) => Err(error),
         },
     };

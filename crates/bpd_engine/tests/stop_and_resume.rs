@@ -51,6 +51,12 @@ fn to_exit(mut debuggee: bpd_engine::Debuggee) -> ExitStatus {
             "this wait carries no deadline and was answered after {waited:?} \
              with the program still running"
         ),
+        // bpd launched this program and holds its child, so it is bpd that
+        // reads the exit
+        Running::Ended { .. } => unreachable!(
+            "the program bpd launched ended without an exit status, and bpd \
+             holds its child"
+        ),
         Running::Finishing { threads, .. } => {
             panic!("nothing was held, and the debuggee ended holding {threads:?}")
         }
@@ -73,7 +79,8 @@ fn the_program_has_run_nothing_while_it_is_stopped() {
 
     let debuggee = stopped(&fixture, &[]);
 
-    let [held] = debuggee.held() else {
+    let held_now = debuggee.held();
+    let [held] = held_now.as_slice() else {
         panic!("one thread is held at entry, and got {:?}", debuggee.held())
     };
     assert_eq!(held.reason, StopReason::Entry);

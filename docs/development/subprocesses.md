@@ -554,8 +554,13 @@ parity guarantee currently keeps clean. what that would cost, and what the
 guarantee would become, is designed rather than guessed at, and it is the rest of
 this milestone
 
-what a debugged child needs *before* any of that is a way to say which debuggee
-a stop belongs to, since every id an agent mints counts from one in its own
-process. that part is built: a session is named, a stop says which session it is
-of, and a request may name one — see [sessions](sessions.md). there is still one
-session, and what would produce a second is the propagation above
+what a debugged child needs *before* any of that is built. a session is named, a
+stop says which session it is of, a request may name one, and the engine can hold
+more than one: the listener a debuggee attached on is kept open, and an agent
+that presents that debuggee's token becomes a second session of it. a program bpd
+did not start ends without an exit status and refuses to be terminated, rather
+than pretending to either — see [sessions](sessions.md)
+
+what is missing is anything that hands a child the endpoint and the token, and
+any way for a front end to say which session a request is for. with two open,
+every request that names none is refused

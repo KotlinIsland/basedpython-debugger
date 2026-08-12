@@ -303,7 +303,7 @@ fn one_raise_is_one_stop_however_many_frames_it_passes_through() {
                 "this wait carries no deadline and was answered after {waited:?} \
                  with the program still running"
             ),
-            other @ Running::Finishing { .. } => {
+            other @ (Running::Ended { .. } | Running::Finishing { .. }) => {
                 panic!("expected a raise or the end, got {other:?}")
             }
         }

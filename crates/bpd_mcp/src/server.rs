@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bpd_core::{
-    Addressed, Detail, HitCondition, LogRecord, Reporting, Request, Response, Running, Scope,
+    Addressed, Detail, Exit, HitCondition, LogRecord, Reporting, Request, Response, Running, Scope,
     SourceBreakpoint, StepKind, Stop, Threads, Which, exit_code, only_stop,
 };
 
@@ -631,6 +631,7 @@ impl<'a> Server<'a> {
         let rebound = match &running {
             Running::Stopped { rebound, .. }
             | Running::Exited { rebound, .. }
+            | Running::Ended { rebound }
             | Running::Finishing { rebound, .. }
             | Running::StillRunning { rebound, .. } => rebound.clone(),
         };
@@ -645,6 +646,17 @@ impl<'a> Server<'a> {
             Running::Exited { status, .. } => serde_json::json!({
                 "outcome": "exited",
                 "exit_code": exit_code(status),
+            }),
+            // a separate outcome from `exited`, and deliberately **without** an
+            // `exit_code` field rather than with a null one: the program is
+            // over and the number is not bpd's to give
+            Running::Ended { .. } => serde_json::json!({
+                "outcome": "ended",
+                "note": "the program is over and bpd cannot say what it exited \
+                         with. bpd did not start that process — it connected to \
+                         bpd's listener — so bpd is not its parent, cannot reap \
+                         it and never learns its exit status. every stop it had \
+                         has ended with it",
             }),
             Running::Finishing { threads, .. } => serde_json::json!({
                 "outcome": "finishing",
@@ -738,8 +750,8 @@ impl<'a> Server<'a> {
         self.held_stops().iter().map(render::stop).collect()
     }
 
-    /// what the program exited with, or `None` while there is one
-    fn ended(&self) -> Option<i64> {
+    /// how the program ended, or `None` while there is one
+    fn ended(&self) -> Option<Exit> {
         self.session.as_ref().and_then(|session| session.ended())
     }
 

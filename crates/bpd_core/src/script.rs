@@ -650,6 +650,13 @@ pub enum Landed {
         exit_code: i64,
     },
 
+    /// the program is over and its exit is not bpd's to read
+    ///
+    /// separate from [`Self::Exited`] and carrying no number, because there is
+    /// none to carry: bpd did not start that process and never learns what it
+    /// exited with. see [`crate::Running::Ended`]
+    Ended,
+
     /// the program ran to its end with threads still held
     ///
     /// it cannot exit: the interpreter finalizes by joining the program's
@@ -951,6 +958,9 @@ pub enum Halted {
         exit_code: i64,
     },
 
+    /// the program is over and its exit is not bpd's to read
+    Ended,
+
     /// the program ran to its end with threads still held
     Finishing {
         /// the threads still held
@@ -1007,6 +1017,11 @@ impl std::fmt::Display for Halted {
                 formatter,
                 "the program exited with {exit_code}, so there is nothing left \
                  to run the rest of the script against"
+            ),
+            Self::Ended => formatter.write_str(
+                "the program is over, so there is nothing left to run the rest \
+                 of the script against. bpd did not start that process and is \
+                 not its parent, so what it exited with is not bpd's to read",
             ),
             Self::Finishing { threads } => write!(
                 formatter,

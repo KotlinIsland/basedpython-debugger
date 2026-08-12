@@ -47,6 +47,7 @@ impl Debuggee {
     /// record
     pub(super) fn execute(
         &mut self,
+        at: usize,
         stop: u64,
         script: &Script,
         reporting: &mut dyn Reporting,
@@ -57,7 +58,7 @@ impl Debuggee {
             .examine()
             .map_err(|reason| bpd_core::Error::ScriptRefused { reason })?;
 
-        let cursor = self
+        let cursor = self.attached[at]
             .held
             .iter()
             .find(|held| held.stop == stop)
@@ -65,14 +66,19 @@ impl Debuggee {
             .ok_or_else(|| bpd_core::Error::Refused {
                 reason: Refusal::NoSuchStop {
                     stop,
-                    held: self.held.iter().map(|held| held.stop).collect(),
+                    held: self.attached[at]
+                        .held
+                        .iter()
+                        .map(|held| held.stop)
+                        .collect(),
                 },
             })?;
 
-        let own = own_id(&self.armed, script)?;
+        let own = own_id(&self.attached[at].armed, script)?;
         let at_most = script.at_most();
         let mut run = Run {
             debuggee: self,
+            at,
             reporting,
             budget: script.budget,
             until: Instant::now() + script.budget.wall(),
@@ -194,6 +200,12 @@ impl Wanted {
 /// one script, part way through
 struct Run<'a> {
     debuggee: &'a mut Debuggee,
+    /// which of the debuggee's sessions this script is running against
+    ///
+    /// resolved once, where the script was addressed, so every step of it goes
+    /// to the same process — a script whose steps drifted between sessions
+    /// would be a transcript of two programs
+    at: usize,
     reporting: &'a mut dyn Reporting,
     budget: Budget,
     /// when the wall clock budget runs out
@@ -301,7 +313,8 @@ impl Run<'_> {
 
     fn stepped(&mut self, kind: StepKind, path: &str, from: At) -> Result<Flow> {
         let stop = self.cursor.stop;
-        if let Err(error) = self.debuggee.step_thread(stop, kind, self.reporting) {
+        if let Err(error) = self.debuggee.attached[self.at].step_thread(stop, kind, self.reporting)
+        {
             return self.refused(path, from, error);
         }
         let (landed, ending) = self.what_happened(Wanted::Stepped)?;
@@ -310,7 +323,7 @@ impl Run<'_> {
 
     fn carried_on(&mut self, path: &str, from: At) -> Result<Flow> {
         let thread = self.cursor.thread;
-        let letting = self.debuggee.let_go(
+        let letting = self.debuggee.attached[self.at].let_go(
             Which::Named {
                 threads: vec![thread],
             },
@@ -358,7 +371,7 @@ impl Run<'_> {
 
     fn walked(&mut self, top: Option<u32>, path: &str, from: At) -> Result<Flow> {
         let stop = self.cursor.stop;
-        let walked = match self.debuggee.walk_stack(stop, top, self.reporting) {
+        let walked = match self.debuggee.attached[self.at].walk_stack(stop, top, self.reporting) {
             Ok(walked) => walked,
             Err(error) => return self.refused(path, from, error),
         };
@@ -385,7 +398,7 @@ impl Run<'_> {
         path: &str,
         from: At,
     ) -> Result<Flow> {
-        let mut set = self.debuggee.armed.clone();
+        let mut set = self.debuggee.attached[self.at].armed.clone();
         set.push(SourceBreakpoint {
             id: self.own,
             file: file.to_path_buf(),
@@ -395,10 +408,11 @@ impl Run<'_> {
             log: None,
         });
 
-        let resolved = match self.debuggee.resolve_breakpoints(set, self.reporting) {
-            Ok(resolved) => resolved,
-            Err(error) => return self.refused(path, from, error),
-        };
+        let resolved =
+            match self.debuggee.attached[self.at].resolve_breakpoints(set, self.reporting) {
+                Ok(resolved) => resolved,
+                Err(error) => return self.refused(path, from, error),
+            };
         let binding = resolved
             .into_iter()
             .find(|entry| entry.id == self.own)
@@ -434,7 +448,7 @@ impl Run<'_> {
         }
 
         let thread = self.cursor.thread;
-        let letting = self.debuggee.let_go(
+        let letting = self.debuggee.attached[self.at].let_go(
             Which::Named {
                 threads: vec![thread],
             },
@@ -470,10 +484,13 @@ impl Run<'_> {
     /// that ended mid-`run_to` must not leave the program armed with something
     /// nobody asked for
     fn disarm(&mut self, landed: &Landed, file: &Path, line: u32) -> Result<Disarmed> {
-        if matches!(landed, Landed::Exited { .. }) {
+        // both endings, because there is nothing left to take a breakpoint off
+        // either way. which of the two it is says whether bpd could read the
+        // exit, and that is not what this is about
+        if matches!(landed, Landed::Exited { .. } | Landed::Ended) {
             return Ok(Disarmed::ProgramEnded);
         }
-        if !self.debuggee.held.is_empty() {
+        if !self.debuggee.attached[self.at].held.is_empty() {
             return Ok(if self.put_the_set_back()? {
                 Disarmed::Removed
             } else {
@@ -481,7 +498,7 @@ impl Run<'_> {
             });
         }
 
-        let running = match self.debuggee.arm_pause(self.reporting) {
+        let running = match self.debuggee.attached[self.at].arm_pause(self.reporting) {
             Ok(running) => running,
             // nothing can be asked of a program with nothing held, and a pause
             // that could not even be armed leaves the breakpoint exactly where
@@ -493,7 +510,7 @@ impl Run<'_> {
         // in that long is one no pause reaches in it either
         let waited = self
             .debuggee
-            .wait_for(Some(self.budget.wall()), self.reporting)?;
+            .wait_for(self.at, Some(self.budget.wall()), self.reporting)?;
         self.keep_rebindings(&waited);
         match waited {
             Running::Stopped { stop, .. } => {
@@ -518,11 +535,11 @@ impl Run<'_> {
     /// `false` means the session would not take it, which is only possible with
     /// nothing held — and then the script's own breakpoint is still in the set
     fn put_the_set_back(&mut self) -> Result<bool> {
-        let set = self.debuggee.armed.clone();
-        match self.debuggee.resolve_breakpoints(set, self.reporting) {
+        let set = self.debuggee.attached[self.at].armed.clone();
+        match self.debuggee.attached[self.at].resolve_breakpoints(set, self.reporting) {
             Ok(resolved) => {
                 debug_assert!(
-                    resolved.len() == self.debuggee.armed.len(),
+                    resolved.len() == self.debuggee.attached[self.at].armed.len(),
                     "the set that went back is the one the client asked for"
                 );
                 Ok(true)
@@ -676,8 +693,7 @@ impl Run<'_> {
             stop: self.cursor.stop,
             depth: frame,
         };
-        self.debuggee
-            .evaluate_in(frame, expression, detail, self.reporting)
+        self.debuggee.attached[self.at].evaluate_in(frame, expression, detail, self.reporting)
     }
 
     // ---- letting the thread go -------------------------------------------
@@ -689,7 +705,9 @@ impl Run<'_> {
     /// deadline per step would be a second place to say the same thing
     fn what_happened(&mut self, wanted: Wanted) -> Result<(Landed, Option<Ending>)> {
         let left = self.until.saturating_duration_since(Instant::now());
-        let ran = self.debuggee.wait_for(Some(left), self.reporting)?;
+        let ran = self
+            .debuggee
+            .wait_for(self.at, Some(left), self.reporting)?;
         self.keep_rebindings(&ran);
 
         Ok(match ran {
@@ -733,6 +751,9 @@ impl Run<'_> {
             ),
             // not a stop, and it carries no location. the wall clock budget is
             // what ran out, so the transcript is partial rather than halted
+            // the program is over and its exit is not bpd's to read, which is
+            // as final for a script as an exit code is
+            Running::Ended { .. } => (Landed::Ended, Some(Ending::Halted(Halted::Ended))),
             Running::StillRunning { .. } => (Landed::StillRunning, Some(Ending::OutOfTime)),
         })
     }
@@ -742,6 +763,7 @@ impl Run<'_> {
         let rebound = match ran {
             Running::Stopped { rebound, .. }
             | Running::Exited { rebound, .. }
+            | Running::Ended { rebound }
             | Running::Finishing { rebound, .. }
             | Running::StillRunning { rebound, .. } => rebound,
         };

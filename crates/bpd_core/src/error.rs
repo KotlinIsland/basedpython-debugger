@@ -135,6 +135,23 @@ pub enum Error {
         wanted: &'static str,
     },
 
+    /// something was asked of a program that is over, whose exit bpd never saw
+    ///
+    /// distinct from [`Self::ProgramExited`] because it carries no number and
+    /// must not. bpd did not start this process — it connected to bpd's
+    /// listener — so bpd is not its parent, cannot reap it and never learns
+    /// what it exited with. saying "exited with 0" here would be the debugger
+    /// inventing the one thing the caller is asking about
+    #[error(
+        "the program is over, so there is nothing left to ask for {wanted}. bpd \
+         did not start that process and is not its parent, so what it exited \
+         with is not bpd's to read. every stop it had has ended with it"
+    )]
+    ProgramEnded {
+        /// what was asked for
+        wanted: &'static str,
+    },
+
     /// a request that is about one stop was made while several were held
     ///
     /// a stop holds one thread and there can be more than one of them at a
@@ -191,6 +208,23 @@ pub enum Error {
         wanted: &'static str,
         /// the sessions this debugger holds
         open: Vec<crate::session::SessionId>,
+    },
+
+    /// a session was asked to end a program bpd did not start
+    ///
+    /// ending a debuggee is signalling the child process bpd holds and reaping
+    /// it. a session that arrived on bpd's listener has no child — bpd is not
+    /// that process's parent — so there is nothing to signal and nothing to
+    /// wait on. it is refused by name rather than quietly doing nothing, which
+    /// is the shape a client reads as success
+    #[error(
+        "{session} cannot be ended by bpd: bpd did not start that process and \
+         is not its parent, so there is nothing to signal and no exit to read. \
+         resume its held threads and let it finish, or end it from outside"
+    )]
+    NotOurProcess {
+        /// the session that was asked
+        session: crate::session::SessionId,
     },
 
     /// a debug script was refused before any of it ran

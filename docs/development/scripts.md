@@ -207,16 +207,16 @@ there is no carrying on past one, and no catch: the steps after a failure would
 run somewhere the script did not intend, and the record would describe an
 investigation that did not happen. the ways a script halts:
 
-| halted                | when                                                                             |
-| --------------------- | -------------------------------------------------------------------------------- |
-| `raised`              | an `eval` or a predicate raised — the exception is the record, and it is the end |
-| `not_a_bool`          | a predicate produced something else                                              |
-| `unbound`             | a `run_to` named a location nothing will stop at                                 |
-| `elsewhere`           | the thread stopped, and not for the reason the step asked for                    |
-| `other_thread`        | a different thread stopped and this one is still running                         |
-| `exited`, `finishing` | the program ended                                                                |
-| `bounded`             | a loop ran its allowance and its predicate was still true                        |
-| `refused`             | the session would not answer the request the step is made of                     |
+| halted                         | when                                                                             |
+| ------------------------------ | -------------------------------------------------------------------------------- |
+| `raised`                       | an `eval` or a predicate raised — the exception is the record, and it is the end |
+| `not_a_bool`                   | a predicate produced something else                                              |
+| `unbound`                      | a `run_to` named a location nothing will stop at                                 |
+| `elsewhere`                    | the thread stopped, and not for the reason the step asked for                    |
+| `other_thread`                 | a different thread stopped and this one is still running                         |
+| `exited`, `ended`, `finishing` | the program ended                                                                |
+| `bounded`                      | a loop ran its allowance and its predicate was still true                        |
+| `refused`                      | the session would not answer the request the step is made of                     |
 
 a script that expects an expression to raise should test the condition with an
 `if` first. there is no `try`, because a step that swallowed a failure is a step
