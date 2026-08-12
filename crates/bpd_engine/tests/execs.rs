@@ -477,3 +477,161 @@ fn a_child_that_execs_is_not_debugged_unless_it_was_asked_for() {
     // done and is a different claim from debugging it
     assert_eq!(seen.started.len(), 1, "{:?}", seen.started);
 }
+
+/// a program whose child writes down everything it could notice about itself
+///
+/// run twice — once with child debugging on and once with it off — so the two
+/// records are the same program's, differing only in whether bpd reached the
+/// child. the child is a **debuggee**, so it is supposed to be able to tell:
+/// what this pins is exactly how much
+const WHAT_THE_CHILD_CAN_SEE: &str = r#"import pathlib
+import subprocess
+import sys
+
+HERE = pathlib.Path(__file__).parent
+subprocess.run([sys.executable, str(HERE / "worker.py")], check=True)
+"#;
+
+const RECORDING_WORKER: &str = r#"import json
+import pathlib
+import signal
+import sys
+
+signal.alarm(300)
+HERE = pathlib.Path(__file__).parent
+(HERE / "record.json").write_text(json.dumps({"modules": sorted(sys.modules)}))
+"#;
+
+/// every module an `exec`'d debugged child has that a bare one does not, and why
+///
+/// the parent's list is `ALLOWED` in `crates/bpd/tests/launch_parity.rs` and it
+/// **did not move** when this arrived. this one is the child's, and it is longer
+/// by exactly the file the child is entered through
+const ALLOWED_IN_A_DEBUGGED_CHILD: &[(&str, &str)] = &[
+    (
+        "bpd_agent",
+        "the agent itself. it cannot go — unimporting it would unload the code \
+         that is running — and it is the same one name the parent gains",
+    ),
+    (
+        "sitecustomize",
+        "how the child is entered at all. a fresh interpreter inherits no \
+         memory, so the only way in is a file the interpreter reads at startup, \
+         and `site` puts what it imports in `sys.modules` like any other import. \
+         it is **not** in the parent: the directory holding it goes on the \
+         parent's path after `site` has already run",
+    ),
+];
+
+/// run the recorder once and say what its child's `sys.modules` held
+///
+/// the same program either way, so the two records differ only in whether bpd
+/// reached the child
+fn modules_of_a_child(debugged: bool) -> std::collections::BTreeSet<String> {
+    let fixture = Fixture::new("recorder", WHAT_THE_CHILD_CAN_SEE);
+    fixture.sibling("worker", RECORDING_WORKER);
+    let mut debuggee = launch(&fixture);
+    let parent = the_only_session(&debuggee);
+    let mut seen = Children::default();
+
+    if debugged {
+        assert!(
+            debuggee
+                .debug_children(true)
+                .expect("the debuggee took the setting")
+        );
+        match ask(
+            &mut debuggee,
+            parent,
+            Request::Run {
+                deadline: Some(A_MOMENT),
+            },
+            &mut seen,
+        ) {
+            Response::Ran(Running::StillRunning { .. }) => {}
+            other => panic!("the parent waits on its child: {other:?}"),
+        }
+        until_sessions(&mut debuggee, parent, 2, &mut seen);
+        let child = the_new_one(&debuggee, &[parent]);
+        match wait_in(&mut debuggee, child, &mut seen) {
+            Running::Stopped { .. } => {}
+            other => panic!("the child was supposed to arrive held: {other:?}"),
+        }
+        match run_in(&mut debuggee, child, &mut seen) {
+            Running::Ended { .. } => {}
+            other => panic!("the child did not end: {other:?}"),
+        }
+        match wait_in(&mut debuggee, parent, &mut seen) {
+            Running::Exited { status, .. } => assert!(status.success(), "{status}"),
+            other => panic!("the parent did not end: {other:?}"),
+        }
+    } else {
+        match run_in(&mut debuggee, parent, &mut seen) {
+            Running::Exited { status, .. } => assert!(status.success(), "{status}"),
+            other => panic!("the parent did not end: {other:?}"),
+        }
+    }
+
+    let written = std::fs::read_to_string(fixture.directory().join("record.json"))
+        .expect("the child wrote its record");
+    let record: serde_json::Value = serde_json::from_str(&written).expect("the child writes json");
+    record["modules"]
+        .as_array()
+        .expect("the record holds a list of modules")
+        .iter()
+        .map(|name| {
+            name.as_str()
+                .expect("a module name is a string")
+                .to_string()
+        })
+        .collect()
+}
+
+/// the child-side list, spelled out for a failure to print
+fn child_reasons() -> String {
+    ALLOWED_IN_A_DEBUGGED_CHILD
+        .iter()
+        .map(|(name, reason)| format!("  - `{name}`: {reason}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_debugged_child_gains_exactly_the_modules_that_are_written_down() {
+    let bare = modules_of_a_child(false);
+    let debugged = modules_of_a_child(true);
+
+    let gained: std::collections::BTreeSet<String> = debugged.difference(&bare).cloned().collect();
+    for name in &gained {
+        assert!(
+            ALLOWED_IN_A_DEBUGGED_CHILD
+                .iter()
+                .any(|(allowed, _)| *allowed == name.as_str()),
+            "a debugged child imported `{name}`, which a child of the same \
+             program that was not debugged does not have and which nothing in \
+             this list accounts for:\n{}\n\
+             a module in the child that is not in a bare one is a program that \
+             can behave differently because bpd reached it. if it genuinely has \
+             to be there, add it above with the reason — and if it does not, the \
+             import that pulled it in is the thing to move",
+            child_reasons()
+        );
+    }
+    let written_down: std::collections::BTreeSet<String> = ALLOWED_IN_A_DEBUGGED_CHILD
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect();
+    assert_eq!(
+        gained, written_down,
+        "the list above claims a module a debugged child no longer gains. a \
+         reason nobody needs is a reason nobody reads — take it out"
+    );
+
+    let lost: Vec<&String> = bare.difference(&debugged).collect();
+    assert!(
+        lost.is_empty(),
+        "a debugged child is missing {lost:?}, which a bare one has. taking a \
+         module back out of `sys.modules` is not a way to hide it: the next \
+         import of it runs its top level a second time"
+    );
+}
