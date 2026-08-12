@@ -1954,9 +1954,10 @@ impl Adapter {
                 )
                 .map_err(Aborted::Wire)?;
             self.say(&format!(
-                "the program forked and the child is **held** at the line that forked. \
-                 it is {session}, and this adapter has asked the client to start a \
-                 debug session for it\n"
+                "the program made a child and it is **held** — a fork at the line that \
+                 forked, and one that was `exec`'d at its own interpreter startup, \
+                 before its program has been compiled. it is {session}, and this \
+                 adapter has asked the client to start a debug session for it\n"
             ))?;
         }
         Ok(())
