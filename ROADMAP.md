@@ -114,16 +114,42 @@ breakpoint is not already solid
         - so the plumbing exists and is theirs: a python debug session in a
         jetbrains IDE **can** be driven over DAP today. that is a much
         better starting point than a platform with no DAP at all
-        - **the question this turns on is whether that path can be pointed at
-        an adapter that is not debugpy.** the plugin is closed — the
-        marketplace API carries no source or issue-tracker url — so it
-        cannot be read, and it has to be asked or tried. if it can, `bpd` is
-        a configuration; if it cannot, the routes are
-        [LSP4IJ](https://github.com/redhat-developer/lsp4ij) (Red Hat's
-        generic LSP and DAP client, EPL 2.0, every flavour from IDEA
-        2024.2 — breakpoints, conditional breakpoints, exception
-        breakpoints, variables, set-value, evaluate, stepping) or a plugin
-        of our own
+        - **the platform has a general DAP layer, and that is the route.**
+        read out of the published plugin jar rather than guessed:
+        `intellij.platform.dap` carries
+        `DebugAdapterSupportProvider<T>`, `DebugAdapterDescriptor<T>`,
+        `DapDebugSession`, `DapCommandProcessor`, `DapBreakpointManager`,
+        `DapXDebugProcess` and `connection.SocketConnectionAdapterHandle`,
+        over `org.eclipse.lsp4j.debug` as the protocol layer. jetbrains'
+        python plugin is a **client** of that layer — it registers
+        `platform.dap.debugAdapterSupportProvider` — rather than being the
+        layer itself
+        - so `bpd` does not extend their plugin and does not need it. its own
+        extension points (`debugpyConfigProvider`, `breakpointHandler`) are
+        debugpy-shaped; `bpd` sits **beside** it, registering the same
+        platform extension point with an adapter id of its own.
+        `createDebugAdapterDescriptor(Project)` is the same shape as vs
+        code's factory, which is already built and proven
+        - **and the transport already fits.** a descriptor's
+        `launchDebugAdapter` returns a `DebugAdapterHandle`, and the
+        platform ships a socket-backed one — plus a registry key
+        `debugpy.dap.debug.port`, "the debugger can connect to DebugPy Debug
+        Adapter process on the specified port". that is `bpd dap --listen`,
+        which exists
+        - **the one thing left to ask** is whether `com.intellij.platform.dap`
+        is public API or `@ApiStatus.Internal`. it cannot be read off the
+        artifact, the python plugin's own content module is
+        `visibility="internal"`, and its `since-build` is `262.9437` — so
+        the layer is new and the version floor is high
+        - **the no-plugin route today is
+        [LSP4IJ](https://github.com/redhat-developer/lsp4ij)** (Red Hat, EPL
+        2.0, every flavour from IDEA 2024.2). users define arbitrary DAP
+        servers in settings without writing anything, and its templates live
+        in `src/main/resources/templates/dap/` — `codelldb`, `go-delve`,
+        `python-debugpy` and six more. the debugpy one attaches over
+        `connect.host`/`connect.port`, which is the shape `bpd dap --listen`
+        already answers. a `bpd` template there is the cheapest thing that
+        could work and does not need JetBrains to answer anything
         - worth reading twice: jetbrains' own stated reason for that plugin is
         **"lower debugging overhead — especially on Python 3.12+ thanks to
         PEP 669 monitoring hooks"**. that is this project's thesis, arrived
