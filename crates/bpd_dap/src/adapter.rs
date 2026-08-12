@@ -1863,12 +1863,13 @@ impl Adapter {
             return Err(Aborted::Refuse(
                 "`debugChildren` needs the client to support the `startDebugging` \
                  reverse request, and this one did not say it does in \
-                 `initialize`. a debugged fork **stops**, at the line that \
-                 forked, and DAP's only way to hand a second program to a client \
-                 is to ask it to start a second session — so bpd would have a \
-                 held process nothing could reach. take `debugChildren` out and \
-                 the fork is reported and left running undebugged, which is what \
-                 bpd does without it"
+                 `initialize`. a debugged child **stops** — a fork at the line \
+                 that forked, and one that was `exec`'d at its own startup — and \
+                 DAP's only way to hand a second program to a client is to ask \
+                 it to start a second session, so bpd would have a held process \
+                 nothing could reach. take `debugChildren` out and the child is \
+                 reported and left running undebugged, which is what bpd does \
+                 without it"
                     .to_string(),
             ));
         }

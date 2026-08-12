@@ -118,12 +118,22 @@ debuggee. an agent that connects to it and presents that debuggee's session
 token becomes a second session of the same `Debuggee`, with its own breakpoint
 set, its own stop numbering and its own held threads
 
-what produces one is a **debugged fork**: the child inherits the endpoint and
-the token in memory, gives the connection it inherited up, and opens one of its
-own. see [child processes](subprocesses.md). it arrives **held**, so a front end
-that never learned of it would have a stopped program it cannot reach — which is
-why the engine reports it as it happens, through `Reporting::attached`, rather
-than leaving it to be discovered
+what produces one is a **debugged child**, and there are two shapes of that. a
+**forked** child inherits the endpoint and the token in memory, gives the
+connection it inherited up, and opens one of its own. a child that was
+**`exec`'d** is a fresh interpreter, so it reads them out of the environment
+instead — the same listener, and a token of its own that is not the session's.
+see [child processes](subprocesses.md)
+
+either way it arrives **held**, so a front end that never learned of it would
+have a stopped program it cannot reach — which is why the engine reports it as it
+happens, through `Reporting::attached`, rather than leaving it to be discovered
+
+the listener therefore accepts **two** tokens: the session's, which only a fork
+can be holding because it never stays in the environment, and the child's, which
+is in the environment for as long as child debugging is on. what a connection
+becomes is the same either way, and neither is a way into a session that already
+exists
 
 what a connection arriving there is treated as is decided by the token and by
 nothing else. any local process can open a socket to a loopback port; one that
@@ -159,12 +169,6 @@ follow that a front end has to be told rather than left to assume:
 
 ## what is not built
 
-- **nothing produces a second session but a fork.** a child that was `exec`'d —
-    `subprocess`, `multiprocessing` with `spawn` — is a fresh interpreter with
-    none of this process's memory in it, so there is nothing for it to inherit an
-    endpoint through. it is reported and not debugged, and reaching one means
-    giving it something through its environment. see
-    [child processes](subprocesses.md)
 - **a session cannot be joined by hand.** there is no command that opens a
     connection to a debuggee's listener; what does it is the agent inside a
     forked child, and `crates/bpd_engine/tests/sessions.rs` does it directly

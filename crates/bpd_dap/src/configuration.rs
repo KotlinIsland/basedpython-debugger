@@ -74,9 +74,8 @@ pub struct Configuration {
     /// debug a child the program **forks**
     ///
     /// off by default, and deliberately not debugpy's default of on: a debugged
-    /// fork **stops**, at the line that forked, and a setting that produced
-    /// stopped processes without being asked for would be a debugger that
-    /// hangs programs by default
+    /// child **stops**, and a setting that produced stopped processes without
+    /// being asked for would be a debugger that hangs programs by default
     ///
     /// it needs two things of the client, and both are refused up front rather
     /// than discovered when a child is already held: the client has to support
@@ -84,8 +83,15 @@ pub struct Configuration {
     /// reachable by a second connection — `bpd dap --listen`. a fork on a
     /// platform that has none is refused by the agent
     ///
-    /// a child that was **exec'd** rather than forked is a fresh interpreter
-    /// with none of this process's memory in it, and this does not reach one
+    /// it covers both ways a child comes into being. a **forked** child is held
+    /// at the line that forked; a child that was **exec'd** — `subprocess`,
+    /// `multiprocessing` with `spawn`, django's `runserver` reloader — is a
+    /// fresh interpreter and is held at its own startup, before its program has
+    /// been compiled
+    ///
+    /// it is also the one setting a program can notice: reaching an `exec`'d
+    /// child means `PYTHONPATH`, appended. see
+    /// [child processes](../../../docs/development/subprocesses.md)
     #[serde(default)]
     pub debug_children: bool,
 

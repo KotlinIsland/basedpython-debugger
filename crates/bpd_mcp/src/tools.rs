@@ -465,34 +465,43 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "debug_children",
-            title: "debug the program's forked children",
-            description: "**off by default.** a program that forks makes a copy \
-                of itself, and with this on the copy opens a debug session of \
-                its own and is held at the line that forked — a second session, \
-                with its own stops and its own numbering, which `sessions` \
-                lists and the `session` argument reaches.\n\n\
-                with it off a forked child gives the whole session up before \
-                `os.fork()` returns and runs exactly as it would have without a \
-                debugger. that is reported and it is not debugged.\n\n\
-                it must be set **before** the program forks: the handler that \
-                acts on it runs inside `os.fork()`, in the child, with nothing \
-                left to ask. it reaches the child through inherited memory, so \
-                it changes nothing a program can see about its own environment \
-                or import path.\n\n\
-                a child that was **exec'd** — `subprocess`, `multiprocessing` \
-                with `spawn` — is a fresh interpreter with none of this memory \
-                in it, and this does not reach one. those are reported and not \
-                debugged. so is a fork on a platform that has none, where this \
-                is refused rather than accepted and never acted on.\n\n\
-                the answer is what the agent says is set, read back rather than \
-                echoed."
+            title: "debug the program's children",
+            description: "**off by default.** with this on, a child this \
+                program starts opens a debug session of its own and arrives \
+                **held** — a second session, with its own stops and its own \
+                numbering, which `sessions` lists and the `session` argument \
+                reaches. with it off a child runs exactly as it would have \
+                without a debugger, and is reported rather than debugged.\n\n\
+                it covers both ways a child comes into being, and they are held \
+                differently because they are different things. a **forked** \
+                child is a copy of this process and is held at the line that \
+                forked. a child that was **exec'd** — `subprocess`, \
+                `multiprocessing` with `spawn` or `forkserver`, django's \
+                `runserver` reloader — is a fresh interpreter, so it is held at \
+                its own startup, before its program has been compiled: there is \
+                no line on that stop and no stack under it, because nothing of \
+                the program has run. set breakpoints there and resume.\n\n\
+                it must be set **before** the child is made. a fork reads it \
+                inside `os.fork()` with nothing left to ask, and an exec reads \
+                the environment this writes, which `subprocess` copies before \
+                bpd is told anything.\n\n\
+                **this is the one setting a program can notice.** an exec'd \
+                child is reached through `PYTHONPATH`, appended — so with this \
+                on the program's environment gains `PYTHONPATH` and three \
+                `BPD_CHILD_*` names, and its `sys.path` gains one last entry. \
+                nothing else, and turning it off puts all of it back. a child \
+                that is not python inherits the variables and ignores them; a \
+                python **grandchild** inherits them and attaches.\n\n\
+                a fork on a platform that has none is refused rather than \
+                accepted and never acted on. the answer is what the agent says \
+                is set, read back rather than echoed."
                 .to_string(),
             schema: object(
                 serde_json::json!({
                     "session": integer(SESSION),
                     "on": { "type": "boolean", "description":
-                        "whether a forked child of this session's program opens \
-                         a session of its own" },
+                        "whether a child of this session's program opens a \
+                         session of its own" },
                 }),
                 &["on"],
             ),
@@ -501,12 +510,12 @@ pub fn tools() -> Vec<Tool> {
             name: "sessions",
             title: "every session this debuggee holds",
             description: "list the debugged processes. one is ordinary; a second \
-                appears when the program **forked** and `debug_children` was on \
-                — this server writes nothing that is not an answer, so this is \
-                how a session that arrived while the program was running is \
-                found.\n\n\
+                appears when the program made a **child** and `debug_children` \
+                was on — this server writes nothing that is not an answer, so \
+                this is how a session that arrived while the program was running \
+                is found.\n\n\
                 each says whether bpd started that process. one bpd did not \
-                start — a debugged fork — cannot be terminated and has no exit \
+                start — a debugged child — cannot be terminated and has no exit \
                 code to read: bpd is not its parent, so what it exited with is \
                 not bpd's to give, and both are refused by name rather than \
                 invented.\n\n\

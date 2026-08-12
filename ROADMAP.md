@@ -511,29 +511,36 @@ present the session token it printed when it bound. see
     over, with no exit status, because bpd is not its parent and never learns
     one — and `terminate` on it is refused by name. with two open, a request
     that names none is refused by `only_session`
-1. **the child reconnecting** — opt-in, decided at fork time from a flag the
-    engine set earlier, because the child forks before anyone could be asked
-1. **MCP's `sessions` tool and a session argument**
-1. **DAP's mediator and multi-connection listener.** this is the one that is a
-    transport rewrite rather than a feature: the run loop parks inside the engine
-    with no deadline, so two connections over one debuggee means one of them is
-    holding it while the other cannot ask anything — including the resume. and
-    the listener as built serves exactly one client by design, refusing the rest
-    with a message that says a second session is a second `bpd dap --listen`
+1. ~~**the child reconnecting**~~ done, opt-in, decided at fork time from a flag
+    the engine set earlier
+1. ~~**MCP's `sessions` tool and a session argument**~~ done
+1. ~~**DAP's mediator and multi-connection listener**~~ done
 
-it cannot ship in halves. MCP alone would be a capability DAP lacks, and the
-justification for that would have to claim DAP's protocol cannot carry it, which
-is false — `startDebugging` exists. **a child that can stop and cannot be
-resumed is a hung program**, which is why the front ends are not optional and why
-neither attempt shipped the engine half on its own
+**the last piece is built too**: a child that **`exec`s**. `subprocess`, and
+`multiprocessing` with the `spawn` and `forkserver` start methods, reach a fresh
+interpreter with none of this process's memory in it, so the agent has to be
+found — through `PYTHONPATH` ending in a directory of its own holding an
+eleven-line `sitecustomize`, appended so it cannot shadow anything, with a
+per-debuggee token that is **not** the session's. it is the same `debugChildren`
+switch: one question a user asks, two ways a child comes into being
 
-one decision is taken in advance so it is not re-argued: the second connection
-uses the **parent's listener and token**, and the busy refusal goes. one lifetime
-to get right, and a client that reached the port is already authenticated to this
-adapter
+that is the one thing in bpd a program can notice, and the rule is now written
+into `crates/bpd/tests/launch_parity.rs` in both directions. the **off** case is
+byte-identical to what it always was — neither assertion that compares the whole
+environment and the whole `sys.path` against a bare run moved. the **on** case is
+an enumerated list of four names with a reason each, and a fifth fails
 
-until this is built `--noreload` is the answer for django, and it is documented
-rather than implied
+so `runserver` works without `--noreload`, and
+[django templates](docs/development/django-templates.md) says so on the strength
+of `a_breakpoint_in_a_template_the_reloaders_child_renders_is_hit_in_the_child` —
+a fixture in `restart_with_reloader`'s own shape against a real django, with the
+breakpoint bound in the child's own template engine mid-render
+
+what is deliberately not in it: a token rotated per child, which
+`subprocess` fixing the environment block before the audit event is raised makes
+unreachable without the undocumented rewrite this design rules out; and windows,
+where `debugChildren` is refused because there is no `fork` for the other half of
+it
 
 ### M8 — attach
 
