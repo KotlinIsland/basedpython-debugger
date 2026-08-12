@@ -5,19 +5,25 @@ its work somewhere the debugger is not, and until something says so the only
 symptom is a breakpoint that never fires
 
 that is what this page is about. `bpd` **notices** a python child and reports
-it, and a child the program **forked** it can debug if it is asked to
+it, and with [`debugChildren`](#a-child-that-is-debugged) asked for it debugs
+one — however the child was made
 
-a child that was started — by `subprocess`, by `multiprocessing` with `spawn`,
-by `exec` — is not touched at all: it runs exactly as it would have. a child
-that was **forked** is the one case where something has to happen, because a
-fork copies the debugger into it. what happens is one of two things, and the
-default is the first:
+there are two ways a program makes one and they are not variants of each other,
+which is why they are two mechanisms rather than one:
 
-- it **stops being a debuggee**, which leaves it running exactly as it would
-    have too
-- with [`debugChildren`](#a-fork-that-is-debugged) asked for, it gives the
-    connection it inherited up and opens one of its own, and is **held** at the
-    line that forked
+- a **fork** copies this process, so the child is born holding the agent, the
+    breakpoint table and the control connection's descriptors. something has to
+    happen there whether child debugging was asked for or not, because doing
+    nothing leaves two processes writing into one socket
+- an **`exec`** replaces the program with a fresh interpreter that inherits
+    nothing but the environment and the file descriptors. nothing of bpd is in
+    it, so with child debugging off there is nothing to undo — and with it on
+    the agent has to be *found*
+
+with `debugChildren` **off**, which is the default, both run exactly as they
+would have without a debugger. with it on, both open a session of their own and
+arrive **held**: a fork at the line that forked, and an `exec`'d child at its
+own interpreter startup, before its program has been compiled
 
 ## the case this exists for
 
@@ -35,9 +41,14 @@ another process" — so what was missing was not correctness, it was the reason
 the same shape is `multiprocessing`, flask's reloader, gunicorn, and anything
 that forks a worker per core
 
-`--noreload` is still the answer for django today, and
-[django templates](django-templates.md) says so. what changed is that a session
-without it now says why nothing is binding
+**this is what `debugChildren` is for**, and with it on `runserver` works
+without `--noreload`: the reloader's child opens a session of its own and a
+breakpoint in a template is bound and hit *there*. see
+[django templates](django-templates.md), and
+[a child that is debugged](#a-child-that-is-debugged) below
+
+with it off — the default — the report is still what a session gets, and it is
+what turns "unbound" into a reason
 
 ## how a child is noticed
 
@@ -216,7 +227,7 @@ before it ran a line, and that `bpd` is not debugging it as a session of its own
 
 ### the child stops being a debuggee
 
-this is what a fork does **unless [`debugChildren`](#a-fork-that-is-debugged)
+this is what a fork does **unless [`debugChildren`](#a-child-that-is-debugged)
 was asked for**, and it is the default. that report is only true because of what
 the child then does, which is: give the whole session up, before `os.fork()` has
 returned to python, and run exactly as it would have if the program had never
@@ -536,8 +547,11 @@ the installed hooks**, so there is nothing to read `bpd`'s out of. the test
 asserts that too, so that a future release growing such a call fails here rather
 than quietly ending the guarantee
 
-the environment and `sys.path` are untouched by any of this. this feature adds
-no variable, no path entry and no module
+the environment and `sys.path` are untouched by any of this. **noticing** a child
+adds no variable, no path entry and no module, and neither does debugging a
+forked one. what does is debugging a child that was `exec`'d, which is the one
+feature in bpd a program can see and is enumerated in
+[what a program can tell](#what-a-program-can-tell-with-child-debugging-on)
 
 the fork handlers are the same shape: cpython exposes `os.register_at_fork` and
 **nothing that enumerates what has been registered**, so a program cannot read
@@ -551,7 +565,7 @@ through. a program that walks its own `/dev/fd` sees them. that is the session
 itself rather than anything on this page, and it is the one fingerprint that
 cannot go while the agent is talking to an engine at all
 
-## a fork that is debugged
+## a child that is debugged
 
 **off by default, and it stays off.** a debugged fork *stops*, and a setting
 that produced stopped processes without being asked for would be a debugger that
@@ -560,10 +574,17 @@ one thing in its design not to copy
 
 it is `bpd_core::Request::DebugChildren`, reached as the `debugChildren` field
 of a DAP launch configuration and as MCP's `debug_children` tool. what comes
-back is what the **agent** says is set, read off the process that will fork
-rather than echoed from the request
+back is what the **agent** says is set, read off the process that will make the
+child rather than echoed from the request
 
-### the child needs nothing it was not born with
+**one setting, two mechanisms.** there is one question a user asks and two ways a
+child comes into being, so they are set together and never apart — a debuggee
+where one was on and the other off would debug half the children a program makes,
+and which half would depend on a start method the user did not choose. what
+follows is the fork; [a child that is `exec`'d](#a-child-that-is-execd) is the
+other half
+
+### a fork needs nothing it was not born with
 
 a fork inherits memory, so the endpoint and the token the child presents are the
 ones its parent was given — held in a `OnceLock` since attach. **no environment
@@ -648,16 +669,157 @@ same exposure any program has when it forks from a multi-threaded process, which
 is why cpython reinitialises its own locks in `PyOS_AfterFork_Child`, and it is
 stated here rather than left to be discovered
 
+## a child that is `exec`'d
+
+`subprocess`, `multiprocessing` with the `spawn` or `forkserver` start method,
+`os.execv`, `os.posix_spawn` — all of them end in a **fresh interpreter** with
+none of this process's memory in it. there is nothing for it to inherit an
+endpoint through, so the agent has to be found through the only two things an
+`exec` does inherit: the environment, and the file descriptors
+
+### the mechanism, and why there is no second candidate
+
+| option                               | reaches the child | what it costs                                                                                                                                                          |
+| ------------------------------------ | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PYTHONPATH` + a `sitecustomize`     | yes               | inherited by **every** descendant, and visible                                                                                                                         |
+| `PYTHONSTARTUP`                      | no                | interactive sessions only — not `-c`, `-m` or a script                                                                                                                 |
+| `PYTHONPATH` + a `.pth` file         | yes               | the same inheritance, and it runs for every venv on the path                                                                                                           |
+| an audit hook that rewrites          | not soundly       | it *can* rewrite a child's arguments — measured — but only through where cpython raises the event relative to where it reads the list back, which no document promises |
+| monkeypatch `subprocess`             | yes               | what debugpy does, in `_pydev_bundle/pydev_monkey.py`, and ruled out by [python support](python-support.md)                                                            |
+| `PYTHONEXECUTABLE` / a launcher shim | yes               | replaces the interpreter the program named, which is a lie about what ran                                                                                              |
+
+so it is **`PYTHONPATH` plus a `sitecustomize`**. [launching](launching.md)
+rejected a `sitecustomize` for the *parent* precisely because it is inherited by
+every subprocess — and that inherited-ness is the property a child needs. the
+rejection stands for the parent and is reversed for children, which is a
+different decision about a different process rather than a change of mind
+
+### what the file is, and where it lives
+
+eleven lines, in a directory of its own holding nothing else, cached under
+`~/.cache/bpd/children/<sha-256 of its bytes>/`. it reads three variables,
+imports the agent, and calls one function. every decision it could contain
+belongs in the agent, where it is rust and is tested
+
+it is **not** basedpython under `python/`: the architecture invariant puts a
+python layer there when it is more than about a dozen lines, and this is under
+that. it is also the one file in the tree that has to be readable by an
+interpreter bpd was not built for, because a program can start any python — and
+what it prints when the agent will not import into one is the whole of what a
+user has to act on
+
+it is **appended** to `PYTHONPATH` and never prepended. the agent's own staged
+directory is prepended at launch, and
+`a_program_that_reads_its_own_import_path_finds_no_debugger_on_it` exists
+because a directory searched before everything else is the debugger deciding
+what the program imports. appended, it cannot shadow a module of the program's
+own — and the directory holds one file, so there is nothing in it to shadow with
+but `sitecustomize` itself
+
+it is idempotent. the same directory is on the **parent's** `sys.path` too, so a
+program that does `import sitecustomize` by hand reaches the child entry point in
+a process that already has a session — and it returns, because the first thing it
+asks is whether this process has one. a child of a child is a different
+interpreter, has no session, and attaches
+
+### the token is not the session's
+
+the session token is taken out of the environment before a line of the program
+runs, and it has to stay out: anything that can read a process's environment
+could otherwise write frames into the session bpd is already answering. so a
+child is given a **different** secret, `BPD_CHILD_TOKEN`, whose whole power is to
+*open* a session. the engine's listener accepts either, and what a connection
+becomes is the same
+
+it is **not rotated per child**, and that is a limit rather than an omission:
+`subprocess` builds the child's environment block before the audit event is
+raised, so the only way to give each child its own would be to rewrite that block
+from a hook — the undocumented path ruled out above. for as long as child
+debugging is on, any local process that can read this debuggee's environment can
+open a session on its listener. it cannot reach the session bpd is already
+holding
+
+### where the child is held
+
+at its own interpreter startup, from `site`, before `__main__` exists and before
+a line of its program has been compiled. that is `StopReason::Started`, carrying
+the pid of the process that started it, and it carries **no file and no line** —
+the only python running is bpd's own eleven, and reporting those as the program's
+location would be the debugger pointing at itself. the stack is **empty** for the
+same reason, and that is the truth about a process that has not begun its program
+
+so it is the child's entry stop. a breakpoint set there is bound when the child
+compiles the file, which the agent announces while the child runs, exactly as it
+does in a program that imports a module late
+
+### a child that is not python, and a grandchild that is
+
+a child that is **not** python — the `/bin/sh` behind `shell=True`, `git`, `ls` —
+inherits the variables and **ignores** them, because nothing but an interpreter
+reads `PYTHONPATH`. that is inert
+
+a **grandchild** that is python inherits them too and attaches. say plainly which
+that is: it is **the feature working through a shell**, not a surprise.
+`sh -c "python worker.py"` really is a python child of this program, and it is
+one the audit hook's report deliberately cannot see — [what rule three
+deliberately does not do](#what-rule-three-deliberately-does-not-do) says why.
+so a program whose children are debugged will find its python descendants
+debugged however deep the shell is, and a program that wanted only its immediate
+children debugged has no way to say so
+
+an interpreter started with `-E`, `-I` or `-S` reaches none of it: the first two
+ignore `PYTHONPATH`, and the third does not import `site`. a child of one runs
+exactly as it would have, and is reported and not debugged
+
+### what a debugged child gains
+
+`bpd_agent` and `sitecustomize`, and nothing else — compared against a child of
+the same program run with `debugChildren` off, in
+`a_debugged_child_gains_exactly_the_modules_that_are_written_down`. the
+**parent's** list did not move: the directory holding `sitecustomize` goes on the
+parent's path after `site` has already run, so the parent never imports it
+
+## what a program can tell, with child debugging on
+
+this is the one feature in bpd that a program can notice, and the rule is written
+into the tests in both directions rather than into a paragraph:
+
+> a program run under `bpd` cannot tell it is being debugged. a program run under
+> `bpd` **with child debugging asked for** can — it has `PYTHONPATH` ending in a
+> directory holding a `sitecustomize`, three `BPD_CHILD_*` names, and exactly one
+> extra `sys.path` entry, which is the last one. it can see nothing else, and off
+> is the default
+
+- the **off** case is `a_program_that_reads_its_own_environment_finds_no_debugger_in_it`
+    and `a_program_that_reads_its_own_import_path_finds_no_debugger_on_it` in
+    `crates/bpd/tests/launch_parity.rs`, which compare the whole environment and
+    the whole `sys.path` against a bare run. neither moved by a byte when this
+    landed
+- the **on** case is `a_program_whose_children_are_debugged_can_tell_and_only_that_much`
+    beside them, with an enumerated list of four names and a reason each. a fifth
+    name fails there
+
+`sys.path` gains the directory as well as `PYTHONPATH`, and it is appended so it
+is the **last** entry. the two have to agree: a `PYTHONPATH` naming a directory
+this interpreter's `sys.path` does not have is a lie about this process, and
+programs read it back — several rebuild the variable out of `sys.path`, which
+would drop the channel on the way to a child
+
+turning it **off** puts all of it back, exactly: `PYTHONPATH` as it was, absent
+if it was absent, which is not the same as set and empty
+
 ## what is not built
 
-**an `exec`'d child.** `subprocess`, and `multiprocessing` with the `spawn` or
-`forkserver` start method, reach a fresh interpreter with none of this process's
-memory in it. there is nothing for it to inherit an endpoint through, so telling
-one how to reach the session means giving it something through its environment —
-which is the one channel the parity guarantee keeps clean. django's reloader is
-here. what that would cost, and what the guarantee would become, is designed
-rather than guessed at
+**a token per child.** see above: the environment block is fixed before bpd is
+told a child is coming, and the only mechanism that could rewrite it is the one
+this design rules out
 
-so `--noreload` is still the answer for django, and the fork case is the one
-this feature covers: `multiprocessing` with the `fork` start method, and every
-program that forks a worker per core
+**windows.** the mechanism is portable — `PYTHONPATH` and `sitecustomize` are not
+posix — but `debugChildren` is refused where there is no `fork`, because half a
+feature reported as the whole of one is what this project does not ship
+
+**`multiprocessing` with `spawn` or `forkserver` on 3.13 is still not
+*reported*.** that blind spot is about the audit hook and is
+[stated above](#the-blind-spot-on-313-which-is-stated-rather-than-left-silent).
+such a child is *debugged* on 3.13 exactly as it is on 3.14 — the environment
+reaches it either way — it is only the notice that bpd cannot give

@@ -191,6 +191,25 @@ its own name in `sys.modules`
 so the entry point is the shortest thing that can work —
 `import bpd_agent; bpd_agent.main()` — and everything after it is rust
 
+### the child's side of the same choice
+
+bpd does use a `sitecustomize`, in exactly one place: to enter a child that was
+**`exec`'d**, when `debugChildren` was asked for. that is not a reversal of the
+paragraph above, because it is a decision about a different process
+
+what makes it wrong for the parent is what makes it the only thing that works for
+a child. an `exec`'d child is a fresh interpreter with none of this process's
+memory in it, so the only channels into a `python …` command line bpd did not
+write are the environment and the files the interpreter reads at startup — and
+"inherited by every subprocess" is the property that reaches one at all
+
+the parent is launched by bpd, so it needs no such channel and gets none: the
+directory holding that file goes on the parent's `PYTHONPATH` **after** `site`
+has already run, which is why the parent never imports it and why
+`the_only_modules_a_debuggee_gains_are_the_ones_written_down` did not change when
+this landed. what a debugged child gains is enumerated separately, in
+[child processes](subprocesses.md#what-a-debugged-child-gains)
+
 ## what `-c` breaks, and what puts it back
 
 entering through `-c` is only the launch form the user asked for one time in

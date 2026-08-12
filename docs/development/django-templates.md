@@ -320,38 +320,48 @@ with the exception — and specifically rather than with the engine's
 `string_if_invalid`, which is `''` by default and would be a debugger reporting
 an empty string for a variable that is not there
 
-## `runserver` reloads into a child, and the agent is not in it
-
-**this is the largest practical limitation of the feature**, and it is not about
-templates at all
+## `runserver` reloads into a child, and the child is debugged
 
 `django.utils.autoreload.restart_with_reloader` calls `subprocess.run(args)` and
-then does nothing but wait on the exit code. the process `bpd launch` attached to
-is the supervisor; the **child** it spawned serves every request and renders
-every template, and the agent is not in it. so under a plain
+then does nothing but wait on the exit code — read in django 6.1. the process
+`bpd launch` attached to is the supervisor; the **child** it spawned serves every
+request and renders every template
 
-```sh
-bpd launch manage.py runserver
-```
+this used to be the largest practical limitation of the feature, and it was not
+about templates at all: the supervisor never imports the template engine, so
+every template breakpoint was reported **unbound** — true, and useless
 
-no template breakpoint can fire, because the process holding them never renders
-anything. nothing is misreported — the supervisor never imports the template
-engine, so the hook never arms and the breakpoint is reported **unbound**, which
-is true — but the answer looks like a broken feature until you know why
+it is not a limitation any more. with
+[`debugChildren`](subprocesses.md#a-child-that-is-debugged) asked for, the
+reloader's child opens a debug session of its own, arrives held at its own
+startup, and a breakpoint in a template binds and fires **there**, in the process
+that actually renders it
 
-the "until you know why" part is smaller than it was: `bpd` now **says** when
-the program it is debugging has started a python child, so a `runserver` session
+- **DAP** — `"debugChildren": true` in the launch configuration. the client has
+    to support the `startDebugging` reverse request and the adapter has to be
+    reachable by a second connection (`bpd dap --listen`), and both are refused
+    at `launch` rather than discovered when the child is already held
+- **MCP** — the `debug_children` tool, then `sessions` to find the child
+
+`a_breakpoint_in_a_template_the_reloaders_child_renders_is_hit_in_the_child` in
+`crates/bpd_engine/tests/django.rs` is that, against a real django: a fixture in
+`restart_with_reloader`'s own shape, down to `env={**os.environ, ...}` and
+`close_fds=False`, with the breakpoint in `index.html` bound in the child's own
+django while the render is under way
+
+### it is off by default, and `--noreload` still works
+
+a debugged child *stops*, so nothing turns it on for you. without it, `bpd`
+still **says** that the program started a python child, so a `runserver` session
 reports the reloader's child rather than leaving an unbound breakpoint to be
-interpreted. see [child processes](subprocesses.md)
+interpreted — see [child processes](subprocesses.md)
 
-it still does not follow the child, so the way to use this is to take the
-reloader out:
+and taking the reloader out is still a perfectly good answer, and the simplest
+one for a single-process session:
 
 ```sh
 bpd launch manage.py runserver --noreload
 ```
-
-subprocess debugging is `M7a` in [the roadmap](../../ROADMAP.md)
 
 ## what is not covered
 
