@@ -420,7 +420,10 @@ pub struct Place {
 /// the line a stop reason names, when it names one
 fn place_of(reason: &StopReason) -> Option<Place> {
     let (file, line) = match reason {
-        StopReason::Entry => return None,
+        // neither names a line, and for the same reason: nothing of the program
+        // has run. an `exec`'d child is held before its `__main__` exists, so
+        // there is no code object to have a line of
+        StopReason::Entry | StopReason::Started { .. } => return None,
         StopReason::Breakpoint { file, line, .. }
         | StopReason::Stepped { file, line, .. }
         | StopReason::Paused { file, line }

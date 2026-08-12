@@ -1493,6 +1493,11 @@ fn start(
         })?;
 
     let staged = agent::stage()?;
+    // staged at launch and not when child debugging is asked for, because the
+    // ask arrives while the debuggee is held at entry and a staging failure
+    // there would be a refusal in the middle of a session rather than at the
+    // one moment nothing has happened yet
+    let child_hook = agent::stage_child_hook()?;
     let listener = Listener::bind()?;
     let endpoint = listener.endpoint()?;
 
@@ -1504,7 +1509,12 @@ fn start(
         .env(env::ENDPOINT, endpoint.to_string())
         .env(env::TOKEN, listener.token_hex())
         .env(env::TARGET, program.target())
-        .env(env::FORM, program.form().as_str());
+        .env(env::FORM, program.form().as_str())
+        // both are taken back out of the environment before any user code runs,
+        // exactly like the four above. what puts the child's pair back — under
+        // the names a child reads — is `debugChildren`, and nothing else
+        .env(env::CHILD_TOKEN, listener.child_token_hex())
+        .env(env::SITECUSTOMIZE, child_hook.python_path());
 
     // the agent is imported by putting its staged directory in front of
     // whatever `PYTHONPATH` this process inherited. **in front of** and not

@@ -107,6 +107,31 @@ pub fn write_handshake<W: Write>(writer: &mut W, token: &[u8; TOKEN_LEN]) -> Res
 /// the token comparison is constant time in the length of the token, so a peer
 /// on loopback cannot learn a prefix by timing the refusal
 pub fn read_handshake<R: Read>(reader: &mut R, expected: &[u8; TOKEN_LEN]) -> Result<()> {
+    read_handshake_among(reader, std::slice::from_ref(expected)).map(|_| ())
+}
+
+/// the same, where more than one token is a legitimate answer
+///
+/// returns **which** of them the peer presented, so the reply is written with
+/// the token that was accepted rather than with whichever came first. a
+/// debuggee holds two: the session token, which its own agent was given and
+/// which never stays in the environment, and the child token, which an
+/// `exec`'d child reads out of the environment it inherited. the two are
+/// different secrets on purpose — see [`crate::env::CHILD_TOKEN`]
+///
+/// every candidate is compared, and each comparison is constant time in the
+/// length of the token. the loop is not short-circuited for the same reason one
+/// comparison is not: a peer that could tell *which* token it got wrong has
+/// learnt something about the one it did not present
+///
+/// # errors
+///
+/// [`Error::WrongToken`] when the peer presented none of them, which is a local
+/// process that reached the port and cannot join
+pub fn read_handshake_among<R: Read>(
+    reader: &mut R,
+    expected: &[[u8; TOKEN_LEN]],
+) -> Result<usize> {
     let mut header = [0u8; HANDSHAKE_LEN];
     if !read_exact_or_eof(reader, &mut header)? {
         return Err(Error::Truncated {
@@ -130,15 +155,17 @@ pub fn read_handshake<R: Read>(reader: &mut R, expected: &[u8; TOKEN_LEN]) -> Re
         return Err(Error::VersionMismatch { found });
     }
 
-    let mut difference = 0u8;
-    for (presented, expected) in token.iter().zip(expected) {
-        difference |= presented ^ expected;
+    let mut accepted = None;
+    for (which, candidate) in expected.iter().enumerate() {
+        let mut difference = 0u8;
+        for (presented, wanted) in token.iter().zip(candidate) {
+            difference |= presented ^ wanted;
+        }
+        if difference == 0 && accepted.is_none() {
+            accepted = Some(which);
+        }
     }
-    if difference != 0 {
-        return Err(Error::WrongToken);
-    }
-
-    Ok(())
+    accepted.ok_or(Error::WrongToken)
 }
 
 /// write one frame, prefixed with its length

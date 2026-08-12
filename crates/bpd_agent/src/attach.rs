@@ -388,6 +388,21 @@ pub(crate) fn resume_reading() {
     }
 }
 
+/// whether this process has ever opened a session of its own
+///
+/// what makes the `sitecustomize` an `exec`'d child is entered through
+/// **idempotent**, which the design requires of it: the directory holding that
+/// file is on the debuggee's own `sys.path` as well, so a program that imports
+/// `sitecustomize` by hand reaches the child entry point in a process that
+/// already has a session. it answers `true` there and the entry point returns
+///
+/// it is [`ENGINE`] rather than a flag of its own because that cell is set by
+/// the one call that opens a session, so there is nothing to keep in step
+#[cfg(unix)]
+pub(crate) fn attached() -> bool {
+    ENGINE.get().is_some()
+}
+
 /// the program has ended, so a connection that closes now is not a loss
 pub(crate) fn mark_finished() {
     FINISHED.store(true, Ordering::Relaxed);

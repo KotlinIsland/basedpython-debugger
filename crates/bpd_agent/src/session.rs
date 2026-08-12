@@ -132,7 +132,7 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
                 refresh_events(python)?;
                 attach::send(&FromAgent::ExceptionBreakpointsSet { raised, uncaught });
             }
-            FromEngine::DebugChildren { on } => debug_children(on),
+            FromEngine::DebugChildren { on } => debug_children(python, on)?,
             FromEngine::Stack { top, .. } => {
                 let answer = stopped.stack(top)?;
                 attach::send(&answer);
@@ -218,17 +218,30 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
     refresh_events(python)
 }
 
-/// decide what a forked child of this process does, and say what is set now
+/// decide what a child of this process does, and say what is set now
 ///
-/// answered on a held thread like everything else, and it needs nothing of the
-/// interpreter: it is one atomic store, and the process that will fork is the
-/// one that has to be holding the answer in its own memory when it does. that
-/// is the whole mechanism — a fork handler runs inside `os.fork()` and has
-/// nobody left to ask
+/// **one setting reaching two mechanisms**, because there is one question a
+/// user asks and two ways a child comes into being:
+///
+/// - a **fork** inherits memory, so it needs an atomic and nothing else. the
+///   process that will fork is the one that has to hold the answer when it does
+///   — a fork handler runs inside `os.fork()` and has nobody left to ask
+/// - an **`exec`** is a fresh interpreter that inherits only the environment, so
+///   it needs the environment written. see [`crate::children`]
+///
+/// they are set together and never apart. a debuggee where one was on and the
+/// other off would debug half the children a program makes, and which half
+/// would depend on a start method the user did not choose
+///
+/// answered on a held thread like everything else. the fork half is one atomic
+/// store; the exec half writes `os.environ` and `sys.path`, which needs the
+/// interpreter and is why this takes it
 #[cfg(unix)]
-fn debug_children(on: bool) {
+fn debug_children(python: Python<'_>, on: bool) -> PyResult<()> {
+    crate::children::announce(python, on)?;
     crate::forks::debug_children(on);
     attach::send(&FromAgent::DebuggingChildren { on });
+    Ok(())
 }
 
 /// the same, where there is no `fork`
@@ -239,7 +252,7 @@ fn debug_children(on: bool) {
 /// that could make it true and a client told it took would wait for child
 /// sessions that cannot arrive
 #[cfg(not(unix))]
-fn debug_children(on: bool) {
+fn debug_children(_python: Python<'_>, on: bool) -> PyResult<()> {
     if on {
         attach::send(&FromAgent::Refused {
             reason: bpd_core::Refusal::NoFork {
@@ -249,6 +262,7 @@ fn debug_children(on: bool) {
     } else {
         attach::send(&FromAgent::DebuggingChildren { on });
     }
+    Ok(())
 }
 
 /// hold every thread that can be held, and name the ones that cannot be

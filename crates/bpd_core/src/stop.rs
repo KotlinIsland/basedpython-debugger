@@ -298,6 +298,29 @@ pub enum StopReason {
         line: u32,
     },
 
+    /// this process is a child that was **`exec`'d**, and it has just become a
+    /// session of its own
+    ///
+    /// where [`StopReason::Forked`] is a copy of a running process, this is a
+    /// fresh interpreter that inherited nothing but the environment — which is
+    /// where it found the endpoint and the token. it is held at interpreter
+    /// startup, from `site`, before `__main__` exists and before a line of the
+    /// program has been compiled
+    ///
+    /// so there is **no file and no line**, and that is the honest shape rather
+    /// than a missing field: the only code running is the four lines of bpd's
+    /// own that found the agent, and reporting those as the program's location
+    /// would be the debugger pointing at itself. nothing of the program has run,
+    /// which makes this the child's [`StopReason::Entry`]
+    ///
+    /// it carries the parent's pid for the reason [`StopReason::Forked`] does:
+    /// the ids the engine mints are its own, and a client shown two sessions
+    /// with nothing between them cannot tell which program made which
+    Started {
+        /// the process that started this one
+        parent: u32,
+    },
+
     /// a breakpoint's condition or log message raised
     ///
     /// the program is held rather than resumed. an expression that raises has

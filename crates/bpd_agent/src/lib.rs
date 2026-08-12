@@ -12,6 +12,12 @@
 mod attach;
 mod breakpoints;
 mod cells;
+// the `sitecustomize` a child is entered through is portable, but what decides
+// whether children are debugged at all is `debugChildren` — and that is refused
+// where there is no `fork`, because half a feature reported as the whole of one
+// is the thing this project does not ship
+#[cfg(unix)]
+mod children;
 mod code;
 mod conditions;
 mod events;
@@ -58,14 +64,14 @@ const TOOL_NAME: &str = "bpd";
 
 #[pymodule]
 mod bpd_agent {
-    #[cfg(unix)]
-    use super::forks;
     use super::{
-        BUILT_FOR, DEBUGGER_TOOL_ID, TOOL_NAME, arm, attach, frames, monitoring, run,
-        running_version, session, spawns,
+        BUILT_FOR, DEBUGGER_TOOL_ID, arm, attach, frames, monitoring, run, running_version,
+        session, spawns,
     };
+    #[cfg(unix)]
+    use super::{children, forks};
     use bpd_protocol::env::Form;
-    use pyo3::exceptions::{PyImportError, PyRuntimeError, PySystemExit};
+    use pyo3::exceptions::PySystemExit;
     use pyo3::prelude::*;
 
     /// the whole of the debuggee's entry point
@@ -83,6 +89,18 @@ mod bpd_agent {
         let target = required_env(bpd_protocol::env::TARGET)?;
         let spelled = required_env(bpd_protocol::env::FORM)?;
         let inherited_path = std::env::var(bpd_protocol::env::PYTHON_PATH).ok();
+
+        // what an `exec`'d child would have to be told, kept now because the
+        // loop below is the last moment the launcher's variables are readable.
+        // nothing is put back into the environment unless `debugChildren` asks
+        // for it
+        #[cfg(unix)]
+        children::remember(
+            python,
+            &endpoint,
+            &required_env(bpd_protocol::env::CHILD_TOKEN)?,
+            &required_env(bpd_protocol::env::SITECUSTOMIZE)?,
+        )?;
 
         // taken out of the environment before any user code can see them. a
         // program that behaves differently because it noticed the debugger is a
@@ -135,6 +153,23 @@ mod bpd_agent {
         // process would stop there with nothing having said why
         session::finishing();
         outcome
+    }
+
+    /// the whole of an `exec`'d child's entry point
+    ///
+    /// called from the staged `sitecustomize`, at interpreter startup, before
+    /// `__main__` exists. everything it does is in [`children`]; what is here
+    /// is the name the four lines of python reach it by
+    ///
+    /// it is **not** [`main`], and the two are not variants of one another: a
+    /// launched program is entered through `-c` with a target to run, and a
+    /// child is a program the interpreter is already about to run on its own.
+    /// the one thing they share is what a debuggee is, and that is
+    /// [`children::entered`]'s to call rather than to repeat
+    #[cfg(unix)]
+    #[pyfunction]
+    fn child_main(python: Python<'_>) -> PyResult<()> {
+        children::entered(python)
     }
 
     /// read a variable the launcher is contracted to have set
@@ -230,33 +265,13 @@ mod bpd_agent {
     /// check is cheap and it happens before anything is instrumented
     #[pyfunction]
     fn verify_interpreter(python: Python<'_>) -> PyResult<()> {
-        let running = running_version(python)?;
-        if running == BUILT_FOR {
-            return Ok(());
-        }
-        Err(PyImportError::new_err(format!(
-            "this bpd agent was built for python {BUILT_FOR} and is being \
-             imported by python {running}. the agent is not abi3 — it reads \
-             interpreter state whose layout changes between releases — so the \
-             build has to match the interpreter exactly"
-        )))
+        super::verify(python)
     }
 
     /// claim the debugger tool id, or report who already holds it
     #[pyfunction]
     fn claim(python: Python<'_>) -> PyResult<()> {
-        if let Some(holder) = holder(python)? {
-            return Err(PyRuntimeError::new_err(format!(
-                "`sys.monitoring` tool id {DEBUGGER_TOOL_ID} is already held by \
-                 `{holder}`. bpd claims that id or none: tools are not \
-                 interchangeable, and taking a different one would mean \
-                 debugging with another tool's event semantics. stop `{holder}` \
-                 and try again"
-            )));
-        }
-
-        monitoring(python)?.call_method1("use_tool_id", (DEBUGGER_TOOL_ID, TOOL_NAME))?;
-        Ok(())
+        super::claim(python)
     }
 
     /// give the tool id back
@@ -273,6 +288,47 @@ mod bpd_agent {
             .call_method1("get_tool", (DEBUGGER_TOOL_ID,))?
             .extract()
     }
+}
+
+/// fail unless this interpreter is the one the agent was compiled against
+///
+/// a mismatched minor version sometimes fails to import outright and sometimes
+/// loads and then reads the wrong offsets, which is far worse. the check is
+/// cheap and it happens before anything is instrumented
+///
+/// it is at the crate root rather than in the module because **two** entry
+/// points need it and there is one interpreter to be right about: a launched
+/// program, whose interpreter bpd chose, and an `exec`'d child, whose
+/// interpreter the *program* chose and which is the one this is really for
+fn verify(python: Python<'_>) -> PyResult<()> {
+    let running = running_version(python)?;
+    if running == BUILT_FOR {
+        return Ok(());
+    }
+    Err(PyImportError::new_err(format!(
+        "this bpd agent was built for python {BUILT_FOR} and is being imported \
+         by python {running}. the agent is not abi3 — it reads interpreter \
+         state whose layout changes between releases — so the build has to \
+         match the interpreter exactly"
+    )))
+}
+
+/// claim the debugger tool id, or report who already holds it
+fn claim(python: Python<'_>) -> PyResult<()> {
+    let holder: Option<String> = monitoring(python)?
+        .call_method1("get_tool", (DEBUGGER_TOOL_ID,))?
+        .extract()?;
+    if let Some(holder) = holder {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "`sys.monitoring` tool id {DEBUGGER_TOOL_ID} is already held by \
+             `{holder}`. bpd claims that id or none: tools are not \
+             interchangeable, and taking a different one would mean debugging \
+             with another tool's event semantics. stop `{holder}` and try again"
+        )));
+    }
+
+    monitoring(python)?.call_method1("use_tool_id", (DEBUGGER_TOOL_ID, TOOL_NAME))?;
+    Ok(())
 }
 
 /// turn on code object discovery, and with it the entry stop

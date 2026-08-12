@@ -2180,6 +2180,18 @@ fn stopped_for(reason: &StopReason) -> (&'static str, String, Vec<u32>) {
             ),
             Vec::new(),
         ),
+        // `entry` for the reason a fork is: nothing of this process has run.
+        // there is no location on it at all, and inventing one out of the
+        // startup machinery it is held in would be a line nobody can act on
+        StopReason::Started { parent } => (
+            "entry",
+            format!(
+                "this process was started by {parent} and is held at \
+                 interpreter startup, before its program has been compiled. it \
+                 has run nothing of its own"
+            ),
+            Vec::new(),
+        ),
         StopReason::EvaluationFailed {
             breakpoint,
             part,
