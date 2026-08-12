@@ -103,6 +103,21 @@ against a specific interpreter:
 BPD_TEST_PYTHONS=/path/to/python3.14 cargo test --workspace
 ```
 
+### the one suite `cargo test` does not run
+
+the vs code extension is javascript, and whether vs code loads it is not a
+question a rust test runner can ask. `editors/vscode/test/` downloads a real vs
+code and starts a real session through the extension, and it is run on its own:
+
+```sh
+cargo build -p bpd_agent && cargo build --bin bpd
+cd editors/vscode && npm ci && BPD_PYTHON=python3.14 npm test
+```
+
+`BPD_PYTHON` has to be the interpreter the agent was built against, for the same
+reason the build step above is not optional. it is a separate `vscode` job in
+CI, headless under `xvfb`. [the vs code extension](vscode.md) is the whole of it
+
 ## the platforms you are not on
 
 the tree carries over a hundred `cfg` sites. the fork handlers, the audit event
