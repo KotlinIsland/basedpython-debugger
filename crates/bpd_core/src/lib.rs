@@ -29,6 +29,7 @@ pub mod parity;
 pub mod python;
 pub mod query;
 pub mod refusal;
+pub mod replace;
 pub mod script;
 pub mod session;
 pub mod spawn;
@@ -50,6 +51,7 @@ pub use query::{
     Taken, Unverified, Wanted, WhyNot, difference,
 };
 pub use refusal::Refusal;
+pub use replace::{Divergence, LiveFrame, Rebound, Replaced, Replacement, Unreplaceable};
 pub use script::{
     Answered, At, Bound, Budget, Did, Disarmed, Halted, Landed, Outcome, Place, Predicate, Record,
     Script, Step, Transcript,

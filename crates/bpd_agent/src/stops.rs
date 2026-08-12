@@ -201,6 +201,10 @@ pub(crate) fn route(request: FromEngine) {
             Address::Any("the exception breakpoints to set")
         }
         FromEngine::Threads { .. } => Address::Any("what the threads are doing"),
+        // about the process rather than about one held thread: it replaces the
+        // code of a file, and which held thread answers makes no difference to
+        // what it finds or what it writes
+        FromEngine::ReplaceCode { .. } => Address::Any("the code to replace"),
         FromEngine::Stack { stop, .. } | FromEngine::StopTheWorld { stop, .. } => {
             Address::Stop(*stop)
         }

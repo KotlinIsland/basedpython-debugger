@@ -29,9 +29,9 @@ use std::time::{Duration, Instant};
 use bpd_core::python::Capabilities;
 use bpd_core::{
     Addressed, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, FrameId, Jumped,
-    LogRecord, Reporting, Request, Resolved, Response, Running, Scope, Script, SessionId, Snapshot,
-    SnapshotId, SourceBreakpoint, Spawn, Stack, StateQuery, StepKind, Stop, TemplateContext,
-    Threads, Transcript, Variables, Which, WorldStopped,
+    LogRecord, Replaced, Reporting, Request, Resolved, Response, Running, Scope, Script, SessionId,
+    Snapshot, SnapshotId, SourceBreakpoint, Spawn, Stack, StateQuery, StepKind, Stop,
+    TemplateContext, Threads, Transcript, Variables, Which, WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine};
@@ -286,6 +286,9 @@ impl Debuggee {
             Request::RestartFrame { frame } => Ok(Response::Jumped(
                 self.move_frame(&FromEngine::RestartFrame { frame }, reporting)?,
             )),
+            Request::ReplaceCode { file } => {
+                Ok(Response::Replaced(self.replace_the_code(file, reporting)?))
+            }
             Request::RunScript { stop, script } => Ok(Response::Transcript(
                 self.execute(stop, &script, reporting)?,
             )),
@@ -711,6 +714,31 @@ impl Debuggee {
         match self.ask_for(Request::RestartFrame { frame })? {
             Response::Jumped(jumped) => Ok(jumped),
             other => unreachable!("a restart was answered with {other:?}"),
+        }
+    }
+
+    /// replace the code the process is running for one file with what is on disk
+    ///
+    /// nothing is applied unless all of it can be. what came back says which
+    /// functions now run different code and which breakpoints moved with them,
+    /// or every reason it was refused — see [`bpd_core::Replaced`]
+    pub fn replace_code(&mut self, file: impl Into<PathBuf>) -> Result<Replaced> {
+        match self.ask_for(Request::ReplaceCode { file: file.into() })? {
+            Response::Replaced(replaced) => Ok(replaced),
+            other => unreachable!("a code replacement was answered with {other:?}"),
+        }
+    }
+
+    fn replace_the_code(
+        &mut self,
+        file: PathBuf,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Replaced> {
+        const EXPECTED: &str = "what replacing a file's code did";
+
+        match self.ask(&FromEngine::ReplaceCode { file }, EXPECTED, reporting)? {
+            FromAgent::Replaced { replaced } => Ok(replaced),
+            other => Err(unexpected(&other, EXPECTED)),
         }
     }
 

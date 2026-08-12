@@ -223,6 +223,80 @@ pub(crate) fn units_for(python: Python<'_>, wanted: &FileId) -> PyResult<Vec<Uni
     Ok(units)
 }
 
+/// forget everything registered for a file and register this tree instead
+///
+/// what a code replacement leaves behind. the roots for a file are the code
+/// objects the interpreter has run from it, and after a replacement every live
+/// function of that file runs the **new** tree — so the old roots describe code
+/// nothing will execute, and a breakpoint bound through them would be armed on a
+/// code object no thread will ever reach. binding walks down from the roots, so
+/// swapping the root is the whole of it
+///
+/// the addresses go with the objects. `retained` is what stops the allocator
+/// handing one code object's address to another, and it is only sound while
+/// `roots` holds the reference — so an address whose object is being dropped
+/// here has to be forgotten in the same breath, or a code object that later
+/// lands on it would be taken for one that is already registered
+///
+/// `whole` is left alone: the module-level code object of that file is exactly
+/// what is being put in
+pub(crate) fn adopt(
+    python: Python<'_>,
+    wanted: &FileId,
+    module: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let filename: String = module.getattr("co_filename")?.extract()?;
+    debug_assert_eq!(
+        module.getattr("co_qualname")?.extract::<String>()?,
+        "<module>",
+        "a file's root is its module-level code object, and binding walks down \
+         from it"
+    );
+
+    let mut registry = write();
+    let filenames: Vec<String> = registry
+        .by_id
+        .get(wanted)
+        .map(|filenames| filenames.iter().cloned().collect())
+        .unwrap_or_default();
+
+    let mut dropped = Vec::new();
+    for name in filenames {
+        if let Some(roots) = registry.roots.remove(&name) {
+            for root in &roots {
+                registry.retained.remove(&(root.as_ptr() as usize));
+            }
+            dropped.push(roots);
+        }
+    }
+
+    registry.retained.insert(module.as_ptr() as usize);
+    registry
+        .roots
+        .insert(filename.clone(), vec![module.clone().unbind()]);
+    registry
+        .by_id
+        .entry(wanted.clone())
+        .or_default()
+        .insert(filename.clone());
+    registry.resolved.insert(filename, Ok(wanted.clone()));
+    registry.whole.insert(wanted.clone());
+    drop(registry);
+
+    // outside the lock, because dropping the last reference to a code object
+    // runs the deallocator, and the registry must never be held over the
+    // interpreter. bound rather than dropped as a `Py`, so the decref happens
+    // here rather than being queued for whenever the GIL is next taken — the
+    // address has already been forgotten, and an object still alive after that
+    // is one the registry could see twice
+    for roots in dropped {
+        for root in roots {
+            drop(root.into_bound(python));
+        }
+    }
+    Ok(())
+}
+
 /// the identity of a `co_filename`, from the cache when it is already known
 fn identity_of(filename: &str) -> Result<FileId, String> {
     if let Some(known) = read().resolved.get(filename) {

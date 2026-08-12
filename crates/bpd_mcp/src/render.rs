@@ -12,8 +12,8 @@
 //!   than one per front end
 
 use bpd_core::{
-    Binding, Difference, Evaluated, Jump, Jumped, LogRecord, Resolved, Snapshot, Source,
-    SourceBreakpoint, Stack, Stop, Threads, Transcript, Variables, WorldStopped,
+    Binding, Difference, Evaluated, Jump, Jumped, LogRecord, Replaced, Replacement, Resolved,
+    Snapshot, Source, SourceBreakpoint, Stack, Stop, Threads, Transcript, Variables, WorldStopped,
 };
 
 /// one held thread, as the answer to a control tool
@@ -212,6 +212,86 @@ pub fn jumped(jump: &Jumped) -> serde_json::Value {
              frame did not move. it is still at {}",
             jump.at
         )),
+    }
+    rendered["notes"] = notes.into();
+    rendered
+}
+
+/// what replacing a file's code did to the process, or what stopped it
+///
+/// the refusals are rendered as their own sentences rather than summarised.
+/// every one of them names the thing that blocked it, and an agent handed
+/// "cannot" would be left guessing which of its edits to undo
+pub fn replaced(replacement: &Replaced) -> serde_json::Value {
+    let mut rendered = serde_json::json!({
+        "file": replacement.file,
+        "outcome": replacement.outcome,
+        "mode": replacement.mode.to_string(),
+    });
+
+    let mut notes: Vec<String> = Vec::new();
+    match &replacement.outcome {
+        Replacement::Applied {
+            changed,
+            rebound,
+            unchanged,
+        } => {
+            if changed.is_empty() {
+                notes.push(format!(
+                    "nothing needed replacing: the {} code objects of that file \
+                     on disk are exactly what the process is running",
+                    unchanged.len()
+                ));
+            } else {
+                for one in changed {
+                    let moved = if one.was_at == one.now_at {
+                        String::new()
+                    } else {
+                        format!(
+                            ", which has moved from line {} to {}",
+                            one.was_at, one.now_at
+                        )
+                    };
+                    notes.push(format!(
+                        "`{}` now runs the code on disk{moved}. {} function \
+                         object(s) in the process held it — every one of them was \
+                         rebound, including any a decorator kept",
+                        one.function, one.objects
+                    ));
+                }
+            }
+            for one in rebound {
+                notes.push(match &one.binding {
+                    Binding::Bound { line, .. } | Binding::BoundInTemplate { line, .. } => {
+                        format!(
+                            "breakpoint {} is bound to line {line} now — it was \
+                             armed on a code object nothing will execute any \
+                             more, and was resolved again against the code that \
+                             is running",
+                            one.id
+                        )
+                    }
+                    Binding::Unbound { reason } => {
+                        format!("breakpoint {} is **unbound** now: {reason}", one.id)
+                    }
+                });
+            }
+            notes.push(
+                "the top level was **not** re-run: no name was bound or unbound \
+                 and no object was created, so every instance and every \
+                 reference the program already had is the one it had before"
+                    .to_string(),
+            );
+        }
+        Replacement::Refused { because } => {
+            notes.push(format!(
+                "nothing was changed. a replacement is never applied partially, \
+                 because a process half way between two versions of a file \
+                 produces evidence about neither — all {} reasons follow",
+                because.len()
+            ));
+            notes.extend(because.iter().map(ToString::to_string));
+        }
     }
     rendered["notes"] = notes.into();
     rendered

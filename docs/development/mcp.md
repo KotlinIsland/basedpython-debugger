@@ -109,6 +109,7 @@ shape of what bpd can see from here
 | `set_variable`                     | write a name of a frame's scope                                   |
 | `set_next_statement`               | move the held frame to another line of the code it is running     |
 | `restart_frame`                    | re-enter the held frame from the top                              |
+| `replace_code`                     | make the running process run the code a file holds on disk        |
 | `threads`                          | what every thread is doing, as a sample                           |
 | `stop_the_world`                   | hold every thread that can be held                                |
 | `state`                            | describe a whole stop in one call, and keep the answer            |

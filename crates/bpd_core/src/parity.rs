@@ -165,6 +165,9 @@ pub fn surface() -> Vec<Request> {
         },
         Request::SetNextStatement { frame, line: 2 },
         Request::RestartFrame { frame },
+        Request::ReplaceCode {
+            file: std::path::PathBuf::from("a.py"),
+        },
         Request::Query {
             stop: 1,
             query: StateQuery {

@@ -86,6 +86,13 @@ pub const fn reach_of(request: &Request) -> Reach {
         // is in, and cpython would accept the same number in another file
         Request::SetNextStatement { .. } => Reach::Direct("goto, after gotoTargets"),
         Request::RestartFrame { .. } => Reach::Direct("restartFrame"),
+
+        // DAP has no request for replacing a running process's code, and its
+        // `restart` is the opposite thing — it throws the process away. so this
+        // is an extension, for the reason a script is: the capability is the
+        // core's, and an editor is where somebody edits the file that makes it
+        // worth having
+        Request::ReplaceCode { .. } => Reach::Direct("bpd/replaceCode, a custom request"),
     }
 }
 
