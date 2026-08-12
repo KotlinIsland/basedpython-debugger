@@ -95,25 +95,39 @@ breakpoint is not already solid
         code and started a session, and this project does not tick a box on a
         thing it has not seen work. see
         [the vs code extension](docs/development/vscode.md)
-- [ ] **intellij drives it.** a hard requirement, not a nice-to-have, and it is
-        a different problem from vs code rather than the same one twice. what
-        was established before it was written down here:
-        - the intellij platform has **no general DAP client**. CLion 2025.3
-        added one for C and C++ debuggers, which is a different surface
-        from a python debug session; platform-wide support is
-        [IJPL-83441](https://youtrack.jetbrains.com/issue/IJPL-83441)
-        - what exists today is
-        [LSP4IJ](https://github.com/redhat-developer/lsp4ij), Red Hat's
-        free LSP and DAP client, EPL 2.0, on the marketplace, for **all**
-        intellij flavours from IDEA 2024.2. its DAP client covers
-        breakpoints and conditional breakpoints, exception breakpoints,
-        variables and set-value, evaluate, stepping and step-in targets —
-        which is most of what `bpd` answers
-        - **what its documentation does not cover is `startDebugging` or more
-        than one concurrent session**, which is exactly what child
-        debugging needs. so the shape of this is unknown until somebody
-        drives it, and the answer decides whether this is a launch
-        configuration or a plugin of our own
+- [ ] **intellij drives it.** a hard requirement, not a nice-to-have, and a
+        different problem from vs code rather than the same one twice
+        - **jetbrains ships an official DAP path for python already**:
+        [Python DAP Debugger](https://plugins.jetbrains.com/plugin/28460-python-dap-debugger),
+        vendor `JetBrains` and verified on the marketplace, ~650k downloads.
+        it "adds a python debugger backend powered by **debugpy** and the
+        Debug Adapter Protocol to all JetBrains IDEs that support python",
+        across every standard run configuration — scripts, pytest, unittest,
+        doctest, tox, Trial, uv — selected by a **Mode** switch in the debug
+        tool window. python 3.9+, local interpreters only
+        - so the plumbing exists and is theirs: a python debug session in a
+        jetbrains IDE **can** be driven over DAP today. that is a much
+        better starting point than a platform with no DAP at all
+        - **the question this turns on is whether that path can be pointed at
+        an adapter that is not debugpy.** the plugin is closed — the
+        marketplace API carries no source or issue-tracker url — so it
+        cannot be read, and it has to be asked or tried. if it can, `bpd` is
+        a configuration; if it cannot, the routes are
+        [LSP4IJ](https://github.com/redhat-developer/lsp4ij) (Red Hat's
+        generic LSP and DAP client, EPL 2.0, every flavour from IDEA
+        2024.2 — breakpoints, conditional breakpoints, exception
+        breakpoints, variables, set-value, evaluate, stepping) or a plugin
+        of our own
+        - worth reading twice: jetbrains' own stated reason for that plugin is
+        **"lower debugging overhead — especially on Python 3.12+ thanks to
+        PEP 669 monitoring hooks"**. that is this project's thesis, arrived
+        at independently, and it means the comparison in
+        [what bpd costs](docs/development/overhead.md) is the comparison
+        that matters inside pycharm too, not just against a command-line
+        debugpy — per-location `DISABLE` against per-code-object
+        - neither LSP4IJ's docs nor the plugin's cover `startDebugging` or
+        more than one concurrent session, which is exactly what child
+        debugging needs. unknown until driven
         - the same bar as vs code applies: nobody ticks this until a session
         has been started and a breakpoint has been hit
 - [x] an MCP server exposing the same session
