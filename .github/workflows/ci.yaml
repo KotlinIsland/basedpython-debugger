@@ -49,11 +49,15 @@ jobs:
       fail-fast: false
       matrix:
         # both supported interpreters on every platform. the free-threaded build
-        # is a separate target rather than a variant, so it gets its own entry
+        # is a separate target rather than a variant, so it gets its own entry —
+        # on two platforms, because its threading and its allocator differ by
+        # more between linux and macos than the gil build's do
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.13", "3.14"]
         include:
           - os: ubuntu-latest
+            python: "3.14t"
+          - os: macos-latest
             python: "3.14t"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -71,6 +75,40 @@ jobs:
       # `bpd_test` discovers interpreters itself and fails loudly when none is
       # supported, so a job that silently tested nothing is not possible
       - run: cargo test --workspace --all-features
+
+  cross:
+    name: cross-compile ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # no darwin entry: `macos-latest` in the `test` matrix compiles for it
+        # natively, so a cross check from linux would answer a question already
+        # answered. these two are the ones a developer on a mac cannot otherwise
+        # ask without pushing
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: rustup target add ${{ matrix.target }}
+      # `cargo check` needs the target's std and no linker, so one runner can
+      # answer for every platform in minutes. that matters because the tree
+      # carries over a hundred `cfg` sites — the fork handlers and the audit
+      # event list are unix-only, the process cache path and `CreateProcess`
+      # are windows-only — and a `cfg` arm that stopped compiling is invisible
+      # to the platform it is not for. the `test` matrix below finds that too,
+      # but only after installing an interpreter and running a whole suite
+      #
+      # `bpd_agent` is excluded because it is a cpython extension: pyo3 resolves
+      # an interpreter **for the target** at build time, and there is not one
+      # here. what that leaves unchecked is exactly the agent, which every
+      # entry of the `test` matrix builds for real
+      - run: cargo check --workspace --exclude bpd_agent --all-features --all-targets --target ${{ matrix.target }}
 
   coverage:
     name: coverage
