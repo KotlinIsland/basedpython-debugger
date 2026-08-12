@@ -644,3 +644,268 @@ fn an_expression_in_a_template_frame_is_template_syntax_and_not_python() {
 
     to_exit(&mut debuggee);
 }
+
+// ---- the reloader --------------------------------------------------------
+
+/// the program `django.utils.autoreload.restart_with_reloader` produces, in the
+/// shape it produces it — read in django 6.1
+///
+/// ```py
+/// def restart_with_reloader():
+///     new_environ = {**os.environ, DJANGO_AUTORELOAD_ENV: "true"}
+///     args = get_child_arguments()
+///     while True:
+///         p = subprocess.run(args, env=new_environ, close_fds=False)
+///         if p.returncode != 3:
+///             return p.returncode
+/// ```
+///
+/// so under the default `runserver` the parent starts `sys.executable` on the
+/// same command line with a marker in the environment, and then does **nothing
+/// but wait on the exit code**. every request is served by the child, and every
+/// breakpoint anyone sets is in code the child runs
+///
+/// the two details that are django's rather than this test's are both here and
+/// both matter: `env=` is a **copy of `os.environ`**, which is what the channel
+/// has to survive, and `close_fds=False`, which hands the child every descriptor
+/// the parent holds — including this session's
+const RELOADER: &str = r#"
+import os
+import subprocess
+import sys
+
+if not os.environ.get("RUN_MAIN"):
+    new_environ = {**os.environ, "RUN_MAIN": "true"}
+    finished = subprocess.run([sys.executable, __file__], env=new_environ, close_fds=False)
+    raise SystemExit(finished.returncode)
+
+import signal
+
+signal.alarm(300)
+
+
+def serve():
+    MARKS.write_text("before")
+    rendered = get_template("index.html").render(
+        {
+            "salute": "hello",
+            "greeting": "outer",
+            "who": "you",
+            "footer": "footer",
+            "stray": "stray",
+            "trailing": "trailing",
+        }
+    )
+    MARKS.write_text("after")
+    return rendered
+
+
+serve()
+"#;
+
+/// how long a wait on a program that is busy with its child is given
+const A_MOMENT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// how long a wait that has to finish is given
+const LONG_ENOUGH: std::time::Duration = std::time::Duration::from_mins(1);
+
+/// ask one session for something, collecting whatever the program says on the
+/// way
+///
+/// the sink is a [`bpd_test::reporting::Children`] rather than `Unreported`,
+/// because a reloader **does** start a child and says so — that report is what
+/// the single-process tests above are entitled to refuse and this one is about
+fn ask(
+    debuggee: &mut Debuggee,
+    at: bpd_core::SessionId,
+    request: bpd_core::Request,
+    seen: &mut bpd_test::reporting::Children,
+) -> bpd_core::Response {
+    match debuggee.dispatch(bpd_core::Addressed::to(at, request), seen) {
+        Ok(answer) => answer,
+        Err(error) => panic!("{at} was not answered: {error}"),
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "it is one reloader's whole life — the setting, the child the \
+              reloader execs, the session it opens, a template breakpoint bound \
+              in the child's own django and hit mid-render, and both processes \
+              ending. splitting it would start django several times and assert \
+              on a different half of one sequence each time"
+)]
+fn a_breakpoint_in_a_template_the_reloaders_child_renders_is_hit_in_the_child() {
+    // the whole reason this feature exists. `bpd launch manage.py runserver`
+    // attaches to a supervisor that never imports the template engine, so
+    // before this a template breakpoint here was reported **unbound** — true,
+    // and useless
+    let fixture = Fixture::new(
+        "manage",
+        &format!("{}{RELOADER}", bpd_test::django::preamble(false)),
+    );
+    fixture.beside("templates/base.html", BASE);
+    fixture.beside("templates/index.html", INDEX);
+    fixture.beside("templates/part.html", PART);
+
+    let mut seen = bpd_test::reporting::Children::default();
+    let mut debuggee = launch(&fixture);
+    let parent = match debuggee.sessions().as_slice() {
+        [only] => *only,
+        open => panic!("one program was launched and the debuggee holds {open:?}"),
+    };
+    assert!(
+        debuggee
+            .debug_children(true)
+            .expect("the debuggee took the setting"),
+        "the agent has to say the setting took"
+    );
+
+    match ask(
+        &mut debuggee,
+        parent,
+        bpd_core::Request::Run {
+            deadline: Some(A_MOMENT),
+        },
+        &mut seen,
+    ) {
+        bpd_core::Response::Ran(Running::StillRunning { .. }) => {}
+        other => panic!("the reloader waits on its child: {other:?}"),
+    }
+
+    // the child is the fresh interpreter `subprocess.run` started, entered
+    // through the staged `sitecustomize` on the end of the `PYTHONPATH` django
+    // copied out of `os.environ`
+    let child = {
+        let mut found = None;
+        for _ in 0..60 {
+            let open = debuggee.sessions();
+            if let Some(joined) = open.iter().find(|id| **id != parent) {
+                found = Some(*joined);
+                break;
+            }
+            match ask(
+                &mut debuggee,
+                parent,
+                bpd_core::Request::Wait {
+                    deadline: Some(A_MOMENT),
+                },
+                &mut seen,
+            ) {
+                bpd_core::Response::Ran(Running::StillRunning { .. }) => {}
+                other => panic!("the reloader had nothing to say and answered {other:?}"),
+            }
+        }
+        found.expect("the reloader's child opened a session of its own")
+    };
+
+    match ask(
+        &mut debuggee,
+        child,
+        bpd_core::Request::Wait {
+            deadline: Some(LONG_ENOUGH),
+        },
+        &mut seen,
+    ) {
+        bpd_core::Response::Ran(Running::Stopped { stop, .. }) => assert!(
+            matches!(stop.reason, StopReason::Started { .. }),
+            "the child arrives held before its program: {:?}",
+            stop.reason
+        ),
+        other => panic!("the child was supposed to arrive held: {other:?}"),
+    }
+
+    // `{{ greeting }}` inside the `{% with %}`, which is a line django really
+    // renders — the same line the single-process tests above bind against
+    let line = line_of(INDEX, "{{ greeting }}");
+    match ask(
+        &mut debuggee,
+        child,
+        bpd_core::Request::SetBreakpoints {
+            breakpoints: vec![SourceBreakpoint::at(
+                1,
+                template(&fixture, "index.html"),
+                line,
+            )],
+        },
+        &mut seen,
+    ) {
+        bpd_core::Response::BreakpointsResolved { resolved } => {
+            // django has not been asked for the template yet, so it is not
+            // loaded and the binding is announced later, while the child runs
+            assert!(
+                matches!(
+                    latest(resolved).as_slice(),
+                    [(
+                        1,
+                        Binding::Unbound { .. }
+                            | Binding::Bound { .. }
+                            | Binding::BoundInTemplate { .. }
+                    )]
+                ),
+                "the child answered the breakpoint set"
+            );
+        }
+        other => panic!("the child's breakpoints were answered with {other:?}"),
+    }
+
+    let (reason, rebound) = match ask(
+        &mut debuggee,
+        child,
+        bpd_core::Request::Run {
+            deadline: Some(LONG_ENOUGH),
+        },
+        &mut seen,
+    ) {
+        bpd_core::Response::Ran(Running::Stopped { stop, rebound }) => {
+            (stop.reason, latest(rebound))
+        }
+        other => panic!(
+            "the child renders the template and was supposed to stop in it: \
+             {other:?}"
+        ),
+    };
+
+    // it bound **in the template**, in the child's own interpreter, and the
+    // render is under way rather than finished
+    let (bound, nodes) = in_template(&rebound[0].1);
+    assert_eq!(bound, line);
+    assert!(!nodes.is_empty(), "{nodes:?}");
+    let StopReason::Breakpoint { file, line: at, .. } = reason.clone() else {
+        panic!("the child stopped for {reason:?}")
+    };
+    assert_eq!(file, template(&fixture, "index.html").display().to_string());
+    assert_eq!(at, line);
+    assert_eq!(
+        marks(&fixture),
+        "before",
+        "the child is held inside the render, not after it"
+    );
+
+    match ask(
+        &mut debuggee,
+        child,
+        bpd_core::Request::Run {
+            deadline: Some(LONG_ENOUGH),
+        },
+        &mut seen,
+    ) {
+        bpd_core::Response::Ran(Running::Ended { .. }) => {}
+        other => panic!("the child did not end: {other:?}"),
+    }
+    match ask(
+        &mut debuggee,
+        parent,
+        bpd_core::Request::Wait {
+            deadline: Some(LONG_ENOUGH),
+        },
+        &mut seen,
+    ) {
+        bpd_core::Response::Ran(Running::Exited { status, .. }) => {
+            assert!(status.success(), "the reloader exited {status}");
+        }
+        other => panic!("the reloader did not end: {other:?}"),
+    }
+    assert_eq!(marks(&fixture), "after");
+}
