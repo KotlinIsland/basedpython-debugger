@@ -507,6 +507,147 @@ fn a_child_that_outlives_its_parent_does_not_hold_the_session_open() {
     }
 }
 
+/// a program that forks on its main thread while other threads are stopping
+///
+/// what this puts in the way of every fork is a **program thread inside the
+/// agent's own state**: three workers going round a breakpoint as fast as the
+/// session resumes them, each of them taking the stop registry to register
+/// itself. on a gil build `os.fork()` holds the GIL and so do they, so they
+/// cannot overlap; on a free-threaded build there is no GIL and they do, which
+/// is the build this is written for
+///
+/// the fork is on the **main** thread on purpose. `fork` keeps only the calling
+/// thread, so a child forked from a worker would have no frame of the agent's
+/// entry point left to return through — this way the child leaves the loop,
+/// runs off the end of the program and goes out through `session::finishing`,
+/// which reads the stop registry it inherited. a child that inherited a locked
+/// one instead of a replaced one waits there for ever, and its parent waits in
+/// `waitpid` for it
+const FORKING_WHILE_THREADS_STOP: &str = r#"import os
+import pathlib
+import signal
+import threading
+import warnings
+
+HERE = pathlib.Path(__file__).parent
+PARENT = os.getpid()
+
+# `os.fork()` with more than one thread on the process is a DeprecationWarning
+# since 3.12, and this forks hundreds of times on purpose
+warnings.simplefilter("ignore", DeprecationWarning)
+
+release = threading.Event()
+
+
+def stops_here(round):
+    return round
+
+
+def stopper():
+    round = 0
+    while not release.is_set():
+        stops_here(round)
+        round += 1
+
+
+workers = [threading.Thread(target=stopper) for _ in range(3)]
+for worker in workers:
+    worker.start()
+
+forks = 0
+while forks < 200:
+    if (HERE / "release").exists():
+        break
+    pid = os.fork()
+    if pid == 0:
+        signal.alarm(120)
+        break
+    forks += 1
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0, (
+        "a forked child did not run to the end of the program: %r" % (status,)
+    )
+
+if os.getpid() == PARENT:
+    (HERE / "forks").write_text(str(forks))
+    release.set()
+    for worker in workers:
+        worker.join()
+"#;
+
+/// how many stops the session drives before it lets the forking loop go
+///
+/// enough that the forking and the registering really do overlap, and a bound
+/// rather than a measurement: the loop is released by the test, so what this
+/// number decides is how long the two are in each other's way, not how long the
+/// test takes
+const ROUNDS: usize = 200;
+
+#[test]
+fn a_child_forked_while_threads_are_registering_stops_runs_to_the_end() {
+    assert!(FORKING_WHILE_THREADS_STOP.contains(WATCHDOG));
+    let fixture = Fixture::new("forker", FORKING_WHILE_THREADS_STOP);
+    let mut debuggee = launch(&fixture);
+
+    let line = line_of(FORKING_WHILE_THREADS_STOP, "    return round");
+    armed(
+        &debuggee
+            .set_breakpoints(vec![SourceBreakpoint::at(1, fixture.path(), line)])
+            .expect("the breakpoint set was answered"),
+    );
+
+    let mut seen = Children::default();
+    let mut rounds = 0;
+    let status = loop {
+        match run(&mut debuggee, &mut seen) {
+            Running::Stopped { .. } => {
+                rounds += 1;
+                if rounds == ROUNDS {
+                    std::fs::write(fixture.directory().join("release"), "go")
+                        .expect("the forking loop was let go of");
+                }
+            }
+            Running::Exited { status, .. } => break status,
+            Running::StillRunning { .. } => panic!(
+                "the program did not end within {LONG_ENOUGH:?}, after {rounds} \
+                 stops. a forked child that inherited a locked stop registry \
+                 waits for ever in the agent's exit path, and its parent waits \
+                 for it in `waitpid`"
+            ),
+            finishing @ Running::Finishing { .. } => {
+                panic!("the program did not end: {finishing:?}")
+            }
+        }
+    };
+    assert!(
+        status.success(),
+        "the program exited with {status}. every child it forked has to have \
+         run to the end of the program and exited zero"
+    );
+    assert!(
+        rounds >= ROUNDS,
+        "the session drove {rounds} stops, and the forking loop is only \
+         released after {ROUNDS} — so the forking and the registering did not \
+         overlap and this proved nothing"
+    );
+
+    let forked: usize = std::fs::read_to_string(fixture.directory().join("forks"))
+        .expect("the program wrote how many times it forked")
+        .trim()
+        .parse()
+        .expect("the program wrote a count");
+    assert!(
+        forked > 1,
+        "the program forked {forked} time(s), which is not a fork under load"
+    );
+    assert_eq!(
+        seen.started.len(),
+        forked,
+        "bpd has to have reported every one of the {forked} forks: {:?}",
+        seen.started.len()
+    );
+}
+
 /// a fork inside a fork
 ///
 /// the handler is inherited by the child along with everything else, so it runs

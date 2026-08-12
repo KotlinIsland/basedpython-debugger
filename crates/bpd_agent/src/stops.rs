@@ -12,11 +12,13 @@
 //! evaluated anywhere else would run the program's code on the wrong thread
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use bpd_core::{FrameId, Holding, Refusal, Reported, StepKind, StopReason, Which};
 use bpd_protocol::message::{FromAgent, FromEngine};
 
+use crate::cells::ForkCell;
 use crate::{attach, pause};
 
 /// what a held thread is asked to do next
@@ -78,22 +80,60 @@ struct Entry {
     mailbox: Arc<Mailbox>,
 }
 
+/// the last stop number handed out, so no two stops share one
+///
+/// outside the table it numbers, and an atomic, because a **forked child keeps
+/// it**. the child's copy of the table names threads the fork did not copy and
+/// is given up with the rest of the session, but the counter is inherited
+/// memory and is left exactly where the fork found it
+///
+/// that is not a claim that two processes cannot land on the same number.
+/// counting on from the same place, they can and will. what inheriting removes
+/// is the collision resetting to one guarantees: a child that started again at
+/// one would reissue, immediately, numbers its parent had **already reported**.
+/// that a number can still name a stop in two sessions is why a
+/// [`bpd_core::Stop`] is named by the session it arrived on, and why
+/// `bpd_core::Addressed::of` refuses rather than picks when a number names two
+static MINTED: AtomicU64 = AtomicU64::new(0);
+
+/// the threads held right now
+///
+/// in a [`ForkCell`] because a program thread can be inside [`enter`] holding
+/// it while another thread of the same process calls `os.fork()`. what keeps
+/// the two apart today is the GIL on a gil build and `os.fork()`'s
+/// stop-the-world on a free-threaded one — neither of which is a property of
+/// this agent, and the second of which is an interpreter internal nothing
+/// promises. so the child's copy is replaced rather than relied on
 #[derive(Debug)]
 struct Registry {
-    /// the last stop number handed out, so no two stops share one
-    minted: u64,
     held: Vec<Entry>,
 }
 
-static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
-    minted: 0,
-    held: Vec::new(),
-});
+static REGISTRY: ForkCell<Registry> = ForkCell::new(nothing_held);
+
+/// what the registry holds before the first stop, and in a forked child
+const fn nothing_held() -> Registry {
+    Registry { held: Vec::new() }
+}
 
 fn registry() -> MutexGuard<'static, Registry> {
     REGISTRY
+        .get()
         .lock()
         .expect("the stop registry is only ever held to look a thread up or add one")
+}
+
+/// give up the held-thread table this process was forked holding
+///
+/// the entries name threads the fork did not copy, so none of them is a thread
+/// this process can answer for. the table is **replaced** rather than emptied
+/// because emptying it means locking it, and a thread that was holding it at
+/// the instant of the fork is one of the threads that did not survive
+///
+/// [`MINTED`] is deliberately not touched — see its own note
+#[cfg(unix)]
+pub(crate) fn abandon() {
+    REGISTRY.abandon();
 }
 
 impl Registry {
@@ -127,17 +167,16 @@ impl Ticket {
 /// arrive before there is anything to route it to
 pub(crate) fn enter(thread: u64, reason: StopReason, holding: Vec<Holding>) -> Ticket {
     let mailbox = Arc::new(Mailbox::default());
-    let stop = {
-        let mut registry = registry();
-        registry.minted += 1;
-        let stop = registry.minted;
-        registry.held.push(Entry {
-            stop,
-            thread,
-            mailbox: Arc::clone(&mailbox),
-        });
-        stop
-    };
+    // minted outside the table's lock, which changes nothing about uniqueness:
+    // the counter is what makes a number unique, and the table is only where
+    // the thread holding it is looked up. what it buys is that the number
+    // survives a fork while the table does not
+    let stop = MINTED.fetch_add(1, Ordering::Relaxed) + 1;
+    registry().held.push(Entry {
+        stop,
+        thread,
+        mailbox: Arc::clone(&mailbox),
+    });
 
     attach::send(&FromAgent::Stopped {
         stop: Reported {

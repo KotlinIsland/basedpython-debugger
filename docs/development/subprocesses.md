@@ -237,6 +237,9 @@ what the handler does, in this order:
 1. **gives up the session.** from that instruction on nothing in the agent
     writes a frame: the one place a frame is written checks it first
 1. **closes both inherited descriptors** — see below
+1. **replaces the cells the session's state lives in**, so that the child can use
+    them again without waiting on a lock a thread the fork did not keep was
+    holding — see below
 1. **takes the tool off the process.** the local events on every code object the
     session armed, then the global events, then the callbacks, then the tool id
     itself. all four, because they are independent: `free_tool_id` explicitly
@@ -277,10 +280,25 @@ a breakpoint after the fork and read its own tool id back
 a fork keeps only the calling thread, so a lock another thread held at the
 instant of the fork is one the child's copy would wait on for ever — and unlike
 almost everything else in the agent, that is not something the GIL rules out. the
-control connection is written to by the reader thread, which does not hold the
-GIL, so even on a gil build a fork can land while its lock is held. on a
-free-threaded build there is no GIL to argue from at all, and free-threaded
-builds are a first-class target
+reader thread is off the process by then, because the `before` handler stood it
+down. what is still on it is the **program's** threads: one inside `send` holds
+the writing end across a socket write, and one registering a stop holds the stop
+registry. on a gil build `os.fork()` holds the GIL and so do both of those, which
+keeps them apart. on a free-threaded build nothing does
+
+measured on 3.14t, and the measurement is the reason this is written down rather
+than assumed either way: with the stop registry deliberately held for twenty
+milliseconds by a thread registering itself, two hundred forks all **waited**,
+and not one child inherited a locked table. so a free-threaded `os.fork()` does
+appear to wait for the threads attached to the interpreter, and the hazard is
+not reachable through a program thread on 3.14t today
+
+that is an observation about one interpreter, not a guarantee. nothing in the
+language reference or in PEP 703 promises it, a release could narrow it, and it
+covers only threads the interpreter can see. relying on it would be the agent
+being correct because of something it does not control, in the one place a wrong
+guess is a debugger that hangs — so the agent does not rely on it, and what
+follows is why it does not have to
 
 so nothing the handler does takes one:
 
@@ -296,8 +314,55 @@ so nothing the handler does takes one:
     is told and one leaving it afterwards, so a fork landing between the two finds
     a code object listed that has nothing on it. clearing that one is a no-op,
     where losing one that really was armed would not be
-- the stop registry is not read. a process that gave the session up has nothing
-    to report about threads that did not survive the fork
+- the writing end, the reader and the stop registry are **replaced rather than
+    emptied**, one atomic store each. see below
+
+### the cells a child replaces
+
+the three pieces of state a session keeps are not `static Mutex<T>`. each is a
+`ForkCell`: an atomic pointer to a `Mutex<T>` on the heap. giving one up is a
+store of null, and the next use makes a fresh one — so a child never takes a lock
+to stop using what it inherited
+
+| cell              | what a thread could be holding it for             | what the child gets          |
+| ----------------- | ------------------------------------------------- | ---------------------------- |
+| the writing end   | a frame being written to the session socket       | nothing connected            |
+| the reader        | a concurrent fork standing the reader thread down | no reader, and none to start |
+| the stop registry | a thread registering itself as held               | no thread held               |
+
+**the cell that is given up is not freed.** either reason on its own is enough:
+its mutex can be locked by a thread the fork did not keep, and destroying a
+locked mutex is undefined; and what it holds owns the descriptor *numbers* the
+handler has just closed, so dropping it would `close(2)` a number the child has
+since recycled — the debugger closing a file the program opened. what leaks is
+one box per fork, in a process that was about to allocate anyway
+
+**the stop counter is not one of them.** it lives outside the table it numbers,
+in an atomic, and a forked child **keeps** it. that is not a claim that two
+processes cannot land on the same number — counting on from the same place, they
+can. what inheriting removes is the collision that resetting to one guarantees: a
+child starting again at one reissues, immediately, numbers its parent has already
+reported. that a number can still name a stop in two sessions is why a stop is
+named by the session it arrived on — see
+[sessions](sessions.md) — and why a request naming a number that two sessions
+hold is refused rather than answered from whichever is nearest
+
+the mechanism is pinned by the `ForkCell` tests in the agent, which abandon a
+cell that is **locked** and require the replacement to be a different cell that
+locks. what drives it against a real interpreter is
+`a_child_forked_while_threads_are_registering_stops_runs_to_the_end`: three
+threads go round a breakpoint as fast as the session resumes them while the main
+thread forks two hundred times, and every child leaves the loop, runs off the end
+of the program and out through the agent's exit path — which reads the stop
+registry it inherited. a child that inherited a locked one waits there for ever,
+and its parent waits for it in `waitpid`
+
+that test does **not** fail on today's interpreters without the cells, and it is
+worth saying why rather than leaving it looking like coverage: the fork waits, as
+above, so the child never inherits a locked table to hang on. what it does catch
+is the child no longer having a special case — the exit path used to return early
+in a forked child precisely because the registry was not safe to read there, and
+now it reads it like any other process
 
 ### only the process that attached reports
 
