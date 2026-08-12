@@ -2166,6 +2166,20 @@ fn stopped_for(reason: &StopReason) -> (&'static str, String, Vec<u32>) {
             format!("{error} is leaving the program at {file}:{line}"),
             Vec::new(),
         ),
+        // DAP has no reason of its own for it, and `entry` is what it is:
+        // nothing of this process has run. that it is a **different process**
+        // from the one the client launched is what the description is for — a
+        // client showing only the reason would show a second entry stop with
+        // nothing saying where it came from
+        StopReason::Forked { parent, file, line } => (
+            "entry",
+            format!(
+                "this process was forked from {parent} and is held at \
+                 {file}:{line}, the line that forked. it has run nothing of its \
+                 own"
+            ),
+            Vec::new(),
+        ),
         StopReason::EvaluationFailed {
             breakpoint,
             part,
