@@ -80,22 +80,36 @@ program and cannot be about a stop:
     both hold, names no session either. the number does not identify one, and
     naming none is what makes the engine refuse rather than the adapter guess
 
-neither protocol has a field for a session id, and neither needs one while there
-is one session:
+neither protocol has a field for a session id, and the two reach a second
+session by opposite routes — which is what `Facet::Session` in the parity table
+is about:
 
-- a **DAP** session *is* the connection. the spec's answer to a second debuggee
-    is the `startDebugging` reverse request, which has the client start a whole
-    second session of its own
-- an **MCP** tool could take one as an argument, and none does. the tool that
-    lists the sessions is what would make an argument meaningful, and it arrives
-    with the second session rather than before it
+- a **DAP** session *is* the connection, so a client never writes one. the
+    spec's answer to a second debuggee is the `startDebugging` reverse request:
+    the adapter asks the client to start a second session, and the configuration
+    it hands over carries the session id in a field of bpd's own. the client
+    sends it straight back on its `attach`, and from then on that connection
+    *is* that session — a request of its that names none means it, rather than
+    "whichever there is". `Reach::OnItsOwn`
+- an **MCP** tool takes one as an argument, because MCP has no push. `sessions`
+    lists them, and every tool that is about one takes an optional `session`.
+    naming none still means the only session there is. `Reach::Direct`
 
-both are recorded as `Reach::OnItsOwn` in `reach_of_facet`, against
-`Facet::Session`, so the parity test holds this to the same standard as every
-other capability: `crates/bpd_dap/tests/coverage.rs` and
+that is a **push** and a **pull** for the same capability, and it is the shape
+the two protocols have rather than a difference in what an agent and a person
+can do. `crates/bpd_dap/tests/coverage.rs` and
 `crates/bpd_mcp/tests/coverage.rs` each drive their adapter through a whole
 conversation and assert that a request really was addressed to the session its
 stop came from, and that nothing was ever addressed anywhere else
+
+### a stop says which session it is of
+
+on MCP every rendered stop carries `session`, and it is not decoration: two
+agents both count their stops from one, so a number alone stops naming one thing
+the moment a program has forked into a debugged child. a `session` argument that
+disagrees with the stop a call is about is **refused** rather than believed — the
+stop was named by the connection it arrived on, which is unforgeable, and an
+argument cannot change it
 
 ## a second session
 
@@ -103,6 +117,13 @@ the listener a debuggee attached on is **kept open** for the life of that
 debuggee. an agent that connects to it and presents that debuggee's session
 token becomes a second session of the same `Debuggee`, with its own breakpoint
 set, its own stop numbering and its own held threads
+
+what produces one is a **debugged fork**: the child inherits the endpoint and
+the token in memory, gives the connection it inherited up, and opens one of its
+own. see [child processes](subprocesses.md). it arrives **held**, so a front end
+that never learned of it would have a stopped program it cannot reach — which is
+why the engine reports it as it happens, through `Reporting::attached`, rather
+than leaving it to be discovered
 
 what a connection arriving there is treated as is decided by the token and by
 nothing else. any local process can open a socket to a loopback port; one that
@@ -138,12 +159,13 @@ follow that a front end has to be told rather than left to assume:
 
 ## what is not built
 
-- nothing lists the sessions, so nothing but the engine's own api can learn a
-    second one is there
-- no tool takes a session argument and no DAP request carries one
-- so a whole-program request from either front end names no session, and with
-    two open it is **refused** rather than routed — `bpd_core::only_session`,
-    which is `only_stop`'s rule one level up. that is the honest behaviour and
-    it is not a usable one, which is why the front ends come next
-- nothing yet *produces* a second session on its own. what will is a debugged
-    child process — see [child processes](subprocesses.md)
+- **nothing produces a second session but a fork.** a child that was `exec`'d —
+    `subprocess`, `multiprocessing` with `spawn` — is a fresh interpreter with
+    none of this process's memory in it, so there is nothing for it to inherit an
+    endpoint through. it is reported and not debugged, and reaching one means
+    giving it something through its environment. see
+    [child processes](subprocesses.md)
+- **a session cannot be joined by hand.** there is no command that opens a
+    connection to a debuggee's listener; what does it is the agent inside a
+    forked child, and `crates/bpd_engine/tests/sessions.rs` does it directly
+    against the engine

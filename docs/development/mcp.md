@@ -386,6 +386,38 @@ the list has one entry: DAP and the hit condition. adding a second means editing
 the test, which is the point — a gap that appears quietly is how two front ends
 drift apart
 
+## more than one session
+
+MCP has no push. every tool returns the answer to what was asked and the server
+writes nothing else — so a second session, which appears while the program is
+**running**, has to be learnable rather than announced
+
+- **`sessions`** lists them: the id, whether bpd started that process, what each
+    is holding, and how it ended. one bpd did not start — a debugged fork — has
+    no exit code to read and cannot be terminated, and both are refused by name
+    rather than invented
+- every tool that is about a session takes an optional **`session`**. naming
+    none still means the only one there is, and with several open a call that
+    names none is refused with the list — `bpd_core::only_session`, which is
+    `only_stop`'s rule one level up
+- a tool that is about a **stop** needs neither. the stop carries the session it
+    was reported from, and that is unforgeable: the engine names a stop on the
+    connection it arrived on. a `session` argument that disagrees with it is
+    **refused** rather than believed, because a caller that believes something
+    false about which program it is looking at would have half of it confirmed
+
+so an agent is never left to infer a session from a stop number. every rendered
+stop carries `session`, which matters the moment there are two: both agents
+count their stops from one
+
+a session that joins while a call is in flight is reported on that call's answer,
+under `attached`, with the sentence that says what to do about it. that is not
+the same key as `spawned`: `spawned` says a child exists and is running,
+`attached` says one is **held** and nothing else will move it
+
+what produces one is `debug_children` — off by default, and see
+[child processes](subprocesses.md)
+
 ## what is not built
 
 - **`run_to` as a *tool***, which is the shape it cannot take. it is either a
