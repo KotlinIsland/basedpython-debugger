@@ -35,8 +35,70 @@ pub const FORM: &str = "BPD_FORM";
 /// set only when the launcher inherited one, so absent here means absent there
 pub const PYTHON_PATH: &str = "BPD_PYTHONPATH";
 
+/// where a child that was **`exec`'d** connects back to
+///
+/// the same endpoint the session's own agent was given. it is a separate name
+/// because it lives in the environment for a different span: [`ENDPOINT`] is
+/// taken back out before any user code runs, and this one is **put in** when
+/// child debugging is asked for and stays there, because the child that reads
+/// it is a fresh interpreter that inherits nothing else
+pub const CHILD_ENDPOINT: &str = "BPD_CHILD_ENDPOINT";
+
+/// the token an `exec`'d child presents, hex encoded
+///
+/// **not [`TOKEN`]**, and that is the whole reason it exists. the session token
+/// is removed from the environment before the program runs; this one has to
+/// stay there for as long as the program can start a child, where anything that
+/// can read this process's environment can read it. a session token left in the
+/// environment would let any of them write frames into the session bpd is
+/// already holding — so a child is given a token whose only power is to open a
+/// session of its own
+pub const CHILD_TOKEN: &str = "BPD_CHILD_TOKEN";
+
+/// the staged directory an `exec`'d child imports the agent from
+///
+/// the `sitecustomize` that enters a child holds nothing but the four lines
+/// that find the agent, and it is in a directory of its own — so the agent's
+/// own directory has to be named somewhere, and this is it. it is put on
+/// `sys.path` by the child, for the one import, and taken off again by the
+/// agent before the child stops
+pub const CHILD_AGENT: &str = "BPD_CHILD_AGENT";
+
+/// the staged directory holding the `sitecustomize` an `exec`'d child is
+/// entered through
+///
+/// launcher to agent only: it is **never** in the environment a program can
+/// read under that name. what child debugging puts in the environment is this
+/// directory appended to `PYTHONPATH`, which is the only spelling an
+/// interpreter that has not started yet will act on
+pub const SITECUSTOMIZE: &str = "BPD_SITECUSTOMIZE";
+
 /// every variable the launcher sets, so neither side can forget one
-pub const ALL: &[&str] = &[ENDPOINT, TOKEN, TARGET, FORM, PYTHON_PATH];
+///
+/// [`CHILD_ENDPOINT`] and [`CHILD_AGENT`] are here without the launcher setting
+/// them, and that is deliberate rather than an oversight: this is the list the
+/// agent **clears**, and a stale pair inherited from an outer `bpd` would
+/// otherwise send this program's children to an engine that is not this one
+pub const ALL: &[&str] = &[
+    ENDPOINT,
+    TOKEN,
+    TARGET,
+    FORM,
+    PYTHON_PATH,
+    CHILD_ENDPOINT,
+    CHILD_TOKEN,
+    CHILD_AGENT,
+    SITECUSTOMIZE,
+];
+
+/// the three names child debugging puts into a debuggee's environment
+///
+/// the whole of what an `exec`'d child is reached through, and the whole of
+/// what a program can read about it beyond `PYTHONPATH`. it is a list rather
+/// than three uses of three constants because the parity mirrors in
+/// `crates/bpd/tests/launch_parity.rs` are written against exactly this set: a
+/// fourth name added here without a reason beside it fails there
+pub const CHILD: &[&str] = &[CHILD_ENDPOINT, CHILD_TOKEN, CHILD_AGENT];
 
 /// how the interpreter is asked to enter the program
 ///

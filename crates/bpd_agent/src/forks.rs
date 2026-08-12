@@ -281,8 +281,11 @@ fn hold_where_it_forked(python: Python<'_>) -> PyResult<()> {
     )
 }
 
-/// the process this one was forked from
-fn parent_process() -> u32 {
+/// the process this one was forked from, or started by
+///
+/// shared with [`crate::children`], because an `exec`'d child names its parent
+/// for the same reason a forked one does and there is one way to ask
+pub(crate) fn parent_process() -> u32 {
     // SAFETY: `getppid` takes nothing, returns the parent's pid, and cannot
     // fail. it is not in `std`, and rustix's process module is already a
     // dependency of this crate for `poll`

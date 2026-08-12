@@ -252,6 +252,16 @@ const HANDSHAKE_PATIENCE: Duration = Duration::from_secs(2);
 /// the collision this exists to remove
 static SESSIONS: AtomicU64 = AtomicU64::new(0);
 
+/// a secret in the form the agent receives it
+fn hex(secret: &[u8; TOKEN_LEN]) -> String {
+    let mut written = String::with_capacity(TOKEN_LEN * 2);
+    for byte in secret {
+        use std::fmt::Write as _;
+        write!(written, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    written
+}
+
 /// name a session nothing else will be named
 fn mint_session() -> SessionId {
     let minted = SESSIONS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -261,11 +271,27 @@ fn mint_session() -> SessionId {
     )
 }
 
-/// the control plane, waiting for exactly one agent
+/// the control plane, and the door every later session comes through
 #[derive(Debug)]
 pub struct Listener {
-    listener: TcpListener,
+    socket: TcpListener,
     token: [u8; TOKEN_LEN],
+    /// what a child that was **`exec`'d** presents instead
+    ///
+    /// a second secret rather than a second port. it exists because of where it
+    /// has to live: an `exec`'d child inherits nothing but the environment, so
+    /// the token it presents is readable by every descendant of the debuggee
+    /// and by anything that can read that process's environment. the session
+    /// token is taken back out of the environment before the program runs and
+    /// must stay out — a peer holding it could write frames into the session
+    /// bpd is already answering
+    ///
+    /// so this one's whole power is to *open* a session. it is minted per
+    /// debuggee and is **not** rotated per child: what fixes a child's
+    /// environment is `subprocess` building the block before the audit event is
+    /// raised, and rewriting it there is the undocumented path
+    /// [child processes](../../../docs/development/subprocesses.md) rules out
+    child: [u8; TOKEN_LEN],
 }
 
 impl Listener {
@@ -278,28 +304,38 @@ impl Listener {
             .map_err(|source| Error::Listen { source })?;
 
         let mut token = [0u8; TOKEN_LEN];
-        getrandom::fill(&mut token).map_err(|source| Error::Listen {
-            source: io::Error::other(source),
-        })?;
+        let mut child = [0u8; TOKEN_LEN];
+        for secret in [&mut token, &mut child] {
+            getrandom::fill(secret).map_err(|source| Error::Listen {
+                source: io::Error::other(source),
+            })?;
+        }
 
-        Ok(Self { listener, token })
+        Ok(Self {
+            socket: listener,
+            token,
+            child,
+        })
     }
 
     /// where the agent should connect
     pub fn endpoint(&self) -> Result<SocketAddr> {
-        self.listener
+        self.socket
             .local_addr()
             .map_err(|source| Error::Listen { source })
     }
 
     /// this session's token, in the form the agent receives it
     pub fn token_hex(&self) -> String {
-        let mut hex = String::with_capacity(TOKEN_LEN * 2);
-        for byte in self.token {
-            use std::fmt::Write as _;
-            write!(hex, "{byte:02x}").expect("writing to a string cannot fail");
-        }
-        hex
+        hex(&self.token)
+    }
+
+    /// the token an `exec`'d child of this debuggee presents
+    ///
+    /// handed to the agent at launch and put into the program's environment
+    /// only when child debugging is asked for — see [`Self::child`]
+    pub fn child_token_hex(&self) -> String {
+        hex(&self.child)
     }
 
     /// a connection that has arrived and handshaked, if one has
@@ -319,13 +355,17 @@ impl Listener {
     /// the handshake itself is given [`HANDSHAKE_PATIENCE`] and no more. a peer
     /// that connects and then says nothing would otherwise hold up the wait
     /// this is called from for as long as it liked
+    /// either token is enough here, and only here: a **forked** child inherited
+    /// the session token in memory, and an `exec`'d one read the child token
+    /// out of its environment. both are this debuggee's, and what a connection
+    /// becomes is the same either way
     pub fn arrived(&self) -> Result<Option<Session>> {
-        let stream = match self.listener.accept() {
+        let stream = match self.socket.accept() {
             Ok((stream, _)) => stream,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
             Err(source) => return Err(Error::Listen { source }),
         };
-        Ok(Session::attach(stream, &self.token, HANDSHAKE_PATIENCE).ok())
+        Ok(Session::attach(stream, &[self.token, self.child], HANDSHAKE_PATIENCE).ok())
     }
 
     /// wait for the agent, giving up if the debuggee dies or takes too long
@@ -333,6 +373,10 @@ impl Listener {
     /// `still_running` is polled so that a debuggee which exits during startup —
     /// almost always because the agent failed to import — is reported as that,
     /// rather than as a timeout thirty seconds later
+    ///
+    /// the **session** token and no other. the first agent is the one bpd
+    /// launched, holding what bpd put in its environment; a peer presenting the
+    /// child token here would be a child claiming to be the program bpd started
     pub fn accept(
         &self,
         mut still_running: impl FnMut() -> Result<Option<String>>,
@@ -340,8 +384,10 @@ impl Listener {
         let deadline = Instant::now() + ATTACH_TIMEOUT;
 
         loop {
-            match self.listener.accept() {
-                Ok((stream, _)) => return Session::attach(stream, &self.token, ATTACH_TIMEOUT),
+            match self.socket.accept() {
+                Ok((stream, _)) => {
+                    return Session::attach(stream, &[self.token], ATTACH_TIMEOUT);
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(source) => return Err(Error::Listen { source }),
             }
@@ -395,7 +441,15 @@ impl Session {
     /// `patience` bounds the handshake alone. it is a parameter rather than a
     /// constant because the two callers are in different situations, and both
     /// are stated where they call — see [`Listener::arrived`]
-    fn attach(mut stream: TcpStream, token: &[u8; TOKEN_LEN], patience: Duration) -> Result<Self> {
+    ///
+    /// `tokens` is what this door accepts. the reply is written with the one
+    /// the peer actually presented, so a child that opened with the child token
+    /// is answered with it rather than being told a secret it did not have
+    fn attach(
+        mut stream: TcpStream,
+        tokens: &[[u8; TOKEN_LEN]],
+        patience: Duration,
+    ) -> Result<Self> {
         stream
             .set_nonblocking(false)
             .map_err(|source| Error::Listen { source })?;
@@ -403,8 +457,8 @@ impl Session {
             .set_read_timeout(Some(patience))
             .map_err(|source| Error::Listen { source })?;
 
-        frame::read_handshake(&mut stream, token)?;
-        frame::write_handshake(&mut stream, token)?;
+        let presented = frame::read_handshake_among(&mut stream, tokens)?;
+        frame::write_handshake(&mut stream, &tokens[presented])?;
 
         // the session reads this connection for as long as the program runs,
         // and the deadline above was about the handshake and nothing else

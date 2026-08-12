@@ -206,6 +206,12 @@ const A_MOMENT: Duration = Duration::from_secs(5);
 /// same debuggee rather than a second debuggee
 fn join(debuggee: &Debuggee, program: &Path) -> Child {
     let staged = bpd_test::agent::staged();
+    // the launcher sets these too, and this is the launcher. they are what an
+    // `exec`'d child of *this* agent would be reached through, and an agent
+    // entered without them refuses by name rather than starting a session that
+    // could not answer `debugChildren`
+    let child_hook = bpd_engine::agent::stage_child_hook()
+        .expect("the child hook stages into the same cache the agent does");
     let listener = debuggee.listener();
     Command::new(&interpreter().executable)
         .arg("-c")
@@ -220,6 +226,8 @@ fn join(debuggee: &Debuggee, program: &Path) -> Child {
         .env(env::TOKEN, listener.token_hex())
         .env(env::TARGET, program)
         .env(env::FORM, env::Form::Script.as_str())
+        .env(env::CHILD_TOKEN, listener.child_token_hex())
+        .env(env::SITECUSTOMIZE, child_hook.python_path())
         .env("PYTHONPATH", staged.python_path())
         .spawn()
         .expect("a second interpreter was started")

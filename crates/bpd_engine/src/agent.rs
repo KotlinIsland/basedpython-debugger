@@ -49,6 +49,24 @@ const MODULE: &str = "bpd_agent";
 const UNIX_SUFFIX: &str = ".so";
 const WINDOWS_SUFFIX: &str = ".pyd";
 
+/// what a child that was `exec`'d is entered through
+///
+/// four lines that find the agent and one that calls it. everything a `.py`
+/// file in a debuggee's path could get wrong is a decision that belongs in the
+/// agent, where it is rust and is tested — so this holds no decisions at all:
+/// it reads three variables, imports one module, and calls one function
+///
+/// it is **not** basedpython under `python/`, and the architecture invariant is
+/// what says so: a python layer goes there when it is more than about a dozen
+/// lines, and this is eleven. it is also the one file in the tree that has to
+/// be readable by an interpreter bpd did not build for — a child could be any
+/// python, and the message it prints when the agent will not import into one is
+/// the whole of what a user has to act on
+const CHILD_HOOK: &str = include_str!("../resources/sitecustomize.py");
+
+/// what the file is called, which is the whole of how an interpreter finds it
+const CHILD_MODULE: &str = "sitecustomize.py";
+
 /// the agent, renamed into a directory an interpreter can import from
 #[derive(Debug)]
 pub struct Staged {
@@ -98,6 +116,47 @@ pub(crate) fn stage_artifact(cache: &Path, artifact: &Path) -> Result<Staged> {
     let python_path = entry.canonicalize().map_err(failed(&entry))?;
 
     Ok(Staged { python_path })
+}
+
+/// put the `sitecustomize` a child is entered through where an interpreter can
+/// import it, and say where
+///
+/// **a directory of its own, holding nothing else.** it goes on the end of a
+/// debuggee's `PYTHONPATH` when child debugging is asked for, which puts it on
+/// every descendant's `sys.path` — so anything else in it would be a module bpd
+/// had added to programs it is not even debugging
+///
+/// it is a cache of its own rather than an entry of the agent's, and the reason
+/// is `bpd cache`: an entry there holds one file, named for the platform's
+/// extension suffix, and anything else in one stops a clear rather than being
+/// removed. a directory that held both would have to teach that check about a
+/// second shape to describe a directory it does not manage
+pub fn stage_child_hook() -> Result<Staged> {
+    stage_child_hook_into(&child_cache()?)
+}
+
+/// the same, into a cache directory of the caller's choosing
+pub(crate) fn stage_child_hook_into(cache: &Path) -> Result<Staged> {
+    let bytes = CHILD_HOOK.as_bytes();
+
+    trust(cache)?;
+    let entry = cache.join(digest(bytes));
+    let module = entry.join(CHILD_MODULE);
+
+    if !holds(&module, bytes)? {
+        publish(cache, &entry, &module, bytes)?;
+    }
+
+    // canonicalised for the reason the agent's directory is: what lands on the
+    // debuggee's `sys.path` is compared against what a bare run has, and a home
+    // directory sits under a symlink on macos
+    let python_path = entry.canonicalize().map_err(failed(&entry))?;
+    Ok(Staged { python_path })
+}
+
+/// where the `sitecustomize` a child is entered through is cached
+fn child_cache() -> Result<PathBuf> {
+    Ok(cache_home()?.join("bpd").join("children"))
 }
 
 /// whether the staged file is already exactly these bytes
