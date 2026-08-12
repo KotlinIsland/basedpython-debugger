@@ -1,7 +1,9 @@
 //! the debug adapter protocol front end
 //!
-//! DAP is how an editor plugs into a debugger — vs code, pycharm and neovim all
-//! speak it — and this crate is the whole of what bpd says to one. it is a
+//! DAP is how an editor plugs into a debugger — vs code and neovim speak it and
+//! have both driven this adapter, and pycharm reaches it through a plugin
+//! rather than natively — and this crate is the whole of what bpd says to one.
+//! it is a
 //! **translation and nothing else**: a DAP request becomes a
 //! [`bpd_core::Request`], the answer is rendered, and no decision about the
 //! program is made on the way. a decision made here would be a decision the MCP

@@ -1,8 +1,15 @@
 # the DAP adapter
 
-DAP is how an editor plugs into a debugger — vs code, pycharm and neovim all
-speak it. `bpd dap` is the whole of what `bpd` says to one, with
-`Content-Length` framing on stdin and stdout, or on a loopback socket
+DAP is how an editor plugs into a debugger. `bpd dap` is the whole of what
+`bpd` says to one, with `Content-Length` framing on stdin and stdout, or on a
+loopback socket
+
+which editors that reaches is not uniform, and this page used to say "vs code,
+pycharm and neovim all speak it" as though it were. **vs code** and **neovim**
+do, and both have driven `bpd`. **pycharm's own python debugging is pydevd**;
+DAP arrives there through a plugin — jetbrains' own `Python DAP Debugger`, or
+LSP4IJ — and which of those `bpd` can reach is the open question in
+[ROADMAP.md](../../ROADMAP.md)
 
 it is a **translation and nothing else**. a DAP request becomes a
 `bpd_core::Request`, the answer is rendered, and no decision about the program
