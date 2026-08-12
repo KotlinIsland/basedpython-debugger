@@ -392,7 +392,7 @@ followed by a wait, and DAP needs those separately: a `continue` has to be
 answered before the program stops again. the adapter resumes, answers, and then
 waits
 
-### three capabilities are reached through an extension
+### four capabilities are reached through an extension
 
 `Request::RunScript` — [the debug script](scripts.md) — is a capability of the
 core, so the parity rule does not let it be an agent's alone. DAP has no request
@@ -428,7 +428,26 @@ they were read. "what changed between these two stops" is a thing a person wants
 as much as an agent, and no editor offers it — which is the parity rule earning
 its keep rather than being satisfied
 
-nothing advertises any of the three. DAP has no capability flag for a custom
+`Request::ReplaceCode` — [hot code replacement](hot-code-replacement.md) — is
+the fourth. DAP's own `restart` is the opposite thing: it throws the process away
+and starts another, and the whole point of a replacement is that the process
+stays. it names no thread either, because it is about the process:
+
+```json
+{
+  "command": "bpd/replaceCode",
+  "arguments": { "file": "/srv/app/handlers.py" }
+}
+```
+
+the whole answer comes back in the response body — an editor given only "yes"
+cannot show what is now different about the process, and one given only "no"
+cannot show which of the user's edits to undo — and each refusal is additionally
+written to the `output` stream, in the `important` category, because the person
+who has to change something is looking at the debug console rather than at a
+response body
+
+nothing advertises any of the four. DAP has no capability flag for a custom
 request, and a client that does not know about one never sends it
 
 ## what is not built

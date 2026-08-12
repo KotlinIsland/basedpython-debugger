@@ -22,6 +22,7 @@ mod files;
 mod forks;
 mod frames;
 mod pause;
+mod replace;
 mod run;
 mod session;
 mod source;

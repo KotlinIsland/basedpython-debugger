@@ -482,6 +482,22 @@ fn drive(asked: &Asked) -> Transcript {
         serde_json::json!({ "frameId": frame }),
     );
 
+    // making the process run the file that is on disk. DAP's own `restart`
+    // throws the process away, which is the opposite of this, so it is an
+    // extension — and the parity rule is why it is here at all: an editor is
+    // where the edit that makes it worth having was made
+    let replaced = answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/replaceCode",
+        serde_json::json!({ "file": "/tmp/fake.py" }),
+    );
+    assert_eq!(
+        replaced["body"]["outcome"]["replaced"], "refused",
+        "the fake refuses, and the adapter has to carry the whole answer rather \
+         than a yes or a no: {replaced}"
+    );
+
     // the whole of a stop in one call, and the difference between two of them.
     // DAP's own way of reading state is the tree walk above, and it keeps it —
     // this is the same capability an agent's front end has, which is what the
@@ -996,6 +1012,25 @@ impl Session for FakeSession {
                     from: 3,
                     bound_to_none: Vec::new(),
                     unannounced: Vec::new(),
+                },
+                mode: Mode::NonStop,
+            }),
+            // the fake refuses, because a refusal is the answer with something
+            // in it: it carries *every* reason rather than the first, and the
+            // adapter has to hand the whole of it over. that a real interpreter
+            // really replaces code is
+            // `crates/bpd_engine/tests/replacement.rs`
+            Request::ReplaceCode { file } => Response::Replaced(bpd_core::Replaced {
+                file,
+                outcome: bpd_core::Replacement::Refused {
+                    because: vec![bpd_core::Unreplaceable::Running {
+                        function: "main".to_string(),
+                        frame: bpd_core::LiveFrame::Thread {
+                            thread: THREAD,
+                            line: 3,
+                            held: Some(1),
+                        },
+                    }],
                 },
                 mode: Mode::NonStop,
             }),

@@ -758,6 +758,52 @@ pub fn tools() -> Vec<Tool> {
             ),
         },
         Tool {
+            name: "replace_code",
+            title: "make the running process run the code on disk",
+            description: "you edited a file and the process is still running \
+                what was there when it was imported. this replaces the code of \
+                every function of that file, in place, **without restarting \
+                anything** — `function.__code__` is rebound, so a method is \
+                caught with it and every instance that already exists sees the \
+                new one immediately.\n\n\
+                the top level is **not** re-run. no name is bound or unbound and \
+                no object is created, so every reference the program already \
+                holds is the one it held before.\n\n\
+                it is applicable exactly when every difference between the file \
+                on disk and the code that is running is inside the body of a \
+                function that exists in both and takes the same arguments. \
+                anything else is refused — a changed module body, a function or \
+                class added or removed, a changed class body, a changed \
+                signature, or a frame anywhere in the process that is running \
+                code about to change.\n\n\
+                **nothing is ever applied partially.** a refusal changes nothing \
+                at all and carries *every* reason it had rather than the first, \
+                so one call tells you the whole of what to fix.\n\n\
+                a frame running the code is refused for honesty rather than \
+                safety: cpython accepts the assignment and the frame in flight \
+                would run the old code to completion, which means the process \
+                would be running two versions of one function until it returned. \
+                let it return first.\n\n\
+                what tells you this is worth calling is `source` answering \
+                `not_the_same_code`: bpd compiles the file and requires the \
+                frame's own code object to be in the result, so that answer \
+                means the file on disk is no longer what is running."
+                .to_string(),
+            schema: object(
+                serde_json::json!({
+                    "file": {
+                        "type": "string",
+                        "description": "the file whose code to replace, on the \
+                                        debuggee's own filesystem. it is matched \
+                                        by filesystem identity rather than by \
+                                        path text, so a symlink and the file it \
+                                        points at are the same file",
+                    },
+                }),
+                &["file"],
+            ),
+        },
+        Tool {
             name: "threads",
             title: "what every thread of the program is doing",
             description: "the only question that is about threads bpd is **not** \

@@ -376,6 +376,13 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)]) -> Transcript 
     );
     client.call("restart_frame", &serde_json::json!({ "frame": 1 }));
 
+    // making the process run the file that is on disk. it is about the process
+    // rather than about a held thread, so it names neither a stop nor a frame
+    client.call(
+        "replace_code",
+        &serde_json::json!({ "file": "/tmp/fake.py" }),
+    );
+
     // the whole of a stop in one call, and the difference between two of them.
     // the id comes back on the answer and is what a `diff` is written against
     let described = client.call(
@@ -573,6 +580,7 @@ fn tool_order() -> Vec<&'static str> {
         "set_variable",
         "set_next_statement",
         "restart_frame",
+        "replace_code",
         "state",
         "diff",
         "run_script",
@@ -1023,6 +1031,37 @@ impl Session for FakeSession {
                     from: 3,
                     bound_to_none: Vec::new(),
                     unannounced: Vec::new(),
+                },
+                mode: Mode::NonStop,
+            }),
+            // the fake applies, so that what the renderer says about a
+            // replacement that really happened is under test: which functions
+            // moved, how many objects held each, and which breakpoints had to be
+            // bound again. the refused shape is what the DAP coverage drives, and
+            // that a real interpreter really replaces code is
+            // `crates/bpd_engine/tests/replacement.rs`
+            Request::ReplaceCode { file } => Response::Replaced(bpd_core::Replaced {
+                file,
+                outcome: bpd_core::Replacement::Applied {
+                    changed: vec![bpd_core::Rebound {
+                        function: "main".to_string(),
+                        was_at: 2,
+                        now_at: 5,
+                        objects: 2,
+                    }],
+                    unchanged: vec!["<module>".to_string()],
+                    rebound: vec![Resolved {
+                        id: 1,
+                        binding: Binding::Bound {
+                            line: 6,
+                            sites: vec![Site {
+                                qualname: "main".to_string(),
+                                first_line: 5,
+                                offset: 4,
+                            }],
+                            evaluation: Evaluation::Always,
+                        },
+                    }],
                 },
                 mode: Mode::NonStop,
             }),

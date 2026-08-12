@@ -628,26 +628,65 @@ and one thing cpython accepts that `bpd` refuses: a move in a frame that is
 stack that no longer matches where it is — a function jumped in this way returned
 a value it never computed. only the frame a thread is executing can move
 
-### M10 — hot module reloading and hot code replacement
+### M10 — hot code replacement · done
 
-reload a changed module and keep the process alive: rebind `__code__` on live
-function objects, update class dictionaries in place so existing instances see
-new methods, and re-run nothing that has already run
+replace the code a live process is running with the code that is now on disk,
+without restarting it: `function.__code__` is rebound on every function object
+in the **process** — found through the heap rather than through the module's
+namespace, so a closure a factory handed out, the original a decorator captured
+and a function in somebody's registry are all reached — and nothing else is
+touched. the top level is not re-run, no name is bound or unbound, and no object
+is created
 
-a change that **cannot** be applied — a changed signature, a changed class
-layout, a module with import side effects, a live frame executing the code being
-replaced — is reported as not applicable, with the reason and the name of the
-thing that blocked it. it is never applied partially, because a process half way
-between two versions of a module produces evidence about neither
+**classes came with it rather than after it.** a method *is* a function object in
+the class dictionary, so every instance that already exists sees the new one at
+once, with nothing written to any dictionary; and "a changed class layout" turned
+out not to be a check of its own but the body rule applied to a class body, which
+is the only other code object cpython leaves unoptimized
 
-**what triggers it is a separate and much earlier piece of work.** noticing that
-the file on disk is no longer the code that is running is a correctness feature
-in its own right, and cpython gets it wrong today: a traceback is rendered by
-`linecache` reading the file *now*, so a file edited since import is shown with
-current text against old line numbers. every python debugger inherits that lie.
-detecting it costs a hash recorded at bind time, and once it is detected the
-client can be offered the replacement — "the source does not match what is
-running, replace it?" — through both adapters
+the rule that makes it total: the file is compiled and the tree compared against
+the tree that is running, and it is applicable exactly when **every difference is
+inside the body of a function that exists in both and takes the same arguments**.
+that is the same machinery `Source` already uses to refuse to show source it
+cannot prove, inverted. it is never applied partially, and a refusal carries every
+reason it had rather than the first
+
+two things had to be measured rather than assumed, and both changed the design:
+
+- **a class body carries its own source line.** since 3.13 cpython stores
+    `__firstlineno__` in every class body — `LOAD_CONST` of the line on 3.13, and
+    `LOAD_SMALL_INT` of it on 3.14, 3.15 and 3.14t — so a class that merely moved
+    down the file is different code. left in the comparison it refuses every edit
+    above a class as a changed class layout, which is most edits. that one
+    instruction is masked, and a test fails if cpython changes
+- **replacing `__code__` under a live frame is safe**, on 3.13, 3.14, 3.15 and
+    3.14t. the frame keeps its own reference to its code object, runs the old code
+    to completion, and the next call gets the new one. this milestone was written
+    expecting the opposite — the neighbouring `f_lineno` assignment on a suspended
+    frame really does abort the interpreter — and it does not generalise. so the
+    refusal for a live frame stands, and its reason is **not** crash prevention:
+    between the assignment and that frame returning the process is running two
+    versions of one function, and a stack whose frames behave two different ways
+    is evidence about neither. a suspended generator, coroutine or async generator
+    counts as such a frame, because it will run that code the moment anything
+    sends into it
+
+what it costs is stated rather than hidden: adding a function, deleting one or
+changing a module-level constant is a change to the module body, and applying one
+would mean re-running the top level — which is running the program a second time,
+not reloading it. those are refused
+
+**what triggers it was already built.** the source around a frame is compiled and
+the frame's own code object has to be in what comes out, so `not_the_same_code`
+is what tells a client the file on disk is no longer what is running and that a
+replacement is worth offering
+
+see [hot code replacement](docs/development/hot-code-replacement.md)
+
+what is **not** built: applying a replacement while a frame is running the code
+and reporting which frames are still on the old version. it is more useful and a
+strictly weaker guarantee, and it was left out deliberately — "never half a
+process" is the rule this milestone commits to
 
 ## further out
 

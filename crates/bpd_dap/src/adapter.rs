@@ -345,6 +345,11 @@ impl Adapter {
             // identically — so they are extensions, for the reason a script is
             Some("bpd/state") => self.state(message),
             Some("bpd/diff") => self.diff(message),
+            // DAP's own `restart` throws the process away, which is the opposite
+            // of this. an editor is where the file gets edited, so an editor is
+            // where a replacement is worth offering — and the parity rule does
+            // not let it be an agent's alone
+            Some("bpd/replaceCode") => self.replace_code(message),
             Some(command) => Err(Aborted::Refuse(format!(
                 "bpd's DAP adapter does not implement `{command}`, and does not \
                  advertise a capability that would make a client send it"
@@ -731,6 +736,49 @@ impl Adapter {
         };
         let body = serde_json::to_value(&difference)
             .expect("a difference is built from types whose serde is derived");
+        self.respond(message, Some(body))?;
+        Ok(())
+    }
+
+    /// replace the code the process is running for one file with what is on disk
+    ///
+    /// a custom request, because DAP has none of its own: its `restart` throws
+    /// the process away and starts another, and the whole point of this is that
+    /// the process stays. the answer is `bpd_core::Replaced` whole — an editor
+    /// given only "yes" cannot show what is now different about the process, and
+    /// one given only "no" cannot show which of the user's edits to undo
+    fn replace_code(&mut self, message: &Incoming) -> Answered {
+        let file = message.arguments["file"].as_str().ok_or_else(|| {
+            Aborted::Refuse(
+                "a `bpd/replaceCode` needs `file`, the path of the file whose \
+                 code to replace, on the debuggee's own filesystem"
+                    .to_string(),
+            )
+        })?;
+
+        let replaced = match self.ask(Request::ReplaceCode { file: file.into() })? {
+            Response::Replaced(replaced) => replaced,
+            other => unreachable!("a code replacement was answered with {other:?}"),
+        };
+
+        // every refusal, as its own sentence, on the `output` stream the client
+        // already shows a user — the body carries the same facts as data, and a
+        // user watching a debug console is the one who has to decide what to
+        // change about their edit
+        if let bpd_core::Replacement::Refused { because } = &replaced.outcome {
+            for reason in because {
+                self.event(
+                    "output",
+                    &serde_json::json!({
+                        "category": "important",
+                        "output": format!("bpd did not replace the code: {reason}\n"),
+                    }),
+                )?;
+            }
+        }
+
+        let body = serde_json::to_value(&replaced)
+            .expect("a replacement is built from types whose serde is derived");
         self.respond(message, Some(body))?;
         Ok(())
     }

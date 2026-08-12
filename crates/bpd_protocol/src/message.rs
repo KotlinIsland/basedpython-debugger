@@ -254,6 +254,16 @@ pub enum FromAgent {
         jumped: bpd_core::Jumped,
     },
 
+    /// what replacing a file's code did to the process, or what stopped it
+    ///
+    /// the whole answer either way. a replacement that was not made carries
+    /// **all** of what stood in the way rather than the first thing, because a
+    /// client fixing them one at a time is a client asking this seventeen times
+    Replaced {
+        /// what became of it, and what it changed about the process
+        replaced: bpd_core::Replaced,
+    },
+
     /// the source around one frame's current line, or why there is none
     ///
     /// read on the debuggee's own filesystem, which is the one the interpreter
@@ -446,6 +456,17 @@ pub enum FromEngine {
     RestartFrame {
         /// which frame
         frame: FrameId,
+    },
+
+    /// replace the code the process is running for one file with what is on disk
+    ///
+    /// the debuggee reads and compiles the file, for the reasons
+    /// [`FromEngine::Source`] does — it is the filesystem the interpreter read
+    /// it from — and because the code objects the new ones are compared against
+    /// are only in the debuggee. compiling runs none of the program
+    ReplaceCode {
+        /// the file whose code to replace, as the client named it
+        file: std::path::PathBuf,
     },
 
     /// write a variable of a frame
@@ -932,6 +953,90 @@ mod tests {
         assert_eq!(received, Some(request));
         let received: Option<FromAgent> = read(&mut wire, &mut buffer).expect("the frame is whole");
         assert_eq!(received, Some(answer));
+    }
+
+    #[test]
+    fn a_replacement_and_what_it_changed_round_trip() {
+        let request = FromEngine::ReplaceCode {
+            file: PathBuf::from("/tmp/victim.py"),
+        };
+        let answer = FromAgent::Replaced {
+            replaced: bpd_core::Replaced {
+                file: PathBuf::from("/tmp/victim.py"),
+                outcome: bpd_core::Replacement::Applied {
+                    changed: vec![bpd_core::Rebound {
+                        function: "boom".to_string(),
+                        was_at: 2,
+                        now_at: 5,
+                        objects: 2,
+                    }],
+                    unchanged: vec!["<module>".to_string()],
+                    rebound: vec![Resolved {
+                        id: 1,
+                        binding: Binding::Bound {
+                            line: 6,
+                            sites: vec![Site {
+                                qualname: "boom".to_string(),
+                                first_line: 5,
+                                offset: 4,
+                            }],
+                            evaluation: Evaluation::Always,
+                        },
+                    }],
+                },
+                mode: Mode::NonStop,
+            },
+        };
+
+        let mut wire = Vec::new();
+        write(&mut wire, &request).expect("writing to a vec cannot fail");
+        write(&mut wire, &answer).expect("writing to a vec cannot fail");
+
+        let mut buffer = Vec::new();
+        let mut wire = wire.as_slice();
+        let received: Option<FromEngine> =
+            read(&mut wire, &mut buffer).expect("the frame is whole");
+        assert_eq!(received, Some(request));
+        let received: Option<FromAgent> = read(&mut wire, &mut buffer).expect("the frame is whole");
+        assert_eq!(received, Some(answer));
+    }
+
+    #[test]
+    fn a_refused_replacement_round_trips_with_every_reason_it_had() {
+        // all of them rather than the first: a client fixing them one at a time
+        // is a client asking this seventeen times
+        let sent = FromAgent::Replaced {
+            replaced: bpd_core::Replaced {
+                file: PathBuf::from("/tmp/victim.py"),
+                outcome: bpd_core::Replacement::Refused {
+                    because: vec![
+                        bpd_core::Unreplaceable::TopLevelChanged {
+                            file: PathBuf::from("/tmp/victim.py"),
+                            differences: vec![bpd_core::Divergence::Defines {
+                                added: vec!["helper".to_string()],
+                                removed: Vec::new(),
+                            }],
+                        },
+                        bpd_core::Unreplaceable::Running {
+                            function: "boom".to_string(),
+                            frame: bpd_core::LiveFrame::Thread {
+                                thread: 8_482_561_408,
+                                line: 3,
+                                held: Some(1),
+                            },
+                        },
+                    ],
+                },
+                mode: Mode::StopTheWorld { native: Vec::new() },
+            },
+        };
+
+        let mut wire = Vec::new();
+        write(&mut wire, &sent).expect("writing to a vec cannot fail");
+
+        let received: Option<FromAgent> =
+            read(&mut wire.as_slice(), &mut Vec::new()).expect("the frame is whole");
+        assert_eq!(received, Some(sent));
     }
 
     #[test]

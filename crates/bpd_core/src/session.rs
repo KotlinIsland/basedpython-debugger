@@ -13,6 +13,7 @@
 //! this crate, defined once and serialised where it has to be
 
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ use crate::breakpoint::{LogRecord, Resolved, SourceBreakpoint};
 use crate::frame::{Frame, FrameId, Scope};
 use crate::jump::Jumped;
 use crate::query::{Difference, Snapshot, SnapshotId, StateQuery};
+use crate::replace::Replaced;
 use crate::script::{Script, Transcript};
 use crate::spawn::{Blindspot, Spawn};
 use crate::stop::{Mode, StepKind, Stop};
@@ -384,6 +386,25 @@ pub enum Request {
         frame: FrameId,
     },
 
+    /// replace the code the process is running for one file with the code on
+    /// disk
+    ///
+    /// a set of assignments to `function.__code__`, and nothing else. the top
+    /// level is **not** re-run, no name is bound or unbound, and no object is
+    /// created — so a class's methods come with it, because a method is a
+    /// function object in the class dictionary and every instance that already
+    /// exists reaches the same one
+    ///
+    /// it is applicable exactly when every difference between the file on disk
+    /// and the code that is running is inside the body of a function that
+    /// exists in both and takes the same arguments. anything else is refused
+    /// with what blocked it, and **nothing is applied partially** — see
+    /// [`crate::Replaced`]
+    ReplaceCode {
+        /// the file whose code to replace, on the debuggee's own filesystem
+        file: PathBuf,
+    },
+
     /// write a variable of a frame, and read back what the frame holds after it
     SetVariable {
         /// which frame
@@ -425,6 +446,7 @@ impl Request {
             Self::Query { .. } => "the state of a stop",
             Self::Diff { .. } => "the difference between two states",
             Self::SetVariable { .. } => "writing a variable",
+            Self::ReplaceCode { .. } => "replacing a file's code",
             Self::SetNextStatement { .. } => "setting the next statement",
             Self::RestartFrame { .. } => "restarting a frame",
         }
@@ -450,6 +472,10 @@ impl Request {
             | Self::Resume { .. }
             | Self::Pause
             | Self::Threads { .. }
+            // about the process rather than about one held thread. it is
+            // answered on a held thread, like everything the agent answers, and
+            // which one makes no difference to the answer
+            | Self::ReplaceCode { .. }
             | Self::Diff { .. } => None,
 
             Self::Step { stop, .. }
@@ -574,6 +600,9 @@ pub enum Response {
     /// frame is now, what the move bound to `None`, and which breakpoints on
     /// the destination will not fire for this pass
     Jumped(Jumped),
+
+    /// what replacing a file's code did to the process, or what stopped it
+    Replaced(Replaced),
 
     /// what a debug script did, step by step
     Transcript(Transcript),

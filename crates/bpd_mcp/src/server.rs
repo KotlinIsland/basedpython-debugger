@@ -446,6 +446,13 @@ impl<'a> Server<'a> {
                     other => unreachable!("a restart was answered with {other:?}"),
                 }
             }
+            "replace_code" => {
+                let args: ReplaceCodeArgs = parse(name, arguments)?;
+                match self.ask(Request::ReplaceCode { file: args.file })? {
+                    Response::Replaced(replaced) => Ok(render::replaced(&replaced)),
+                    other => unreachable!("a code replacement was answered with {other:?}"),
+                }
+            }
             "threads" => {
                 let args: ThreadsArgs = parse(name, arguments)?;
                 match self.ask(Request::Threads {
@@ -1279,6 +1286,16 @@ struct RestartFrameArgs {
     frame: u32,
 }
 
+/// which file's code to replace
+///
+/// no stop and no frame: a replacement is about the process rather than about
+/// one held thread, and it names the file the same way a breakpoint does
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceCodeArgs {
+    file: PathBuf,
+}
+
 /// a whole investigation, submitted as data
 ///
 /// the steps and the budget are `bpd_core`'s own types, so what the schema
@@ -1527,6 +1544,7 @@ mod tests {
         "set_variable" => SetVariableArgs,
         "set_next_statement" => SetNextStatementArgs,
         "restart_frame" => RestartFrameArgs,
+        "replace_code" => ReplaceCodeArgs,
         "threads" => ThreadsArgs,
         "stop_the_world" => WorldArgs,
         "run_script" => RunScript,

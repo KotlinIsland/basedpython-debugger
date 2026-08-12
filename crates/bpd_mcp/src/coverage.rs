@@ -54,6 +54,7 @@ pub const fn reach_of(request: &Request) -> Reach {
         Request::SetVariable { .. } => Reach::Direct("set_variable"),
         Request::SetNextStatement { .. } => Reach::Direct("set_next_statement"),
         Request::RestartFrame { .. } => Reach::Direct("restart_frame"),
+        Request::ReplaceCode { .. } => Reach::Direct("replace_code"),
 
         // the shape this front end exists for, in one call: an agent says what
         // it wants to know and is answered with it, instead of walking a tree
