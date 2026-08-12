@@ -71,12 +71,15 @@
 //!   name up or imports anything
 //! - **no lock, anywhere.** a fork keeps only the calling thread, so a lock
 //!   another thread held at the instant of the fork is one the child's copy
-//!   would wait on for ever. that is not a free-threading nicety: the writing
-//!   end of the control connection is written to by the reader thread, which
-//!   does not hold the GIL, so even on a gil build a fork can land while it is
-//!   locked. so the descriptors are closed by number and the code objects to
-//!   disarm come from [`crate::events`]'s published snapshot, which is an
-//!   atomic pointer read
+//!   would wait on for ever. on a gil build the forking thread holds the GIL
+//!   and so does every program thread that could be holding one of these, which
+//!   keeps them apart; on a free-threaded build nothing does, and free-threaded
+//!   builds are a first-class target rather than a variant to argue around. so
+//!   the descriptors are closed by number, the code objects to disarm come from
+//!   [`crate::events`]'s published snapshot, and the session's own state —
+//!   the writing end, the reader, the stop registry — is **replaced** cell by
+//!   cell rather than emptied. every one of those is an atomic store or an
+//!   atomic read. see [`crate::cells`]
 //! - **the descriptors.** closing one is a `close(2)`, which needs nothing of
 //!   the interpreter at all
 //! - **allocation.** the handler allocates, and it is the platform's own

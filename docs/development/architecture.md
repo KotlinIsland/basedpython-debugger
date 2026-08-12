@@ -300,7 +300,13 @@ the registry of held threads, their mailboxes and the parking are native, behind
 mutexes and condition variables that do not assume a GIL. the control connection
 is read by a rust thread that never takes one, because every answer has to be
 computed on the python thread the question is about — and that thread is not on
-the process while it forks, because cpython counts the ones that are. see
+the process while it forks, because cpython counts the ones that are
+
+what a mutex that does not assume a GIL costs is a fork: `fork` keeps only the
+calling thread, so one held by a program thread at that instant is held for ever
+in the child. so the session's own state — the writing end, the reader, the held
+thread table — is in cells behind an atomic pointer, and a forked child
+**replaces** each of them with a store rather than taking any of them. see
 [child processes](subprocesses.md)
 
 free-threaded builds are a target, not a variant to be tested later. anything in

@@ -11,6 +11,7 @@
 
 mod attach;
 mod breakpoints;
+mod cells;
 mod code;
 mod conditions;
 mod events;

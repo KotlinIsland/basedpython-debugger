@@ -51,6 +51,7 @@ use std::thread::JoinHandle;
 use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
+use crate::cells::ForkCell;
 use crate::stops;
 
 /// the exit code used when the debugger disappears mid-session
@@ -61,7 +62,18 @@ use crate::stops;
 const ENGINE_LOST: i32 = 70;
 
 /// the writing end, or nothing before `attach`
-static WRITER: Mutex<Option<TcpStream>> = Mutex::new(None);
+///
+/// in a [`ForkCell`] because a program thread can be inside [`send`], holding
+/// it across a socket write, while another thread of the same process calls
+/// `os.fork()` — there is no GIL on a free-threaded build to keep the two
+/// apart. the child's copy would then be locked by a thread the fork did not
+/// keep
+static WRITER: ForkCell<Option<TcpStream>> = ForkCell::new(no_writer);
+
+/// what the writing end is before `attach`, and in a forked child
+const fn no_writer() -> Option<TcpStream> {
+    None
+}
 
 /// whether the program has finished
 ///
@@ -81,10 +93,10 @@ static FINISHED: AtomicBool = AtomicBool::new(false);
 /// would wait for answers nothing can send
 ///
 /// an atomic rather than anything larger because of where it is read: in a
-/// forked child, and in [`send`] *before* the writing end is locked. the reader
-/// thread writes without the GIL, so a fork can land while it holds that lock,
-/// and the child's copy of it would then be held for ever by a thread that does
-/// not exist. see [`crate::forks`]
+/// forked child, and in [`send`] *before* the writing end is locked. a fork
+/// handler that had to take a lock to find out whether this process still owns
+/// a session would be waiting on whatever a thread the fork did not keep was
+/// holding. see [`crate::forks`] and [`crate::cells`]
 static DETACHED: AtomicBool = AtomicBool::new(false);
 
 /// every descriptor this session opened in the debuggee
@@ -145,14 +157,23 @@ struct Reader {
     running: Option<JoinHandle<Reading>>,
 }
 
-static READER: Mutex<Reader> = Mutex::new(Reader {
-    #[cfg(unix)]
-    forking: 0,
-    #[cfg(unix)]
-    waker: None,
-    idle: None,
-    running: None,
-});
+/// in a [`ForkCell`] for the reason [`WRITER`] is: [`stand_down`] takes this,
+/// and the `forking` count above exists because two threads can fork at once —
+/// so a fork can land while a *concurrent* fork holds it, and the child's copy
+/// would be locked by neither of them
+static READER: ForkCell<Reader> = ForkCell::new(no_reader);
+
+/// what the reader is before `attach`, and in a forked child
+const fn no_reader() -> Reader {
+    Reader {
+        #[cfg(unix)]
+        forking: 0,
+        #[cfg(unix)]
+        waker: None,
+        idle: None,
+        running: None,
+    }
+}
 
 /// connect to the engine, complete the handshake, and start reading
 pub(crate) fn attach(endpoint: &str, token_hex: &str) -> io::Result<()> {
@@ -207,11 +228,11 @@ fn lock<T>(mutex: &'static Mutex<T>) -> MutexGuard<'static, T> {
 }
 
 fn writer() -> MutexGuard<'static, Option<TcpStream>> {
-    lock(&WRITER)
+    lock(WRITER.get())
 }
 
 fn reader() -> MutexGuard<'static, Reader> {
-    lock(&READER)
+    lock(READER.get())
 }
 
 /// hand the reading end to a thread of its own
@@ -255,9 +276,10 @@ fn start_reading(reader: &mut Reader) -> io::Result<()> {
 /// the fork and is resumed by the request that was waiting
 #[cfg(unix)]
 pub(crate) fn stand_down() {
-    // a forked child gave the session up and has no reader thread to stand
-    // down. it must not touch this: its copy of the reading end names
-    // descriptors `detach` has already closed
+    // a forked child gave the session up and never started a reader, so there
+    // is nothing here to take off the process. going on would count a fork the
+    // matching `after_in_parent` handler will not count back, because that half
+    // returns here too
     if detached() {
         return;
     }
@@ -367,10 +389,20 @@ pub(crate) fn detached() -> bool {
 /// the wakeup pair goes the same way and for the same reason: it is two more
 /// descriptors this session opened in a process that is no longer a debuggee
 ///
-/// no lock is taken, on any build. the writing end is behind one that the
-/// reader thread holds without the GIL, so a fork can land while it is locked
-/// and the child's copy of it would then be held by a thread that does not
-/// exist. see [`crate::forks`]
+/// **no lock is taken, on any build.** the reader thread is not on the process
+/// while it forks — `os.register_at_fork(before=…)` stands it down — so it is
+/// not the thread that could be holding one. what could is a thread of the
+/// **program's**: one inside [`send`] holds the writing end across a socket
+/// write, and one inside [`crate::stops::enter`] holds the stop registry. on a
+/// gil build `os.fork()` holds the GIL and so do those, which keeps them apart;
+/// on a free-threaded build nothing does, and a first-class target does not get
+/// an argument that holds on one build
+///
+/// so the three cells are **replaced** rather than emptied, with an atomic
+/// store each — see [`crate::cells`], which is also where the abandoned cells
+/// are accounted for. the numbered closes above are why they must not be
+/// dropped: what they hold owns these descriptor numbers, and a later `close`
+/// of a number this process has recycled would close a file the program opened
 #[cfg(unix)]
 pub(crate) fn detach() -> bool {
     if DETACHED.swap(true, Ordering::SeqCst) {
@@ -384,10 +416,10 @@ pub(crate) fn detach() -> bool {
         }
         // SAFETY: these are the descriptors `attach` opened in the process this
         // one was forked from, and nothing in *this* process will close any of
-        // them again. every owning value is inside a `static` whose destructor
-        // never runs, and nothing reads one once `DETACHED` is set — [`send`],
-        // [`stand_down`] and [`resume_reading`] all return before they look. so
-        // this is the only close they will get
+        // them again. the values that own them are in cells this call is about
+        // to abandon, and an abandoned cell is never freed — so nothing will
+        // ever drop a `TcpStream` or a `UnixStream` for one of these numbers,
+        // and this is the only close they will get
         #[expect(
             unsafe_code,
             reason = "the owning values are unreachable in a forked child, so \
@@ -399,6 +431,14 @@ pub(crate) fn detach() -> bool {
             std::os::fd::OwnedFd::from_raw_fd(raw)
         });
     }
+
+    // and now the cells those values live in, so that this process can use the
+    // writing end, the reader and the stop registry again without waiting on a
+    // lock a thread the fork did not keep was holding. it does not take any of
+    // them to do it
+    WRITER.abandon();
+    READER.abandon();
+    stops::abandon();
     true
 }
 
