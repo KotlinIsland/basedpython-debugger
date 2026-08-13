@@ -51,6 +51,14 @@ use pyo3::types::PyModule;
 /// set by `build.rs` from the interpreter `PYO3_PYTHON` selected
 const BUILT_FOR: &str = env!("BPD_AGENT_PYTHON");
 
+/// the oldest interpreter `build.rs` will compile this against
+///
+/// stamped so a test can put it beside `bpd_core::python::MINIMUM_SUPPORTED`. a
+/// build script cannot depend on a workspace crate, so the number is written in
+/// two places and a test is what keeps them one
+#[cfg(test)]
+const BUILD_MINIMUM: &str = env!("BPD_AGENT_MINIMUM");
+
 /// the tool id `sys.monitoring` reserves for debuggers
 ///
 /// `bpd` claims this one or none. quietly taking a different id would mean a
@@ -771,20 +779,21 @@ fn monitoring(python: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     })
 }
 
-/// the running interpreter's `major.minor`
+/// the running interpreter's tag
+///
+/// spelled by [`bpd_core::python::InterpreterTag`], which is also what `bpd`
+/// names an agent directory with — the check here and the selection out there
+/// have to be about the same thing or one of them is answering a different
+/// question
 fn running_version(python: Python<'_>) -> PyResult<String> {
     let info = PyModule::import(python, "sys")?.getattr("version_info")?;
     let major: u8 = info.getattr("major")?.extract()?;
     let minor: u8 = info.getattr("minor")?.extract()?;
 
-    Ok(format!(
-        "{major}.{minor}{}",
-        if free_threaded(python, major, minor)? {
-            "t"
-        } else {
-            ""
-        }
-    ))
+    Ok(
+        bpd_core::python::InterpreterTag::new(major, minor, free_threaded(python, major, minor)?)
+            .to_string(),
+    )
 }
 
 /// whether this interpreter is a `Py_GIL_DISABLED` build
@@ -829,4 +838,34 @@ fn free_threaded(python: Python<'_>, major: u8, minor: u8) -> PyResult<bool> {
          different abis — so there is nothing to check this agent against and \
          guessing would mean running against a layout it was not compiled for"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BUILD_MINIMUM, BUILT_FOR};
+    use bpd_core::python::{InterpreterTag, MINIMUM_SUPPORTED};
+
+    /// `bpd` finds an agent by naming a directory after the interpreter's tag,
+    /// and the agent refuses an interpreter whose tag is not the one stamped
+    /// here. those are two different guarantees and they are only comparable
+    /// because they are said in the same words — a stamp in any other spelling
+    /// would be an agent no launcher could ever select
+    #[test]
+    fn the_stamped_tag_is_the_one_bpd_selects_by() {
+        let tag = InterpreterTag::parse(BUILT_FOR)
+            .unwrap_or_else(|| panic!("`{BUILT_FOR}` was stamped by build.rs and is not a tag"));
+
+        assert_eq!(tag.to_string(), BUILT_FOR);
+    }
+
+    #[test]
+    fn the_agent_build_minimum_matches_the_support_policy() {
+        assert_eq!(
+            BUILD_MINIMUM,
+            format!("{}.{}", MINIMUM_SUPPORTED.major, MINIMUM_SUPPORTED.minor),
+            "build.rs refuses below one interpreter and the support policy \
+             names another, so an interpreter bpd will not drive can still \
+             build an agent"
+        );
+    }
 }

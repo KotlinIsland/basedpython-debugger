@@ -44,9 +44,9 @@ fn imported_from(interpreter: &Capabilities, python_path: &Path) -> String {
 fn a_cached_agent_is_imported_by_the_interpreter_it_was_built_for() {
     let cache = tempfile::tempdir().expect("a temporary directory can be made");
 
-    let first = bpd_engine::agent::stage_into(cache.path())
+    let first = bpd_engine::agent::stage_for_into(cache.path(), interpreter())
         .unwrap_or_else(|error| panic!("could not stage the agent: {error}"));
-    let again = bpd_engine::agent::stage_into(cache.path())
+    let again = bpd_engine::agent::stage_for_into(cache.path(), interpreter())
         .unwrap_or_else(|error| panic!("could not stage the agent again: {error}"));
 
     assert_eq!(
@@ -71,7 +71,7 @@ fn a_cache_that_cannot_be_trusted_is_refused_rather_than_worked_around() {
     let cache = outside.path().join("not a directory");
     std::fs::write(&cache, "something else entirely").expect("the file can be written");
 
-    let refused = bpd_engine::agent::stage_into(&cache);
+    let refused = bpd_engine::agent::stage_for_into(&cache, interpreter());
 
     let Err(error) = refused else {
         panic!("staging into a file has to be refused, not worked around");

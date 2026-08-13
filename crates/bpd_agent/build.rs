@@ -40,6 +40,12 @@ fn main() {
         .0
         .contains(&pyo3_build_config::BuildFlag::Py_GIL_DISABLED);
 
+    // recorded so `the_agent_build_minimum_matches_the_support_policy` can put
+    // the number above beside `bpd_core::python::MINIMUM_SUPPORTED`. a build
+    // script cannot depend on a workspace crate, so the two are written twice
+    // and a test is the only thing that can keep them the same
+    println!("cargo::rustc-env=BPD_AGENT_MINIMUM={minimum_major}.{minimum_minor}");
+
     // recorded so the agent can refuse at import time when it is loaded by an
     // interpreter other than the one it was compiled for
     println!(

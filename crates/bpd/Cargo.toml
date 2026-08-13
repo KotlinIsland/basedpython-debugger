@@ -25,6 +25,10 @@ bpd_test = { workspace = true }
 
 criterion = { workspace = true }
 serde_json = { workspace = true }
+# `tests/agents.rs` names the cache entry an agent stages into, which is the
+# sha-256 of its bytes. computing it is what makes "this interpreter was given
+# the file under *its* tag" an assertion rather than an inference
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 
 # the whole-process comparison: a program run bare, under bpd, and under

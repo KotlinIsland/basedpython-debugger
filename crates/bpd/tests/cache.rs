@@ -46,8 +46,11 @@ impl Home {
     /// temporary directory is under a `/var` that is a link to `/private/var` —
     /// the same entry, named the way the report will name it
     fn stage(&self) -> PathBuf {
-        let staged = bpd_engine::agent::stage_into(&self.cache())
-            .unwrap_or_else(|error| panic!("could not stage the agent: {error}"));
+        let staged = bpd_engine::agent::stage_for_into(
+            &self.cache(),
+            bpd_test::agent::matching_interpreter(),
+        )
+        .unwrap_or_else(|error| panic!("could not stage the agent: {error}"));
         self.cache().join(digest_of(staged.python_path()))
     }
 

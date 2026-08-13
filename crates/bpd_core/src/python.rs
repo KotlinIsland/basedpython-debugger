@@ -55,6 +55,66 @@ impl fmt::Display for PythonVersion {
     }
 }
 
+/// which agent build an interpreter can load
+///
+/// the agent is a cpython extension and is **not** abi3 — it reads
+/// `sys.monitoring` and frame internals whose layout changes between releases —
+/// so one build belongs to one `major.minor`. a free-threaded interpreter is a
+/// **different abi** rather than a variant of the same one: different struct
+/// layouts, different reference counting, and the same `sys.version_info`. so
+/// the tag carries both, spelled the way cpython spells its own extension
+/// suffix — `3.14`, `3.14t`
+///
+/// it is the one vocabulary three things share: what `bpd` names an agent
+/// directory with, what the agent stamps into itself at build time, and what
+/// `bpd_agent.verify_interpreter()` compares at import. selection picking the
+/// right file and the agent checking it was compiled for the interpreter that
+/// imported it are two different guarantees, and they are only comparable
+/// because they are said in the same words
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InterpreterTag {
+    major: u8,
+    minor: u8,
+    free_threaded: bool,
+}
+
+impl InterpreterTag {
+    /// the tag of a release and a build configuration
+    pub const fn new(major: u8, minor: u8, free_threaded: bool) -> Self {
+        Self {
+            major,
+            minor,
+            free_threaded,
+        }
+    }
+
+    /// the tag written back out of text — a directory name, or a build stamp
+    ///
+    /// `None` unless the text is exactly what [`Display`](fmt::Display) would
+    /// have written. `3.014` and `3.14.0` name no interpreter, and a tag read
+    /// loosely would hand one release's agent to another — which is the load
+    /// that imports and then reads the wrong offsets
+    pub fn parse(text: &str) -> Option<Self> {
+        let (version, free_threaded) = match text.strip_suffix('t') {
+            Some(version) => (version, true),
+            None => (text, false),
+        };
+        let (major, minor) = version.split_once('.')?;
+        let tag = Self::new(major.parse().ok()?, minor.parse().ok()?, free_threaded);
+        (tag.to_string() == text).then_some(tag)
+    }
+}
+
+impl fmt::Display for InterpreterTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)?;
+        if self.free_threaded {
+            f.write_str("t")?;
+        }
+        Ok(())
+    }
+}
+
 /// which python implementation an interpreter is
 ///
 /// only [`Implementation::CPython`] can be debugged. the variant for everything
@@ -129,6 +189,15 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
+    /// the agent build this interpreter can load
+    ///
+    /// taken from what the interpreter said about itself when it was probed,
+    /// which is the only thing that can be right: a path or a file name only
+    /// ever *claims* which interpreter it is for
+    pub const fn tag(&self) -> InterpreterTag {
+        InterpreterTag::new(self.version.major, self.version.minor, self.free_threaded)
+    }
+
     /// ask an interpreter what it is
     pub fn probe(interpreter: &Path) -> Result<Self> {
         let output = Command::new(interpreter)
@@ -355,6 +424,69 @@ mod tests {
             RemoteDebug::DisabledByEnvironment
         );
         assert_eq!(capabilities(report()).remote_debug, RemoteDebug::Available);
+    }
+
+    /// the free-threaded build is the half a version alone cannot say, and it
+    /// is the half that decides between two artifacts on disk
+    #[test]
+    fn a_tag_is_the_release_and_the_build_configuration() {
+        assert_eq!(capabilities(report()).tag().to_string(), "3.14");
+        assert_eq!(
+            capabilities(ProbeReport {
+                free_threaded: true,
+                ..report()
+            })
+            .tag()
+            .to_string(),
+            "3.14t"
+        );
+        assert_ne!(
+            capabilities(report()).tag(),
+            capabilities(ProbeReport {
+                free_threaded: true,
+                ..report()
+            })
+            .tag(),
+            "a free-threaded interpreter is a different abi, not a variant of \
+             the same one"
+        );
+    }
+
+    #[test]
+    fn a_tag_reads_back_from_exactly_the_spelling_it_writes() {
+        for spelled in ["3.13", "3.14", "3.14t", "3.15", "4.0"] {
+            let tag =
+                InterpreterTag::parse(spelled).unwrap_or_else(|| panic!("`{spelled}` is a tag"));
+            assert_eq!(tag.to_string(), spelled);
+        }
+    }
+
+    /// a directory whose name is nearly a tag is not one. reading it loosely
+    /// would resolve one release's agent to another, which is the load that
+    /// imports and then reads the wrong offsets
+    #[test]
+    fn text_that_is_not_a_tag_is_not_read_as_one() {
+        for spelled in [
+            "",
+            "3",
+            "3.",
+            ".14",
+            "3.014",
+            "03.14",
+            "3.14.0",
+            "3.14T",
+            "3.14t ",
+            "python3.14",
+            "t",
+            "3.-1",
+            "3.256",
+        ] {
+            assert_eq!(
+                InterpreterTag::parse(spelled),
+                None,
+                "`{spelled}` was read as a tag"
+            );
+        }
     }
 
     // the probe has to stay parseable by interpreters far older than the

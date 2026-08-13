@@ -76,6 +76,48 @@ jobs:
       # supported, so a job that silently tested nothing is not possible
       - run: cargo test --workspace --all-features
 
+  agents:
+    name: an agent per interpreter tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: |
+            3.13
+            3.14
+      # every entry of the `test` matrix builds one agent and debugs the one
+      # interpreter it matches. what no entry of it can reach is the thing an
+      # installed bpd does: carry several, and choose. so this assembles the
+      # layout out of real builds and launches each interpreter through it
+      #
+      # the last `cargo build -p bpd_agent` also leaves its artifact where a
+      # checkout's development build sits, and it is 3.14's. that makes the
+      # 3.13 launch below decisive rather than incidental: an agent chosen by
+      # anything other than the tag is the 3.14 build, and 3.13 refuses it at
+      # import
+      - name: build an agent for each tag, into the layout bpd reads
+        run: |
+          set -euo pipefail
+          for python in python3.13 python3.14; do
+            PYO3_PYTHON=$python cargo build -p bpd_agent
+            tag=$("$python" -c 'import sys, sysconfig; print("%d.%d%s" % (sys.version_info[0], sys.version_info[1], "t" if sysconfig.get_config_var("Py_GIL_DISABLED") else ""))')
+            mkdir -p "target/debug/agents/$tag"
+            cp target/debug/libbpd_agent.so "target/debug/agents/$tag/"
+          done
+      - run: cargo build --bin bpd
+      - name: each interpreter is launched with the agent carried for its tag
+        run: |
+          set -euo pipefail
+          for python in python3.13 python3.14; do
+            ran=$(./target/debug/bpd launch --python "$python" -c 'print("the-program-ran")')
+            test "$ran" = "the-program-ran"
+          done
+
   cross:
     name: cross-compile ${{ matrix.target }}
     runs-on: ubuntu-latest

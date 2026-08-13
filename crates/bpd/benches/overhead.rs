@@ -165,14 +165,19 @@ impl Session {
         // by an earlier `cargo build` (no `--release`) is in a different
         // directory and is not found — which is the honest outcome, since a
         // debug agent's numbers would not be the shipped agent's numbers
-        if let Err(error) = bpd_engine::agent::stage() {
+        //
+        // the interpreter comes first because an agent is resolved **for** one:
+        // a `bpd` carries one per interpreter tag. `matching_interpreter` fails
+        // with what every candidate said, which is the same missing release
+        // build seen from the other end
+        let interpreter = bpd_test::agent::matching_interpreter();
+        if let Err(error) = bpd_engine::agent::stage_for(interpreter) {
             panic!(
                 "{error}\n\nthis is a benchmark, so it runs against the release \
                  agent. build one:\n    cargo build --release -p bpd_agent"
             );
         }
 
-        let interpreter = bpd_test::agent::matching_interpreter();
         let (debugpy, debugpy_version) = debugpy_interpreter(interpreter);
 
         Self {
@@ -790,7 +795,7 @@ fn attaching(criterion: &mut Criterion) {
     });
 
     group.bench_function("agent imported, staged once", |bencher| {
-        let staged = bpd_test::agent::staged();
+        let staged = bpd_test::agent::staged_for(bpd_test::agent::matching_interpreter());
         bencher.iter(|| {
             snippet(
                 &session.interpreter,
@@ -809,8 +814,11 @@ fn attaching(criterion: &mut Criterion) {
                     // timed part: what is being asked is what the *interpreter*
                     // pays for such a file, not what a one megabyte copy costs
                     let cache = tempfile::tempdir().expect("a temporary directory can be made");
-                    let staged = bpd_engine::agent::stage_into(cache.path())
-                        .unwrap_or_else(|error| panic!("could not stage the agent: {error}"));
+                    let staged = bpd_engine::agent::stage_for_into(
+                        cache.path(),
+                        bpd_test::agent::matching_interpreter(),
+                    )
+                    .unwrap_or_else(|error| panic!("could not stage the agent: {error}"));
                     let started = Instant::now();
                     snippet(
                         &session.interpreter,

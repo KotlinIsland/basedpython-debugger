@@ -54,9 +54,21 @@ nobody asks
 ## the report
 
 `bpd cache` names the directory, counts the entries, adds up what they hold, and
-says which entry the agent **this** `bpd` would stage is in — which is the entry
-whose removal costs the next launch a cold load, and the only one there is a
+says which entries the agents **this** `bpd` carries would stage into — the ones
+whose removal costs the next launch a cold load, and the only ones there is a
 reason to keep
+
+there is one per interpreter tag, because a `bpd` carries one agent per tag and
+each is what a launch on the interpreter it is for would stage —
+[launching](launching.md#which-agent-is-staged) has the layout. a checkout
+carries a single untagged artifact instead, and it is reported as what it is:
+
+```text
+current      35ec95e90058b885e39956a1cb007e5fafe9fd667fc282be129ffdd281eb729b
+             the agent for python 3.13 — not staged yet — the next launch will put it there
+current      6be4c6f43b6e1b9a2a86a8c0c8c1f2f0c1a2b3c4d5e6f708192a3b4c5d6e7f80
+             the agent for python 3.14 — staged, 5.3 MiB (5620704 bytes) — clearing it costs the next launch a cold load of the agent
+```
 
 a cache that is not there is said plainly and is not a failure. it is what a
 machine that has never launched a debuggee looks like, and asking about it does
@@ -74,15 +86,16 @@ so the number can be checked against `du` rather than taken on trust
 
 ## clearing
 
-`bpd cache clear` removes every entry. `--keep-current` leaves the one holding
-the agent this `bpd` would stage, so the next launch does not pay a cold load of
-it — about 120 ms on macOS, measured in [what bpd costs](overhead.md)
+`bpd cache clear` removes every entry. `--keep-current` leaves the ones holding
+the agents this `bpd` carries — one per interpreter tag — so the next launch
+does not pay a cold load of one, about 120 ms on macOS, measured in
+[what bpd costs](overhead.md)
 
-it is worth having for exactly that reason and no other: the entry a person is
-about to use again is the one piece of the cache with a cost attached to
-deleting it, and the report already points at it. `--keep-current` on a cache
-that does not hold the current agent keeps nothing and **says so**, rather than
-leaving a silence that reads like it kept something
+it is worth having for exactly that reason and no other: the entries a person is
+about to use again are the pieces of the cache with a cost attached to deleting
+them, and the report already points at them. `--keep-current` names each agent
+it could not keep because the cache did not hold it, rather than leaving a
+silence that reads like it kept something
 
 there is no flag that clears anything the refusals below stop. a `--force` would
 be a way to turn the checks off, and the checks are the reason it is safe to run
@@ -152,8 +165,8 @@ windows should not stand between a person and the other eighty-eight — and the
 exit code says the answer is not the whole answer
 
 `bpd cache` exits non-zero for the same reason when the directory holds
-something it cannot account for, or when the current entry cannot be named
-because the agent build is not where it should be. the report is still printed:
+something it cannot account for, or when the current entries cannot be named
+because this `bpd` carries no agent at all. the report is still printed:
 what it says is true, it is just not all of what was asked
 
 ## what is not covered by a test

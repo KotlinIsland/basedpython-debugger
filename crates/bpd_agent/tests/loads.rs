@@ -67,12 +67,7 @@ fn an_interpreter_it_was_not_built_for_never_proceeds_silently() {
     let built_for = succeeds("import bpd_agent; print(bpd_agent.built_for())");
 
     for interpreter in bpd_test::discovered().all() {
-        let running = format!(
-            "{}.{}{}",
-            interpreter.version.major,
-            interpreter.version.minor,
-            if interpreter.free_threaded { "t" } else { "" }
-        );
+        let running = interpreter.tag().to_string();
         if running == built_for {
             continue;
         }
