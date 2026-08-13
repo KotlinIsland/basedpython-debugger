@@ -602,7 +602,12 @@ request, and a client that does not know about one never sends it
     a debug console, which is not a terminal, so its streams are pipes and
     `isatty()` is `False`. why that is the right answer rather than a
     pseudo-terminal, and what follows from it for buffering, is in
-    [launching a debuggee](launching.md#the-debuggees-own-standard-streams)
+    [launching a debuggee](launching.md#the-debuggees-own-standard-streams).
+    it is also the only route to a debuggee that **reads input**: a launch
+    through this adapter gives the program `/dev/null` as its stdin on both
+    transports, so `input()` raises `EOFError` at the line that asked. nothing
+    in DAP carries a client's keystrokes to a debuggee any other way, and a
+    channel invented here would be a capability MCP does not have
 
 the vs code extension is **driven in the editor it is for**. its schema is
 pinned to `bpd_dap::Configuration` by a test that fails if either side moves,

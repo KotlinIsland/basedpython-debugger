@@ -10,6 +10,12 @@
 //! adapter's stdout is the protocol, and one `print` from the debuggee in the
 //! middle of a message would make every message after it unreadable
 //!
+//! its stdin is **`/dev/null`**, for the mirror image of that reason: over
+//! stdio this process's stdin is the protocol, and a debuggee reading it took
+//! the client's next request out of the stream. under `--listen` it belongs to
+//! whatever spawned this. neither is the debuggee's, and DAP's way to give a
+//! program real input is `runInTerminal`
+//!
 //! under `--listen` the protocol is on the socket instead, and this process's
 //! stdout carries exactly one line: where the adapter bound and what a client
 //! has to present. that is why the port can be reported at all — it is the one

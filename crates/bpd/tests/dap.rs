@@ -10,7 +10,10 @@
 //! framing. that matters more than it looks, because the debuggee's own stdout
 //! is on the same file descriptor the protocol would be on if it were inherited
 //! — a single `print` would make every message after it unreadable, and a test
-//! that spoke to the adapter in-process would never notice
+//! that spoke to the adapter in-process would never notice. the same is true of
+//! the descriptor going the other way, and it is a sharper edge: a debuggee
+//! reading stdin over this transport does not lose its own output, it **takes
+//! the client's request**
 //!
 //! ## both transports, one set of assertions
 //!
@@ -77,6 +80,7 @@ over_each_transport!(
     an_editor_can_move_where_the_program_carries_on_from,
     a_capability_that_is_not_advertised_is_refused_rather_than_guessed_at,
     a_client_is_refused_the_same_interpreter_the_command_line_is,
+    a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds,
 );
 
 /// a program with a local worth writing to, and a marker after the breakpoint
@@ -719,6 +723,92 @@ fn a_capability_that_is_not_advertised_is_refused_rather_than_guessed_at(transpo
     client.finish();
 }
 
+/// a line put in a **listening** adapter's own stdin, which no debuggee may read
+///
+/// under `--listen` the protocol is on the socket, so this is not the protocol —
+/// it is the stream of whatever spawned the adapter, and a debuggee that took a
+/// byte of it would be taking it from a reader that is already waiting on it.
+/// over stdio there is no need for a marker: the protocol *is* the stream, and
+/// what a debuggee reads there is a DAP message
+const NOT_THE_DEBUGGEES: &str = "this line belongs to whatever spawned bpd";
+
+/// a program that reads its own stdin and says exactly what it got
+///
+/// `read()` rather than one `input()`, because it reads to **end of stream**: it
+/// returns the empty string on a stream that is already over, and on a stream
+/// somebody else is writing it does not return at all. so a debuggee handed
+/// bpd's stdin either prints what it stole or never reaches the next line
+const STDIN_PROBE: &str = r#"import sys
+
+print("isatty", sys.stdin.isatty(), flush=True)
+print("read", repr(sys.stdin.read()), flush=True)
+try:
+    input()
+    print("input returned", flush=True)
+except EOFError as error:
+    print("EOFError", error, flush=True)
+"#;
+
+fn a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds(transport: Transport) {
+    // the debuggee's output is captured on both transports, and its stdin used
+    // to be inherited on both. over stdio that made the program a **second
+    // reader of the protocol**: `input()` returned `Content-Length: 68` and the
+    // request those bytes belonged to was never answered — the session
+    // corrupted rather than merely hung. under `--listen` it was the stream of
+    // whatever spawned the adapter, taken from it just as silently
+    //
+    // what it gets instead is `/dev/null`, which is what
+    // `python program.py < /dev/null` gives, and `EOFError` is what a program
+    // that asks for a line gets — an outcome with a name, at the line that
+    // asked for it
+    let fixture = Fixture::new("reader", STDIN_PROBE);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let exited = client.event("exited");
+    assert_eq!(exited["body"]["exitCode"], 0, "the probe runs to the end");
+    client.event("terminated");
+
+    let said = client.output();
+    assert!(
+        said.contains("read ''"),
+        "the debuggee read something from its stdin, and everything there is \
+         bpd's: {said:?}"
+    );
+    assert!(
+        !said.contains("Content-Length"),
+        "the debuggee read a DAP message the client sent, which is the protocol \
+         stream with a second reader on it: {said:?}"
+    );
+    assert!(
+        !said.contains(NOT_THE_DEBUGGEES),
+        "the debuggee read the stdin of whatever spawned the adapter: {said:?}"
+    );
+    assert!(
+        said.contains("EOFError"),
+        "asking a stream that is over for a line raises `EOFError`, which is \
+         what a program can catch. the probe said: {said:?}"
+    );
+    // and the guard: an empty stdin is still a stdin. `sys.stdin` being `None`
+    // — which is what closing the descriptor gives — would make `input()` raise
+    // `RuntimeError` instead, and every assertion above would still pass
+    assert!(
+        said.contains("isatty False"),
+        "the debuggee has a real stdin object that reports it is not a \
+         terminal: {said:?}"
+    );
+
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
 /// the interpreter the built agent matches
 fn interpreter() -> String {
     bpd_test::agent::matching_interpreter()
@@ -790,13 +880,22 @@ impl Listener {
     fn start() -> Self {
         let mut adapter = Command::new(BPD)
             .args(["dap", "--listen", "0"])
-            // a listening adapter never reads its stdin, and a pipe left open
-            // for it would only be something to close later
-            .stdin(Stdio::null())
+            // a listening adapter never reads its stdin — the protocol is on
+            // the socket — so this holds a marker instead of nothing, and the
+            // marker is what says whether anything the adapter *starts* read
+            // it. see [`NOT_THE_DEBUGGEES`]
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .expect("the binary was built by the same cargo invocation as this test");
         let mut stdout = BufReader::new(adapter.stdout.take().expect("stdout was asked for"));
+
+        // written and then closed. a debuggee that inherited this reads the
+        // line and carries on, so the theft is a failed assertion naming what
+        // was taken rather than a suite that hangs until the watchdog
+        let mut feeding = adapter.stdin.take().expect("stdin was asked for");
+        writeln!(feeding, "{NOT_THE_DEBUGGEES}").expect("nothing has read the adapter's stdin");
+        drop(feeding);
 
         let process = Arc::new(Mutex::new(adapter));
         let finished = Arc::new(AtomicBool::new(false));

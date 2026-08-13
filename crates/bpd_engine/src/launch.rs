@@ -1446,9 +1446,9 @@ impl Program {
 /// launch a program under the debugger and stop before its first statement
 ///
 /// returns once the agent has reported that it is stopped, so the caller holds a
-/// debuggee that has run none of the program yet. the debuggee's own stdout and
-/// stderr are bpd's, untouched — which is what makes a run under bpd
-/// indistinguishable from a bare one
+/// debuggee that has run none of the program yet. all three of the debuggee's
+/// own standard streams are bpd's, untouched — which is what makes a run under
+/// bpd indistinguishable from a bare one, down to `isatty()`
 pub fn launch(
     interpreter: &Capabilities,
     program: &Program,
@@ -1462,6 +1462,12 @@ pub fn launch(
 /// what a front end whose own stdout is a **protocol** needs: one `print` from
 /// the program in the middle of a message and every message after it is
 /// unreadable
+///
+/// the debuggee's **stdin is `/dev/null`** here, and that is part of the same
+/// decision rather than a separate one: a front end that has taken the
+/// program's output over has taken bpd's streams for itself, and there is no
+/// bare run left to inherit from. `input()` raises `EOFError`, exactly as it
+/// does under `python program.py < /dev/null`
 ///
 /// `on_spawn` is handed the two pipes the moment the process exists and before
 /// anything waits on it. that ordering is the whole of the contract: a pipe
@@ -1531,6 +1537,26 @@ fn start(
 
     if piped.is_some() {
         command
+            // stdin goes with the other two, and it goes to `/dev/null` rather
+            // than staying inherited. this process's stdin is either the
+            // **protocol** — `bpd dap` on stdio, `bpd mcp` — or it belongs to
+            // whatever spawned bpd, and neither is the debuggee's to read.
+            // measured, before this: `input()` in a debuggee under `bpd dap`
+            // handed the program `'Content-Length: 68\r'`, and the request
+            // those bytes were the header of was answered by nothing
+            //
+            // nothing carries a client's keystrokes to a debuggee — DAP's
+            // answer for a program that needs them is `runInTerminal`, where the
+            // client owns the terminal — so what is left is the empty stream
+            // `python program.py < /dev/null` has. `input()` there raises
+            // `EOFError` at the line that asked, which is an outcome with a name
+            // rather than a hang
+            //
+            // **null and not a closed descriptor.** cpython sets `sys.stdin` to
+            // `None` when descriptor 0 is not open, and then `input()` raises
+            // `RuntimeError: input(): lost sys.stdin` — and descriptor 0 would
+            // be handed to the next file the program opened
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
     }
