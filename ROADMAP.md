@@ -436,38 +436,64 @@ result is
 
 ## after the MVP
 
-### M6 — basedpython
+### M6 — basedpython · breakpoints done, frames not
 
-`.by` breakpoints and `.by` frames through a verified source map
+`.by` breakpoints through a verified source map. **the map and the breakpoints
+are done. frames are not**, and that is where this milestone stands
 
 this was recorded as **blocked upstream** — "the transpiler has to emit a source
-map with provenance for generated lines and a hash of both artefacts". **most of
-that is wrong, and the sibling repository had already found it out.**
+map with provenance for generated lines and a hash of both artefacts". all of it
+had already landed by the time anyone looked
 
-`by run` writes `_by_sourcemap.py` beside the transpiled output today:
+`by run` writes `_by_sourcemap.py` into the directory it transpiles into:
+`SOURCEMAP`, indexed by generated line and holding the `.by` line it came from
+with `None` where a prelude has no source — that `None` **is** the provenance —
+and `DIGESTS`, the sha-256 of both files each entry describes. both were checked
+against a real `by run` before anything was built on them. see
+[source mapping](docs/development/source-mapping.md)
 
-```python
-SOURCEMAP = {
-    "/tmp/.tmpXXXX/demo.py": ("/abs/path/demo.by", [None, 0, 1, 2, 3, ...]),
-}
-```
+**what is done**
 
-indexed by **generated** line, holding the `.by` line it came from — and `None`
-where the transpiler emitted a prelude with no source. that is the map, and the
-`None` **is** the provenance. `basedpython-pycharm` ships source-mapped `.by`
-debugging on it through debugpy's `setPydevdSourceMap`, verified end to end, and
-its `docs/debugging.md` says in as many words that the same "blocked upstream"
-belief it had recorded for a long time was false
+- the map is read from the bytes and never imported: a breakpoint is set before
+    there is an interpreter to ask, and importing it would put a module in the
+    debuggee's `sys.modules` that bpd put there. the reader accepts the literal
+    subset the emitter writes and refuses everything else by line and column
+- **both digests are recomputed from disk before any mapping is trusted.** a
+    file that has moved refuses the whole map, naming every one that did, before
+    the interpreter is started — for the reason an unsupported interpreter is
+    refused there. this is the milestone: a line that came from a map nobody
+    verified is the exact failure the contract refuses
+- a `.by` breakpoint is translated into the generated python before the agent
+    sees it and every answer about it is translated back before a client does.
+    the agent never learns a source map exists, so a `.by` program's `sys.modules`
+    and `sys.path` are what a bare run of the same generated python has
+- `Binding::BoundInSource` carries **both** locations, and a `.by` line the
+    transpiler generated nothing for moves forward the way a non-executable line
+    does — with the answer read back out of the map, so what it says about where
+    it went is true. a generated line the map marks `None` is refused rather than
+    attributed to whichever `.by` line was nearest
+- bpd **finds** the map rather than being told where it is: a program running out
+    of a directory holding `_by_sourcemap.py` is running that build. so the
+    command line, a DAP client and an MCP client all reach it without any of them
+    being taught what basedpython is
 
-what is genuinely missing is the **hash of both artefacts**, and only that. it is
-what this project's rule needs rather than what a map needs: a source map that
-was not verified against the thing it maps is exactly the line number
-[the contract](README.md) refuses to report. so the upstream ask is one digest,
-not a mapping format
+**what is left**
 
-until it lands `bpd` debugs the generated python and says that is what it is
-doing — which is now a smaller gap than this entry claimed, and a much smaller
-ask. see [bpd and the basedpython pycharm plugin](docs/development/basedpython-pycharm.md)
+- **frames.** a stop, a stack frame and a traceback still report the generated
+    python. that is honest — nothing claims a `.by` location it was not given one
+    for — but it is half of what this milestone is for. it is a separate piece
+    because a location leaves the debugger through about thirty fields, and
+    mapping some of them and not the others would report two different files for
+    one location
+- **a subcommand that sets the run up.** what a person types today is a two line
+    wrapper handed to `by run` through `PYTHON`, written out on the source mapping
+    page and driven end to end against the real `by` binary. `bpd by <module>`
+    would write that wrapper itself, and it is sugar over a thing that already
+    works rather than the thing that makes it work
+- **the `basedpython-pycharm` switch.** the plugin's reason for staying on
+    debugpy was that bpd could not debug `.by` at all. half of that is now false;
+    the frames half is not. see
+    [bpd and the basedpython pycharm plugin](docs/development/basedpython-pycharm.md)
 
 ### M7 — django templates · done
 
