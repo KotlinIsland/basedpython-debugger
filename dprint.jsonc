@@ -42,7 +42,13 @@
     // javascript all the way down, and none of it is ours
     "**/.vscode-test",
     // npm writes it and npm's format is what `npm ci` compares against
-    "**/package-lock.json"
+    "**/package-lock.json",
+    // what the intellij build leaves behind: gradle's own caches, the platform
+    // plugin's layout index and release list, and a sandbox holding a whole
+    // IDE's configuration. none of it is ours
+    "**/.gradle",
+    "**/.intellijPlatform",
+    "editors/intellij/build"
   ],
   // markdown, toml, python, yaml, and the json and javascript the vs code
   // extension is made of. a python code block inside markdown is formatted by
