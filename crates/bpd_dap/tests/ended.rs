@@ -11,7 +11,11 @@
 //! program ended and is not told a lie about how
 //!
 //! the fake here is small and separate from `coverage.rs`, which drives the
-//! whole request surface against a program that is still there
+//! whole request surface. that this outcome reaches the client **at all** is one
+//! of the things `coverage.rs` now enforces for every one of them, as
+//! `bpd_core::Told` — this is the part of it that is particular to this outcome:
+//! not merely that the client is told, but that it is told the truth and not an
+//! invented number
 
 use std::io::{BufRead as _, BufReader, Read, Write};
 use std::sync::Arc;

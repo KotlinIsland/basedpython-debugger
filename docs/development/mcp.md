@@ -386,6 +386,48 @@ the list has one entry: DAP and the hit condition. adding a second means editing
 the test, which is the point — a gap that appears quietly is how two front ends
 drift apart
 
+### and about what the debugger says
+
+a `Request` and a `Facet` are what an agent **asks for**. what the debugger
+**says** is the other half of the same rule, and it was held by
+`bpd_core::Reporting` — a trait whose methods have no default bodies, which
+forces an implementation to exist and is satisfied by an **empty one**. nothing
+failed if this server took a report and dropped it
+
+`bpd_mcp::carriage_of` is the table for it, matching `bpd_core::Told` with no
+catch-all arm. every entry is `Carried::Pulled`, and that is the whole
+asymmetry between the two front ends: this server writes nothing that is not an
+answer, so a fact that arrives while the program is running is **kept and handed
+over on the next answer**:
+
+| what the debugger says                            | where an agent finds it                                               |
+| ------------------------------------------------- | --------------------------------------------------------------------- |
+| a logpoint's record                               | the `logged` key of the next answer                                   |
+| a pause armed while the program ran               | `pause_armed_while_running` under `logged`                            |
+| a child the program started                       | `spawned.started`                                                     |
+| a way of starting a child this interpreter hides  | `spawned.cannot_see`, beside the children rather than instead of them |
+| a debugged fork joining                           | `attached.sessions`, and the `sessions` tool afterwards               |
+| a thread stopping                                 | `outcome: stopped`, with the frames                                   |
+| the program exiting                               | `outcome: exited`, with `exit_code`                                   |
+| the program ending with threads still held        | `outcome: finishing`, with `held`                                     |
+| the program being over with no exit bpd can read  | `outcome: ended`, deliberately with no `exit_code` field at all       |
+| a deadline passing with the program still running | `outcome: timed_out`, with `waited_ms`                                |
+
+**a pull is a legitimate route and it is the one that has to be watched.** a
+server that kept a fact and never handed it over looks exactly like one that
+carries it properly, right up until somebody reads what an answer really held.
+so the fake session in `crates/bpd_mcp/tests/coverage.rs` says one of
+everything, the conversation is run to each of the two ways a program can end,
+and the test reads the answers for what would prove each one arrived. a server
+that emptied one of those methods passes every other test in the file and fails
+that one
+
+DAP's side of this table is the mirror image — everything is pushed as an event
+— and the one thing it has nowhere to put is the deadline that passes, because
+it answered the `continue` long before. that is this direction's single
+justified exception, in a hand written list of its own kept beside the one for
+capabilities
+
 ## more than one session
 
 MCP has no push. every tool returns the answer to what was asked and the server

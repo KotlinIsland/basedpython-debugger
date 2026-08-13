@@ -1,4 +1,5 @@
-//! every capability of the core is reachable through the adapter
+//! every capability of the core is reachable through the adapter, and
+//! everything the debugger says reaches the client
 //!
 //! the parity rule says no capability exists in one adapter and not the other.
 //! the two-sided test of it arrives with the MCP adapter, because with one
@@ -8,6 +9,14 @@
 //! until someone says how DAP gets at it — and then this asserts the claim is
 //! true by **driving the adapter** and watching what the session is asked
 //!
+//! the other direction is here too, and it is the harder one. what the debugger
+//! *says* was held by `bpd_core::Reporting`, a trait with no default bodies —
+//! which forces an implementation to exist and is satisfied by an empty one. so
+//! the fake session says one of everything, the conversation runs to each of the
+//! two ways a program can end, and `shown` says what would prove each reached
+//! the client. an adapter that took a report and dropped it passes every other
+//! test in this file and fails that one
+//!
 //! the session here is a fake, deliberately. what this test is about is the
 //! adapter's own translation: which DAP request becomes which `Request`, and
 //! whether the table beside it is honest. that a request really stops a real
@@ -15,17 +24,18 @@
 
 use std::collections::BTreeSet;
 use std::io::{BufRead as _, BufReader, Read, Write};
-use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 
+use bpd_core::parity::mark;
 use bpd_core::{
-    Addressed, At, Binding, Content, Did, Entry, Evaluated, Evaluation, Facet, Frame, FrameId,
-    Mode, Outcome, Reach, Record, Reported, Reporting, Request, Resolved, Response, Running,
-    SessionId, Site, Stack, Stop, StopReason, Threads, Value, Variables, WorldStopped,
+    Addressed, At, Binding, Carried, Content, Did, Entry, Evaluated, Evaluation, Facet, Frame,
+    FrameId, Mode, Outcome, Reach, Record, Reported, Reporting, Request, Resolved, Response,
+    Running, SessionId, Site, Stack, Stop, StopReason, Threads, Told, Value, Variables,
+    WorldStopped, ran_as, say,
 };
 use bpd_dap::{
-    Configuration, Failed, Interrupt, Launcher, ProgramOutput, Session, Started, reach_of,
-    reach_of_facet, surface,
+    Configuration, Failed, Interrupt, Launcher, ProgramOutput, Session, Started, carriage_of,
+    reach_of, reach_of_facet, surface,
 };
 
 /// the interpreter's identity for the one thread this fake ever holds
@@ -196,23 +206,6 @@ fn a_stop_that_ends_takes_its_references_with_it() {
     );
 }
 
-/// the child the fake session reports while the program runs
-fn started_a_child() -> bpd_core::Spawn {
-    bpd_core::Spawn {
-        event: "_posixsubprocess.fork_exec".to_string(),
-        executable: Some("/usr/bin/python3.14".to_string()),
-        arguments: vec!["/usr/bin/python3.14".to_string(), "worker.py".to_string()],
-        verdict: bpd_core::Verdict::ThisInterpreter,
-    }
-}
-
-/// the blind spot the fake session announces while the program runs
-fn cannot_see_a_child() -> bpd_core::Blindspot {
-    bpd_core::Blindspot::MultiprocessingSpawn {
-        interpreter: "3.13".to_string(),
-    }
-}
-
 #[test]
 fn a_blind_spot_reaches_the_client_where_a_collapsed_console_cannot_hide_it() {
     // the message that stops silence being evidence. it is the one notice a
@@ -226,7 +219,7 @@ fn a_blind_spot_reaches_the_client_where_a_collapsed_console_cannot_hide_it() {
         .filter(|event| {
             event["body"]["output"]
                 .as_str()
-                .is_some_and(|text| text.contains("silence here does not mean"))
+                .is_some_and(|text| text.contains(mark::BLIND_TO))
         })
         .collect();
     assert!(
@@ -252,7 +245,7 @@ fn a_child_the_program_started_reaches_the_client_as_the_debuggers_own_words() {
         .filter(|event| {
             event["body"]["output"]
                 .as_str()
-                .is_some_and(|text| text.contains("worker.py"))
+                .is_some_and(|text| text.contains(mark::CHILD))
         })
         .collect();
     assert!(
@@ -295,17 +288,116 @@ fn the_thread_model_reaches_the_client_on_every_stop() {
     }
 }
 
+#[test]
+fn everything_the_debugger_says_really_reaches_the_client() {
+    // the half of the parity rule a trait could not hold. `bpd_core::Reporting`
+    // has no default bodies, so an implementation of it has to exist — and an
+    // empty one satisfies that. what fails an empty one is this: the fake says
+    // one of everything, and the claim in `bpd_dap::carriage_of` is read against
+    // what the client was really sent
+    let told = everything_said();
+
+    for said in Told::ALL {
+        match carriage_of(said) {
+            Carried::Pushed(where_it_goes) => assert!(
+                shown(said, &told),
+                "`{}` is said to reach a client as {where_it_goes}, and driving \
+                 the adapter never sent it",
+                said.name()
+            ),
+            // never DAP's answer, and `crates/bpd/tests/parity.rs` is where that
+            // is stated. a fact held back for a request a DAP client is not
+            // obliged to make is a fact nobody is told
+            Carried::Pulled(where_it_goes) => panic!(
+                "DAP holds `{}` back for {where_it_goes}, and it has an event \
+                 stream",
+                said.name()
+            ),
+            Carried::Nowhere { why } => assert!(
+                !shown(said, &told),
+                "`{}` is said to reach no DAP client — {why} — and driving the \
+                 adapter sent it anyway",
+                said.name()
+            ),
+        }
+    }
+}
+
+/// what the client is sent across both ways the program can end
+///
+/// two conversations rather than one, because the two outcomes that end a
+/// program cannot both happen to it. the messages are read together: a fact is
+/// carried if it turned up in either, and each check below names something
+/// distinctive enough that the two cannot be confused
+fn everything_said() -> Transcript {
+    let mut messages = drive(&Asked::default()).messages;
+    messages.extend(drive_until(&Asked::default(), Told::Ended).messages);
+    Transcript { messages }
+}
+
+/// what would show one thing the debugger says reached a DAP client
+///
+/// exhaustive and with no catch-all arm, so a fact added to the core does not
+/// compile here until someone says what its arrival looks like. it is
+/// deliberately not the table in `bpd_dap::coverage`: that one says what the
+/// adapter *would* send, and this is read against what it really sent — saying
+/// it is reached is not the same as reaching it
+fn shown(said: Told, told: &Transcript) -> bool {
+    match said {
+        // the program's own words, written where the program would have written
+        // them
+        Told::Logged => told.output("stdout", mark::LOGGED),
+        Told::Pausing => told.output("console", &mark::RUNNING.to_string()),
+        Told::Spawned => told.output("console", mark::CHILD),
+        Told::BlindSpot => told.output("important", mark::BLIND_TO),
+        // a reverse request rather than an event, because the client has to
+        // start a session for the held child rather than merely hear about it
+        Told::Attached => told.messages.iter().any(|message| {
+            message["type"] == "request"
+                && message["command"] == "startDebugging"
+                && message.to_string().contains(&mark::JOINED.to_string())
+        }),
+        Told::Stopped => !told.events("stopped").is_empty(),
+        Told::Exited => told.events("exited").iter().any(|event| {
+            event["body"]["exitCode"] == serde_json::json!(i64::from(mark::EXIT_CODE))
+        }),
+        Told::Finishing => told.output("console", &mark::HELD_AT_THE_END.to_string()),
+        // `terminated` alone is not evidence: an exit produces one too. the
+        // reason on the console is the part that only this outcome writes
+        Told::Ended => {
+            !told.events("terminated").is_empty() && told.output("console", "not bpd's to read")
+        }
+        // nothing at all, which is what `carriage_of` says. the fake really does
+        // answer a wait with it, so a client that started being told would show
+        // the wait's own length turning up somewhere
+        Told::StillRunning => told
+            .messages
+            .iter()
+            .any(|message| message.to_string().contains(&mark::WAITED_MS.to_string())),
+    }
+}
+
 /// run one whole DAP conversation against the fake session
 ///
 /// one conversation rather than one per test: the point of it is coverage of
 /// the whole surface, and three tests reading three different parts of the same
 /// transcript is what that looks like
+fn drive(asked: &Asked) -> Transcript {
+    drive_until(asked, Told::Exited)
+}
+
+/// the same conversation, run to one of the two ways a program can end
+///
+/// `ending` is what the fake answers the last wait with. a program bpd started
+/// exits and bpd reads the status; one that connected to bpd's listener is over
+/// and bpd is not its parent, so there is no status to read — and the two are
+/// told to the client differently, which is the whole of why both are driven
 #[expect(
     clippy::too_many_lines,
     reason = "it is a transcript. splitting a conversation into helpers hides \
               the order the messages go in, which is the thing under test"
 )]
-fn drive(asked: &Asked) -> Transcript {
+fn drive_until(asked: &Asked, ending: Told) -> Transcript {
     let (to_adapter, mut client_writes) = std::io::pipe().expect("a pipe is available");
     let (client_reads, from_adapter) = std::io::pipe().expect("a pipe is available");
 
@@ -316,7 +408,7 @@ fn drive(asked: &Asked) -> Transcript {
             // second session cannot arrive on — and this conversation asks for
             // it, which is the only route DAP has to that capability
             bpd_dap::serve(
-                &Fake { asked },
+                &Fake { asked, ending },
                 Box::new(to_adapter),
                 Box::new(from_adapter),
                 &bpd_dap::Reachable::At {
@@ -594,6 +686,12 @@ fn drive(asked: &Asked) -> Transcript {
         "continue",
         serde_json::json!({ "threadId": thread }),
     );
+    // the program has been let go, and what it does next arrives on the
+    // connection rather than as the answer to anything. reading to the end of it
+    // is what puts every outcome the waiting produced in the transcript: a
+    // client that hung up first would be measuring the race between its own
+    // `disconnect` and the adapter's wait loop
+    reader.until_event("terminated");
     answer(
         &mut client_writes,
         &mut reader,
@@ -623,6 +721,20 @@ impl Transcript {
             .iter()
             .filter(|message| message["type"] == "event" && message["event"] == event)
             .collect()
+    }
+
+    /// whether an `output` event of one category said something
+    ///
+    /// the category is part of it rather than beside it. DAP's categories are
+    /// how a client decides where a line goes, and a notice of bpd's shown as
+    /// the program's own output is a claim about the debuggee that is not true
+    fn output(&self, category: &str, said: &str) -> bool {
+        self.events("output").into_iter().any(|event| {
+            event["body"]["category"] == category
+                && event["body"]["output"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(said))
+        })
     }
 
     fn refusals(&self) -> Vec<String> {
@@ -657,6 +769,18 @@ impl Messages {
         Self {
             input: BufReader::new(input),
             seen: Vec::new(),
+        }
+    }
+
+    /// read until an event of one name arrives, keeping everything on the way
+    fn until_event(&mut self, event: &str) {
+        loop {
+            let message = self.next_message();
+            let arrived = message["type"] == "event" && message["event"] == event;
+            self.seen.push(message);
+            if arrived {
+                return;
+            }
         }
     }
 
@@ -703,6 +827,8 @@ impl Messages {
 /// stop, and the one a step lands at
 struct Fake {
     asked: Asked,
+    /// which of the two ways a program can end this one ends
+    ending: Told,
 }
 
 /// the state the fake keeps across a session
@@ -711,6 +837,13 @@ struct FakeSession {
     held: Vec<Stop>,
     /// stops still to come, innermost first
     remaining: Vec<Stop>,
+    /// what a wait is answered with once there are no stops left, in order
+    ///
+    /// the last one repeats, because the adapter goes on waiting until the
+    /// program is over and the two outcomes that end one are the last entry
+    over: Vec<Told>,
+    /// whether the reports have been made, which happens once
+    said: bool,
 }
 
 impl Launcher for Fake {
@@ -730,6 +863,12 @@ impl Launcher for Fake {
                     line: 4,
                 },
             )],
+            // a deadline that passes and a program that runs out with threads
+            // still held are both things a real one does before it ends, and
+            // neither ends it — so both come before whichever ending this
+            // conversation is driving
+            over: vec![Told::StillRunning, Told::Finishing, self.ending],
+            said: false,
         })))
     }
 
@@ -842,13 +981,14 @@ impl Session for FakeSession {
     ) -> Result<Response, Failed> {
         let Addressed { session, request } = asked;
 
-        // a program starts a child while it runs, so a wait is where one is
-        // reported. the fake does it on every wait, which is what makes the
-        // adapter's route for it part of this conversation rather than
-        // something only a real interpreter ever exercises
-        if matches!(request, Request::Wait { .. }) {
-            reporting.spawned(started_a_child());
-            reporting.blind_to(cannot_see_a_child());
+        // everything a running program says arrives while it is running, so a
+        // wait is where all of it is reported. the fake says one of each, once,
+        // which is what puts the adapter's route for every one of them in this
+        // conversation rather than leaving it to a test that needs a real
+        // interpreter to fork
+        if matches!(request, Request::Wait { .. }) && !self.said {
+            self.said = true;
+            say(reporting);
         }
         {
             let mut recorder = self.asked.lock().expect("the recorder is not poisoned");
@@ -897,10 +1037,7 @@ impl Session for FakeSession {
                             rebound: Vec::new(),
                         }
                     }
-                    None => Running::Exited {
-                        status: exited_with(0),
-                        rebound: Vec::new(),
-                    },
+                    None => ran_as(self.next_outcome()),
                 };
                 Response::Ran(running)
             }
@@ -1072,6 +1209,21 @@ impl Session for FakeSession {
     }
 }
 
+impl FakeSession {
+    /// the next thing a wait is answered with once there are no stops left
+    ///
+    /// the last one repeats. the adapter waits for as long as the program is
+    /// there, and what makes it stop is one of the two endings — which is the
+    /// last entry, and the one this conversation was run for
+    fn next_outcome(&mut self) -> Told {
+        if self.over.len() > 1 {
+            self.over.remove(0)
+        } else {
+            self.over[0]
+        }
+    }
+}
+
 struct FakeInterrupt {
     asked: Asked,
 }
@@ -1088,19 +1240,5 @@ impl Interrupt for FakeInterrupt {
 
     fn terminate(&mut self) -> Result<(), Failed> {
         Ok(())
-    }
-}
-
-/// an exit status, which has no portable constructor
-fn exited_with(code: i32) -> ExitStatus {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt as _;
-        ExitStatus::from_raw(code << 8)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::ExitStatusExt as _;
-        ExitStatus::from_raw(code.unsigned_abs())
     }
 }

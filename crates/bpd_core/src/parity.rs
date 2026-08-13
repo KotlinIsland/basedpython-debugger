@@ -11,19 +11,35 @@
 //! - [`Reach`] is how a front end says it gets at one, including saying that it
 //!   cannot
 //!
+//! that is the half about what a client **asks for**. the other half is what the
+//! debugger **says**, and it was held by a trait with no default bodies — which
+//! forces an implementation to exist and is satisfied by an empty one. so it is
+//! enumerated here too:
+//!
+//! - [`Told`] is one of every fact the debugger produces that a client did not
+//!   ask for: the [`Reporting`] methods, and the outcomes of a running program
+//! - [`Carried`] is how a front end says it passes one on, including saying that
+//!   it cannot
+//! - [`say`] and [`ran`] build one of each, so that a check can hand them to an
+//!   adapter and then go looking for them in what the client was really told
+//!
 //! nothing here knows what DAP or MCP are. each adapter writes its own
-//! `reach_of` — an exhaustive match with no catch-all arm, so a capability added
-//! to the core is a compile error there rather than a capability that front end
-//! silently does not have — and the parity test compares the two answers
+//! `reach_of` and `carriage_of` — exhaustive matches with no catch-all arm, so a
+//! capability or a report added to the core is a compile error there rather than
+//! one that front end silently does not have — and the parity test compares the
+//! two answers
 
 use std::num::{NonZeroU32, NonZeroU64};
+use std::process::ExitStatus;
+use std::time::Duration;
 
-use crate::breakpoint::SourceBreakpoint;
+use crate::breakpoint::{LogRecord, SourceBreakpoint};
 use crate::frame::{FrameId, Scope};
 use crate::query::{SnapshotId, StateQuery, Wanted};
 use crate::script::{Budget, Script, Step};
-use crate::session::{Request, Threads};
-use crate::stop::StepKind;
+use crate::session::{Reporting, Request, Running, SessionId, Threads};
+use crate::spawn::{Blindspot, Spawn, Verdict};
+use crate::stop::{Reported, StepKind, StopReason};
 use crate::thread::Which;
 use crate::value::Detail;
 
@@ -109,6 +125,346 @@ impl Facet {
             Self::ValueBounds => "the bounds on how much of a value is read",
             Self::Session => "naming the session a request is for",
         }
+    }
+}
+
+/// one thing the debugger says that no client asked it for
+///
+/// the other direction from [`Request`], and it needed enumerating for the same
+/// reason. a report was held by [`Reporting`], which has no default bodies — so
+/// an implementation has to **exist**, and an empty one satisfies that. nothing
+/// failed if a front end took a report and dropped it on the floor
+///
+/// it is deliberately not a [`Facet`]. a facet is a capability carried inside a
+/// request, so it is still something a client asks for, and [`Reach`] is about
+/// how one asks. these are the opposite: the debugger produced a fact and the
+/// question is whether it got **out**. what proves one is different too — a
+/// capability is proved by watching what the session was asked, and a report by
+/// watching what the client was told — and putting two proofs behind one name is
+/// how one of them comes to be skipped
+///
+/// the outcomes of a running program are here beside the [`Reporting`] methods
+/// because a front end has the same problem with both: a fact arrived while
+/// nobody was asking, and it either reaches the client or it does not.
+/// [`Running`] is how the fact crosses the session boundary, not how it reaches
+/// a person
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Told {
+    /// a logpoint produced a record — [`Reporting::logged`]
+    Logged,
+
+    /// a pause is armed, and these threads were running python — [`Reporting::pausing`]
+    Pausing,
+
+    /// the program started a child process — [`Reporting::spawned`]
+    Spawned,
+
+    /// there is a way of starting a child this interpreter hides — [`Reporting::blind_to`]
+    BlindSpot,
+
+    /// a debugged fork joined as a session of its own — [`Reporting::attached`]
+    Attached,
+
+    /// a thread stopped — [`Running::Stopped`]
+    Stopped,
+
+    /// the program exited, and bpd read what with — [`Running::Exited`]
+    Exited,
+
+    /// the program ran to its end with threads still held — [`Running::Finishing`]
+    Finishing,
+
+    /// the program is over and its exit is not bpd's to read — [`Running::Ended`]
+    Ended,
+
+    /// a deadline passed and the program is still running — [`Running::StillRunning`]
+    StillRunning,
+}
+
+impl Told {
+    /// every one of them, for a test that has to cover all of them
+    pub const ALL: [Self; 10] = [
+        Self::Logged,
+        Self::Pausing,
+        Self::Spawned,
+        Self::BlindSpot,
+        Self::Attached,
+        Self::Stopped,
+        Self::Exited,
+        Self::Finishing,
+        Self::Ended,
+        Self::StillRunning,
+    ];
+
+    /// what to call this in a message about it
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Logged => "a logpoint's record",
+            Self::Pausing => "a pause armed while the program ran",
+            Self::Spawned => "a child the program started",
+            Self::BlindSpot => "a way of starting a child this interpreter hides",
+            Self::Attached => "a debugged fork joining as a session of its own",
+            Self::Stopped => "a thread stopping",
+            Self::Exited => "the program exiting",
+            Self::Finishing => "the program ending with threads still held",
+            Self::Ended => "the program being over with no exit bpd can read",
+            Self::StillRunning => "a deadline passing with the program still running",
+        }
+    }
+
+    /// whether it arrives through [`Reporting`] rather than as the outcome of a
+    /// run
+    ///
+    /// what [`say`] makes, as against what [`ran`] makes
+    pub const fn unasked(self) -> bool {
+        match self {
+            Self::Logged | Self::Pausing | Self::Spawned | Self::BlindSpot | Self::Attached => true,
+            Self::Stopped | Self::Exited | Self::Finishing | Self::Ended | Self::StillRunning => {
+                false
+            }
+        }
+    }
+
+    /// which one a resumed program's outcome is
+    ///
+    /// exhaustive and with no catch-all arm, so an outcome added to [`Running`]
+    /// is a compile error here — and naming it is what puts it in [`ALL`], which
+    /// is what every front end then has to answer for
+    ///
+    /// [`ALL`]: Self::ALL
+    pub const fn of(outcome: &Running) -> Self {
+        match outcome {
+            Running::Stopped { .. } => Self::Stopped,
+            Running::Exited { .. } => Self::Exited,
+            Running::Finishing { .. } => Self::Finishing,
+            Running::Ended { .. } => Self::Ended,
+            Running::StillRunning { .. } => Self::StillRunning,
+        }
+    }
+}
+
+/// how a front end passes on something the debugger said
+///
+/// the sibling of [`Reach`], and it needs its own words because the two front
+/// ends differ here in a way they do not differ about requests. DAP has an event
+/// stream and sends a report as it happens; MCP has no push at all, so a report
+/// is kept and handed over on the answer to the next call
+///
+/// [`Carried::Pulled`] is a legitimate answer and it is the one that has to be
+/// watched. a front end that kept a report and never handed it over looks
+/// exactly like one that carries it properly, right up until somebody reads what
+/// the next answer really held — which is why an adapter's claim here is checked
+/// against a real conversation rather than believed
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Carried {
+    /// the front end sends it when it happens, and this is what it sends
+    Pushed(&'static str),
+
+    /// there is nowhere to send it, so it is kept and rides on the next answer
+    ///
+    /// this is where it turns up
+    Pulled(&'static str),
+
+    /// this front end's protocol cannot carry it at all
+    ///
+    /// the reason is not decoration, for the reason it is not on
+    /// [`Reach::Unreachable`]: a fact no front end passes on is a fact the
+    /// debugger established and threw away, and the only thing that separates
+    /// that from a limit of one protocol is a stated reason someone had to write
+    Nowhere {
+        /// why the protocol cannot carry it
+        why: &'static str,
+    },
+}
+
+impl Carried {
+    /// whether this front end passes the fact on at all
+    pub const fn carries(&self) -> bool {
+        !matches!(self, Self::Nowhere { .. })
+    }
+}
+
+/// what the reports [`say`] and the outcomes [`ran`] build carry
+///
+/// a front end renders a fact in its own shape, so what proves the fact reached
+/// a client is a piece of the **payload** turning up in what the client was
+/// told. these are the distinctive pieces, and they are here rather than in each
+/// adapter's test so that the two front ends are checked against the same facts
+pub mod mark {
+    /// what the log record [`super::say`] makes says
+    pub const LOGGED: &str = "a logpoint said this";
+
+    /// the thread the pause [`super::say`] makes names as running python
+    pub const RUNNING: u64 = 909_090;
+
+    /// the file the child [`super::say`] makes is about to run
+    pub const CHILD: &str = "worker.py";
+
+    /// the sentence every blind spot ends up saying, whatever renders it
+    pub const BLIND_TO: &str = "silence here does not mean";
+
+    /// the session the debugged fork [`super::say`] makes arrived as
+    pub const JOINED: u64 = 424_242;
+
+    /// the thread still held as the program of [`super::ran`] ends
+    pub const HELD_AT_THE_END: u64 = 909_091;
+
+    /// what the program of [`super::ran`] exits with
+    pub const EXIT_CODE: i32 = 91;
+
+    /// how long [`super::ran`]'s deadline was waited out for
+    pub const WAITED_MS: u64 = 505_050;
+}
+
+/// what a report is called, worked out by being handed one
+///
+/// [`Reporting`] has no default bodies, so a method added to it is a compile
+/// error **here** as well as in every front end — and the only thing this can do
+/// about one is name it, which is what puts it in [`Told::ALL`]. rust cannot
+/// enumerate methods; it can insist that every one of them is written down
+///
+/// it is not a front end and reports nothing to anybody. it exists so that
+/// [`say`] can be checked against the trait rather than against somebody's
+/// memory of the trait
+#[derive(Debug, Default)]
+pub struct Naming {
+    /// what it was handed, in order, each with the part of the payload that
+    /// makes it recognisable
+    pub heard: Vec<(Told, String)>,
+}
+
+impl Reporting for Naming {
+    fn logged(&mut self, record: LogRecord) {
+        self.heard.push((Told::Logged, record.message));
+    }
+
+    fn pausing(&mut self, running: Vec<u64>) {
+        self.heard.push((Told::Pausing, format!("{running:?}")));
+    }
+
+    fn spawned(&mut self, child: Spawn) {
+        self.heard.push((Told::Spawned, child.arguments.join(" ")));
+    }
+
+    fn blind_to(&mut self, blindspot: Blindspot) {
+        self.heard.push((Told::BlindSpot, blindspot.to_string()));
+    }
+
+    fn attached(&mut self, session: SessionId) {
+        self.heard.push((Told::Attached, session.to_string()));
+    }
+}
+
+/// hand a front end one report of every kind [`Reporting`] carries
+///
+/// what a coverage test drives an adapter with, so that "this front end surfaces
+/// it" stops being a claim and becomes something that either turns up in the
+/// transcript or does not. the payloads live here rather than in each adapter's
+/// test because two tests inventing their own are two tests that can come to
+/// check different things
+///
+/// [`Naming`] is what keeps this complete: a method added to the trait breaks
+/// that implementation, naming it grows [`Told::ALL`], and the test below then
+/// fails until this says it too
+pub fn say(to: &mut dyn Reporting) {
+    to.logged(LogRecord {
+        breakpoint: 1,
+        file: "/tmp/fake.py".to_string(),
+        line: 3,
+        thread: mark::RUNNING,
+        hit: 1,
+        message: mark::LOGGED.to_string(),
+    });
+    to.pausing(vec![mark::RUNNING]);
+    to.spawned(Spawn {
+        event: "_posixsubprocess.fork_exec".to_string(),
+        executable: Some("/usr/bin/python3.14".to_string()),
+        arguments: vec!["/usr/bin/python3.14".to_string(), mark::CHILD.to_string()],
+        verdict: Verdict::ThisInterpreter,
+    });
+    to.blind_to(Blindspot::MultiprocessingSpawn {
+        interpreter: "3.13".to_string(),
+    });
+    to.attached(SessionId::new(
+        NonZeroU64::new(mark::JOINED).expect("the joined session is not zero"),
+    ));
+}
+
+/// one outcome of every kind a resumed program has
+///
+/// the sibling of [`say`] for the facts that arrive as [`Running`] rather than
+/// through [`Reporting`]. an adapter's fake answers a wait with one of these, and
+/// what the client was then told is what says whether the front end really
+/// carries it
+///
+/// [`Running::Stopped`] carries a stop of nowhere in particular, because an
+/// adapter driving a conversation has stops of its own and the interesting thing
+/// about that outcome is not the payload
+pub fn ran() -> Vec<Running> {
+    vec![
+        Running::Stopped {
+            stop: Reported {
+                stop: 1,
+                thread: mark::RUNNING,
+                reason: StopReason::Entry,
+                holding: Vec::new(),
+            }
+            .in_session(SessionId::new(
+                NonZeroU64::new(1).expect("the first session is not zero"),
+            )),
+            rebound: Vec::new(),
+        },
+        Running::Exited {
+            status: exited_with(mark::EXIT_CODE),
+            rebound: Vec::new(),
+        },
+        Running::Finishing {
+            threads: vec![mark::HELD_AT_THE_END],
+            rebound: Vec::new(),
+        },
+        Running::Ended {
+            rebound: Vec::new(),
+        },
+        Running::StillRunning {
+            waited: Duration::from_millis(mark::WAITED_MS),
+            rebound: Vec::new(),
+        },
+    ]
+}
+
+/// the outcome [`ran`] holds of one kind
+///
+/// what an adapter's fake answers a wait with when the conversation has reached
+/// the point that outcome is what it is driving
+///
+/// # panics
+///
+/// when `told` is a report rather than an outcome, which is a caller asking for
+/// something [`ran`] was never going to hold
+pub fn ran_as(told: Told) -> Running {
+    assert!(
+        !told.unasked(),
+        "`{}` arrives through `Reporting` rather than as the outcome of a run, \
+         and `say` is what makes one",
+        told.name()
+    );
+    ran()
+        .into_iter()
+        .find(|outcome| Told::of(outcome) == told)
+        .unwrap_or_else(|| unreachable!("`ran` holds one outcome of every kind"))
+}
+
+/// an exit status, which has no portable constructor
+fn exited_with(code: i32) -> ExitStatus {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        ExitStatus::from_raw(code << 8)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt as _;
+        ExitStatus::from_raw(code.unsigned_abs())
     }
 }
 
@@ -226,5 +582,79 @@ mod tests {
     fn every_facet_is_named_once() {
         let names: BTreeSet<&str> = Facet::ALL.iter().map(|facet| facet.name()).collect();
         assert_eq!(names.len(), Facet::ALL.len(), "two facets share a name");
+    }
+
+    #[test]
+    fn everything_the_debugger_says_is_named_once() {
+        let names: BTreeSet<&str> = Told::ALL.iter().map(|told| told.name()).collect();
+        assert_eq!(names.len(), Told::ALL.len(), "two of them share a name");
+    }
+
+    #[test]
+    fn saying_one_of_every_report_reaches_every_method_of_the_trait() {
+        // the link between the trait and the data. `Naming` implements
+        // `Reporting`, which has no default bodies, so a method added there is a
+        // compile error in it — and this is what then fails until `Told::ALL`
+        // and `say` have both been told about the new one
+        let mut naming = Naming::default();
+        say(&mut naming);
+
+        let heard: Vec<Told> = naming.heard.iter().map(|(told, _)| *told).collect();
+        let unasked: Vec<Told> = Told::ALL
+            .into_iter()
+            .filter(|told| told.unasked())
+            .collect();
+        assert_eq!(
+            heard, unasked,
+            "`say` has to make one report of every kind the trait carries, in \
+             the order they are enumerated"
+        );
+
+        // and each of them really carried its payload. a report built empty
+        // would reach a front end with nothing in it to find afterwards
+        for (told, payload) in &naming.heard {
+            assert!(
+                !payload.trim().is_empty(),
+                "the report `say` made of `{}` carries nothing recognisable",
+                told.name()
+            );
+        }
+    }
+
+    #[test]
+    fn running_a_program_has_one_outcome_of_every_kind_and_no_kind_twice() {
+        let told: Vec<Told> = ran().iter().map(Told::of).collect();
+        let outcomes: Vec<Told> = Told::ALL
+            .into_iter()
+            .filter(|told| !told.unasked())
+            .collect();
+        assert_eq!(
+            told, outcomes,
+            "`ran` has to hold one outcome of every kind, in the order they are \
+             enumerated"
+        );
+
+        for told in outcomes {
+            assert_eq!(Told::of(&ran_as(told)), told);
+        }
+    }
+
+    #[test]
+    fn the_marks_a_report_carries_are_all_different() {
+        // what a front end's coverage test looks for. two that were the same
+        // would let one report stand in as evidence for another
+        let marks = [
+            mark::RUNNING.to_string(),
+            mark::JOINED.to_string(),
+            mark::HELD_AT_THE_END.to_string(),
+            mark::EXIT_CODE.to_string(),
+            mark::WAITED_MS.to_string(),
+        ];
+        let distinct: BTreeSet<&String> = marks.iter().collect();
+        assert_eq!(
+            marks.len(),
+            distinct.len(),
+            "two marks are the same: {marks:?}"
+        );
     }
 }

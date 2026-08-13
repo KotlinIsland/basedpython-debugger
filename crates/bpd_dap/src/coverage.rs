@@ -6,13 +6,20 @@
 //! DAP silently does not have, and [`reach_of_facet`] does the same for the
 //! capabilities that are carried *inside* a request rather than being one
 //!
-//! two tests read this table. `crates/bpd_dap/tests/coverage.rs` drives the
-//! adapter with a real DAP conversation and checks the table against what the
-//! session was actually asked — so an entry that claims a mapping the adapter
-//! does not make fails rather than reading well. `crates/bpd/tests/parity.rs`
-//! is the two-sided half, and compares this against the MCP adapter's answer
+//! [`carriage_of`] is the same thing for the other direction — what the debugger
+//! **says** without being asked. that half was held by `bpd_core::Reporting`,
+//! which has no default bodies, so an implementation had to exist and an empty
+//! one satisfied it. as [`bpd_core::Told`] it is data, and the same exhaustive
+//! match applies
+//!
+//! two tests read these tables. `crates/bpd_dap/tests/coverage.rs` drives the
+//! adapter with a real DAP conversation and checks them against what the session
+//! was actually asked and what the client was actually told — so an entry that
+//! claims a mapping the adapter does not make fails rather than reading well.
+//! `crates/bpd/tests/parity.rs` is the two-sided half, and compares this against
+//! the MCP adapter's answer
 
-use bpd_core::parity::{Facet, Reach};
+use bpd_core::parity::{Carried, Facet, Reach, Told};
 use bpd_core::session::Request;
 
 pub use bpd_core::parity::surface;
@@ -157,6 +164,98 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
              `detail` of a `bpd/state`, which is an extension and so has \
              somewhere to carry one",
         ),
+    }
+}
+
+/// how one thing the debugger says reaches a DAP client
+///
+/// exhaustive, for the reason [`reach_of`] is: a fact added to the core is a
+/// compile error here rather than a fact DAP silently swallows
+///
+/// every entry is [`Carried::Pushed`] but one. DAP has an event stream, so the
+/// adapter says a thing when it happens rather than keeping it for an answer
+/// somebody may never ask for
+pub const fn carriage_of(told: Told) -> Carried {
+    match told {
+        Told::Logged => Carried::Pushed(
+            "an `output` event on the `stdout` category, carrying the source and \
+             the line the logpoint is on. `stdout` because a logpoint's message \
+             is the program's own words, written where the program would have \
+             written them",
+        ),
+
+        Told::Pausing => Carried::Pushed(
+            "an `output` event on the `console` category, naming the threads that \
+             were running python when the pause went on — and saying that nothing \
+             is going to arrive when there were none",
+        ),
+
+        // `console` and not `stdout`. the program did not write this, bpd did,
+        // and a client that filed it among the program's own output would be
+        // putting words in the debuggee's mouth
+        Told::Spawned => Carried::Pushed(
+            "an `output` event on the `console` category, with no `source` and no \
+             `line`: the audit hook sees what the program asked the operating \
+             system for and not where it was asked",
+        ),
+
+        // DAP has a category for exactly this — something a user should see with
+        // the console collapsed — and it is the one notice that must not scroll
+        // past, because every other thing bpd says is a positive claim and this
+        // one is about an absence
+        Told::BlindSpot => Carried::Pushed(
+            "an `output` event on the `important` category, which is what DAP has \
+             for something the user should see even with the console collapsed",
+        ),
+
+        Told::Attached => Carried::Pushed(
+            "the `startDebugging` reverse request, carrying a configuration that \
+             names the session and how to reach this adapter — and a `console` \
+             line saying the child is held. it is the spec's own answer to a \
+             second debuggee, rather than debugpy's `debugpyAttach` event, which \
+             predates the spec having one",
+        ),
+
+        Told::Stopped => Carried::Pushed(
+            "a `stopped` event naming the thread and the reason, with \
+             `allThreadsStopped` only when the world really was stopped",
+        ),
+
+        Told::Exited => Carried::Pushed(
+            "an `exited` event carrying the code, and a `terminated` event after it",
+        ),
+
+        Told::Finishing => Carried::Pushed(
+            "an `output` event naming the threads still held and why the process \
+             cannot exit until they are resumed, and then the `stopped` events \
+             for them",
+        ),
+
+        // `terminated` and **no** `exited`, which is the protocol saying exactly
+        // what is true: DAP's `exited` event carries an `exitCode` as a required
+        // field, and there is none to carry
+        Told::Ended => Carried::Pushed(
+            "a `terminated` event and deliberately no `exited` one, with the \
+             reason on the `console` category — DAP's `exited` carries an \
+             `exitCode` and bpd did not start that process, so there is no number \
+             for it and a zero would be invented",
+        ),
+
+        // the one thing the debugger says that DAP has nowhere to put. it is a
+        // limit of the protocol's shape rather than a thing nobody got round to:
+        // there is no event for "still running", and the request a timeout would
+        // answer was answered long before the timeout happened
+        Told::StillRunning => Carried::Nowhere {
+            why: "DAP answers `continue` **before** the program stops again, so a \
+                  deadline that passes has nothing outstanding to be the answer \
+                  to — and there is no event for it either, because the client \
+                  already knows the program is running: it was told when its \
+                  `continue` was answered and it has had no `stopped` since. the \
+                  adapter's own wait carries a deadline only so that one \
+                  connection cannot block the other sessions of the same \
+                  debuggee, and nothing about the program is learned when it \
+                  passes",
+        },
     }
 }
 

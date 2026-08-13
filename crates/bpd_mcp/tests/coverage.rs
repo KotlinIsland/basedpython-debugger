@@ -1,5 +1,6 @@
-//! every capability of the core is reachable through a tool, and a control tool
-//! really does return the stop it produced
+//! every capability of the core is reachable through a tool, a control tool
+//! really does return the stop it produced, and everything the debugger says
+//! reaches the agent
 //!
 //! the session here is a fake, deliberately. what is under test is the server's
 //! own translation: which tool becomes which `Request`, what the answer looks
@@ -7,23 +8,36 @@
 //! real interpreter is `crates/bpd/tests/mcp.rs`, against a real one
 //!
 //! the fake is also how the **timeout** shape is exercised without waiting for
-//! one: it answers the last wait with `Running::StillRunning`, which is what an
-//! engine whose deadline passed returns. that a real deadline really passes is
-//! the other test's job
+//! one: it answers a wait with `Running::StillRunning`, which is what an engine
+//! whose deadline passed returns. that a real deadline really passes is the
+//! other test's job
+//!
+//! what the debugger *says* is checked the same way, and it is the half a trait
+//! could not hold: `bpd_core::Reporting` has no default bodies, so an
+//! implementation has to exist and an empty one satisfies that. MCP has no push,
+//! so every one of these is **kept and handed over on the next answer** — which
+//! is a legitimate route and the one that has to be watched, because a server
+//! that kept a fact and never handed it over looks exactly the same from
+//! outside. so the fake says one of everything and `shown` goes and reads the
+//! answers
+//!
+//! this is the one-sided half of both directions. `crates/bpd/tests/parity.rs`
+//! is where what this server claims is compared against what DAP claims
 
 use std::collections::BTreeSet;
 use std::io::{BufRead as _, BufReader, Write};
 use std::sync::{Arc, Mutex};
 
+use bpd_core::parity::mark;
 use bpd_core::{
-    Addressed, At, Binding, Content, Detail, Did, Entry, Evaluated, Evaluation, Exit, Facet, Frame,
-    FrameId, HitCondition, Mode, Outcome, Reach, Record, Reported, Reporting, Request, Resolved,
-    Response, Running, SessionId, Site, SourceBreakpoint, Stack, Stop, StopReason, Threads, Value,
-    Variables, WorldStopped,
+    Addressed, At, Binding, Carried, Content, Detail, Did, Entry, Evaluated, Evaluation, Exit,
+    Facet, Frame, FrameId, HitCondition, Mode, Outcome, Reach, Record, Reported, Reporting,
+    Request, Resolved, Response, Running, SessionId, Site, SourceBreakpoint, Stack, Stop,
+    StopReason, Threads, Told, Value, Variables, WorldStopped, ran_as, say,
 };
 use bpd_mcp::{
-    Configuration, Failed, Launcher, ProgramOutput, Session, Started, reach_of, reach_of_facet,
-    surface, tools,
+    Configuration, Failed, Launcher, ProgramOutput, Session, Started, carriage_of, reach_of,
+    reach_of_facet, surface, tools,
 };
 
 /// the interpreter's identity for the one thread this fake ever holds
@@ -236,7 +250,11 @@ fn a_deadline_that_passes_is_a_timeout_and_is_never_dressed_as_a_stop() {
 #[test]
 fn an_argument_a_tool_does_not_take_is_refused_with_the_name_of_it() {
     let asked = Asked::default();
-    let transcript = drive_with(&asked, &[("wait", serde_json::json!({ "deadlineMs": 5 }))]);
+    let transcript = drive_with(
+        &asked,
+        &[("wait", serde_json::json!({ "deadlineMs": 5 }))],
+        Told::Exited,
+    );
 
     let refused = transcript
         .failures()
@@ -287,16 +305,21 @@ fn what_the_program_printed_comes_back_on_the_answer_that_let_it_run() {
 /// the whole surface, and several tests reading different parts of the same
 /// transcript is what that looks like
 fn drive(asked: &Asked) -> Transcript {
-    drive_with(asked, &[])
+    drive_with(asked, &[], Told::Exited)
 }
 
+/// the same conversation, run to one of the two ways a program can end
+///
+/// a program bpd started exits and bpd reads the status; one that connected to
+/// bpd's listener is over and bpd is not its parent, so there is no status to
+/// read. they are different answers, and a program can only do one of them
 #[expect(
     clippy::too_many_lines,
     reason = "it is one conversation covering the whole tool surface, and \
               splitting it would put the calls and the order they are answered \
               in in two places"
 )]
-fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)]) -> Transcript {
+fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) -> Transcript {
     let (to_server, client_writes) = std::io::pipe().expect("a pipe is available");
     let (client_reads, from_server) = std::io::pipe().expect("a pipe is available");
 
@@ -304,7 +327,7 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)]) -> Transcript 
         let asked = Arc::clone(asked);
         move || {
             bpd_mcp::serve(
-                &mut Fake { asked },
+                &mut Fake { asked, ending },
                 Box::new(to_server),
                 Box::new(from_server),
             )
@@ -440,7 +463,11 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)]) -> Transcript 
     client.call("continue_", &serde_json::json!({ "deadline_ms": 500 }));
     client.call("pause", &serde_json::json!({ "deadline_ms": 500 }));
     client.call("resume", &serde_json::json!({}));
-    // the fake has no stops left, so this is the timeout shape
+    // the fake has no stops left, so these are the three shapes a wait has when
+    // it produced no stop: the deadline passed, the program ran out with a
+    // thread still held, and the program is over. only the last of them ends it
+    client.call("wait", &serde_json::json!({ "deadline_ms": 500 }));
+    client.call("wait", &serde_json::json!({ "deadline_ms": 500 }));
     client.call("wait", &serde_json::json!({ "deadline_ms": 500 }));
 
     for (tool, arguments) in extra {
@@ -552,6 +579,23 @@ impl Transcript {
             .unwrap_or_else(|| panic!("only {} tools were answered", self.messages.len()))
     }
 
+    /// whether one answer to a tool call carried all of these
+    ///
+    /// the answers are read back as json and written out compactly, so a needle
+    /// is about what an answer **holds** rather than about how it was indented.
+    /// all of them have to be in the same answer: a fact is carried by the call
+    /// it rode on, and two halves in two answers is not one report arriving
+    fn answered(&self, needles: &[&str]) -> bool {
+        self.messages
+            .iter()
+            .filter_map(|message| message["result"]["content"][0]["text"].as_str())
+            .filter_map(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+            .any(|answer| {
+                let compact = answer.to_string();
+                needles.iter().all(|needle| compact.contains(needle))
+            })
+    }
+
     /// every tool call that reported a failure, with what it said
     fn failures(&self) -> Vec<String> {
         self.messages
@@ -603,24 +647,9 @@ fn tool_order() -> Vec<&'static str> {
         "pause",
         "resume",
         "wait",
+        "wait",
+        "wait",
     ]
-}
-
-/// the child the fake session reports while the program runs
-fn started_a_child() -> bpd_core::Spawn {
-    bpd_core::Spawn {
-        event: "_posixsubprocess.fork_exec".to_string(),
-        executable: Some("/usr/bin/python3.14".to_string()),
-        arguments: vec!["/usr/bin/python3.14".to_string(), "worker.py".to_string()],
-        verdict: bpd_core::Verdict::ThisInterpreter,
-    }
-}
-
-/// the blind spot the fake session announces while the program runs
-fn cannot_see_a_child() -> bpd_core::Blindspot {
-    bpd_core::Blindspot::MultiprocessingSpawn {
-        interpreter: "3.13".to_string(),
-    }
 }
 
 #[test]
@@ -661,14 +690,16 @@ fn a_child_the_program_started_is_carried_on_the_answer_that_saw_it() {
     );
 
     let started = &spawned["started"][0];
-    assert_eq!(started["arguments"][1], "worker.py");
+    assert_eq!(started["arguments"][1], mark::CHILD);
     assert_eq!(started["event"], "_posixsubprocess.fork_exec");
 
     // its own key rather than under `logged`. an agent that found it there
-    // would reasonably read it as a logpoint having fired
+    // would reasonably read it as a logpoint having fired, and the same answer
+    // really does carry logpoint records — so what is checked is that the child
+    // is not among them rather than that there are none
     assert!(
-        stepped["logged"].is_null(),
-        "a child was reported as a log record: {stepped}"
+        !stepped["logged"].to_string().contains(mark::CHILD),
+        "a child was reported among the log records: {stepped}"
     );
 
     // the two fields an agent decides on. `certain` is why the verdict is not a
@@ -687,6 +718,97 @@ fn a_child_the_program_started_is_carried_on_the_answer_that_saw_it() {
         "the sentence a person is shown has to be here too, or an agent and a \
          human reading the same session read different things: {started}"
     );
+}
+
+#[test]
+fn everything_the_debugger_says_really_reaches_the_agent() {
+    // the half of the parity rule a trait could not hold. `bpd_core::Reporting`
+    // has no default bodies, so an implementation of it has to exist — and an
+    // empty one satisfies that. what fails an empty one is this: the fake says
+    // one of everything, and the claim in `bpd_mcp::carriage_of` is read against
+    // what the agent was really answered
+    let told = everything_said();
+
+    for said in Told::ALL {
+        match carriage_of(said) {
+            // never this server's answer, and `crates/bpd/tests/parity.rs` is
+            // where that is stated: it writes nothing that is not an answer to
+            // something the client asked
+            Carried::Pushed(where_it_goes) => panic!(
+                "MCP claims to push `{}` as {where_it_goes}, and this server has \
+                 no event stream to push it on",
+                said.name()
+            ),
+            Carried::Pulled(where_it_goes) => assert!(
+                shown(said, &told),
+                "`{}` is said to be handed over on {where_it_goes}, and driving \
+                 the server never carried it. a fact that is kept and never \
+                 handed over is one an agent is never told, and it looks exactly \
+                 like this from outside — which is why it is read here rather \
+                 than believed",
+                said.name()
+            ),
+            Carried::Nowhere { why } => assert!(
+                !shown(said, &told),
+                "`{}` is said to reach no agent — {why} — and driving the server \
+                 carried it anyway",
+                said.name()
+            ),
+        }
+    }
+}
+
+/// what the agent is answered across both ways the program can end
+///
+/// two conversations rather than one, because the two outcomes that end a
+/// program cannot both happen to it. the answers are read together, and each
+/// check below names something distinctive enough that the two cannot be
+/// confused
+fn everything_said() -> Transcript {
+    let mut messages = drive(&Asked::default()).messages;
+    messages.extend(drive_with(&Asked::default(), &[], Told::Ended).messages);
+    Transcript { messages }
+}
+
+/// what would show one thing the debugger says reached an agent
+///
+/// exhaustive and with no catch-all arm, so a fact added to the core does not
+/// compile here until someone says what its arrival looks like. it is
+/// deliberately not the table in `bpd_mcp::coverage`: that one says where the
+/// server *would* put it, and this is read against what it really answered —
+/// saying it is reached is not the same as reaching it
+///
+/// every one of them is looked for in an **answer**, which is the whole of what
+/// "reached by a pull" has to mean here. that no message is anything but an
+/// answer is `a_control_tool_returns_the_stop_it_produced_and_nothing_arrives_as_an_event`
+fn shown(said: Told, told: &Transcript) -> bool {
+    match said {
+        Told::Logged => told.answered(&["\"logged\"", mark::LOGGED]),
+        Told::Pausing => {
+            told.answered(&["\"pause_armed_while_running\"", &mark::RUNNING.to_string()])
+        }
+        Told::Spawned => told.answered(&["\"spawned\"", "\"started\"", mark::CHILD]),
+        // `silence_is_not_evidence` is the field an agent acts on, and it goes
+        // beside the children rather than instead of them
+        Told::BlindSpot => told.answered(&["\"cannot_see\"", "\"silence_is_not_evidence\":true"]),
+        Told::Attached => told.answered(&["\"attached\"", &mark::JOINED.to_string()]),
+        Told::Stopped => told.answered(&["\"outcome\":\"stopped\""]),
+        Told::Exited => told.answered(&[
+            "\"outcome\":\"exited\"",
+            &format!("\"exit_code\":{}", mark::EXIT_CODE),
+        ]),
+        Told::Finishing => told.answered(&[
+            "\"outcome\":\"finishing\"",
+            &mark::HELD_AT_THE_END.to_string(),
+        ]),
+        // deliberately with no `exit_code` field at all, which is checked by
+        // `crates/bpd_mcp/tests/ended.rs` — here it only has to have arrived
+        Told::Ended => told.answered(&["\"outcome\":\"ended\""]),
+        Told::StillRunning => told.answered(&[
+            "\"outcome\":\"timed_out\"",
+            &format!("\"waited_ms\":{}", mark::WAITED_MS),
+        ]),
+    }
 }
 
 #[test]
@@ -743,6 +865,8 @@ impl Messages {
 /// a session that answers everything and records what it was asked
 struct Fake {
     asked: Asked,
+    /// which of the two ways a program can end this one ends
+    ending: Told,
 }
 
 struct FakeSession {
@@ -750,6 +874,13 @@ struct FakeSession {
     held: Vec<Stop>,
     /// stops still to come, innermost first
     remaining: Vec<Stop>,
+    /// what a wait is answered with once there are no stops left, in order
+    ///
+    /// the last one repeats, so a conversation that goes on asking gets the
+    /// same answer rather than a program that comes back to life
+    over: Vec<Told>,
+    /// whether the reports have been made, which happens once
+    said: bool,
     output: Arc<dyn ProgramOutput>,
 }
 
@@ -762,6 +893,12 @@ impl Launcher for Fake {
         Ok(Started::Stopped(Box::new(FakeSession {
             asked: Arc::clone(&self.asked),
             held: vec![stop_at(1, StopReason::Entry)],
+            // a deadline that passes and a program that runs out with threads
+            // still held are both things a real one does before it ends, and
+            // neither ends it — so both come before whichever ending this
+            // conversation is driving
+            over: vec![Told::StillRunning, Told::Finishing, self.ending],
+            said: false,
             // innermost first, so `pop` hands them out in order
             remaining: vec![
                 stop_at(
@@ -948,13 +1085,14 @@ impl Session for FakeSession {
             .addressed
             .push((request.name(), session));
 
-        // a program starts a child while it runs, so a wait is where one is
-        // reported. the fake does it on every wait, which puts the server's
-        // route for it in this conversation rather than leaving it to a test
-        // that needs a real interpreter
-        if matches!(request, Request::Wait { .. }) {
-            reporting.spawned(started_a_child());
-            reporting.blind_to(cannot_see_a_child());
+        // everything a running program says arrives while it is running, so a
+        // wait is where all of it is reported. the fake says one of each, once,
+        // which puts the server's route for every one of them in this
+        // conversation rather than leaving it to a test that needs a real
+        // interpreter to fork
+        if matches!(request, Request::Wait { .. }) && !self.said {
+            self.said = true;
+            say(reporting);
         }
 
         Ok(match request {
@@ -1173,7 +1311,7 @@ impl FakeSession {
         }
     }
 
-    /// the next stop, or the timeout shape once there are none left
+    /// the next stop, or the next of the outcomes that are not one
     fn next_stop(&mut self) -> Running {
         match self.remaining.pop() {
             Some(next) => {
@@ -1183,12 +1321,14 @@ impl FakeSession {
                     rebound: Vec::new(),
                 }
             }
-            // what an engine whose deadline passed answers. the program is
-            // running, so there is nothing to say about where it is
-            None => Running::StillRunning {
-                waited: std::time::Duration::from_millis(500),
-                rebound: Vec::new(),
-            },
+            None => {
+                let told = if self.over.len() > 1 {
+                    self.over.remove(0)
+                } else {
+                    self.over[0]
+                };
+                ran_as(told)
+            }
         }
     }
 }

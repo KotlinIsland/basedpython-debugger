@@ -488,6 +488,48 @@ followed by a wait, and DAP needs those separately: a `continue` has to be
 answered before the program stops again. the adapter resumes, answers, and then
 waits
 
+### and about what the debugger says
+
+the rule is about both directions, and the other one used to rest on somebody
+remembering. `bpd_core::Reporting` has no default bodies, so an implementation
+of it has to exist — and an empty one satisfies that. an adapter could take a
+logpoint's record, or a forked child sitting there **held**, and drop it
+
+`bpd_dap::carriage_of` is the table for it, matching `bpd_core::Told` with no
+catch-all arm like the others. everything DAP says is `Carried::Pushed`,
+because DAP has an event stream and a client is not obliged to ask anything
+again — a fact kept back for a request that never comes is a fact nobody is
+told:
+
+| what the debugger says                            | how a DAP client is told                                       |
+| ------------------------------------------------- | -------------------------------------------------------------- |
+| a logpoint's record                               | an `output` event on `stdout`, with the source and line        |
+| a pause armed while the program ran               | an `output` event on `console`, naming the threads             |
+| a child the program started                       | an `output` event on `console`, with no `source` and no `line` |
+| a way of starting a child this interpreter hides  | an `output` event on `important`                               |
+| a debugged fork joining                           | the `startDebugging` reverse request                           |
+| a thread stopping                                 | a `stopped` event                                              |
+| the program exiting                               | an `exited` event with the code, then `terminated`             |
+| the program ending with threads still held        | an `output` event naming them, then the `stopped` events       |
+| the program being over with no exit bpd can read  | `terminated` and deliberately **no** `exited`                  |
+| a deadline passing with the program still running | nothing — see below                                            |
+
+**one of them reaches no DAP client at all.** DAP answers a `continue` *before*
+the program stops again, so a deadline that passes has nothing outstanding to
+be the answer to, and there is no event for "still running" — the client was
+told the program was running when its `continue` was answered and has had no
+`stopped` since. the adapter's own wait carries a deadline only so one
+connection cannot block the other sessions of the same debuggee. it is the sole
+entry in the parity test's hand written list for this direction, and it is
+acceptable only because MCP, whose control tools return the stop they produced,
+has to carry it and does
+
+**saying it is reached is not the same as reaching it.** so the fake session in
+`crates/bpd_dap/tests/coverage.rs` says one of everything, the conversation is
+run to each of the two ways a program can end, and the test reads the
+transcript for what would prove each one arrived. an adapter that emptied one of
+those methods passes every other test in the file and fails that one
+
 ### four capabilities are reached through an extension
 
 `Request::RunScript` — [the debug script](scripts.md) — is a capability of the
