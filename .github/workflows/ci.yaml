@@ -152,6 +152,55 @@ jobs:
         env:
           BPD_PYTHON: python
 
+  intellij:
+    name: intellij
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      # the IntelliJ Platform 2026.2 is compiled for java 25, and `product-info.json`
+      # refuses anything older
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: jetbrains
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          build-root-directory: editors/intellij
+      # the plugin is what makes bpd reachable from a jetbrains IDE at all, and
+      # no rust test can reach it: whether the platform loads the manifest,
+      # whether its extension point registrations are accepted, and whether a
+      # session started from a run configuration stops on a breakpoint are all
+      # questions only a real IDE answers
+      #
+      # it is its own job rather than a step of `test` because it pulls a jvm
+      # toolchain, gradle, and a 1.2 GB IDE, and none of that belongs in the
+      # matrix that runs on five interpreter and platform combinations
+      - run: cargo build -p bpd_agent
+      - run: cargo build --bin bpd
+      # the platform test framework runs headless — it is not an electron app
+      # and wants no display, so unlike the `vscode` job there is no xvfb here
+      #
+      # `python` is the interpreter setup-python put first on PATH, which is the
+      # one `cargo build -p bpd_agent` above compiled the agent against. the
+      # runner has to name the same one twice or the agent will not import
+      - run: ./gradlew test
+        working-directory: editors/intellij
+        env:
+          BPD_EXECUTABLE: ${{ github.workspace }}/target/debug/bpd
+          BPD_PYTHON: python
+      # the manifest is checked against the platform it declares: an extension
+      # point that moved, or an api that went away, is a plugin that installs
+      # and does not load
+      - run: ./gradlew verifyPluginStructure verifyPluginProjectConfiguration
+        working-directory: editors/intellij
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest

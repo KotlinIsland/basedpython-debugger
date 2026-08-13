@@ -101,67 +101,46 @@ breakpoint is not already solid
         `createDebugAdapterDescriptor` itself, so the `showErrorMessage` beside
         the throw was the same sentence in front of the user twice. see
         [the vs code extension](docs/development/vscode.md)
-- [ ] **intellij drives it.** a hard requirement, not a nice-to-have, and a
-        different problem from vs code rather than the same one twice
-        - **jetbrains ships an official DAP path for python already**:
-        [Python DAP Debugger](https://plugins.jetbrains.com/plugin/28460-python-dap-debugger),
-        vendor `JetBrains` and verified on the marketplace, ~650k downloads.
-        it "adds a python debugger backend powered by **debugpy** and the
-        Debug Adapter Protocol to all JetBrains IDEs that support python",
-        across every standard run configuration — scripts, pytest, unittest,
-        doctest, tox, Trial, uv — selected by a **Mode** switch in the debug
-        tool window. python 3.9+, local interpreters only
-        - so the plumbing exists and is theirs: a python debug session in a
-        jetbrains IDE **can** be driven over DAP today. that is a much
-        better starting point than a platform with no DAP at all
-        - **the platform has a general DAP layer, and that is the route.**
-        read out of the published plugin jar rather than guessed:
-        `intellij.platform.dap` carries
-        `DebugAdapterSupportProvider<T>`, `DebugAdapterDescriptor<T>`,
-        `DapDebugSession`, `DapCommandProcessor`, `DapBreakpointManager`,
-        `DapXDebugProcess` and `connection.SocketConnectionAdapterHandle`,
-        over `org.eclipse.lsp4j.debug` as the protocol layer. jetbrains'
-        python plugin is a **client** of that layer — it registers
-        `platform.dap.debugAdapterSupportProvider` — rather than being the
-        layer itself
-        - so `bpd` does not extend their plugin and does not need it. its own
-        extension points (`debugpyConfigProvider`, `breakpointHandler`) are
-        debugpy-shaped; `bpd` sits **beside** it, registering the same
-        platform extension point with an adapter id of its own.
-        `createDebugAdapterDescriptor(Project)` is the same shape as vs
-        code's factory, which is already built and proven
-        - **and the transport already fits.** a descriptor's
-        `launchDebugAdapter` returns a `DebugAdapterHandle`, and the
-        platform ships a socket-backed one — plus a registry key
-        `debugpy.dap.debug.port`, "the debugger can connect to DebugPy Debug
-        Adapter process on the specified port". that is `bpd dap --listen`,
-        which exists
-        - **the one thing left to ask** is whether `com.intellij.platform.dap`
-        is public API or `@ApiStatus.Internal`. it cannot be read off the
-        artifact, the python plugin's own content module is
-        `visibility="internal"`, and its `since-build` is `262.9437` — so
-        the layer is new and the version floor is high
-        - **the no-plugin route today is
-        [LSP4IJ](https://github.com/redhat-developer/lsp4ij)** (Red Hat, EPL
-        2.0, every flavour from IDEA 2024.2). users define arbitrary DAP
-        servers in settings without writing anything, and its templates live
-        in `src/main/resources/templates/dap/` — `codelldb`, `go-delve`,
-        `python-debugpy` and six more. the debugpy one attaches over
-        `connect.host`/`connect.port`, which is the shape `bpd dap --listen`
-        already answers. a `bpd` template there is the cheapest thing that
-        could work and does not need JetBrains to answer anything
-        - worth reading twice: jetbrains' own stated reason for that plugin is
-        **"lower debugging overhead — especially on Python 3.12+ thanks to
-        PEP 669 monitoring hooks"**. that is this project's thesis, arrived
-        at independently, and it means the comparison in
+- [x] **intellij drives it.** a hard requirement, not a nice-to-have, and a
+        different problem from vs code rather than the same one twice.
+        `editors/intellij/` is a plugin registering
+        `platform.dap.debugAdapterSupportProvider` — the platform's own general
+        DAP layer, which jetbrains' debugpy backend is a *client* of rather than
+        the owner of — with an adapter id of its own, plus a run configuration
+        type and the same `PATH` rule the vs code extension carries.
+        **what ticked it**: `editors/intellij/src/test/` downloads a real
+        pycharm and starts a session through the plugin — a breakpoint set with
+        the IDE's own `XBreakpointManager` on the python plugin's line
+        breakpoint type, a stop observed as `XDebuggerManager` holding a paused
+        session, the frame the IDE focused and a local read out of its
+        variables view, and a resume that ends with the program's own exit. the
+        assertions are the IDE's debug state, not bpd's output, and CI runs it
+        headless — the platform test framework needs no display. see
+        [the intellij plugin](docs/development/intellij.md)
+        - **the layer is `@ApiStatus.Experimental`, not `Internal`**, its module
+        descriptor says `visibility="public"`, and both its extension points
+        are `dynamic="true"`. that was the open question and it is closed
+        - **but it is not in every IDE, and that is the real constraint**:
+        `intellij.platform.dap` ships in the unified PyCharm and in IDEA
+        Ultimate, and **not** in PyCharm Community or IDEA Community, at
+        2026.2.1. the marketplace lists jetbrains' own DAP plugin as
+        `PYCHARM_COMMUNITY` compatible anyway, which its own `since-build`
+        supports and the product layout does not
+        - **`supportsSingleThreadExecutionRequests` is honoured.**
+        `DapDebugSessionImpl.resume` reads it off the `initialize` response
+        and sets `ContinueArguments.singleThread` from it, so a non-stop bpd
+        session resumes in pycharm the way it does in vs code
+        - **`startDebugging` is not advertised** by the layer's default
+        `createInitializeParams`, and `DapClient` does not implement lsp4j's
+        reverse request. so `debug children` is refused there by name, with
+        the adapter's own sentence
+        - worth reading twice: jetbrains' own stated reason for their debugpy
+        plugin is **"lower debugging overhead — especially on Python 3.12+
+        thanks to PEP 669 monitoring hooks"**. that is this project's thesis,
+        arrived at independently, and it means the comparison in
         [what bpd costs](docs/development/overhead.md) is the comparison
         that matters inside pycharm too, not just against a command-line
         debugpy — per-location `DISABLE` against per-code-object
-        - neither LSP4IJ's docs nor the plugin's cover `startDebugging` or
-        more than one concurrent session, which is exactly what child
-        debugging needs. unknown until driven
-        - the same bar as vs code applies: nobody ticks this until a session
-        has been started and a breakpoint has been hit
 - [x] an MCP server exposing the same session
 - [x] a parity test that enumerates the capabilities in `bpd_core` and fails if
         either adapter is missing one. the rule is enforced by CI, not by review
@@ -189,13 +168,14 @@ entry naming the executable and nothing else. what stays out is everything
 built *on top* of that — panels, custom views, an inline value renderer, any UI
 of our own
 
-**intellij is the case that may not fit that rule**, and the exclusion is
-written narrowly for it rather than bent. vs code needs an extension because it
-resolves a configuration's `type` through one; if intellij can reach `bpd`
-through LSP4IJ's existing DAP run configuration then it needs no plugin at all
-and this stays a launch configuration. if it cannot, then the minimum that makes
-`bpd` reachable is in scope on the same grounds the vs code stub is — and
-everything above that minimum is still out
+**intellij needed a plugin**, and the exclusion is written narrowly for it
+rather than bent. vs code needs an extension because it resolves a
+configuration's `type` through one; a jetbrains IDE resolves a debug session
+through a run configuration type and a `ProgramRunner`, and neither can be named
+from a settings file. so the minimum that makes `bpd` reachable there is in
+scope on the same grounds the vs code stub is — a run configuration, an adapter
+registration and a `PATH` lookup — and everything above that minimum is still
+out: no panels, no tool window, no actions, no inline values
 
 ## before the MVP
 

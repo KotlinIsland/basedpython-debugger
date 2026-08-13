@@ -70,6 +70,7 @@ development = [
     "development/sessions.md",
     "development/dap.md",
     "development/vscode.md",
+    "development/intellij.md",
     "development/agent-interface.md",
     "development/mcp.md",
     "development/scripts.md",

@@ -15,10 +15,11 @@ a debugger for python and [basedpython](https://github.com/KotlinIsland/basedpyt
     editor needs a launch configuration rather than a bespoke plugin. **vs
     code** is proven: `editors/vscode/` registers the type and a test drives a
     real session through it. **neovim** drives it through `nvim-dap`, which
-    names the executable itself. **pycharm is a hard requirement and is not
-    done** — its own python debugging is pydevd, and DAP reaches it through a
-    plugin rather than natively, so see [ROADMAP.md](ROADMAP.md) for what that
-    turns on
+    names the executable itself. **pycharm** is proven too: `editors/intellij/`
+    is a plugin on the platform's own DAP extension point, and a test downloads
+    a real pycharm and stops a program on a breakpoint in it — the layer it
+    needs is in the unified pycharm and in IDEA Ultimate, and not in the
+    community builds
 - **and MCP, at parity** — ai agents get the same session through an interface
     shaped for them rather than for a ui. both are thin adapters over one
     session core, and a capability exists in both or in neither
