@@ -30,6 +30,9 @@ use std::path::{Path, PathBuf};
 use bpd_core::Detail;
 use bpd_dap::Configuration;
 
+mod fields;
+use fields::fields_of;
+
 /// the extension's directory, from this crate
 fn extension() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../editors/vscode")
@@ -336,65 +339,4 @@ fn the_manifest_and_the_javascript_agree_on_what_they_register() {
     assert!(source.contains("\"bpd.executable\""));
     assert!(source.contains("getConfiguration(\"bpd\""));
     assert!(source.contains(".get(\"executable\")"));
-}
-
-/// the field names serde will read for a struct, asked of serde
-///
-/// a derived `Deserialize` hands its field list — already renamed, so already
-/// camel case — to the deserializer it is given. capturing it there is the
-/// difference between a test that checks two lists agree and a test that
-/// re-states one of them
-fn fields_of<'de, T: serde::Deserialize<'de> + std::fmt::Debug>() -> BTreeSet<String> {
-    let mut found = Vec::new();
-    let error = T::deserialize(Fields { found: &mut found })
-        .expect_err("this deserializer answers a struct with an error, always");
-    assert_eq!(
-        error.to_string(),
-        CAPTURED,
-        "the field list was never asked for, so `{}` is not a struct serde reads by name",
-        std::any::type_name::<T>()
-    );
-    assert!(
-        !found.is_empty(),
-        "a struct with no fields tells this test nothing"
-    );
-    found.into_iter().collect()
-}
-
-/// what the capturing deserializer says once it has the field list
-const CAPTURED: &str = "the field list is the whole of what this wanted";
-
-/// a deserializer that answers nothing and records the field list it is offered
-struct Fields<'a> {
-    found: &'a mut Vec<String>,
-}
-
-impl<'de> serde::Deserializer<'de> for Fields<'_> {
-    type Error = serde::de::value::Error;
-
-    fn deserialize_struct<V: serde::de::Visitor<'de>>(
-        self,
-        _name: &'static str,
-        fields: &'static [&'static str],
-        _visitor: V,
-    ) -> Result<V::Value, Self::Error> {
-        self.found
-            .extend(fields.iter().map(|field| (*field).to_owned()));
-        Err(serde::de::Error::custom(CAPTURED))
-    }
-
-    fn deserialize_any<V: serde::de::Visitor<'de>>(
-        self,
-        _visitor: V,
-    ) -> Result<V::Value, Self::Error> {
-        Err(serde::de::Error::custom(
-            "this deserializer answers a struct with its field list and nothing else",
-        ))
-    }
-
-    serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-        bytes byte_buf option unit unit_struct newtype_struct seq tuple
-        tuple_struct map enum identifier ignored_any
-    }
 }
