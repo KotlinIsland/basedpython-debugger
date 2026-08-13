@@ -19,8 +19,7 @@ import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.intellij.openapi.util.NotNullLazyValue
 import com.intellij.ui.components.JBCheckBox
 import com.intellij.ui.components.JBTextField
-import com.intellij.ui.dsl.builder.bindSelected
-import com.intellij.ui.dsl.builder.bindText
+import com.intellij.ui.dsl.builder.AlignX
 import com.intellij.ui.dsl.builder.panel
 import com.intellij.util.execution.ParametersListUtil
 import javax.swing.JComponent
@@ -156,7 +155,20 @@ class BpdRunConfiguration(
         }
     }
 
-    override fun suggestedName(): String? = program.substringAfterLast('/').ifBlank { null }
+    /**
+     * the file name of the program, when there is one to take
+     *
+     * `Path` rather than a split on `/`, because a windows configuration names
+     * its program with backslashes and would otherwise be suggested whole
+     */
+    override fun suggestedName(): String? =
+        try {
+            java.nio.file.Path.of(program).fileName?.toString()
+        } catch (ignored: java.nio.file.InvalidPathException) {
+            // a name is a convenience, and a program that is not a path yet is
+            // one somebody is still typing
+            null
+        }
 }
 
 /** the fields of a bpd run configuration, as a person edits them */
@@ -192,17 +204,17 @@ class BpdRunConfigurationEditor : SettingsEditor<BpdRunConfiguration>() {
     override fun createEditor(): JComponent =
         panel {
             row("Script:") {
-                cell(program).align(com.intellij.ui.dsl.builder.AlignX.FILL)
+                cell(program).align(AlignX.FILL)
             }
             row("Arguments:") {
-                cell(parameters).align(com.intellij.ui.dsl.builder.AlignX.FILL)
+                cell(parameters).align(AlignX.FILL)
             }
             row("Interpreter:") {
-                cell(interpreter).align(com.intellij.ui.dsl.builder.AlignX.FILL)
+                cell(interpreter).align(AlignX.FILL)
                     .comment("resolved on PATH like any other command")
             }
             row("${BpdExecutable.FIELD}:") {
-                cell(executable).align(com.intellij.ui.dsl.builder.AlignX.FILL)
+                cell(executable).align(AlignX.FILL)
                     .comment(
                         "a bare name is looked up on PATH; anything else must be an absolute " +
                             "path. a relative path is refused rather than resolved against a " +

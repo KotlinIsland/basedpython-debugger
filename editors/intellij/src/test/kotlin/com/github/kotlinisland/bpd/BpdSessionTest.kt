@@ -291,7 +291,7 @@ class BpdSessionTest : HeavyPlatformTestCase() {
                 )
                 return
             } catch (refused: RuntimeConfigurationError) {
-                refused.message.orEmpty()
+                refused.localizedMessage.orEmpty()
             }
         assertTrue(
             "what the IDE reported does not name the path that was wrong: $said",
@@ -322,7 +322,7 @@ class BpdSessionTest : HeavyPlatformTestCase() {
                 fail("a relative `${BpdExecutable.FIELD}` was resolved rather than refused")
                 return
             } catch (refused: com.intellij.execution.ExecutionException) {
-                refused.message.orEmpty()
+                refused.localizedMessage.orEmpty()
             }
         assertTrue(
             "the refusal does not say the path is relative: $said",
@@ -367,6 +367,9 @@ class BpdSessionTest : HeavyPlatformTestCase() {
                     }
                 }
 
+                // the platform deprecated this in favour of a form that takes
+                // a callback for the rest, and left it abstract
+                @Suppress("OVERRIDE_DEPRECATION")
                 override fun tooManyChildren(remaining: Int) {
                     done = true
                 }
