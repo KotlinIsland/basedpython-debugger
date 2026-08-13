@@ -17,22 +17,30 @@ work, and it should end somewhere
 
 ## why they are not merged today
 
-**they do not overlap in capability.** `basedpython-pycharm` debugs `.by` and
-`bpd` cannot yet, so folding a working `.by` debugger into a plugin that cannot
-replace it would trade something for nothing
+**they do not fully overlap in capability yet.** `basedpython-pycharm` reports
+`.by` frames and `bpd` does not, so folding a working `.by` debugger into a
+plugin that cannot yet replace it would trade something for nothing
 
-**but the gap is much smaller than this project recorded.** M6 said the
-transpiler had to emit a map with provenance and a hash, as though none existed.
-`by run` writes `_by_sourcemap.py` today — indexed by generated line, holding the
-`.by` line it came from and `None` where a prelude has no source, which *is* the
-provenance — and the language plugin ships source-mapped `.by` debugging on it,
-verified end to end. its `docs/debugging.md` records that the identical "blocked
-upstream" belief it had held for a long time was false
+**but the gap is much smaller than this project recorded, and half of it is now
+closed.** M6 said the transpiler had to emit a map with provenance and a hash, as
+though none existed. `by run` writes `_by_sourcemap.py` today — indexed by
+generated line, holding the `.by` line it came from and `None` where a prelude
+has no source, which *is* the provenance, plus `DIGESTS` over both files each
+entry describes. the language plugin ships source-mapped `.by` debugging on it,
+verified end to end, and its `docs/debugging.md` records that the identical
+"blocked upstream" belief it had held for a long time was false
 
-what is actually missing is the **hash of both artefacts**, and only that. it is
-this project's rule that needs it rather than the mapping: a line that came from
-a map nobody verified against the thing it maps is the exact failure the contract
-refuses. so the upstream ask is one digest
+**`bpd` now binds a `.by` breakpoint through that map**, per
+[source mapping](source-mapping.md). what is still missing on this side is `.by`
+**frames**: a stop and a stack report the generated python. that is honest rather
+than wrong — nothing claims a `.by` location it was not given one for — and it is
+the half that decides whether this plugin can switch
+
+where the two implementations differ is the digest. the language plugin maps a
+line whether or not the pair of files is still the pair the map was built from;
+`bpd` refuses the whole build when either has moved, before the interpreter is
+started, because a line that came from a map nobody verified against the thing it
+maps is the exact failure the contract refuses
 
 and the scopes differ. `bpd` is a python debugger. a person debugging ordinary
 python has no reason to install a basedpython language plugin to get one, and a
@@ -41,10 +49,10 @@ merge would make that the only way
 ## where this is going
 
 the end state is not "bpd's plugin absorbed into the language plugin". it is
-**`basedpython-pycharm` switching its adapter from debugpy to `bpd`** once M6
-lands. debugging the transpiled python is the fallback this project's roadmap
-already describes as temporary — `bpd` exists to replace it with `.by`
-breakpoints and `.by` frames through a verified map, which is the whole reason
+**`basedpython-pycharm` switching its adapter from debugpy to `bpd`** once M6's
+frames land. `.by` **breakpoints** already bind through a verified map;
+debugging the transpiled python is the fallback this project's roadmap describes
+as temporary, and what is left of it is the frames — which is the whole reason
 the source mapping rule is "total or absent, no identity fallback"
 
 when that happens the two plugins have one adapter between them, and whether
