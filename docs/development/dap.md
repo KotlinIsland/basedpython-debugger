@@ -6,10 +6,9 @@ loopback socket
 
 which editors that reaches is not uniform, and this page used to say "vs code,
 pycharm and neovim all speak it" as though it were. **vs code** and **neovim**
-do, and both have driven `bpd`. **pycharm's own python debugging is pydevd**;
-DAP arrives there through a plugin — jetbrains' own `Python DAP Debugger`, or
-LSP4IJ — and which of those `bpd` can reach is the open question in
-[ROADMAP.md](../../ROADMAP.md)
+do, and both have driven `bpd`. **pycharm's own python debugging is pydevd**,
+and DAP arrives there through a plugin rather than natively — which is what
+[the intellij plugin](intellij.md) is, and it drives `bpd` too
 
 it is a **translation and nothing else**. a DAP request becomes a
 `bpd_core::Request`, the answer is rendered, and no decision about the program
