@@ -18,6 +18,14 @@ node_modules/
 # gigabyte, and cached between runs
 /editors/vscode/.vscode-test
 
+# what running the intellij build leaves behind. the wrapper's jar and
+# properties are committed beside them, which is what pins the gradle these use.
+# `.intellijPlatform` holds the layout index and the release list the platform
+# plugin caches; the IDE itself lands in the gradle cache rather than here
+/editors/intellij/.gradle
+/editors/intellij/.intellijPlatform
+/editors/intellij/build
+
 .DS_Store
 *.pyc
 __pycache__/
