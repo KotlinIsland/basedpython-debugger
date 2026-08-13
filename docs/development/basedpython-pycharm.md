@@ -17,11 +17,22 @@ work, and it should end somewhere
 
 ## why they are not merged today
 
-**they do not overlap in capability.** `basedpython-pycharm` debugs `.by`;
-`bpd` cannot, because that needs the transpiler to emit a source map with
-provenance and a hash of both artefacts — M6 on the roadmap, and upstream work.
-folding a working `.by` debugger into a plugin that cannot yet replace it would
-trade something for nothing
+**they do not overlap in capability.** `basedpython-pycharm` debugs `.by` and
+`bpd` cannot yet, so folding a working `.by` debugger into a plugin that cannot
+replace it would trade something for nothing
+
+**but the gap is much smaller than this project recorded.** M6 said the
+transpiler had to emit a map with provenance and a hash, as though none existed.
+`by run` writes `_by_sourcemap.py` today — indexed by generated line, holding the
+`.by` line it came from and `None` where a prelude has no source, which *is* the
+provenance — and the language plugin ships source-mapped `.by` debugging on it,
+verified end to end. its `docs/debugging.md` records that the identical "blocked
+upstream" belief it had held for a long time was false
+
+what is actually missing is the **hash of both artefacts**, and only that. it is
+this project's rule that needs it rather than the mapping: a line that came from
+a map nobody verified against the thing it maps is the exact failure the contract
+refuses. so the upstream ask is one digest
 
 and the scopes differ. `bpd` is a python debugger. a person debugging ordinary
 python has no reason to install a basedpython language plugin to get one, and a

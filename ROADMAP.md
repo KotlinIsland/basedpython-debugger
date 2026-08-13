@@ -440,10 +440,34 @@ result is
 
 `.by` breakpoints and `.by` frames through a verified source map
 
-this milestone has an **upstream dependency**: the basedpython transpiler has to
-emit a source map with provenance for generated lines and a hash of both
-artefacts. that work is in basedpython, not here. until it lands, `bpd` debugs
-the generated python and says that is what it is doing
+this was recorded as **blocked upstream** — "the transpiler has to emit a source
+map with provenance for generated lines and a hash of both artefacts". **most of
+that is wrong, and the sibling repository had already found it out.**
+
+`by run` writes `_by_sourcemap.py` beside the transpiled output today:
+
+```python
+SOURCEMAP = {
+    "/tmp/.tmpXXXX/demo.py": ("/abs/path/demo.by", [None, 0, 1, 2, 3, ...]),
+}
+```
+
+indexed by **generated** line, holding the `.by` line it came from — and `None`
+where the transpiler emitted a prelude with no source. that is the map, and the
+`None` **is** the provenance. `basedpython-pycharm` ships source-mapped `.by`
+debugging on it through debugpy's `setPydevdSourceMap`, verified end to end, and
+its `docs/debugging.md` says in as many words that the same "blocked upstream"
+belief it had recorded for a long time was false
+
+what is genuinely missing is the **hash of both artefacts**, and only that. it is
+what this project's rule needs rather than what a map needs: a source map that
+was not verified against the thing it maps is exactly the line number
+[the contract](README.md) refuses to report. so the upstream ask is one digest,
+not a mapping format
+
+until it lands `bpd` debugs the generated python and says that is what it is
+doing — which is now a smaller gap than this entry claimed, and a much smaller
+ask. see [bpd and the basedpython pycharm plugin](docs/development/basedpython-pycharm.md)
 
 ### M7 — django templates · done
 
