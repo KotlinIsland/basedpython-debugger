@@ -394,6 +394,61 @@ that are all the same reason:
     why the request exists. `bpd` does not implement it yet, and that is a gap
     in the adapter rather than a reason to fake the thing it asks for
 
+### the same two give the debuggee no stdin at all
+
+a captured launch gives the debuggee `/dev/null` as its stdin. it used to give
+it `bpd`'s own, and that was not a smaller version of the output problem — it
+was a worse one:
+
+- over **stdio** — `bpd dap` with no flag, and `bpd mcp`, which has no other
+    transport — `bpd`'s stdin *is* the protocol. the debuggee and the adapter
+    were two readers of one descriptor, so a program calling `input()` did not
+    merely hang: it took the client's next message out of the stream. measured,
+    it returned `'Content-Length: 68\r'`, and the request those bytes belonged
+    to was answered by nothing. the session was **corrupted** rather than
+    stalled
+- under **`--listen`** the protocol is on the socket, so there was nothing there
+    to corrupt — and the stream was still not the debuggee's. it is whatever
+    spawned `bpd`: an editor, a script, a CI job. measured, a debuggee read a
+    line out of a file its launcher was reading
+
+the rule is the one the output follows, and it is about the **capture** rather
+than the transport: a front end that has taken the program's output over has
+taken `bpd`'s streams for itself, and there is no bare run left to inherit from.
+so the debuggee gets what `python program.py < /dev/null` gives, on all three
+paths — `bpd dap` on stdio, `bpd dap --listen`, and `bpd mcp`
+
+that is a defined outcome rather than a hang. `input()` raises **`EOFError`**,
+`sys.stdin.read()` returns `''`, and `sys.stdin.isatty()` is `False` — at the
+line that asked for it, where the debugger stops on it like any other exception.
+it is a real stream object, and that is the reason for `/dev/null` rather than a
+closed descriptor: with descriptor 0 not open, cpython sets `sys.stdin` to `None`
+and `input()` raises `RuntimeError: input(): lost sys.stdin` instead, and the
+next file the program opened would be handed descriptor 0
+
+`--listen` inheriting was considered separately, because it is the one path
+where `bpd`'s stdin is not the protocol. it is refused for two reasons: the
+stream still belongs to another reader, and taking bytes from it is the same
+theft with a quieter victim — and it would make the **program** behave
+differently depending on which socket its client connected over, which is one
+adapter giving one program two answers about its own world
+
+a program that genuinely needs input has one honest route, and it is DAP's:
+`runInTerminal`, where the client starts the program in a terminal it owns and
+the terminal is a real one. `bpd` does not implement it yet, and that is the gap
+to close rather than a reason to invent a channel here — a pipe the adapter
+wrote to would be a capability in one adapter and not the other, which
+[the parity rule](dap.md#the-parity-rule-both-sided) forbids. until then a
+program under `bpd dap` or `bpd mcp` takes its input from a file, an argument or
+the environment, and `bpd launch` is the path that still has a terminal
+
+`a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds` in
+`crates/bpd/tests/dap.rs` runs on **both** transports and pins two of the three,
+and `..._rather_than_the_servers` in `crates/bpd/tests/mcp.rs` pins the last. the
+loopback half is not vacuous: the listening adapter is started with a marked line
+in its own stdin, so a debuggee that inherited it reads the marker and the
+assertion says what was taken
+
 ### the parity test could not see any of this, and now can
 
 `crates/bpd/tests/launch_parity.rs` runs everything twice and compares, and every

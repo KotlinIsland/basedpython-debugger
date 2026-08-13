@@ -239,6 +239,17 @@ write colour escapes and progress redraws into text an agent then has to read
 around. the reasoning, and what it costs in buffering, is in
 [launching a debuggee](launching.md#the-debuggees-own-standard-streams)
 
+the debuggee's **stdin** is `/dev/null`, and that is the other half of the same
+decision. this server speaks on stdio and has no second transport, so its stdin
+*is* the protocol — a debuggee reading it took the agent's next message out of
+the stream, which corrupted the session rather than merely hanging the program.
+so a program that calls `input()` gets `EOFError` at the line that asked for it,
+and an agent that needs a program to consume input gives it a file, an argument
+or the environment. there is no tool that writes to a debuggee's stdin: DAP has
+no such request either — its answer is `runInTerminal`, which neither front end
+has — and a channel here alone would be a capability the DAP adapter does not
+have
+
 it is bounded: the most recent 64 KiB, because what a program printed just
 before it stopped is what the stop is about, and whatever fell off the front is
 counted and reported. logpoint records are bounded the same way — the first 200,

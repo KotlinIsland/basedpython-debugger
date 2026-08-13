@@ -7,6 +7,12 @@
 //! the program's own stdout and stderr are **pipes**, not this process's. this
 //! server's stdout is the protocol, and one `print` from the debuggee in the
 //! middle of a line would make that line unreadable json
+//!
+//! its stdin is **`/dev/null`**, for the mirror image of that reason: this
+//! server's stdin is the protocol, and a debuggee reading it took the client's
+//! next message out of the stream. `input()` in a debuggee raises `EOFError`,
+//! and there is no tool that writes to one — see
+//! [the MCP server](../../../docs/development/mcp.md)
 
 use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader, Read};

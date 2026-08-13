@@ -617,6 +617,82 @@ fn one_call_describes_a_stop_and_one_more_says_what_changed_since() {
     client.finish();
 }
 
+/// a program that reads its own stdin and says exactly what it got
+///
+/// `read()` rather than one `input()`, because it reads to **end of stream**: it
+/// returns the empty string on a stream that is already over, and on a stream
+/// somebody else is writing it does not return at all. so a debuggee handed the
+/// server's stdin either prints what it stole or never reaches the next line
+const STDIN_PROBE: &str = r#"import sys
+
+print("isatty", sys.stdin.isatty(), flush=True)
+print("read", repr(sys.stdin.read()), flush=True)
+try:
+    input()
+    print("input returned", flush=True)
+except EOFError as error:
+    print("EOFError", error, flush=True)
+"#;
+
+#[test]
+fn a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_the_servers() {
+    // this server's stdin **is** the protocol — it is stdio and nothing else —
+    // so a debuggee that inherited it was a second reader of the client's own
+    // messages, taking bytes out of requests nothing then answered. the same
+    // defect `bpd dap` had over stdio, and the same answer: a captured launch
+    // gives the debuggee `/dev/null`, which is what
+    // `python program.py < /dev/null` gives
+    let fixture = Fixture::new("reader", STDIN_PROBE);
+    let mut client = Client::start();
+
+    client.ask(
+        "initialize",
+        &serde_json::json!({ "protocolVersion": bpd_mcp::PROTOCOL_VERSION }),
+    );
+    let launched = client.call(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    assert_eq!(launched["outcome"], "stopped", "launch gave {launched}");
+
+    let finished = client.call("continue_", &serde_json::json!({ "deadline_ms": GENEROUS }));
+    assert_eq!(
+        finished["outcome"], "exited",
+        "the probe reads its stdin to the end and finishes. a program still \
+         running here is one blocked on a stream the client is writing: \
+         {finished}"
+    );
+
+    let said = finished["output"]["text"]
+        .as_str()
+        .expect("the program printed something");
+    assert!(
+        said.contains("read ''"),
+        "the debuggee read something from its stdin, and everything there is \
+         the server's: {said:?}"
+    );
+    assert!(
+        !said.contains("jsonrpc"),
+        "the debuggee read a message the client sent, which is the protocol \
+         stream with a second reader on it: {said:?}"
+    );
+    assert!(
+        said.contains("EOFError"),
+        "asking a stream that is over for a line raises `EOFError`, which is \
+         what a program can catch. the probe said: {said:?}"
+    );
+    // and the guard: an empty stdin is still a stdin. `sys.stdin` being `None`
+    // — which is what closing the descriptor gives — would make `input()` raise
+    // `RuntimeError` instead, and every assertion above would still pass
+    assert!(
+        said.contains("isatty False"),
+        "the debuggee has a real stdin object that reports it is not a \
+         terminal: {said:?}"
+    );
+
+    client.finish();
+}
+
 /// the interpreter the built agent matches
 fn interpreter() -> String {
     bpd_test::agent::matching_interpreter()
