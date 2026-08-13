@@ -22,7 +22,10 @@ a debugger for python and [basedpython](https://github.com/KotlinIsland/basedpyt
     community builds
 - **and MCP, at parity** — ai agents get the same session through an interface
     shaped for them rather than for a ui. both are thin adapters over one
-    session core, and a capability exists in both or in neither
+    session core, and a capability is reached by both wherever the protocol can
+    carry it — a test fails when one reaches something the other does not. where
+    a protocol genuinely cannot, that is a written entry naming which and why,
+    because the gap this rule is about is the silent one
 - **django templates** — breakpoints in template files, template frames in the
     stack. under `runserver` the reloader serves from a **child** process the
     debugger is not in, so that wants `--noreload` until `bpd` follows a child;
