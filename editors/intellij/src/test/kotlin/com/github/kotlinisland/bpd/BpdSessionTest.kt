@@ -1,6 +1,7 @@
 package com.github.kotlinisland.bpd
 
 import com.intellij.execution.RunManager
+import com.intellij.execution.configurations.RuntimeConfigurationError
 import com.intellij.execution.executors.DefaultDebugExecutor
 import com.intellij.execution.runners.ExecutionEnvironmentBuilder
 import com.intellij.execution.runners.ProgramRunner
@@ -18,8 +19,22 @@ import com.intellij.xdebugger.XDebuggerManager
 import com.intellij.xdebugger.breakpoints.XBreakpointManager
 import com.intellij.xdebugger.breakpoints.XBreakpointProperties
 import com.intellij.xdebugger.breakpoints.XLineBreakpointType
+import com.intellij.openapi.editor.colors.TextAttributesKey
+import com.intellij.ui.SimpleTextAttributes
+import com.intellij.xdebugger.frame.XCompositeNode
+import com.intellij.xdebugger.frame.XFullValueEvaluator
+import com.intellij.xdebugger.frame.XStackFrame
+import com.intellij.xdebugger.frame.XValue
+import com.intellij.xdebugger.frame.XValueChildrenList
+import com.intellij.xdebugger.frame.XValueContainer
+import com.intellij.xdebugger.frame.XValueGroup
+import com.intellij.xdebugger.frame.XValueNode
+import com.intellij.xdebugger.frame.XValuePlace
+import com.intellij.xdebugger.frame.presentation.XValuePresentation
+import com.intellij.xdebugger.frame.XDebuggerTreeNodeHyperlink
 import com.jetbrains.python.debugger.PyLineBreakpointType
 import java.io.File
+import javax.swing.Icon
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -218,6 +233,16 @@ class BpdSessionTest : HeavyPlatformTestCase() {
             position.line,
         )
 
+        // the variables view, read the way the view itself reads it: the frame
+        // the IDE focused is asked for its children, and the answer walks the
+        // scope groups the DAP layer puts them in
+        val total =
+            checkNotNull(named(frame, "total")) {
+                "`total` is a local of `accumulate` at this line, and the frame the IDE " +
+                    "focused offers ${names(frame)}"
+            }
+        assertEquals("`total` is 0 + 1 + 2 at the breakpoint", "3", presentation(total))
+
         // the program has not run past the breakpoint, so it has not written its file
         assertFalse(
             "the program reached its last statement before the breakpoint stopped it",
@@ -232,6 +257,254 @@ class BpdSessionTest : HeavyPlatformTestCase() {
         // killed rather than resumed leaves no file here
         waitFor("the program writing its last file") { Files.exists(finished) }
         assertEquals("42", FileUtil.loadFile(finished.toFile(), StandardCharsets.UTF_8).trim())
+    }
+
+    /**
+     * a configuration whose `bpd executable` names nothing, which must not start
+     *
+     * what it is here for is the sentence. a `bpd` that cannot be found is the
+     * likeliest thing to go wrong for a new user, and the whole reason
+     * [BpdExecutable] walks `PATH` itself is so that what they read names the
+     * command and says what to do — rather than the failed spawn a process that
+     * does not exist otherwise produces
+     *
+     * the IDE's own validation is what is driven: `checkConfiguration` is what
+     * the run configuration dialog calls, and what
+     * `ExecutionEnvironmentBuilder.buildAndExecute` calls before it starts
+     * anything
+     */
+    fun testAConfigurationThatCannotFindBpdIsRefused() {
+        val missing = createTempDirectory().toPath().resolve("there-is-no-bpd-here")
+        val settings =
+            RunManager.getInstance(project)
+                .createConfiguration("bpd cannot be found", BpdRunConfigurationType::class.java)
+        val configuration = settings.configuration as BpdRunConfiguration
+        configuration.executable = missing.toString()
+        configuration.program = program.toString()
+
+        val said =
+            try {
+                configuration.checkConfiguration()
+                fail(
+                    "the IDE accepted a configuration whose `${BpdExecutable.FIELD}` names " +
+                        "nothing, so nothing told the person their path is wrong",
+                )
+                return
+            } catch (refused: RuntimeConfigurationError) {
+                refused.message.orEmpty()
+            }
+        assertTrue(
+            "what the IDE reported does not name the path that was wrong: $said",
+            said.contains(missing.toString()),
+        )
+        assertTrue(
+            "what the IDE reported does not say what to do about it: $said",
+            said.contains("put `bpd` on PATH, or set the run configuration's"),
+        )
+
+        assertNull(
+            "a session was started even though its adapter could not be named",
+            XDebuggerManager.getInstance(project).currentSession,
+        )
+    }
+
+    /**
+     * a relative path is refused rather than resolved
+     *
+     * this is the rule `editors/vscode/extension.js` carries and the reason it
+     * carries it: an IDE's working directory is not a directory the user chose,
+     * so resolving against it would start whichever `bpd` happened to be there
+     */
+    fun testARelativeExecutableIsRefused() {
+        val said =
+            try {
+                BpdExecutable.resolve("build/bpd")
+                fail("a relative `${BpdExecutable.FIELD}` was resolved rather than refused")
+                return
+            } catch (refused: com.intellij.execution.ExecutionException) {
+                refused.message.orEmpty()
+            }
+        assertTrue(
+            "the refusal does not say the path is relative: $said",
+            said.contains("which is a relative path"),
+        )
+        assertTrue(
+            "the refusal does not say what to give instead: $said",
+            said.contains("give an absolute path, or a bare command name to look up on PATH"),
+        )
+    }
+
+    /**
+     * one level of a frame's children, as the variables view would ask for them
+     *
+     * [XCompositeNode] is a callback rather than a return value because the view
+     * is asynchronous, so the answer is collected and the queue is pumped until
+     * the node says it is finished — or says why it is not
+     */
+    private fun children(container: XValueContainer): List<Pair<String, XValue>> {
+        val collected = mutableListOf<Pair<String, XValue>>()
+        var refused: String? = null
+        var done = false
+        container.computeChildren(
+            object : XCompositeNode {
+                override fun addChildren(
+                    children: XValueChildrenList,
+                    last: Boolean,
+                ) {
+                    for (index in 0 until children.size()) {
+                        collected += children.getName(index) to children.getValue(index)
+                    }
+                    for (index in 0 until children.topGroups.size) {
+                        val group = children.topGroups[index]
+                        collected += group.name.orEmpty() to GroupAsValue(group)
+                    }
+                    for (index in 0 until children.bottomGroups.size) {
+                        val group = children.bottomGroups[index]
+                        collected += group.name.orEmpty() to GroupAsValue(group)
+                    }
+                    if (last) {
+                        done = true
+                    }
+                }
+
+                override fun tooManyChildren(remaining: Int) {
+                    done = true
+                }
+
+                override fun setAlreadySorted(alreadySorted: Boolean) = Unit
+
+                override fun setErrorMessage(errorMessage: String) {
+                    refused = errorMessage
+                    done = true
+                }
+
+                override fun setErrorMessage(
+                    errorMessage: String,
+                    link: XDebuggerTreeNodeHyperlink?,
+                ) {
+                    refused = errorMessage
+                    done = true
+                }
+
+                override fun setMessage(
+                    message: String,
+                    icon: Icon?,
+                    attributes: SimpleTextAttributes,
+                    link: XDebuggerTreeNodeHyperlink?,
+                ) = Unit
+            },
+        )
+        waitFor("the frame answering with its children") { done }
+        check(refused == null) {
+            "the IDE could not read the frame's children: $refused"
+        }
+        return collected
+    }
+
+    /** an [XValueGroup] read as the container it is, so one walk covers both */
+    private class GroupAsValue(private val group: XValueGroup) : XValue() {
+        override fun computePresentation(
+            node: XValueNode,
+            place: XValuePlace,
+        ) = Unit
+
+        override fun computeChildren(node: XCompositeNode) = group.computeChildren(node)
+    }
+
+    /** every name the frame offers, across the scopes it groups them into */
+    private fun names(frame: XStackFrame): List<String> =
+        children(frame).flatMap { (name, value) ->
+            val nested = children(value).map { it.first }
+            if (nested.isEmpty()) listOf(name) else nested
+        }
+
+    /** the value the frame holds under a name, wherever the IDE grouped it */
+    private fun named(
+        frame: XStackFrame,
+        wanted: String,
+    ): XValue? {
+        for ((name, value) in children(frame)) {
+            if (name == wanted) {
+                return value
+            }
+            children(value).firstOrNull { it.first == wanted }?.let { return it.second }
+        }
+        return null
+    }
+
+    /** what the variables view would show for a value */
+    private fun presentation(value: XValue): String {
+        var shown: String? = null
+        value.computePresentation(
+            object : XValueNode {
+                override fun setPresentation(
+                    icon: Icon?,
+                    type: String?,
+                    presentation: String,
+                    hasChildren: Boolean,
+                ) {
+                    shown = presentation
+                }
+
+                override fun setPresentation(
+                    icon: Icon?,
+                    presentation: XValuePresentation,
+                    hasChildren: Boolean,
+                ) {
+                    val text = StringBuilder()
+                    presentation.renderValue(
+                        object : XValuePresentation.XValueTextRenderer {
+                            override fun renderValue(value: String) {
+                                text.append(value)
+                            }
+
+                            override fun renderStringValue(value: String) {
+                                text.append(value)
+                            }
+
+                            override fun renderNumericValue(value: String) {
+                                text.append(value)
+                            }
+
+                            override fun renderKeywordValue(value: String) {
+                                text.append(value)
+                            }
+
+                            override fun renderValue(
+                                value: String,
+                                key: TextAttributesKey,
+                            ) {
+                                text.append(value)
+                            }
+
+                            override fun renderStringValue(
+                                value: String,
+                                additionalSpecialCharsToHighlight: String?,
+                                maxLength: Int,
+                            ) {
+                                text.append(value)
+                            }
+
+                            override fun renderComment(comment: String) = Unit
+
+                            override fun renderSpecialSymbol(symbol: String) {
+                                text.append(symbol)
+                            }
+
+                            override fun renderError(error: String) {
+                                text.append(error)
+                            }
+                        },
+                    )
+                    shown = text.toString()
+                }
+
+                override fun setFullValueEvaluator(evaluator: XFullValueEvaluator) = Unit
+            },
+            XValuePlace.TREE,
+        )
+        waitFor("the IDE rendering the value") { shown != null }
+        return checkNotNull(shown)
     }
 
     /**
