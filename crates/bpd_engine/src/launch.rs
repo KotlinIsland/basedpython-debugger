@@ -21,7 +21,7 @@ mod query;
 mod script;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -36,7 +36,7 @@ use bpd_core::{
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine};
 
-use crate::{Error, Interrupt, Listener, Result, Session, agent};
+use crate::{Error, Interrupt, Listener, Result, Session, agent, mapping};
 
 /// the [`Reporting`] sink for a request whose answer is what is waited for
 ///
@@ -173,6 +173,19 @@ struct Attached {
     /// front end that never learns of it has a stopped program nothing can
     /// resume
     pending_joined: Vec<SessionId>,
+    /// the verified source map this session's breakpoints go through
+    ///
+    /// `None` is the ordinary case — a program written in python has nothing to
+    /// map. it is per session rather than on the debuggee because a session is
+    /// what holds a breakpoint set, and the two have to be replaced together
+    map: Option<Arc<bpd_core::SourceMap>>,
+    /// where each translated breakpoint went, by the id the client gave it
+    ///
+    /// the record [`mapping::restore`] reads to put an answer back into `.by`
+    /// terms. replaced whole every time the set is, because a breakpoint set is
+    /// replaced whole and a stale entry here would map an answer through a
+    /// translation nobody made
+    translated: std::collections::BTreeMap<u32, mapping::Translated>,
     /// every state a query has read, under the id it was given out as
     ///
     /// nothing evicts one. a snapshot is a reading that was already taken rather
@@ -190,6 +203,13 @@ struct Attached {
 /// [`bpd_core::only_session`]'s rule and not this type's
 #[derive(Debug)]
 pub struct Debuggee {
+    /// the verified source map every session of this debuggee maps through
+    ///
+    /// held here as well as on each [`Attached`] because a session that joins
+    /// later — a debugged fork — is running the same build out of the same
+    /// directory, and a child whose `.by` breakpoints stopped resolving would be
+    /// a gap nobody asked for
+    map: Option<Arc<bpd_core::SourceMap>>,
     /// where an agent connects, kept open for the life of the debuggee
     ///
     /// it used to be a local of [`start`] and closed when that returned, which
@@ -558,6 +578,36 @@ impl Debuggee {
         }
     }
 
+    /// map this debuggee's `.by` breakpoints through `map`
+    ///
+    /// installed at launch, before anything is armed. every session this
+    /// debuggee holds now and every one that joins later maps through it,
+    /// because a debugged fork is running the same build out of the same
+    /// directory
+    ///
+    /// the map has already been verified — [`bpd_core::SourceMap::load`] is the
+    /// only way to have one, and it checks both digests of every entry against
+    /// the files on disk before it returns. so what this installs is a map that
+    /// was true a moment ago rather than one that claims to be
+    fn map_sources(&mut self, map: bpd_core::SourceMap) {
+        let armed: usize = self
+            .attached
+            .iter()
+            .map(|session| session.armed.len())
+            .sum();
+        assert_eq!(
+            armed, 0,
+            "a source map is installed at launch, and breakpoints had already \
+             been resolved without it — they would disagree with everything \
+             resolved after"
+        );
+        let map = Arc::new(map);
+        for session in &mut self.attached {
+            session.map = Some(Arc::clone(&map));
+        }
+        self.map = Some(map);
+    }
+
     /// decide whether a forked child of the program becomes a session of its own
     ///
     /// off by default. what comes back is what the agent says is set, and it is
@@ -868,7 +918,9 @@ impl Debuggee {
                 // fork is stopped at the line that forked — so a front end that
                 // is never told has a stopped program it cannot reach
                 reporting.attached(arrived.id());
-                self.attached.push(Attached::connected(arrived));
+                let mut joined = Attached::connected(arrived);
+                joined.map = self.map.as_ref().map(Arc::clone);
+                self.attached.push(joined);
             }
 
             // the wait is sliced so that the listener is looked at in between,
@@ -910,7 +962,9 @@ impl Debuggee {
                         rebound,
                     });
                 }
-                Some(FromAgent::BreakpointsResolved { resolved }) => rebound.extend(resolved),
+                Some(FromAgent::BreakpointsResolved { resolved }) => {
+                    rebound.extend(self.attached[at].restore(resolved));
+                }
                 Some(FromAgent::Logged { record }) => reporting.logged(record),
                 // the program started a child. it is already running — the
                 // agent reports and does not block — so this is news rather
@@ -970,6 +1024,8 @@ impl Attached {
             pending_spawns: Vec::new(),
             pending_blind: Vec::new(),
             pending_joined: Vec::new(),
+            map: None,
+            translated: std::collections::BTreeMap::new(),
             snapshots: Vec::new(),
         }
     }
@@ -1014,11 +1070,41 @@ impl Attached {
             }
         }
 
+        // a `.by` breakpoint is translated into the generated python before
+        // the agent sees it, and the answer is translated back before anybody
+        // else does. the agent never learns a source map exists
+        let mapping::Sent {
+            breakpoints,
+            refused,
+            translated,
+        } = mapping::send(self.map.as_deref(), breakpoints);
+        // replaced whole, like the set it describes. a translation left over
+        // from the last set would map an answer through a route this one never
+        // took
+        self.translated = translated;
+
         let request = FromEngine::SetBreakpoints { breakpoints };
         match self.ask(&request, EXPECTED, reporting)? {
-            FromAgent::BreakpointsResolved { resolved } => Ok(resolved),
+            FromAgent::BreakpointsResolved { resolved } => {
+                let mut answers = self.restore(resolved);
+                // the ones the map refused never went to the agent, so they are
+                // put back here. a client asked about every breakpoint in the
+                // set and is owed an answer about every one of them
+                answers.extend(refused);
+                answers.sort_by_key(|answer| answer.id);
+                Ok(answers)
+            }
             other => Err(unexpected(&other, EXPECTED)),
         }
+    }
+
+    /// every answer about a translated breakpoint, back in `.by` terms
+    ///
+    /// applied to every `Resolved` that leaves this session — the answer to a
+    /// set and the rebindings that arrive unprompted — because a client that
+    /// was handed one raw would be reading a line of a file it never wrote
+    fn restore(&self, resolved: Vec<Resolved>) -> Vec<Resolved> {
+        mapping::restore(self.map.as_deref(), &self.translated, resolved)
     }
 
     fn arm_exceptions(
@@ -1343,7 +1429,8 @@ impl Attached {
                 Some(FromAgent::BreakpointsResolved { resolved })
                     if !matches!(request, FromEngine::SetBreakpoints { .. }) =>
                 {
-                    self.pending_rebinds.extend(resolved);
+                    let restored = self.restore(resolved);
+                    self.pending_rebinds.extend(restored);
                 }
                 Some(FromAgent::Stopped { stop }) => {
                     self.held.push(stop.in_session(self.session.id()));
@@ -1498,6 +1585,17 @@ fn start(
             reason: error.to_string(),
         })?;
 
+    // before anything is started, for the reason an unsupported interpreter is
+    // refused before anything is started: a program that ran and then could not
+    // be debugged is a program that ran. `crates/bpd/tests/launch_refusal.rs` is
+    // where that rule is checked for the interpreter, and this is the same rule
+    let map = match build_directory(program) {
+        Some(directory) => Some(
+            bpd_core::SourceMap::load(&directory).map_err(|source| Error::SourceMap { source })?,
+        ),
+        None => None,
+    };
+
     let staged = agent::stage_for(interpreter)?;
     // staged at launch and not when child debugging is asked for, because the
     // ask arrives while the debuggee is held at entry and a staging failure
@@ -1612,12 +1710,50 @@ fn start(
     // the listener goes on the debuggee rather than out of scope here. it used
     // to be dropped with this frame, which closed the socket and made the first
     // agent the only one that could ever attach
-    Ok(Launched::Stopped(Debuggee {
+    let mut debuggee = Debuggee {
         listener,
+        map: None,
         attached: vec![Attached {
             held: vec![stop],
             child: Some(Arc::new(Mutex::new(child))),
             ..Attached::connected(session)
         }],
-    }))
+    };
+    if let Some(map) = map {
+        debuggee.map_sources(map);
+    }
+    Ok(Launched::Stopped(debuggee))
+}
+
+/// the basedpython build directory this program runs out of, if it does
+///
+/// **how bpd finds the map, and it is found rather than configured.** `by run`
+/// transpiles into one directory and writes `_by_sourcemap.py` into it beside
+/// the python it generated and the runner shim it starts — so a program running
+/// out of a directory that holds that file is running that build, by
+/// construction, and there is nothing for a user to point at and get wrong
+///
+/// the alternative was a launch option, and it would have been a launch option
+/// three front ends each had to grow. finding it here means the command line, a
+/// DAP client and an MCP client all debug `.by` on the same terms without any of
+/// them being taught what basedpython is
+///
+/// the rule is one sentence: **the directory the program is in, or the current
+/// directory for a form that names no file**. what makes that safe rather than a
+/// guess is that finding the file is where the guessing stops — the map is
+/// verified against both files it describes before a single line comes out of
+/// it, and one that cannot be is a refusal at launch
+fn build_directory(program: &Program) -> Option<PathBuf> {
+    let directory = match program {
+        Program::Script(path) => path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())?,
+        Program::Module(_) | Program::Command(_) => std::env::current_dir().ok()?,
+    };
+    directory
+        .join(bpd_core::source_map::MAP_FILENAME)
+        .is_file()
+        .then_some(directory)
 }

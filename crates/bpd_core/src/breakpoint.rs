@@ -177,6 +177,36 @@ pub enum Binding {
         evaluation: Evaluation,
     },
 
+    /// the interpreter will stop here, in the python a `.by` was transpiled to
+    ///
+    /// a separate variant rather than a [`Self::Bound`] whose `line` quietly
+    /// means a different file, for the reason [`Self::BoundInTemplate`] is one:
+    /// the two locations are both real and neither stands in for the other.
+    /// `line` is the `.by` line the user asked about, `generated` is where the
+    /// interpreter will really stop, and [`Site`] describes code objects of the
+    /// generated python because that is the only place code objects exist
+    ///
+    /// a client that showed only `line` is showing the truth. one that showed
+    /// only `generated` is too. what neither of them is doing is inventing a
+    /// third location out of the two, which is what a single field would have
+    /// left room for
+    BoundInSource {
+        /// the `.by` line it sits on
+        ///
+        /// not necessarily the line that was asked for. two things move it: a
+        /// `.by` line the transpiler generated nothing for — a blank line, a
+        /// comment — moves to the next one it did, and the generated line that
+        /// produces may itself move on to the next executable one. this is
+        /// where it ended up, read back out of the map rather than assumed
+        line: u32,
+        /// where in the generated python the interpreter will stop
+        generated: crate::source_map::Located,
+        /// every code object of the generated python that holds that line
+        sites: Vec<Site>,
+        /// how the condition will be answered on every hit
+        evaluation: Evaluation,
+    },
+
     /// nothing will stop, and this is why
     Unbound {
         /// what stood in the way
@@ -308,6 +338,47 @@ pub enum Unbound {
         error: PythonError,
     },
 
+    /// the file is basedpython and bpd was given no source map for this program
+    ///
+    /// a `.by` is never what the interpreter runs. without the map that says
+    /// which generated line the request means, there is nothing to bind to and
+    /// nothing to guess from — the alternative would be binding to a `.py` of
+    /// the same name and hoping the lines line up, which is the identity
+    /// fallback the source mapping rule exists to forbid
+    NoSourceMap {
+        /// the path as the client gave it
+        file: PathBuf,
+    },
+
+    /// the source map cannot place that `.by` line in any generated python
+    ///
+    /// the map was loaded and verified, and it has no generated line for this
+    /// one. every reason it can have is a fact the map itself carries rather
+    /// than a limit of the search — see [`crate::source_map::Unmapped`]
+    Unmappable {
+        /// why the map could not place it
+        reason: crate::source_map::Unmapped,
+    },
+
+    /// the `.by` line was placed, and nothing in the generated python holds it
+    ///
+    /// the ordinary reasons, one level down. a `.by` breakpoint that cannot bind
+    /// because the module has not been imported yet fails for exactly the reason
+    /// a python one does, and flattening that into a reason of its own would be
+    /// two vocabularies for one fact. what is added is where the search really
+    /// happened, because a user reading "not loaded" about a file in a temporary
+    /// directory needs to know why bpd was looking there
+    InGeneratedPython {
+        /// the `.by` file, as the client gave it
+        file: PathBuf,
+        /// the line of it that was asked for
+        requested: u32,
+        /// where in the generated python that line is
+        generated: crate::source_map::Located,
+        /// what stood in the way there
+        reason: Box<Unbound>,
+    },
+
     /// the log message cannot be used
     LogMessageInvalid {
         /// the template as the client wrote it
@@ -376,6 +447,45 @@ fn no_rendered_node(
     }
 }
 
+/// [`Unbound::NoSourceMap`], and what would have produced one
+fn no_source_map(
+    formatter: &mut std::fmt::Formatter<'_>,
+    file: &std::path::Path,
+) -> std::fmt::Result {
+    write!(
+        formatter,
+        "`{}` is basedpython source, and bpd has no source map for this \
+         program. the interpreter never runs a `.by` — it runs the python `by` \
+         transpiled it to — so without the map that says which generated line \
+         this one is, there is nothing to bind to. run the program with `bpd \
+         by`, which transpiles it and hands bpd the map `by run` wrote",
+        file.display()
+    )
+}
+
+/// [`Unbound::InGeneratedPython`], which is an ordinary reason one level down
+///
+/// both locations, in the order a person reads them: the line they asked about,
+/// where `by` put it, and then the reason as it would read for any python file.
+/// a user meeting "not loaded" about a path in a temporary directory needs the
+/// middle clause to make sense of the last one
+fn in_generated_python(
+    formatter: &mut std::fmt::Formatter<'_>,
+    file: &std::path::Path,
+    requested: u32,
+    generated: &crate::source_map::Located,
+    reason: &Unbound,
+) -> std::fmt::Result {
+    write!(
+        formatter,
+        "line {requested} of `{}` is line {} of `{}`, which `by` transpiled it \
+         to, and {reason}",
+        file.display(),
+        generated.line,
+        generated.file.display()
+    )
+}
+
 impl std::fmt::Display for Unbound {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -437,6 +547,14 @@ impl std::fmt::Display for Unbound {
                     None => write!(formatter, ". it has no executable lines at all"),
                 }
             }
+            Self::NoSourceMap { file } => no_source_map(formatter, file),
+            Self::Unmappable { reason } => write!(formatter, "{reason}"),
+            Self::InGeneratedPython {
+                file,
+                requested,
+                generated,
+                reason,
+            } => in_generated_python(formatter, file, *requested, generated, reason),
             Self::ConditionInvalid { condition, error } => write!(
                 formatter,
                 "the condition `{condition}` does not compile: {error}. a \
@@ -520,11 +638,41 @@ mod tests {
             ),
             (
                 Unbound::NoExecutableLine {
-                    file,
+                    file: file.clone(),
                     requested: 40,
                     last_executable: None,
                 },
                 "no executable lines at all",
+            ),
+            (
+                Unbound::NoSourceMap { file: file.clone() },
+                "run the program with `bpd by`",
+            ),
+            (
+                Unbound::Unmappable {
+                    reason: crate::source_map::Unmapped::NoGeneratedLine {
+                        file: file.clone(),
+                        requested: 4,
+                        last_mapped: Some(2),
+                    },
+                },
+                "the last line it generated anything for is line 2",
+            ),
+            (
+                Unbound::InGeneratedPython {
+                    file,
+                    requested: 7,
+                    generated: crate::source_map::Located {
+                        file: PathBuf::from("/tmp/build/program.py"),
+                        line: 15,
+                    },
+                    reason: Box::new(Unbound::NoExecutableLine {
+                        file: PathBuf::from("/tmp/build/program.py"),
+                        requested: 15,
+                        last_executable: Some(12),
+                    }),
+                },
+                "line 7 of `/tmp/program.py` is line 15 of `/tmp/build/program.py`",
             ),
         ];
 

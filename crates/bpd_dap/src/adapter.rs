@@ -2259,6 +2259,40 @@ fn rendered_breakpoint(resolved: &Resolved, requested: &SourceBreakpoint) -> ser
             }
             body
         }
+        // DAP's `Breakpoint` carries one `source` and one `line`, so the `.by`
+        // location is what goes in them — it is the file the client asked
+        // about, and the one it will show a marker in. the generated location
+        // has nowhere of its own to go and rides in `message`, which is the
+        // only field of a `Breakpoint` that is free text. it is not dropped:
+        // a person who does not believe the debugger needs to be able to see
+        // what it saw
+        Binding::BoundInSource {
+            line,
+            generated,
+            sites,
+            ..
+        } => {
+            let moved = if *line == requested.line {
+                String::new()
+            } else {
+                format!(
+                    "line {} of that file generated nothing bpd can stop on, so                      this moved to line {line}, which did. ",
+                    requested.line
+                )
+            };
+            serde_json::json!({
+                "id": resolved.id,
+                "verified": true,
+                "line": line,
+                "source": source_of(&requested.file.display().to_string()),
+                "message": format!(
+                    "{moved}`by` transpiled that to line {} of `{}`, and it is                      armed in {} code object(s) there",
+                    generated.line,
+                    generated.file.display(),
+                    sites.len()
+                ),
+            })
+        }
         Binding::Unbound { reason } => serde_json::json!({
             "id": resolved.id,
             "verified": false,

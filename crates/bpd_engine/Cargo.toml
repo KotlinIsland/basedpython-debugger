@@ -32,6 +32,7 @@ rustix = { workspace = true }
 bpd_test = { workspace = true }
 
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]
