@@ -36,6 +36,10 @@ dependencies {
         bundledModule("intellij.platform.dap")
         testFramework(TestFrameworkType.Platform)
     }
+    // `HeavyPlatformTestCase` is a `junit.framework.TestCase`, and the platform
+    // test framework does not bring junit with it — without this the suite fails
+    // to compile with "cannot access 'junit.framework.TestCase'"
+    testImplementation("junit:junit:4.13.2")
 }
 
 kotlin {
@@ -70,4 +74,9 @@ tasks.test {
     // somebody uses
     systemProperty("java.awt.headless", "true")
     systemProperty("idea.force.use.core.classloader", "true")
+    testLogging {
+        events("passed", "failed", "skipped")
+        showStandardStreams = true
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }
