@@ -596,6 +596,13 @@ request, and a client that does not know about one never sends it
     and the answer says when the bound bit
 - **`restart`**, **function breakpoints**, **data breakpoints**, **goto**,
     **step back**, and **`setExpression`**
+- **`runInTerminal`**. it is the reverse request a client answers by starting
+    the program in a terminal it owns, and it is the *only* honest way for a
+    debuggee under this adapter to have one — the program's output here goes to
+    a debug console, which is not a terminal, so its streams are pipes and
+    `isatty()` is `False`. why that is the right answer rather than a
+    pseudo-terminal, and what follows from it for buffering, is in
+    [launching a debuggee](launching.md#the-debuggees-own-standard-streams)
 
 the vs code extension is **driven in the editor it is for**. its schema is
 pinned to `bpd_dap::Configuration` by a test that fails if either side moves,

@@ -15,6 +15,12 @@
 //! launcher that treats one as a special case of another gets at least one
 //! wrong
 //!
+//! **how** the two are run is under test as well as what they are handed. most
+//! of this file compares two piped runs, which is what `Command::output` gives
+//! — and that leaves anything differing only between a terminal and a pipe
+//! invisible. `a_program_on_a_terminal_is_still_on_one_under_bpd` is the
+//! comparison that needs a real one, and it opens a pseudo-terminal to make it
+//!
 //! "it only fails under the debugger" is the bug class this prevents
 
 use std::path::Path;
@@ -45,16 +51,21 @@ fn invocation<'a>(fixture: &'a Fixture, form: Form, args: &[&'a str]) -> Vec<Str
     words
 }
 
-/// run one argument vector bare, and then under `bpd launch`
+/// the two commands that run one argument vector — bare, and under `bpd launch`
+///
+/// built here rather than at each call site so that both halves of a comparison
+/// are constructed by the same code. what runs them is the caller's, because
+/// **how** they are run is itself under test: through pipes for most of this
+/// file, and through a real terminal for the one comparison pipes cannot make
 ///
 /// `environment` is applied to both, so a variable that changes what the
 /// interpreter does — `PYTHONSAFEPATH` is the one that matters — changes it for
 /// the thing under test and for the thing it is compared against
-fn both_ways(
+fn each_way(
     working_directory: &Path,
     arguments: &[String],
     environment: &[(&str, &str)],
-) -> (Run, Run) {
+) -> (Command, Command) {
     let mut bare = Command::new(&interpreter().executable);
     bare.current_dir(working_directory).args(arguments);
 
@@ -71,6 +82,16 @@ fn both_ways(
         debugged.env(name, value);
     }
 
+    (bare, debugged)
+}
+
+/// run one argument vector bare, and then under `bpd launch`, through pipes
+fn both_ways(
+    working_directory: &Path,
+    arguments: &[String],
+    environment: &[(&str, &str)],
+) -> (Run, Run) {
+    let (mut bare, mut debugged) = each_way(working_directory, arguments, environment);
     (finished(&mut bare), finished(&mut debugged))
 }
 
@@ -390,6 +411,116 @@ fn output_arrives_in_the_same_order_on_both_streams() {
 
         assert_eq!(debugged.stdout, bare.stdout, "as {form:?}");
         assert_eq!(debugged.stderr, bare.stderr, "as {form:?}");
+    }
+}
+
+/// what a program can see about the streams it was given, and what its own
+/// buffering does with them
+///
+/// the last line is a **measurement** rather than a claim. `os.write` goes
+/// straight to the file descriptor, past python's buffer, so where it lands
+/// among the lines above it *is* the buffering: on a line-buffered stream every
+/// print is already out and it arrives last, and on a block-buffered one it
+/// overtakes all of them and the prints arrive together at exit
+///
+/// `isatty` is the half that matters more. it is what `rich`, `click`, `pytest`
+/// and `colorama` check to decide colour, progress bars and formatting, so a
+/// program that is told the wrong answer *renders* differently — the buffering
+/// only changes when its output arrives
+///
+/// it writes to **both** streams as well, which is a comparison only a terminal
+/// makes possible. a terminal has one stream, so the two arrive on it in the
+/// order the program wrote them and the order is recoverable afterwards.
+/// through pipes it is not — `output_arrives_in_the_same_order_on_both_streams`
+/// above compares each stream against its own counterpart and cannot see
+/// across, because two pipes carry no record of how the two were interleaved
+const STREAM_PROBE: &str = "import os\n\
+     import sys\n\
+     print('stdout.isatty', sys.stdout.isatty())\n\
+     print('stderr.isatty', sys.stderr.isatty(), file=sys.stderr)\n\
+     print('stdin.isatty', sys.stdin.isatty())\n\
+     print('stdout.line_buffering', sys.stdout.line_buffering)\n\
+     print('stderr.line_buffering', sys.stderr.line_buffering, file=sys.stderr)\n\
+     os.write(sys.stdout.fileno(), b'past the buffer\\n')\n";
+
+/// a terminal's own newline translation, undone, so terminal text can be
+/// compared with piped text
+///
+/// only ever applied to one side of a comparison **against a pipe**. the two
+/// terminal runs are compared with it left in, because both went through the
+/// same line discipline and removing it there would be the test editing what it
+/// is comparing
+#[cfg(unix)]
+fn without_carriage_returns(written: &str) -> String {
+    written.replace("\r\n", "\n")
+}
+
+#[cfg(unix)]
+#[test]
+fn a_program_on_a_terminal_is_still_on_one_under_bpd() {
+    // the comparison the rest of this file structurally cannot make. everything
+    // else here runs both halves through `Command::output`, which is two pipes,
+    // so anything that differs only between a terminal and a pipe is invisible
+    // to it — and `isatty()` is exactly that
+    //
+    // what it pins is the rule: `bpd` gives the debuggee **what a bare run
+    // would have given it**. not always a terminal and not always a pipe. the
+    // way `bpd launch` achieves that is by inheriting its own standard streams,
+    // so a change that put a pipe in front of the debuggee would pass every
+    // other test in this file and fail here
+    for form in EVERY_FORM {
+        let fixture = Fixture::new("streams", STREAM_PROBE);
+        let arguments = invocation(&fixture, form, &[]);
+        let (bare, debugged) = each_way(fixture.directory(), &arguments, &[]);
+
+        let bare = bpd_test::terminal::through_a_terminal(bare);
+        let debugged = bpd_test::terminal::through_a_terminal(debugged);
+
+        assert!(
+            bare.success && debugged.success,
+            "the probe has to run to the end both ways, as {form:?}. bare exited \
+             {:?} having written:\n{}\ndebugged exited {:?} having written:\n{}",
+            bare.exit_code,
+            bare.written,
+            debugged.exit_code,
+            debugged.written
+        );
+        assert_eq!(debugged.exit_code, bare.exit_code, "as {form:?}");
+        assert_eq!(
+            debugged.written, bare.written,
+            "on a terminal the program saw different streams under bpd than \
+             without it, as {form:?}. `isatty()` decides colour, progress bars \
+             and formatting in most CLI libraries, and the buffering that \
+             follows it decides when a `print` arrives at all"
+        );
+
+        // and the guard that keeps this from being the piped comparison a
+        // second time. if a terminal and a pipe ever stopped differing here,
+        // every assertion above would pass while proving nothing — which is the
+        // state this test exists to get the file out of
+        let (piped_bare, piped_debugged) = both(&fixture, form, &[]);
+        assert_eq!(
+            piped_debugged.stdout, piped_bare.stdout,
+            "through pipes the program saw different streams under bpd than \
+             without it, as {form:?}"
+        );
+        assert_eq!(piped_debugged.stderr, piped_bare.stderr, "as {form:?}");
+        assert!(
+            bare.written.contains("stdout.isatty True")
+                && piped_bare.stdout.contains("stdout.isatty False"),
+            "the two runs have to be of different shapes, or this measured a \
+             pipe twice, as {form:?}. on a terminal the probe wrote:\n{}\nand \
+             through a pipe:\n{}",
+            bare.written,
+            piped_bare.stdout
+        );
+        assert_ne!(
+            without_carriage_returns(&bare.written),
+            piped_bare.stdout,
+            "as {form:?} a bare run wrote the same thing on a terminal as into \
+             a pipe, so there is no difference left for bpd to get wrong and \
+             the comparison above is vacuous"
+        );
     }
 }
 

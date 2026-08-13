@@ -20,6 +20,11 @@ pub mod alloc;
 pub mod debuggee;
 pub mod django;
 pub mod reporting;
+// a pseudo-terminal, which is what the comparison against a piped run cannot
+// reach. windows has no terminal of this shape — ConPTY is a different animal —
+// and the test over it is unix-only for the same reason
+#[cfg(unix)]
+pub mod terminal;
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
