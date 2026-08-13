@@ -1,0 +1,31 @@
+<idea-plugin>
+  <id>com.github.kotlinisland.bpd</id>
+  <name>bpd</name>
+  <vendor url="https://github.com/KotlinIsland/basedpythondebugger">KotlinIsland</vendor>
+
+  <description><![CDATA[
+    Registers <a href="https://github.com/KotlinIsland/basedpythondebugger">bpd</a> as a debug
+    adapter, so a run configuration can name it.
+    <p>bpd is a debugger for Python built on PEP 669 monitoring. This plugin contributes the run
+    configuration, the launch attributes it carries, and the answer to "where is bpd". Everything a
+    session does after that is the Debug Adapter Protocol, which <code>bpd dap</code> already
+    speaks.</p>
+  ]]></description>
+
+  <!-- the platform's general DAP layer. it is not in every IDE: PyCharm
+       Community 2026.2.1 does not ship it, and this dependency is what turns
+       that into a plugin that declines to load rather than one that loads and
+       fails at the first session -->
+  <dependencies>
+    <module name="intellij.platform.dap"/>
+    <plugin id="com.intellij.modules.python"/>
+  </dependencies>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <platform.dap.debugAdapterSupportProvider
+        implementation="com.github.kotlinisland.bpd.BpdAdapterSupportProvider"/>
+    <platform.dap.launchArgumentsProvider
+        implementation="com.github.kotlinisland.bpd.BpdLaunchArgumentsProvider"/>
+    <configurationType implementation="com.github.kotlinisland.bpd.BpdRunConfigurationType"/>
+  </extensions>
+</idea-plugin>
