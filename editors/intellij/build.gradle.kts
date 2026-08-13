@@ -46,6 +46,12 @@ kotlin {
     // the platform's own classes are compiled for java 25 — `product-info.json`
     // says `minRequiredJavaVersion: 25` — so anything older cannot read them
     jvmToolchain(25)
+    compilerOptions {
+        // the same standard `cargo clippy -- -D warnings` holds the rust to. a
+        // deprecation here is an api that is going away under a plugin built on
+        // one that is already `@ApiStatus.Experimental`
+        allWarningsAsErrors = true
+    }
 }
 
 intellijPlatform {

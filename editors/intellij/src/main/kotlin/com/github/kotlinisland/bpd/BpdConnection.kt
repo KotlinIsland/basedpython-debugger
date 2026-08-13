@@ -17,6 +17,7 @@ import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.TimeUnit
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -66,7 +67,7 @@ class BpdConnection private constructor(
             // debuggee it is still tearing down is torn down
             runCatching { socket.close() }
                 .onFailure { LOG.warn("the bpd adapter's socket would not close", it) }
-            if (!process.waitFor(SHUTDOWN.inWholeMilliseconds, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            if (!process.waitFor(SHUTDOWN.inWholeMilliseconds, TimeUnit.MILLISECONDS)) {
                 LOG.warn(
                     "`bpd dap --listen 0` did not exit after its client disconnected, so " +
                         "it is being ended — a debuggee it still holds is ended with it",
