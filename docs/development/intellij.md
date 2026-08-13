@@ -132,6 +132,55 @@ socket itself, before the launcher writes anything: a DAP header block is
 required to be the first of them, so `X-Bpd-Token` on the line above it is one
 header block with two headers rather than two messages
 
+## the console
+
+**the program's own output reaches the IDE console, and the platform's default
+is what puts it there.** the plugin overrides nothing for it
+
+that was the open question, and it was open for a reason:
+[`basedpython-pycharm`](basedpython-pycharm.md) had to override
+`createXDebugProcess` because `DapXDebugProcess` builds a console over its own
+process handler, and an adapter that spawns the debuggee itself — which `bpd`
+does — is not the debuggee's process. what the platform actually does, read off
+the artifact and then driven:
+
+- `DapXDebugProcess.createConsole` builds a `TerminalExecutionConsole` over
+    `XDebugProcess.getProcessHandler`, which for a DAP session is the platform's
+    own `DefaultDebugProcessHandler` — a handler with no process behind it. so
+    the console is **not** a view of anything the adapter's process wrote, and
+    the fact that `bpd` owns the debuggee costs nothing
+- `DapXDebugProcess.launchOutputListener` drains the DAP session's `output`
+    events and `formatAndPrintOutput` prints each into
+    `XDebugSession.getConsoleView`, mapping the category: `stderr` to
+    `ProcessOutputType.STDERR`, `console` to `SYSTEM`, everything else — which
+    includes `stdout` — to `STDOUT`
+- `bpd_dap` sends the debuggee's two streams as `output` events under exactly
+    `stdout` and `stderr` (`Console::wrote`), so both land as themselves
+
+`basedpython-pycharm` also drops adapter `output` events on the floor, because
+debugpy opens every session with two bare events reading `ptvsd` and `debugpy`.
+that filtering would be wrong here: **`bpd` sends no `output` event of its own**.
+`bpd dap --listen 0` announces its port as one line of json on its **stdout**,
+and `BpdConnection` reads that line off the pipe — it is not the debuggee's
+output and never becomes an event. the console holds the program's lines and
+nothing else, and that is asserted rather than assumed
+
+### stdout is buffered, and that is cpython
+
+`bpd` hands the interpreter a pipe rather than a terminal, and cpython
+block-buffers a stdout that is a pipe. so a `print` that is not flushed sits in
+the interpreter and arrives at the console when the program exits — measured
+against the adapter directly, not inferred: at a breakpoint the client has the
+program's `stderr` and not its `stdout`, and both `stdout` lines arrive together
+just before `exited`
+
+stderr is line-buffered whatever it is attached to, so it is always there
+
+this is the adapter's behaviour rather than the plugin's, and it is the same in
+vs code. `program.py` flushes its one stdout line for that reason, so the suite
+reads both streams at the breakpoint rather than waiting for a program to end —
+which is also the moment a person is actually reading the console
+
 ## what the platform does with bpd's capabilities
 
 three things were unknown before this was built, and driving it answered two:
@@ -190,8 +239,8 @@ what one run does: writes `program.py` into a project on disk, puts a breakpoint
 on the line holding the marker comment through the IDE's own
 `XBreakpointManager`, starts a `bpd` run configuration under the debug executor,
 waits for `XDebuggerManager` to hold a paused session, reads the frame the IDE
-focused and a local out of its variables view, resumes with `XDebugSession`, and
-waits for the program to write its last file
+focused and a local out of its variables view, reads the console the IDE built,
+resumes with `XDebugSession`, and waits for the program to write its last file
 
 **the evidence is taken from the IDE, not from bpd.** whether the adapter
 answers a `stackTrace` correctly is settled by the rust suite, and re-reading
@@ -199,9 +248,21 @@ bpd's output here would prove that again rather than the thing in question. so
 what is asserted is the IDE's own debug state — that the platform loaded the
 plugin's extension point registrations, that `XDebuggerManager` holds a session,
 that the session is paused, that the frame it focused is in the file the
-breakpoint is in and on its line, and that the variables view says `total` is
-`3`. the program writes a file as its last statement, which is how "the session
-ended because the program exited" is told apart from "the session was killed"
+breakpoint is in and on its line, that the variables view says `total` is `3`,
+and that the terminal buffer of `XDebugSession.getConsoleView` holds the two
+lines the program wrote and no line it did not. the program writes a file as its
+last statement, which is how "the session ended because the program exited" is
+told apart from "the session was killed"
+
+nothing waits for a duration. every step waits for a **condition** with a
+deadline, and the deadline's message names the thing that never arrived — a
+console assertion that slept instead would pass on a machine that is quick and
+fail on one that is loaded, which is worse than not asserting it
+
+`program.py` is `editors/vscode/test/program.py` with two `print` calls added,
+and that difference is deliberate: a program that writes nothing cannot say
+whether what it writes reaches a console. the vs code suite does not assert on
+its console, so its copy has nothing to gain from them
 
 it runs **headless**. the platform test framework is not an electron app and
 wants no display, so unlike the `vscode` job there is no `xvfb` in CI
@@ -230,6 +291,12 @@ plugin's:
 list above, plus both refusals: a `bpd executable` naming a file that is not
 there is refused by `checkConfiguration` with the path and the remedy in the
 sentence, and a relative one is refused rather than resolved
+
+the console assertion was negative-checked the way the rest of the suite was:
+with `formatAndPrintOutput` overridden to do nothing — which is exactly the
+platform behaviour it is about — the session still stops on the breakpoint and
+still reads `total` as `3`, and the run fails with `the program's stdout
+reaching the IDE console did not happen`
 
 **checked mechanically, in `cargo test`** — `crates/bpd_dap/tests/intellij.rs`:
 
