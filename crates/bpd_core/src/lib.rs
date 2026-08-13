@@ -34,6 +34,7 @@ pub mod refusal;
 pub mod replace;
 pub mod script;
 pub mod session;
+pub mod source_map;
 pub mod spawn;
 pub mod stop;
 pub mod thread;
@@ -63,6 +64,7 @@ pub use session::{
     Running, SessionId, Shadowed, Stack, TemplateContext, Threads, Variables, WorldStopped,
     exit_code, only_session, only_stop,
 };
+pub use source_map::{Located, MapError, SourceMap, Unmapped};
 pub use spawn::{Blindspot, Spawn, Verdict};
 pub use stop::{Holding, Mode, Part, Reported, StepKind, Stop, StopReason};
 pub use thread::{Progress, ThreadState, Where, Which};
