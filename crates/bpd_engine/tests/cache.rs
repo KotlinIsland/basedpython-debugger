@@ -15,7 +15,7 @@ use std::path::Path;
 /// is under a `/var` that is a link to `/private/var` — the same entry, named
 /// the way the cache was asked about
 fn staged_into(cache: &Path) -> std::path::PathBuf {
-    let staged = bpd_engine::agent::stage_into(cache)
+    let staged = bpd_engine::agent::stage_for_into(cache, bpd_test::agent::matching_interpreter())
         .unwrap_or_else(|error| panic!("could not stage the agent: {error}"));
     let digest = staged
         .python_path()
@@ -36,9 +36,19 @@ fn the_current_digest_is_the_entry_staging_put_the_built_agent_in() {
     let current =
         bpd_engine::cache::current().unwrap_or_else(|error| panic!("no built agent: {error}"));
 
-    let entry = cache
-        .entry(&current)
-        .unwrap_or_else(|| panic!("the built agent was staged and `{current}` is not reported"));
+    // one entry per agent this `bpd` carries, and the one that was just staged
+    // has to be among them — a reader that agreed with itself about a digest
+    // would pass every unit test and still point a user at the wrong entry
+    let digests: Vec<&str> = current
+        .iter()
+        .map(bpd_engine::cache::Current::digest)
+        .collect();
+    let entry = digests
+        .iter()
+        .find_map(|digest| cache.entry(digest))
+        .unwrap_or_else(|| {
+            panic!("the agent for this interpreter was staged and none of {digests:?} is reported")
+        });
     assert_eq!(
         entry.path(),
         staged,
@@ -67,7 +77,7 @@ fn clearing_a_cache_removes_the_agent_a_launch_would_have_imported() {
 
     let cleared = bpd_engine::cache::open_at(&root)
         .unwrap_or_else(|error| panic!("the cache could not be read: {error}"))
-        .clear(None)
+        .clear(&[])
         .unwrap_or_else(|error| panic!("clearing failed: {error}"));
 
     assert!(cleared.succeeded());

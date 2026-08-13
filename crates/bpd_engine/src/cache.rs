@@ -1,11 +1,12 @@
 //! the agent staging cache, seen from outside a launch
 //!
-//! [`agent::stage`](crate::agent::stage) keeps one copy of the agent per build,
-//! under `<cache>/<sha-256 of its bytes>/`, and never removes one. that is not
-//! an oversight — the name being the content is what makes reuse safe — but it
-//! does mean a rebuild leaves its predecessor behind for ever. on the machine
-//! this was written on the cache had reached **89 entries and 448 MB**, against
-//! one agent of 5.6 MB, and that number is what this module exists for
+//! [`agent::stage_for`] keeps one copy of the agent per build, one per
+//! interpreter tag it carries, under `<cache>/<sha-256 of its bytes>/`, and
+//! never removes one. that is not an oversight — the name being the content is
+//! what makes reuse safe — but it does mean a rebuild leaves its predecessor
+//! behind for ever. on the machine this was written on the cache had reached
+//! **89 entries and 448 MB**, against one agent of 5.6 MB, and that number is
+//! what this module exists for
 //!
 //! # why nothing here happens on its own
 //!
@@ -39,6 +40,8 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+
+use bpd_core::python::InterpreterTag;
 
 use crate::agent;
 use crate::{Error, Result};
@@ -123,7 +126,7 @@ impl Failure {
 #[must_use = "a clear that could not remove an entry says so here, and reporting it is the point"]
 pub struct Cleared {
     removed: Vec<Entry>,
-    kept: Option<Entry>,
+    kept: Vec<Entry>,
     failures: Vec<Failure>,
 }
 
@@ -138,9 +141,13 @@ impl Cleared {
         self.removed.iter().map(Entry::size).sum()
     }
 
-    /// the entry that was asked for by digest and left alone, if it was there
-    pub fn kept(&self) -> Option<&Entry> {
-        self.kept.as_ref()
+    /// the entries that were asked for by digest and left alone
+    ///
+    /// only the ones that were really there. a digest that named nothing kept
+    /// nothing, and saying otherwise would be a report of a directory that does
+    /// not exist
+    pub fn kept(&self) -> &[Entry] {
+        &self.kept
     }
 
     /// the entries that were asked to go and did not, and why
@@ -216,14 +223,49 @@ pub fn open_at(root: &Path) -> Result<Cache> {
     })
 }
 
-/// the digest of the agent build this `bpd` would stage right now
+/// an agent build this `bpd` carries, and the entry it stages into
+#[derive(Debug, Clone)]
+pub struct Current {
+    tag: Option<InterpreterTag>,
+    digest: String,
+}
+
+impl Current {
+    /// the interpreter this build is for, or `None` for the development build
+    ///
+    /// the untagged one is the artifact a `cargo build -p bpd_agent` leaves
+    /// beside the binary. nothing about it names an interpreter — the agent's
+    /// own check at import is what says whether it fits — so there is nothing
+    /// here to report either
+    pub const fn tag(&self) -> Option<InterpreterTag> {
+        self.tag
+    }
+
+    /// the entry this build stages into
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
+/// every agent build this `bpd` would stage, and the entry each one goes to
+///
+/// one `bpd` carries an agent per interpreter tag, so "the current entry" is a
+/// list rather than a single answer — and all of them are current, because each
+/// is what a launch on the interpreter it is for would use
 ///
 /// the same bytes, read the same way and hashed the same way as a launch hashes
-/// them, so the answer is the entry a launch would use rather than a guess at it
-pub fn current() -> Result<String> {
-    let artifact = agent::built_artifact()?;
-    let bytes = std::fs::read(&artifact).map_err(unreadable(&artifact))?;
-    Ok(agent::digest(&bytes))
+/// them, so these are the entries a launch would use rather than guesses at them
+pub fn current() -> Result<Vec<Current>> {
+    agent::built_artifacts()?
+        .into_iter()
+        .map(|(tag, artifact)| {
+            let bytes = std::fs::read(&artifact).map_err(unreadable(&artifact))?;
+            Ok(Current {
+                tag,
+                digest: agent::digest(&bytes),
+            })
+        })
+        .collect()
 }
 
 impl Cache {
@@ -260,7 +302,7 @@ impl Cache {
         self.entries.iter().find(|entry| entry.digest == digest)
     }
 
-    /// remove entries, leaving the one named by `keep` if it is there
+    /// remove entries, leaving the ones named by `keep` that are there
     ///
     /// nothing is removed at all when the cache holds a [`Stray`]: it is one
     /// directory, and something in it that staging did not write is a reason to
@@ -270,7 +312,7 @@ impl Cache {
     /// [`Cleared::failures`] and the rest are still attempted, because "which
     /// ones" is the useful answer — one entry a debuggee has loaded on windows
     /// should not stand between a user and the other eighty-eight
-    pub fn clear(&self, keep: Option<&str>) -> Result<Cleared> {
+    pub fn clear(&self, keep: &[&str]) -> Result<Cleared> {
         if let Some(stray) = self.strays.first() {
             // one of them is named here, and `Cache::strays` has the rest. a
             // refusal is about the decision, and the decision is the same
@@ -294,13 +336,13 @@ impl Cache {
 
         let mut cleared = Cleared {
             removed: Vec::new(),
-            kept: None,
+            kept: Vec::new(),
             failures: Vec::new(),
         };
 
         for entry in &self.entries {
-            if keep == Some(entry.digest.as_str()) {
-                cleared.kept = Some(entry.clone());
+            if keep.contains(&entry.digest.as_str()) {
+                cleared.kept.push(entry.clone());
                 continue;
             }
             match remove(entry) {
@@ -523,7 +565,7 @@ mod tests {
         let fixture = Fixture::new();
         let cleared = fixture
             .open()
-            .clear(None)
+            .clear(&[])
             .unwrap_or_else(|error| panic!("clearing an absent cache failed: {error}"));
 
         assert!(cleared.succeeded());
@@ -565,13 +607,13 @@ mod tests {
 
         let cleared = fixture
             .open()
-            .clear(None)
+            .clear(&[])
             .unwrap_or_else(|error| panic!("clearing failed: {error}"));
 
         assert!(cleared.succeeded());
         assert_eq!(cleared.removed().len(), 2);
         assert_eq!(cleared.reclaimed(), held);
-        assert!(cleared.kept().is_none());
+        assert!(cleared.kept().is_empty());
 
         let after = fixture.open();
         assert!(after.entries().is_empty());
@@ -591,13 +633,17 @@ mod tests {
 
         let cleared = fixture
             .open()
-            .clear(Some(&digest))
+            .clear(&[&digest])
             .unwrap_or_else(|error| panic!("clearing failed: {error}"));
 
         assert!(cleared.succeeded());
         assert_eq!(
-            cleared.kept().map(super::Entry::digest),
-            Some(digest.as_str())
+            cleared
+                .kept()
+                .iter()
+                .map(super::Entry::digest)
+                .collect::<Vec<_>>(),
+            vec![digest.as_str()]
         );
         assert_eq!(cleared.removed().len(), 1);
         assert!(keep.is_dir(), "the entry that was kept is still there");
@@ -611,11 +657,11 @@ mod tests {
 
         let cleared = fixture
             .open()
-            .clear(Some(&"0".repeat(64)))
+            .clear(&[&"0".repeat(64)])
             .unwrap_or_else(|error| panic!("clearing failed: {error}"));
 
         assert!(cleared.succeeded());
-        assert!(cleared.kept().is_none());
+        assert!(cleared.kept().is_empty());
         assert_eq!(cleared.removed().len(), 1);
     }
 
@@ -661,7 +707,7 @@ mod tests {
         assert_eq!(cache.strays()[0].path(), intruder);
         assert_eq!(cache.entries().len(), 1);
 
-        let Err(Error::UnexpectedInAgentCache { root, reason }) = cache.clear(None) else {
+        let Err(Error::UnexpectedInAgentCache { root, reason }) = cache.clear(&[]) else {
             panic!("a cache holding something unaccounted for has to be refused");
         };
         assert_eq!(root, fixture.root());
@@ -688,7 +734,7 @@ mod tests {
         assert_eq!(cache.strays().len(), 1);
         assert_eq!(cache.strays()[0].path(), extra);
 
-        let refused = cache.clear(None);
+        let refused = cache.clear(&[]);
         assert!(matches!(refused, Err(Error::UnexpectedInAgentCache { .. })));
         assert!(extra.is_file());
         assert!(entry.is_dir());
@@ -716,7 +762,7 @@ mod tests {
         assert_eq!(cache.strays().len(), 1);
         assert!(cache.strays()[0].reason().contains("link"));
 
-        let refused = cache.clear(None);
+        let refused = cache.clear(&[]);
         assert!(matches!(refused, Err(Error::UnexpectedInAgentCache { .. })));
         assert!(
             treasure.is_file(),
@@ -743,7 +789,7 @@ mod tests {
 
         let cleared = fixture
             .open()
-            .clear(None)
+            .clear(&[])
             .unwrap_or_else(|error| panic!("clearing failed: {error}"));
         set_mode(&stuck, 0o700);
 

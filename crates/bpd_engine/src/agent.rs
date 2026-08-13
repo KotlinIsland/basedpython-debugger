@@ -5,11 +5,13 @@
 //! file named after the module. staging is that rename, into a directory that
 //! goes on the debuggee's `PYTHONPATH`
 //!
-//! resolution today is "next to the running executable", which is what a cargo
-//! build produces and what an installed layout would also produce. publishing a
-//! build per interpreter tag, and choosing between them by `EXT_SUFFIX`, is
-//! still ahead — until then an agent built for the wrong interpreter is caught
-//! by the agent itself at import, which is the check that actually decides
+//! one `bpd` carries an agent per interpreter tag, in `agents/<tag>/` beside
+//! the binary, and picks between them by what the interpreter said about itself
+//! when it was probed — never by what a path claims. the agent's own
+//! `verify_interpreter` is unchanged and still runs: selection picking the
+//! right file and the agent checking it was compiled for the interpreter that
+//! imported it are two different guarantees, and the second is what catches a
+//! wrong first
 //!
 //! # why the directory is a cache and not a temporary
 //!
@@ -36,14 +38,42 @@
 //! staging somewhere else. a fallback would turn a broken cache into a
 //! performance regression nobody notices
 
+use std::collections::BTreeMap;
 use std::io;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+
+use bpd_core::python::{Capabilities, InterpreterTag};
 
 use crate::{Error, Result};
 
 /// the module name the interpreter imports, and so the file's stem
 const MODULE: &str = "bpd_agent";
+
+/// where a `bpd` keeps the agents it carries, beside the binary
+///
+/// one directory per interpreter tag, each holding the artifact under **cargo's
+/// own name**:
+///
+/// ```text
+/// bpd
+/// agents/3.13/libbpd_agent.so
+/// agents/3.14/libbpd_agent.so
+/// agents/3.14t/libbpd_agent.so
+/// ```
+///
+/// a directory per tag rather than a tag in the file name, for two reasons.
+/// the artifact keeps the name cargo gave it, so whatever assembles the layout
+/// copies and renames nothing — there is no step in which a name could be
+/// invented that disagrees with the bytes beside it. and the tags a `bpd`
+/// carries are then **read off the filesystem** rather than recovered by
+/// parsing file names, which is what lets a refusal say what is really there
+///
+/// the cache under `~/.cache/bpd/agents/` is untouched by any of it. it is
+/// keyed on the sha-256 of the bytes, so several agents are simply several
+/// entries, and an entry still holds one file named for the platform's import
+/// suffix and nothing else — which is the rule `bpd cache` reads a directory by
+const AGENTS: &str = "agents";
 
 /// what an importable extension module is called, on unix and on windows
 const UNIX_SUFFIX: &str = ".so";
@@ -80,19 +110,19 @@ impl Staged {
     }
 }
 
-/// put the built agent where an interpreter can import it, and say where
+/// put the agent for this interpreter where it can import it, and say where
 ///
 /// the per-user cache is used, and created if it is not there yet
-pub fn stage() -> Result<Staged> {
-    stage_into(&default_cache()?)
+pub fn stage_for(interpreter: &Capabilities) -> Result<Staged> {
+    stage_for_into(&default_cache()?, interpreter)
 }
 
 /// the same, into a cache directory of the caller's choosing
 ///
 /// the directory is held to the same rules as the default one: it has to be a
 /// real directory that nobody but its owner can write to, or staging refuses
-pub fn stage_into(cache: &Path) -> Result<Staged> {
-    stage_artifact(cache, &built_artifact()?)
+pub fn stage_for_into(cache: &Path, interpreter: &Capabilities) -> Result<Staged> {
+    stage_artifact(cache, &artifact_for(interpreter)?)
 }
 
 /// the cache entry holding exactly the bytes of `artifact`, made if absent
@@ -415,12 +445,29 @@ pub(crate) fn module_names() -> [String; 2] {
     ]
 }
 
-/// where the agent build lives, relative to whatever is running
+/// the agent builds this `bpd` carries, and where it looked for them
+#[derive(Debug)]
+struct Carried {
+    /// the published agents, by the tag of the interpreter each one is for
+    tagged: BTreeMap<InterpreterTag, PathBuf>,
+    /// the single untagged artifact `cargo build -p bpd_agent` leaves behind
+    ///
+    /// its path says nothing about which interpreter it is for, and it does not
+    /// have to: a checkout has exactly one, and the agent's own
+    /// `verify_interpreter` is what decides whether it fits. that check is not
+    /// a fallback for this — it runs against a published agent too
+    development: Option<PathBuf>,
+    /// the directories that were looked in, so a refusal can say where
+    looked_in: Vec<PathBuf>,
+}
+
+/// where an agent is looked for, relative to whatever is running
 ///
 /// a test binary sits in `<target>/<profile>/deps`, and `bpd` itself in
-/// `<target>/<profile>`. both are checked, so the same resolution works from a
-/// test and from the installed binary
-pub(crate) fn built_artifact() -> Result<PathBuf> {
+/// `<target>/<profile>`. both are looked in, so the same resolution works from
+/// a test and from an installed binary — where the pair is `<prefix>/bin` and
+/// `<prefix>`
+fn roots() -> Result<Vec<PathBuf>> {
     let running = std::env::current_exe().map_err(|source| Error::LocateAgent {
         reason: format!("the running executable has no path: {source}"),
     })?;
@@ -428,22 +475,203 @@ pub(crate) fn built_artifact() -> Result<PathBuf> {
         reason: format!("`{}` has no parent directory", running.display()),
     })?;
 
-    let name = cargo_artifact_name();
-    let candidates = [directory.join(&name), directory.join("..").join(&name)];
+    let mut roots = vec![directory.to_path_buf()];
+    roots.extend(directory.parent().map(Path::to_path_buf));
+    Ok(roots)
+}
 
-    for candidate in &candidates {
-        if candidate.is_file() {
-            return Ok(candidate.clone());
+/// everything this `bpd` could stage, read off the filesystem
+fn carried() -> Result<Carried> {
+    carried_in(&roots()?)
+}
+
+/// the same, over roots the caller names
+fn carried_in(roots: &[PathBuf]) -> Result<Carried> {
+    let name = cargo_artifact_name();
+    let mut carried = Carried {
+        tagged: BTreeMap::new(),
+        development: None,
+        looked_in: roots.to_vec(),
+    };
+
+    for root in roots {
+        let published = root.join(AGENTS);
+        match std::fs::read_dir(&published) {
+            Ok(found) => {
+                for child in found {
+                    let child = child.map_err(unreadable(&published))?;
+                    // a directory whose name is not exactly a tag is not an
+                    // agent directory. reading one loosely would hand a release
+                    // an agent built for another, which is the load that
+                    // imports and then reads the wrong offsets
+                    let Some(tag) = child.file_name().to_str().and_then(InterpreterTag::parse)
+                    else {
+                        continue;
+                    };
+                    let artifact = child.path().join(&name);
+                    if artifact.is_file() {
+                        // the nearer root wins, which is the order a single
+                        // artifact is looked for in too
+                        carried.tagged.entry(tag).or_insert(artifact);
+                    }
+                }
+            }
+            // a `bpd` that carries nothing published is the ordinary state of a
+            // checkout, not a failure
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(unreadable(&published)(source)),
+        }
+
+        let development = root.join(&name);
+        if carried.development.is_none() && development.is_file() {
+            carried.development = Some(development);
         }
     }
 
+    Ok(carried)
+}
+
+/// the agent build for an interpreter, or a refusal naming what is carried
+///
+/// keyed on [`Capabilities::tag`] — the release and the build configuration the
+/// interpreter itself reported — rather than on `EXT_SUFFIX`, which also
+/// carries a platform that a file on this machine cannot disagree about. the
+/// tag is the vocabulary the agent's own check is written in, so the thing
+/// selection asks for is the thing verification compares
+pub(crate) fn artifact_for(interpreter: &Capabilities) -> Result<PathBuf> {
+    select(interpreter, &carried()?)
+}
+
+/// where an agent built for `tag` goes, under a directory `bpd` looks in
+///
+/// the layout is `bpd`'s to define, so whatever assembles one asks here instead
+/// of repeating it — the resolution reads back exactly the path this names
+pub fn published_at(root: &Path, tag: InterpreterTag) -> PathBuf {
+    root.join(AGENTS)
+        .join(tag.to_string())
+        .join(cargo_artifact_name())
+}
+
+/// the choice itself, over an already-read layout
+fn select(interpreter: &Capabilities, carried: &Carried) -> Result<PathBuf> {
+    let tag = interpreter.tag();
+
+    if let Some(artifact) = carried.tagged.get(&tag) {
+        return Ok(artifact.clone());
+    }
+    // the development build is the weaker claim, because nothing about it names
+    // an interpreter — so it is taken only where nothing was published for this
+    // one, and the agent settles it at import
+    if let Some(artifact) = &carried.development {
+        return Ok(artifact.clone());
+    }
+
     Err(Error::LocateAgent {
-        reason: format!(
-            "no `{name}` next to `{}`. build it for a supported interpreter:\n    \
-             PYO3_PYTHON=python3.14 cargo build -p bpd_agent",
-            running.display()
-        ),
+        reason: no_agent_for(interpreter, tag, carried),
     })
+}
+
+/// every agent build this `bpd` carries, in tag order and the untagged one last
+///
+/// a launch takes one of these. `bpd cache` has to know all of them, because
+/// each stages into an entry of its own
+pub(crate) fn built_artifacts() -> Result<Vec<(Option<InterpreterTag>, PathBuf)>> {
+    let carried = carried()?;
+
+    let mut all: Vec<_> = carried
+        .tagged
+        .iter()
+        .map(|(tag, artifact)| (Some(*tag), artifact.clone()))
+        .collect();
+    all.extend(carried.development.clone().map(|artifact| (None, artifact)));
+
+    if all.is_empty() {
+        return Err(Error::LocateAgent {
+            reason: carries_nothing(&carried),
+        });
+    }
+    Ok(all)
+}
+
+/// why this interpreter cannot be launched, and what would change that
+///
+/// it names all three of the things a reader needs: the interpreter and the tag
+/// it needs, the tags that are here instead, and what to do. "no agent for
+/// python 3.13" is not enough when the answer is "this build carries 3.14 and
+/// 3.15"
+fn no_agent_for(interpreter: &Capabilities, tag: InterpreterTag, carried: &Carried) -> String {
+    let named = interpreter.interpreter.display();
+
+    if carried.tagged.is_empty() {
+        return format!(
+            "bpd carries no agent build at all, and python {} (`{named}`) needs \
+             the one tagged `{tag}`. nothing was found in {}. build it for this \
+             interpreter:\n    PYO3_PYTHON={named} cargo build -p bpd_agent",
+            interpreter.version,
+            looked_in(carried),
+        );
+    }
+
+    format!(
+        "bpd carries no agent for python {} (`{named}`), which needs the build \
+         tagged `{tag}`. it carries {}. the agent is a cpython extension and is \
+         not abi3 — it reads interpreter state whose layout changes between \
+         releases — so one build loads into one release and one build \
+         configuration and no other. debug with an interpreter this bpd carries, \
+         or build the agent for this one:\n    \
+         PYO3_PYTHON={named} cargo build -p bpd_agent",
+        interpreter.version,
+        tags(carried),
+    )
+}
+
+/// the same, asked of a `bpd` rather than about an interpreter
+fn carries_nothing(carried: &Carried) -> String {
+    format!(
+        "bpd carries no agent build at all. nothing was found in {}. an \
+         installed bpd keeps one per interpreter tag in `{AGENTS}/<tag>/` beside \
+         the binary, and a checkout has the one cargo built:\n    \
+         PYO3_PYTHON=python3.14 cargo build -p bpd_agent",
+        looked_in(carried),
+    )
+}
+
+/// the tags carried, with the directory each was found in
+fn tags(carried: &Carried) -> String {
+    carried
+        .tagged
+        .iter()
+        .map(|(tag, artifact)| {
+            let directory = artifact.parent().unwrap_or_else(|| {
+                unreachable!("`{}` is a file in a tag directory", artifact.display())
+            });
+            format!("`{tag}` in `{}`", directory.display())
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// the directories that were looked in, named so the reader can look too
+fn looked_in(carried: &Carried) -> String {
+    carried
+        .looked_in
+        .iter()
+        .map(|root| format!("`{}`", root.display()))
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
+/// name the directory an agent layout could not be read out of
+fn unreadable(path: &Path) -> impl FnOnce(io::Error) -> Error + use<> {
+    let path = path.to_path_buf();
+    move |source| Error::LocateAgent {
+        reason: format!(
+            "`{}` is where bpd keeps the agents it carries, and it could not be \
+             read: {source}. bpd will not report an interpreter unsupported \
+             while it cannot see what it holds",
+            path.display()
+        ),
+    }
 }
 
 fn cargo_artifact_name() -> String {
@@ -458,8 +686,263 @@ fn cargo_artifact_name() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MODULE, Staged, import_suffix, stage_artifact};
+    use std::path::{Path, PathBuf};
+
+    use bpd_core::python::{
+        Capabilities, Implementation, InterpreterTag, PythonVersion, RemoteDebug,
+    };
+
+    use super::{
+        MODULE, Staged, cargo_artifact_name, carried_in, import_suffix, published_at, select,
+        stage_artifact,
+    };
     use crate::Error;
+
+    /// an install laid out the way `bpd` will be installed, in a directory of
+    /// its own
+    ///
+    /// the agents are written through [`published_at`], which is the same
+    /// answer the resolution reads back — a test that spelled the layout out a
+    /// second time would be a test of one restatement against another
+    struct Install {
+        directory: tempfile::TempDir,
+    }
+
+    impl Install {
+        fn new() -> Self {
+            Self {
+                directory: tempfile::tempdir().expect("a temporary directory can be made"),
+            }
+        }
+
+        /// where the binary sits, and the directory above it
+        fn roots(&self) -> Vec<PathBuf> {
+            vec![self.beside(), self.prefix()]
+        }
+
+        fn prefix(&self) -> PathBuf {
+            self.directory.path().to_path_buf()
+        }
+
+        fn beside(&self) -> PathBuf {
+            self.directory.path().join("bin")
+        }
+
+        /// carry an agent for a tag, under the root of the caller's choosing
+        fn carries(root: &Path, tag: &str, bytes: &str) -> PathBuf {
+            let tag = InterpreterTag::parse(tag).expect("the test names a real tag");
+            let artifact = published_at(root, tag);
+            write(&artifact, bytes);
+            artifact
+        }
+
+        /// leave the artifact a `cargo build -p bpd_agent` leaves behind
+        fn development_build(&self, bytes: &str) -> PathBuf {
+            let artifact = self.beside().join(cargo_artifact_name());
+            write(&artifact, bytes);
+            artifact
+        }
+    }
+
+    fn write(path: &Path, bytes: &str) {
+        std::fs::create_dir_all(
+            path.parent()
+                .expect("an artifact path names a file in a directory"),
+        )
+        .expect("the directory can be made");
+        std::fs::write(path, bytes).expect("the artifact can be written");
+    }
+
+    /// an interpreter that reported itself as this release and build
+    fn interpreter(tag: &str) -> Capabilities {
+        let tag = InterpreterTag::parse(tag).expect("the test names a real tag");
+        let (version, free_threaded) = (tag.to_string(), tag.to_string().ends_with('t'));
+        let version = version.trim_end_matches('t');
+        let (major, minor) = version
+            .split_once('.')
+            .expect("a tag is a major and a minor");
+
+        Capabilities {
+            interpreter: PathBuf::from(format!("python{version}")),
+            executable: PathBuf::from(format!("/usr/bin/python{version}")),
+            version: PythonVersion::new(
+                major.parse().expect("a tag's major is a number"),
+                minor.parse().expect("a tag's minor is a number"),
+                0,
+            ),
+            implementation: Implementation::CPython,
+            free_threaded,
+            debug_build: false,
+            ext_suffix: Some(format!(".cpython-{major}{minor}-darwin.so")),
+            monitoring: true,
+            remote_debug: RemoteDebug::Available,
+        }
+    }
+
+    fn chosen_for(install: &Install, tag: &str) -> Result<PathBuf, Error> {
+        let carried = carried_in(&install.roots()).expect("the layout can be read");
+        select(&interpreter(tag), &carried)
+    }
+
+    fn refusal_for(install: &Install, tag: &str) -> String {
+        match chosen_for(install, tag) {
+            Ok(artifact) => panic!(
+                "python {tag} was given `{}`, and nothing here is for it",
+                artifact.display()
+            ),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn every_interpreter_is_given_the_agent_carried_for_its_own_tag() {
+        let install = Install::new();
+        let root = install.prefix();
+        for tag in ["3.13", "3.14", "3.14t", "3.15"] {
+            Install::carries(&root, tag, tag);
+        }
+
+        for tag in ["3.13", "3.14", "3.14t", "3.15"] {
+            let chosen = chosen_for(&install, tag)
+                .unwrap_or_else(|error| panic!("python {tag} was refused: {error}"));
+            assert_eq!(
+                std::fs::read_to_string(&chosen).expect("the chosen artifact can be read"),
+                tag,
+                "python {tag} was given `{}`",
+                chosen.display()
+            );
+        }
+    }
+
+    /// the free-threaded build is a different abi and its agent is a different
+    /// file. a rule that read the version and stopped would hand each of these
+    /// the other's agent, and cpython would import it and read the wrong offsets
+    #[test]
+    fn a_free_threaded_interpreter_is_never_given_the_gil_builds_agent() {
+        let install = Install::new();
+        let root = install.prefix();
+        Install::carries(&root, "3.14", "the gil build");
+        Install::carries(&root, "3.14t", "the free-threaded build");
+
+        assert_eq!(
+            std::fs::read_to_string(chosen_for(&install, "3.14t").expect("3.14t is carried"))
+                .expect("the chosen artifact can be read"),
+            "the free-threaded build"
+        );
+    }
+
+    #[test]
+    fn the_development_build_is_used_when_nothing_is_published() {
+        let install = Install::new();
+        let artifact = install.development_build("the agent cargo built");
+
+        assert_eq!(
+            chosen_for(&install, "3.14").expect("the development build is there"),
+            artifact,
+            "a checkout has one artifact and no layout, and that has to keep working"
+        );
+    }
+
+    /// a published agent names the interpreter it is for and the development
+    /// build names nothing, so the specific one wins where there is one. the
+    /// development build is still reachable for every other interpreter, which
+    /// is what a checkout that has also assembled a layout looks like
+    #[test]
+    fn a_published_agent_is_preferred_to_the_untagged_one() {
+        let install = Install::new();
+        Install::carries(&install.prefix(), "3.14", "the published agent");
+        install.development_build("the agent cargo built");
+
+        assert_eq!(
+            std::fs::read_to_string(chosen_for(&install, "3.14").expect("3.14 is carried"))
+                .expect("the chosen artifact can be read"),
+            "the published agent"
+        );
+        assert_eq!(
+            std::fs::read_to_string(chosen_for(&install, "3.13").expect("the development build"))
+                .expect("the chosen artifact can be read"),
+            "the agent cargo built"
+        );
+    }
+
+    /// the directory beside the binary comes first, the one above it second —
+    /// the same order a single artifact is looked for in
+    #[test]
+    fn the_nearer_root_wins() {
+        let install = Install::new();
+        Install::carries(&install.prefix(), "3.14", "the one further away");
+        Install::carries(&install.beside(), "3.14", "the one beside the binary");
+
+        assert_eq!(
+            std::fs::read_to_string(chosen_for(&install, "3.14").expect("3.14 is carried"))
+                .expect("the chosen artifact can be read"),
+            "the one beside the binary"
+        );
+    }
+
+    /// a directory whose name is nearly a tag is not one, and a tag directory
+    /// with no agent in it carries nothing. either read loosely would end in an
+    /// interpreter being handed a file that was never for it
+    #[test]
+    fn a_directory_that_is_not_an_agent_for_a_tag_carries_nothing() {
+        let install = Install::new();
+        let agents = install.prefix().join("agents");
+        for name in ["3.014", "3.14.0", "python3.14", "cpython-314-darwin"] {
+            write(&agents.join(name).join(cargo_artifact_name()), "not a tag");
+        }
+        std::fs::create_dir_all(agents.join("3.14")).expect("the directory can be made");
+        std::fs::write(agents.join("3.14").join("notes.txt"), "not an agent")
+            .expect("the file can be written");
+
+        let refused = refusal_for(&install, "3.14");
+        assert!(
+            refused.contains("no agent build at all"),
+            "a tag directory with no agent in it carries nothing: {refused}"
+        );
+    }
+
+    #[test]
+    fn an_interpreter_nothing_is_carried_for_is_told_which_tags_are() {
+        let install = Install::new();
+        let root = install.prefix();
+        Install::carries(&root, "3.14", "an agent");
+        Install::carries(&root, "3.15", "an agent");
+
+        let refused = refusal_for(&install, "3.13");
+
+        assert!(refused.contains("python 3.13.0"), "{refused}");
+        assert!(
+            refused.contains("`3.13`"),
+            "the refusal has to name the tag that is needed: {refused}"
+        );
+        for present in ["`3.14`", "`3.15`"] {
+            assert!(
+                refused.contains(present),
+                "the refusal has to name what is carried, and {present} is: {refused}"
+            );
+        }
+        assert!(
+            refused.contains("cargo build -p bpd_agent"),
+            "and what to do about it: {refused}"
+        );
+    }
+
+    #[test]
+    fn a_bpd_carrying_nothing_says_so_and_names_where_it_looked() {
+        let install = Install::new();
+
+        let refused = refusal_for(&install, "3.14");
+
+        assert!(refused.contains("no agent build at all"), "{refused}");
+        for root in install.roots() {
+            assert!(
+                refused.contains(&root.display().to_string()),
+                "the refusal has to name where it looked, and `{}` is one: {refused}",
+                root.display()
+            );
+        }
+        assert!(refused.contains("cargo build -p bpd_agent"), "{refused}");
+    }
 
     /// a cache in a directory of its own, and an agent whose bytes are ours to
     /// change. the real artifact would prove nothing about a rebuild, because a
@@ -475,11 +958,11 @@ mod tests {
             }
         }
 
-        fn root(&self) -> std::path::PathBuf {
+        fn root(&self) -> PathBuf {
             self.directory.path().join("cache")
         }
 
-        fn artifact(&self, bytes: &str) -> std::path::PathBuf {
+        fn artifact(&self, bytes: &str) -> PathBuf {
             let path = self.directory.path().join("libbpd_agent.build");
             std::fs::write(&path, bytes).expect("the artifact can be written");
             path
@@ -491,7 +974,7 @@ mod tests {
         }
     }
 
-    fn module_in(staged: &Staged) -> std::path::PathBuf {
+    fn module_in(staged: &Staged) -> PathBuf {
         staged
             .python_path()
             .join(format!("{MODULE}{}", import_suffix()))
@@ -683,7 +1166,7 @@ mod tests {
         }
 
         let cache = Cache::new();
-        let refused = stage_artifact(std::path::Path::new("/"), &cache.artifact("an agent"));
+        let refused = stage_artifact(Path::new("/"), &cache.artifact("an agent"));
 
         let Err(Error::UntrustedAgentCache { reason, .. }) = refused else {
             panic!("a cache somebody else owns has to be refused, not used");
@@ -726,14 +1209,14 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn mode_of(path: &std::path::Path) -> u32 {
+    fn mode_of(path: &Path) -> u32 {
         use std::os::unix::fs::MetadataExt as _;
 
         std::fs::metadata(path).expect("the path is there").mode() & 0o7777
     }
 
     #[cfg(unix)]
-    fn set_mode(directory: &std::path::Path, mode: u32) {
+    fn set_mode(directory: &Path, mode: u32) {
         use std::os::unix::fs::PermissionsExt as _;
 
         std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode))

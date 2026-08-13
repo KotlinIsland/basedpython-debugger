@@ -205,7 +205,7 @@ const A_MOMENT: Duration = Duration::from_secs(5);
 /// the design took in advance and it is what makes this a second session of the
 /// same debuggee rather than a second debuggee
 fn join(debuggee: &Debuggee, program: &Path) -> Child {
-    let staged = bpd_test::agent::staged();
+    let staged = bpd_test::agent::staged_for(interpreter());
     // the launcher sets these too, and this is the launcher. they are what an
     // `exec`'d child of *this* agent would be reached through, and an agent
     // entered without them refuses by name rather than starting a session that

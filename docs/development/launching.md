@@ -83,6 +83,95 @@ bpd                                      the debuggee
 the agent connects **back** to the engine. that removes any race over who binds
 first, and means the debuggee never listens for anything
 
+## which agent is staged
+
+the agent is a cpython extension and is **not** `abi3`: it reads
+`sys.monitoring` and interpreter internals whose layout changes between
+releases. one build is loadable by one `(release, build configuration)` pair,
+and a free-threaded interpreter is a different abi rather than a variant of the
+same one — different struct layouts, different reference counting, and the same
+`sys.version_info`. so `bpd` carries one agent per **interpreter tag**, spelled
+the way cpython spells its own extension suffix: `3.13`, `3.14`, `3.14t`
+
+they live beside the binary, one directory per tag:
+
+```text
+<prefix>/bin/bpd
+<prefix>/agents/3.13/libbpd_agent.so
+<prefix>/agents/3.14/libbpd_agent.so
+<prefix>/agents/3.14t/libbpd_agent.so
+```
+
+both the directory holding `bpd` and the one above it are looked in, which is
+why the same rule serves an installed `<prefix>/bin/bpd` and a test binary in
+`target/debug/deps`
+
+a directory per tag rather than a tag in the file name, for two reasons. the
+artifact keeps the name **cargo** gave it, so whatever assembles the layout
+copies and renames nothing — there is no step in which a name could be invented
+that disagrees with the bytes beside it. and the tags a `bpd` carries are then
+read off the filesystem rather than recovered by parsing file names, which is
+what lets a refusal say what is really there.
+`bpd_engine::agent::published_at` is where the layout is defined, and it is
+what CI and the tests assemble one through
+
+### how the choice is made
+
+by the tag the interpreter reported **about itself** when it was probed — its
+`sys.version_info` and its `Py_GIL_DISABLED` — never by what a path claims.
+`EXT_SUFFIX` would work too and is what an earlier note proposed, but it also
+carries a platform that a file on this machine cannot disagree about; the tag is
+the vocabulary `bpd_agent.verify_interpreter()` is written in, so what selection
+asks for is exactly what verification compares
+
+**`verify_interpreter` has not gone anywhere.** selection picking the right file
+and the agent checking it was compiled for the interpreter that imported it are
+two different guarantees, and the second is what catches a wrong first — a
+mismatched agent is refused at import, before anything is instrumented
+
+### the development build
+
+a checkout has no layout. `cargo build -p bpd_agent` leaves one artifact next to
+the binary, and that is used for any interpreter no tagged agent was carried
+for:
+
+```sh
+PYO3_PYTHON=python3.14 cargo build -p bpd_agent
+cargo run --bin bpd -- launch --python python3.14 script.py
+```
+
+it is the weaker claim of the two, because nothing about it names an
+interpreter — so a tagged agent wins wherever there is one, and the agent's own
+check at import is what settles whether the untagged one fits. which is the
+whole of what a checkout has ever relied on
+
+### when there is no agent for an interpreter
+
+the refusal names three things, because two of them are not enough: the
+interpreter and the tag it needs, the tags that **are** carried, and what to do
+
+```text
+error: bpd carries no agent for python 3.13.5 (`python3.13`), which needs the
+build tagged `3.13`. it carries `3.14` in `/opt/bpd/agents/3.14`, `3.15` in
+`/opt/bpd/agents/3.15`. the agent is a cpython extension and is not abi3 — it
+reads interpreter state whose layout changes between releases — so one build
+loads into one release and one build configuration and no other. debug with an
+interpreter this bpd carries, or build the agent for this one:
+    PYO3_PYTHON=python3.13 cargo build -p bpd_agent
+```
+
+a `bpd` carrying nothing at all says that instead, and names both directories it
+looked in — "no agent for python 3.13" would send someone hunting for a
+packaging problem that is really an empty build tree
+
+`crates/bpd/tests/agents.rs` is where all of this is asserted, and it is
+asserted through a real `bpd` binary in a directory of its own with a layout
+beside it rather than over a path string. only one tag can hold a real agent —
+`cargo test` builds the agent against one interpreter — so the others hold bytes
+that are not one, which makes the negative half exact: the entry a launch stages
+into is the sha-256 of what it staged, so an interpreter that reached another
+tag's directory names another entry
+
 ## where the agent is staged
 
 the agent is a `cdylib`, and cargo names the artifact `libbpd_agent.dylib`,
@@ -95,6 +184,11 @@ that directory is a **cache**, with one entry per distinct agent build:
 ```text
 ~/.cache/bpd/agents/<sha-256 of the artifact>/bpd_agent.so
 ```
+
+carrying several agents changes nothing here. the entry is keyed on the bytes,
+so several agents are simply several entries, and an entry still holds one file
+named for the platform's import suffix and nothing else — which is the rule
+[`bpd cache`](agent-cache.md) reads a directory by
 
 `$XDG_CACHE_HOME` is used instead of `~/.cache` when it is set to an absolute
 path, and windows uses `%LOCALAPPDATA%\bpd\agents\…\bpd_agent.pyd`. macOS gets

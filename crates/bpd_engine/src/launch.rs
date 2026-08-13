@@ -1498,7 +1498,7 @@ fn start(
             reason: error.to_string(),
         })?;
 
-    let staged = agent::stage()?;
+    let staged = agent::stage_for(interpreter)?;
     // staged at launch and not when child debugging is asked for, because the
     // ask arrives while the debuggee is held at entry and a staging failure
     // there would be a refusal in the middle of a session rather than at the

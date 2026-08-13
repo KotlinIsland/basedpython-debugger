@@ -14,7 +14,7 @@
 
 use std::process::ExitCode;
 
-use bpd_engine::cache::{Cache, Cleared};
+use bpd_engine::cache::{Cache, Cleared, Current};
 
 use crate::report_error;
 
@@ -35,8 +35,8 @@ enum Command {
 /// `bpd cache clear` arguments
 #[derive(Debug, clap::Args)]
 pub(crate) struct ClearArgs {
-    /// leave the entry the agent this `bpd` would stage is already in, so the
-    /// next launch does not pay a cold load of it
+    /// leave the entries the agents this `bpd` carries are already in, so the
+    /// next launch does not pay a cold load of one
     #[arg(long)]
     keep_current: bool,
 }
@@ -68,22 +68,28 @@ fn report(cache: &Cache) -> ExitCode {
         note("it is not there — nothing has been staged yet, and it holds nothing");
     }
 
-    // the current entry is a separate question from what is in the cache, and
-    // it can fail on its own — an agent that is not built is a `bpd` that
-    // cannot launch anything either, and saying which entry is current would be
-    // a guess. the report above is still true, so it is printed either way
+    // the current entries are a separate question from what is in the cache,
+    // and asking can fail on its own — a `bpd` that carries no agent cannot
+    // launch anything either, and naming a current entry would be a guess. the
+    // report above is still true, so it is printed either way
+    //
+    // there is one per interpreter tag this `bpd` carries, because each is what
+    // a launch on the interpreter it is for would stage
     let current = bpd_engine::cache::current();
     let mut ok = true;
     match &current {
-        Ok(digest) => {
-            field("current", digest);
-            match cache.entry(digest) {
-                Some(entry) => note(&format!(
-                    "staged, {} — clearing it costs the next launch a cold load \
-                     of the agent",
-                    size(entry.size())
-                )),
-                None => note("not staged yet — the next launch will put it there"),
+        Ok(builds) => {
+            for build in builds {
+                field("current", build.digest());
+                let held = match cache.entry(build.digest()) {
+                    Some(entry) => format!(
+                        "staged, {} — clearing it costs the next launch a cold \
+                         load of the agent",
+                        size(entry.size())
+                    ),
+                    None => "not staged yet — the next launch will put it there".to_owned(),
+                };
+                note(&format!("{} — {held}", carries(build)));
             }
         }
         Err(_) => {
@@ -124,11 +130,22 @@ fn report(cache: &Cache) -> ExitCode {
     }
 }
 
+/// which interpreter a build is for, as a person would say it
+fn carries(build: &Current) -> String {
+    match build.tag() {
+        Some(tag) => format!("the agent for python {tag}"),
+        // the untagged artifact beside the binary. nothing about it names an
+        // interpreter — the agent's own check at import is what decides — so
+        // nothing is claimed about it here either
+        None => "the development build".to_owned(),
+    }
+}
+
 /// take the entries away, and say exactly which ones went
 fn clear(cache: &Cache, args: &ClearArgs) -> ExitCode {
     let keep = if args.keep_current {
         match bpd_engine::cache::current() {
-            Ok(digest) => Some(digest),
+            Ok(builds) => builds,
             // refused rather than cleared: `--keep-current` names an entry to
             // keep, and clearing everything because the current one could not
             // be identified is the opposite of what was asked
@@ -142,7 +159,7 @@ fn clear(cache: &Cache, args: &ClearArgs) -> ExitCode {
             }
         }
     } else {
-        None
+        Vec::new()
     };
 
     if !cache.present() {
@@ -151,7 +168,8 @@ fn clear(cache: &Cache, args: &ClearArgs) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let cleared = match cache.clear(keep.as_deref()) {
+    let digests: Vec<&str> = keep.iter().map(Current::digest).collect();
+    let cleared = match cache.clear(&digests) {
         Ok(cleared) => cleared,
         Err(error) => {
             report_error(&error);
@@ -161,19 +179,25 @@ fn clear(cache: &Cache, args: &ClearArgs) -> ExitCode {
 
     field("removed", &entries(cleared.removed().len()));
     field("reclaimed", &size(cleared.reclaimed()));
-    match (args.keep_current, cleared.kept()) {
-        (true, Some(entry)) => {
+    if args.keep_current {
+        for entry in cleared.kept() {
             field("kept", entry.digest());
             note(&format!(
-                "{} — the agent this bpd stages, so no launch pays a cold load",
+                "{} — an agent this bpd stages, so no launch pays a cold load",
                 size(entry.size())
             ));
         }
-        // the flag was given and the entry was not there to keep. saying so
-        // matters: the next launch stages it and pays the cold load anyway, and
-        // a silent "kept nothing" would look like it had been kept
-        (true, None) => note("the agent this bpd stages was not in the cache, so nothing was kept"),
-        (false, _) => {}
+        // an agent this `bpd` carries that was not in the cache to begin with.
+        // saying so matters: the next launch stages it and pays the cold load
+        // anyway, and a silent "kept nothing" would look like it had been kept
+        for build in &keep {
+            if cache.entry(build.digest()).is_none() {
+                note(&format!(
+                    "{} was not in the cache, so nothing was kept for it",
+                    carries(build)
+                ));
+            }
+        }
     }
 
     if cleared.succeeded() {
