@@ -180,6 +180,7 @@ version = "0.0.0"
 dependencies = [
  "bpd_core",
  "bpd_engine",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

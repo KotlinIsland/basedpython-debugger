@@ -232,6 +232,13 @@ the server's stdout **is** the protocol, so the debuggee's cannot be. the
 program is launched with pipes and what it wrote is carried on the next tool
 answer, under `output`, tagged with the stream each line came from
 
+pipes and not a pseudo-terminal, deliberately. what reads the program's output
+here is an agent rather than a terminal, so `python program.py | agent` is the
+bare run this is the same as — and a program told `isatty()` is `True` would
+write colour escapes and progress redraws into text an agent then has to read
+around. the reasoning, and what it costs in buffering, is in
+[launching a debuggee](launching.md#the-debuggees-own-standard-streams)
+
 it is bounded: the most recent 64 KiB, because what a program printed just
 before it stopped is what the stop is about, and whatever fell off the front is
 counted and reported. logpoint records are bounded the same way — the first 200,

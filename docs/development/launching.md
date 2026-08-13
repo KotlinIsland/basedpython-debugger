@@ -318,6 +318,115 @@ the engine reports these as `ExitedBeforeStopping` and propagates the exit code
 without a word of its own. a line of `bpd`'s on top would be a line that is not
 there without the debugger
 
+## the debuggee's own standard streams
+
+the rule is the same one the rest of this page follows, applied to a channel
+that is easy to forget is program-observable: **`bpd` gives the debuggee what a
+bare run would have given it**. not always a terminal, and not always a pipe —
+the same thing
+
+it matters because `isatty()` is not cosmetic. it is what `rich`, `click`,
+`pytest` and `colorama` check to decide colour, progress bars and formatting, so
+a program told the wrong answer *renders* differently. the buffering follows
+from it and is the smaller half: cpython line-buffers a terminal and
+block-buffers a pipe, so on a pipe an unflushed `print` waits for the program to
+exit or for the buffer to fill. how big that buffer is is not a constant worth
+quoting — cpython sizes `sys.stdout` from the descriptor's own `st_blksize`, so
+it differs by platform and by what the descriptor is
+
+### `bpd launch` inherits, and that is the whole mechanism
+
+`bpd launch` gives the debuggee no streams of its own. the interpreter is spawned
+with stdin, stdout and stderr inherited, so the debuggee is holding **the same
+file descriptors** `bpd` was handed — not an imitation of them. measured, as
+`sys.stdout`:
+
+|                             | `isatty()` | `line_buffering` |
+| --------------------------- | ---------- | ---------------- |
+| bare, in a terminal         | `True`     | `True`           |
+| `bpd launch`, in a terminal | `True`     | `True`           |
+| bare, redirected            | `False`    | `False`          |
+| `bpd launch`, redirected    | `False`    | `False`          |
+
+a pseudo-terminal here would be strictly worse. it would be a *second* terminal
+between `bpd` and the real one, and then the size, the window-change signal and
+the line discipline would all be `bpd`'s to keep in step with a terminal it is
+no longer connected to — and stdout and stderr, which are genuinely two
+descriptors on a bare run, would arrive on one
+
+### `bpd dap` and `bpd mcp` capture, and give a pipe
+
+on those two the debuggee's output cannot be left where it is: `bpd`'s own stdout
+**is the protocol**, and one `print` from the program in the middle of a message
+makes every message after it unreadable. so the program's stdout and stderr are
+pipes, read by a thread each, and forwarded — as DAP `output` events with a
+`stdout` or `stderr` category, and as the same distinction over MCP
+
+that leaves a judgement to make, because there is no bare run to copy: what is
+the debuggee's output going *to*. it is going to a program — the DAP client —
+which reads it and renders it in a debug console. `python program.py | client`
+is the bare equivalent of that, and it is a pipe. so a pipe is what the rule
+asks for, and the block buffering that comes with it is the buffering a bare
+piped run has. a debuggee under `bpd dap` whose `print` has no `flush=True`
+reaches the console when the program exits, and would have done the same without
+`bpd`
+
+a pseudo-terminal was considered for this path and **refused**, for four reasons
+that are all the same reason:
+
+- `isatty()` would return `True`, which is a claim that there is a terminal.
+    there is not. a debug console does not deliver keystrokes to the program,
+    has no size, and does not act on cursor motion — so a program told it has a
+    terminal writes colour, `\r` progress redraws and cursor escapes into a
+    widget that shows them literally. that is `bpd` making the program's output
+    *wrong* in order to make it *timely*
+- a terminal has a size, and this one would not have a real one.
+    `os.get_terminal_size()` on a fresh pseudo-terminal is `0x0` until somebody
+    sets one, and setting `80x24` is a number nobody measured. a debugger
+    inventing a fact about the program's world is the thing this project exists
+    not to do
+- a terminal has **one** stream. stdout and stderr would arrive merged, and
+    which one a line came from — a real fact about the program, reported today
+    as the DAP `output` category — would be gone
+- it fixes the timeliness of output by changing what the program *is*, and DAP
+    already has the answer for a program that genuinely needs a terminal:
+    `runInTerminal`, where the client owns the terminal and makes it. that is
+    why the request exists. `bpd` does not implement it yet, and that is a gap
+    in the adapter rather than a reason to fake the thing it asks for
+
+### the parity test could not see any of this, and now can
+
+`crates/bpd/tests/launch_parity.rs` runs everything twice and compares, and every
+comparison in it went through `Command::output` — which is two pipes on both
+sides. so anything differing only between a terminal and a pipe was invisible to
+it: a change that put a pipe in front of the debuggee would have passed the
+whole file
+
+`a_program_on_a_terminal_is_still_on_one_under_bpd` is the comparison it could
+not make. it opens a real pseudo-terminal, gives it to a bare interpreter and to
+`bpd launch` as all three standard streams, and compares what came back. the
+probe reports `isatty` on each stream and then writes one line with `os.write`,
+straight to the file descriptor and past python's buffer — so *where that line
+lands* among the ones before it is the buffering, measured rather than asked
+about
+
+it writes to **both** streams, which is the second thing only a terminal can
+settle. `output_arrives_in_the_same_order_on_both_streams` promises more than it
+checks: it compares each stream against its own counterpart, and two pipes carry
+no record of how the two were interleaved, so nothing there can see across them.
+a terminal has one stream, and the order the two arrive in on it is the order
+the program wrote them — which is also the fact that makes the merging above a
+real cost rather than a tidy-up
+
+it carries its own guard. the same probe is run through pipes, and the test fails
+if the two shapes ever stop differing — otherwise it would be the piped
+comparison a second time, passing while proving nothing
+
+it is unix-only, and says so by being `#[cfg(unix)]` rather than by skipping.
+windows has no pseudo-terminal of this shape — ConPTY is a different mechanism
+with a different API — and there is nothing on windows for the test to be about,
+because `bpd launch` inherits its streams there exactly as it does here
+
 ## the one fingerprint that remains
 
 `bpd_agent` stays in the debuggee's `sys.modules`. it cannot be removed —

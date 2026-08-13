@@ -16,5 +16,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 
+# a pseudo-terminal, for the half of launch parity a pipe cannot measure. std
+# has no way to open one and no `unsafe`-free path to `forkpty`; this is the
+# wrapper, and `NOCTTY` on every open is what keeps a controlling terminal out
+# of it
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs", "pty"] }
+
 [lints]
 workspace = true
