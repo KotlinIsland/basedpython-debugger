@@ -691,6 +691,47 @@ mod tests {
     }
 
     #[test]
+    fn a_by_breakpoint_is_rendered_with_both_of_its_locations() {
+        use bpd_core::source_map::Located;
+
+        // an agent reading this has one answer with two true locations in it.
+        // the `.by` line is the one it asked about; the generated location is
+        // what makes the code objects beside it mean anything
+        let rendered = breakpoints(
+            &[Resolved {
+                id: 1,
+                binding: Binding::BoundInSource {
+                    line: 7,
+                    generated: Located {
+                        file: std::path::PathBuf::from("/tmp/build/app.py"),
+                        line: 19,
+                    },
+                    sites: vec![Site {
+                        qualname: "main".to_string(),
+                        first_line: 12,
+                        offset: 4,
+                    }],
+                    evaluation: Evaluation::Always,
+                },
+            }],
+            &[SourceBreakpoint::at(1, "/src/app.by", 7)],
+        );
+
+        let [only] = &rendered[..] else {
+            panic!("one breakpoint was asked about, and {rendered:?} came back")
+        };
+        assert_eq!(only["bound"], true);
+        assert_eq!(only["line"], 7);
+        assert_eq!(only["file"], "/src/app.by");
+        assert_eq!(only["generated"]["file"], "/tmp/build/app.py");
+        assert_eq!(only["generated"]["line"], 19);
+        assert!(
+            only["moved"].is_null(),
+            "it bound on the line that was asked for: {only}"
+        );
+    }
+
+    #[test]
     fn a_stack_that_was_cut_says_how_much_of_it_is_missing() {
         let whole = stack(&Stack {
             frames: vec![frame(0)],

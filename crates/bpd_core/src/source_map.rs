@@ -114,8 +114,6 @@ impl Pair {
 /// pair it was built from
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceMap {
-    /// the map file this was read from, for a message about it
-    path: PathBuf,
     /// keyed by the canonical generated path, so a lookup is one comparison
     pairs: BTreeMap<PathBuf, Pair>,
 }
@@ -449,24 +447,7 @@ impl SourceMap {
             });
         }
 
-        Ok(Self { path, pairs })
-    }
-
-    /// the map file this was read from
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// whether this map is about that file at all, generated or source
-    ///
-    /// what a caller asks before it decides a location needs mapping. it takes
-    /// the path as it was spelled and canonicalises it, so a `/tmp` path and the
-    /// `/var` path it points at are the same file here as they are on disk
-    pub fn describes(&self, file: &Path) -> bool {
-        let Ok(file) = file.canonicalize() else {
-            return false;
-        };
-        self.pairs.contains_key(&file) || self.pairs.values().any(|pair| pair.source == file)
+        Ok(Self { pairs })
     }
 
     /// the `.by` location a generated python location came from
@@ -795,9 +776,10 @@ mod tests {
             map.to_source(&stranger, 1),
             Err(Unmapped::NotInTheMap { .. })
         ));
-        assert!(!map.describes(&stranger));
-        assert!(map.describes(&build.source));
-        assert!(map.describes(&build.generated));
+        assert!(matches!(
+            map.to_generated(&stranger, 1),
+            Err(Unmapped::NotInTheMap { .. })
+        ));
     }
 
     #[test]

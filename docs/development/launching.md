@@ -59,6 +59,8 @@ there is no arrangement of arguments in which two of them are given. giving
 bpd                                      the debuggee
  │
  ├─ probe the interpreter, refuse if it cannot be driven
+ ├─ load a basedpython source map if the program runs out of a build
+ │  directory, and refuse if it no longer describes what is on disk
  ├─ stage the agent build, from the cache after the first time
  ├─ bind loopback, generate a session token
  ├─ spawn ────────────────────────────▶  python -c "import bpd_agent;
@@ -82,6 +84,16 @@ bpd                                      the debuggee
 
 the agent connects **back** to the engine. that removes any race over who binds
 first, and means the debuggee never listens for anything
+
+the two things above the spawn are both refusals, and both are above it on
+purpose: a program that ran and then could not be debugged is a program that
+ran. an interpreter below the minimum is one of them, and
+`crates/bpd/tests/launch_refusal.rs` is what says nothing was started. the other
+is a basedpython build that no longer matches its source map — see
+[source mapping](source-mapping.md), which is also where the rule that bpd
+**finds** the map rather than being told where it is is written down. nothing
+about it reaches the debuggee: the map is read and hashed out of process, and
+the agent never learns one exists
 
 ## which agent is staged
 
