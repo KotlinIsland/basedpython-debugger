@@ -154,6 +154,20 @@ pub enum Refusal {
         /// the platform the debuggee is running on
         platform: String,
     },
+
+    /// the frame is `.by` source and that line of it generated no python
+    ///
+    /// a frame of a basedpython build reports the `.by` line it came from, so a
+    /// line named against that frame is a line of the `.by` — and the frame can
+    /// only be moved to a line the interpreter has. a blank line and a comment
+    /// generate nothing, exactly as in ordinary python, and the map says which
+    /// lines those are rather than the debugger moving the frame somewhere near
+    UnmappableLine {
+        /// what was asked about
+        frame: FrameId,
+        /// what the map said, which names the file and the line
+        reason: crate::source_map::Unmapped,
+    },
 }
 
 impl std::fmt::Display for Refusal {
@@ -248,6 +262,11 @@ impl std::fmt::Display for Refusal {
                 formatter,
                 "{frame} runs `{function}` and cannot be re-entered from the \
                  top: {reason}"
+            ),
+            Self::UnmappableLine { frame, reason } => write!(
+                formatter,
+                "{frame} is reported as basedpython source and cannot be moved \
+                 to that line of it: {reason}"
             ),
             Self::NotATemplateFrame { frame, function } => write!(
                 formatter,

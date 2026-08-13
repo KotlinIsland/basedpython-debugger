@@ -43,6 +43,16 @@ use bpd_mcp::{
 /// the interpreter's identity for the one thread this fake ever holds
 const THREAD: u64 = 4242;
 
+/// the `.by` the fake's mapped frame is reported in
+const MAPPED_TO: &str = "/src/demo.by";
+
+/// the generated python that mapped frame is really running
+///
+/// the location a front end has to be able to show. an agent given only
+/// `demo.by:11` has no way to check the debugger against the interpreter, and
+/// no file it can set a python breakpoint in
+const GENERATED_FROM: &str = "/tmp/.by-build/demo.py";
+
 /// the session this fake's stops are reported from
 ///
 /// the engine mints one per debuggee and a fake has no engine, so this stands
@@ -123,7 +133,7 @@ fn every_capability_of_the_core_is_reachable_through_a_tool() {
 #[test]
 fn every_capability_carried_inside_a_request_reaches_the_session() {
     let asked = Asked::default();
-    drive(&asked);
+    let client = drive(&asked);
     let recorded = asked.lock().expect("the recorder is not poisoned");
 
     for facet in Facet::ALL {
@@ -164,6 +174,17 @@ fn every_capability_carried_inside_a_request_reaches_the_session() {
              was asked for {detail:?}"
         );
     }
+
+    // and where the interpreter really is, for the frame reported as `.by`
+    // source. an agent shown only `demo.by:11` cannot check the debugger
+    // against the interpreter and has no file it could set a python breakpoint
+    // in — so both the sentence and the pair itself ride on the frame
+    assert!(
+        client.answered(&[MAPPED_TO, GENERATED_FROM, "\"line\":14"]),
+        "the stack reported `{MAPPED_TO}` and no answer said where the \
+         interpreter really is: {:?}",
+        client.result_of("stack")
+    );
 
     // and the capability the server reaches on its own: no tool takes a session
     // argument, because there is one session — so the server addresses every
@@ -990,6 +1011,7 @@ fn snapshot(stop: u64, query: &bpd_core::StateQuery) -> bpd_core::Snapshot {
                     id: FrameId { stop, depth: 0 },
                     file: "/tmp/fake.py".to_string(),
                     line: 3,
+                    mapping: None,
                     kind: bpd_core::FrameKind::Python {
                         function: "main".to_string(),
                         first_line: 1,
@@ -1249,6 +1271,7 @@ fn stack(stop: u64) -> Stack {
                 id: FrameId { stop, depth: 0 },
                 file: "/tmp/page.html".to_string(),
                 line: 2,
+                mapping: None,
                 kind: bpd_core::FrameKind::Template {
                     node: "VariableNode".to_string(),
                     python: FrameId { stop, depth: 1 },
@@ -1258,13 +1281,32 @@ fn stack(stop: u64) -> Stack {
                 id: FrameId { stop, depth: 1 },
                 file: "/tmp/fake.py".to_string(),
                 line: 3,
+                mapping: None,
+                kind: bpd_core::FrameKind::Python {
+                    function: "main".to_string(),
+                    first_line: 1,
+                },
+            },
+            // a frame of a basedpython build, reported at the `.by` line it
+            // came from. what an agent has to be able to reach is where the
+            // interpreter really is — see `GENERATED_FROM`
+            Frame {
+                id: FrameId { stop, depth: 2 },
+                file: MAPPED_TO.to_string(),
+                line: 11,
+                mapping: Some(bpd_core::Mapping::FromSource {
+                    generated: bpd_core::Located {
+                        file: std::path::PathBuf::from(GENERATED_FROM),
+                        line: 14,
+                    },
+                }),
                 kind: bpd_core::FrameKind::Python {
                     function: "main".to_string(),
                     first_line: 1,
                 },
             },
         ],
-        depth: 2,
+        depth: 3,
         mode: Mode::NonStop,
     }
 }

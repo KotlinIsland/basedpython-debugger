@@ -51,7 +51,7 @@ use pyo3::types::PyDict;
 
 use crate::conditions::{self, capture};
 use crate::values::Reader;
-use crate::{events, templates, world};
+use crate::{events, sources, templates, world};
 
 /// `CO_OPTIMIZED` — the frame keeps its locals in slots the compiler assigned
 ///
@@ -616,7 +616,11 @@ impl<'py> Stopped<'py> {
         };
         let code = frame.getattr("f_code")?;
 
-        let line = match wanted {
+        // the line a client names is a line of the file the frame **reported**,
+        // and for a basedpython build that is the `.by`. translating it here is
+        // the other half of reporting one: a debugger that answered in one
+        // file's lines and took orders in another's would be two debuggers
+        let asked = match wanted {
             Wanted::Line(line) => line,
             Wanted::FirstLine => match restartable(&code)? {
                 Ok(line) => line,
@@ -631,8 +635,23 @@ impl<'py> Stopped<'py> {
                 }
             },
         };
+        // a restart's destination came out of the code object and is already a
+        // line the interpreter has, so only a line a client named is translated
+        let line = match wanted {
+            Wanted::Line(_) => match translate(&code, asked)? {
+                Ok(line) => line,
+                Err(reason) => {
+                    return Ok(FromAgent::Refused {
+                        reason: Refusal::UnmappableLine { frame: id, reason },
+                    });
+                }
+            },
+            Wanted::FirstLine => asked,
+        };
 
-        let from: u32 = frame.getattr("f_lineno")?.extract()?;
+        // where the frame is now, as a client was told it — the same reading
+        // the stack gave, rather than the interpreter's line beside a `.by` one
+        let from = describe_where(&frame)?.line;
         // every name of the frame's own slots that holds nothing right now.
         // cpython binds all of them to `None` as part of a jump, which is a
         // change to the program's state that the debugger caused and that
@@ -654,6 +673,10 @@ impl<'py> Stopped<'py> {
         // itself is the only thing that can say where the program is now — and
         // after a refusal it says the same way that nothing moved
         let at = describe_where(&frame)?;
+        // the breakpoint table is keyed by the line the interpreter has, so
+        // this is read off the frame rather than taken from `at` — which is the
+        // same location said the way a client is told it
+        let landed: u32 = frame.getattr("f_lineno")?.extract()?;
 
         let outcome = match moved {
             Ok(()) => Jump::Moved {
@@ -662,10 +685,11 @@ impl<'py> Stopped<'py> {
                 // against the line the frame is on now rather than the line that
                 // was asked for. they are the same line, and one of them is a
                 // reading and the other is an expectation
-                unannounced: crate::breakpoints::bound_at(code.as_ptr() as usize, at.line),
+                unannounced: crate::breakpoints::bound_at(code.as_ptr() as usize, landed),
             },
             Err(error) => Jump::Refused {
-                wanted: line,
+                // the line the client asked for, in the terms it asked in
+                wanted: asked,
                 error: capture(self.python, &error),
             },
         };
@@ -763,6 +787,17 @@ enum Wanted {
 /// over a variable begins with `MAKE_CELL` instructions that carry no line at
 /// all. `co_firstlineno` is where the code was written, and what a jump needs is
 /// a position the frame can be put at
+/// the line of the interpreter's own file that a named line means
+///
+/// a frame of generated python is reported as the `.by` line behind it, so the
+/// line a client names against that frame is a `.by` line and the interpreter
+/// has never heard of it. a frame of anything else is reported as itself, and
+/// the line means what it says
+fn translate(code: &Bound<'_, PyAny>, line: u32) -> PyResult<Result<u32, bpd_core::Unmapped>> {
+    let file: String = code.getattr("co_filename")?.extract()?;
+    Ok(sources::to_generated(&file, line).unwrap_or(Ok(line)))
+}
+
 fn restartable(code: &Bound<'_, PyAny>) -> PyResult<Result<u32, Unrestartable>> {
     let flags: u32 = code.getattr("co_flags")?.extract()?;
     for (flag, kind) in [
@@ -860,10 +895,21 @@ fn describe(slot: &Slot<'_>, id: FrameId) -> PyResult<Frame> {
     match slot {
         Slot::Python(frame) => {
             let code = frame.getattr("f_code")?;
+            // a frame of generated python is reported as the `.by` line behind
+            // it, with the location the interpreter really has carried beside
+            // it. a frame the build did not generate — the standard library,
+            // the `_by_runner.py` shim `by run` starts — comes back untouched,
+            // because dressing one as basedpython would be inventing a source
+            // file for it
+            let at = sources::locate(
+                code.getattr("co_filename")?.extract()?,
+                frame.getattr("f_lineno")?.extract()?,
+            );
             Ok(Frame {
                 id,
-                file: code.getattr("co_filename")?.extract()?,
-                line: frame.getattr("f_lineno")?.extract()?,
+                file: at.file,
+                line: at.line,
+                mapping: at.mapping,
                 kind: FrameKind::Python {
                     function: code.getattr("co_qualname")?.extract()?,
                     first_line: code.getattr("co_firstlineno")?.extract()?,
@@ -876,6 +922,9 @@ fn describe(slot: &Slot<'_>, id: FrameId) -> PyResult<Frame> {
                 id,
                 file: origin.getattr("name")?.extract()?,
                 line: node.getattr("token")?.getattr("lineno")?.extract()?,
+                // a django template is not compiled to python at all, so there
+                // is no generated line for a source map to be about
+                mapping: None,
                 kind: FrameKind::Template {
                     node: node.get_type().getattr("__name__")?.extract()?,
                     python: FrameId {
@@ -897,7 +946,8 @@ fn describe(slot: &Slot<'_>, id: FrameId) -> PyResult<Frame> {
 pub(crate) fn file_and_line(frame: &Bound<'_, PyAny>) -> PyResult<(String, u32)> {
     let file = frame.getattr("f_code")?.getattr("co_filename")?.extract()?;
     let line = frame.getattr("f_lineno")?.extract()?;
-    Ok((file, line))
+    let at = sources::locate(file, line);
+    Ok((at.file, at.line))
 }
 
 /// where one frame is, without a frame id — there is no stop behind it
@@ -906,9 +956,17 @@ pub(crate) fn file_and_line(frame: &Bound<'_, PyAny>) -> PyResult<(String, u32)>
 /// that stays valid for a stop and a running thread's frame has no such promise
 pub(crate) fn describe_where(frame: &Bound<'_, PyAny>) -> PyResult<Where> {
     let code = frame.getattr("f_code")?;
+    // mapped like a frame is, and with nowhere to carry the generated location:
+    // a `Where` is a sample of a thread bpd is not holding, and there is no
+    // frame id on it to ask anything more about. it is the same location a
+    // frame of the same code would report, which is what the rule asks for
+    let at = sources::locate(
+        code.getattr("co_filename")?.extract()?,
+        frame.getattr("f_lineno")?.extract()?,
+    );
     Ok(Where {
-        file: code.getattr("co_filename")?.extract()?,
-        line: frame.getattr("f_lineno")?.extract()?,
+        file: at.file,
+        line: at.line,
         function: code.getattr("co_qualname")?.extract()?,
     })
 }

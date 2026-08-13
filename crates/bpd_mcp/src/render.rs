@@ -85,6 +85,21 @@ fn located(frame: &bpd_core::Frame) -> serde_json::Value {
         "file": frame.file,
         "line": frame.line,
     });
+    // what a source map made of the two fields above, when one did. an agent
+    // reading `demo.by:11` needs to be able to find out where the interpreter
+    // really is — the map is the reason the two differ, and an answer that
+    // showed only one of them would leave nothing to reconcile them with. the
+    // sentence is the core's, so this and DAP's `Source.origin` say the same
+    // thing about the same frame
+    if let Some(mapping) = &frame.mapping {
+        rendered["mapped"] = serde_json::json!(mapping.to_string());
+        if let bpd_core::Mapping::FromSource { generated } = mapping {
+            rendered["generated"] = serde_json::json!({
+                "file": generated.file,
+                "line": generated.line,
+            });
+        }
+    }
     match &frame.kind {
         bpd_core::FrameKind::Python {
             function,
@@ -683,6 +698,7 @@ mod tests {
             id: bpd_core::FrameId { stop: 1, depth },
             file: "/tmp/app.py".to_string(),
             line: 4,
+            mapping: None,
             kind: bpd_core::FrameKind::Python {
                 function: "work".to_string(),
                 first_line: 1,

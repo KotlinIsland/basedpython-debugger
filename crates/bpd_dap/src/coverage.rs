@@ -164,6 +164,18 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
              `detail` of a `bpd/state`, which is an extension and so has \
              somewhere to carry one",
         ),
+
+        // DAP has a field for this and its own spec names the case: `origin`
+        // is "the origin of this source. for example, 'internal module',
+        // 'inlined content from source map'". a frame of a basedpython build
+        // is reported at its `.by` line, and this is where it says where the
+        // interpreter really is
+        Facet::GeneratedLocation => Reach::Direct(
+            "the `origin` of a stack frame's `source`, which carries the \
+             sentence `bpd_core::Mapping` renders — either the generated file \
+             and line the interpreter is at, or, for generated python no `.by` \
+             line is behind, the map's own reason there is none",
+        ),
     }
 }
 

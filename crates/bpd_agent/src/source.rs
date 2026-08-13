@@ -75,9 +75,27 @@ pub(crate) fn around(
         });
     }
 
+    let (lowest, highest) = extent(&code, wanted.first_line)?;
+
+    // everything above proved the **generated** python: it compiles, and the
+    // code object this frame is running is in what came out, so its line table
+    // is the one producing the line numbers. what a user of a basedpython build
+    // has to read is the `.by` those lines came from, and that file is proved a
+    // second way — by the digest the transpiler wrote and `bpd` checked
+    let (bytes, file, line, lowest, highest) = match mapped(&file, line, lowest, highest) {
+        Ok(None) => (bytes, file, line, lowest, highest),
+        Ok(Some(source)) => (
+            source.bytes,
+            source.file,
+            source.line,
+            source.lowest,
+            source.highest,
+        ),
+        Err(why) => return Ok(Source::Unverified { why }),
+    };
+
     let all = split(&bytes);
     let total = u32::try_from(all.len()).unwrap_or(u32::MAX);
-    let (lowest, highest) = extent(&code, wanted.first_line)?;
 
     // the window is the lines asked for, clamped to the code object that was
     // proved. a line outside it was not verified by anything
@@ -119,6 +137,71 @@ pub(crate) fn around(
         lines,
         total,
     })
+}
+
+/// the `.by` behind a generated file, its bytes, and the window in its terms
+struct Mapped {
+    bytes: Vec<u8>,
+    file: String,
+    line: u32,
+    lowest: u32,
+    highest: u32,
+}
+
+/// the `.by` a frame of generated python should be shown as, if it is one
+///
+/// `Ok(None)` is every frame this build did not generate — ordinary python, the
+/// standard library, the runner shim — and also a frame sitting on a generated
+/// line the transpiler invented. that line has no `.by` behind it, the frame
+/// reports the generated location for exactly that reason, and showing the
+/// generated python beside it is the same location said once
+///
+/// the window is the `.by` lines the **proved** code object covers. an edit
+/// further down either file leaves this code object identical, so its lines are
+/// still the ones running and lines outside it are not
+fn mapped(file: &str, line: u32, lowest: u32, highest: u32) -> Result<Option<Mapped>, Unverified> {
+    let Some(map) = crate::sources::source_of(file) else {
+        return Ok(None);
+    };
+    let Ok(at) = map.to_source(line) else {
+        return Ok(None);
+    };
+
+    let source = map.source.display().to_string();
+    let bytes = std::fs::read(&map.source).map_err(|error| Unverified::NotAFile {
+        file: source.clone(),
+        reason: error.to_string(),
+    })?;
+    // the second proof, and the one `bpd` cannot make from out here: it hashed
+    // this file at launch, and a user asking to read it is asking about now. a
+    // `.by` edited since the transpile is the failure a source map exists to
+    // prevent, and the lines around it would be wrong with total confidence
+    if bpd_core::source_map::digest(&bytes) != map.digest {
+        return Err(Unverified::NotTheSameSource {
+            file: source,
+            generated: file.to_string(),
+        });
+    }
+
+    // one `.by` line becomes several generated ones and some generate none, so
+    // the extent is read out of the table rather than mapped at its ends
+    let mut extent = (lowest..=highest).filter_map(|generated| map.to_source(generated).ok());
+    let first = extent.next().unwrap_or_else(|| {
+        unreachable!("the frame's own line is in the code object's extent and it mapped")
+    });
+    let (mut low, mut high) = (first, first);
+    for mapped in extent {
+        low = low.min(mapped);
+        high = high.max(mapped);
+    }
+
+    Ok(Some(Mapped {
+        bytes,
+        file: source,
+        line: at,
+        lowest: low,
+        highest: high,
+    }))
 }
 
 /// compile the file's bytes the way the import machinery does

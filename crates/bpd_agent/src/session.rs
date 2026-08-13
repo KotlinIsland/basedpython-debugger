@@ -37,8 +37,8 @@ use bpd_protocol::message::{FromAgent, FromEngine};
 use pyo3::prelude::*;
 
 use crate::{
-    attach, breakpoints, events, exceptions, frames, pause, replace, steps, stops, templates,
-    threads, world,
+    attach, breakpoints, events, exceptions, frames, pause, replace, sources, steps, stops,
+    templates, threads, world,
 };
 
 /// tell the engine what a logpoint had to say, and carry straight on
@@ -126,6 +126,10 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
             FromEngine::SetBreakpoints { breakpoints } => {
                 let resolved = breakpoints::apply(python, breakpoints)?;
                 attach::send(&FromAgent::BreakpointsResolved { resolved });
+            }
+            FromEngine::MapSources { files } => {
+                let files = sources::install(files);
+                attach::send(&FromAgent::SourcesMapped { files });
             }
             FromEngine::SetExceptionBreakpoints { raised, uncaught } => {
                 exceptions::watch(raised, uncaught);

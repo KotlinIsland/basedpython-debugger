@@ -103,6 +103,16 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
              every tool that is about one. a tool that is about a stop needs \
              neither: the stop carries the session it was reported from",
         ),
+
+        // an MCP answer is JSON, so both locations go on the frame as
+        // themselves. `generated` is the pair an agent can act on — set a
+        // breakpoint in it, read that file — and `mapped` is the sentence, the
+        // same one DAP puts on a source's `origin`
+        Facet::GeneratedLocation => Reach::Direct(
+            "the `mapped` and `generated` fields of a frame in stack and in \
+             state, which carry the sentence `bpd_core::Mapping` renders and \
+             the generated file and line themselves",
+        ),
     }
 }
 

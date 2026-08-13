@@ -86,8 +86,7 @@ line comes out of it, and a map that cannot be is a refusal at launch — before
 the interpreter is started, for the reason an unsupported interpreter is refused
 there. a program that ran and then could not be debugged is a program that ran
 
-nothing about this reaches the debuggee. `bpd` reads the bytes, hashes the bytes,
-and parses the two tables itself, in
+`bpd` reads the bytes, hashes the bytes, and parses the two tables itself, in
 `bpd_core::source_map::literal` — a reader that accepts the literal subset the
 emitter writes and refuses everything else by line and column. it does **not**
 import `_by_sourcemap.py`, for two reasons that are both about when:
@@ -98,6 +97,15 @@ import `_by_sourcemap.py`, for two reasons that are both about when:
 - importing it would put a module in the debuggee's `sys.modules` that `bpd` put
     there. what a program can tell about being debugged stays at nothing, and
     `crates/bpd/tests/launch_parity.rs` is the guard on it
+
+the **tables** do reach the debuggee, because that is where a location is made —
+see [what is mapped](#what-is-mapped). they reach it as bytes on the control
+connection into the agent's own memory, exactly as the breakpoint table does:
+nothing is imported, nothing joins `sys.modules` or `sys.path`, and nothing is
+written to the environment.
+`a_program_in_a_basedpython_build_cannot_tell_the_map_reached_the_debuggee`
+runs a program out of a mapped build twice, once bare and once under `bpd`, and
+compares what it saw
 
 #### verification, which is the whole point
 
@@ -201,29 +209,127 @@ front end goes through, because all three reach the map the same way
 `bpd` does not yet have a subcommand that writes that wrapper for you, and the
 roadmap's M6 entry says so
 
-## what is mapped, and what is not yet
+## what is mapped
 
 **breakpoints are.** a `.by` breakpoint binds through the map, in both
 directions, and refuses rather than guesses
 
-**frames are not.** a stop, a stack frame and a traceback still report the
-generated python — the file the interpreter is really in, and the line it is
-really on. that is honest rather than wrong: nothing claims a `.by` location it
-was not given one for. but it is half of what this milestone is for, and the
-other half is named in `ROADMAP.md`
+**and so is everything the debugger says about where the program is.** a stop, a
+stack frame, a traceback entry, a thread's sample, a logpoint's record and the
+source a query reads all name the `.by` line. what a user set a breakpoint in and
+what the debugger reports back are one file
 
-the reason it is a separate piece rather than the same one is that a location
-leaves the debugger through about thirty fields — every `StopReason`, every
-`Frame`, every traceback entry, every query snapshot, every script transcript.
-mapping some of them and not the others would produce a session that reports two
-different files for one location, which is worse than a session that consistently
-reports the one the interpreter has
+that is one rule and not a list, because a list is how one of them gets missed. a
+location leaves the debugger through about thirty fields — seven on `StopReason`
+alone, plus `Frame`, `Where`, `TracebackFrame`, query snapshots and script
+transcripts — and mapping some of them would produce a session that reports two
+different files for one location. **that is worse than consistently reporting the
+one the interpreter has**, because a person reading it has no way to tell which
+of the two answers is the true one
 
-## what a mapped frame will look like
+### so the substitution happens in the agent
 
-when frames land, a mapped frame carries both locations for the reason
-`BoundInSource` does: the one the user asked about and the one the interpreter is
-actually at. the second is not shown by default, and is one request away
+not on the way out of the engine. the agent is where a location is *made* — from
+a code object's `co_filename` and a frame's `f_lineno` — and there are eight
+places in the whole crate that do it, against thirty a location can leave
+through. `crates/bpd_agent/src/sources.rs` is the one function all eight go
+through, and it is the same shape `templates.rs` uses for django
+
+so `bpd` sends the map to the agent, over the control connection, once, while the
+debuggee is held at entry and before a line of the program has run
+
+**the verification does not go with it.** `SourceMap::load` is the only
+constructor there is and it hashes both files of every pair against disk before
+it returns, out of process — so what crosses is a `MappedFile` that could not
+have been built without that check having passed. the agent applies a map; it
+never decides that one is trustworthy, because a debuggee vouching for the
+instrument that measures it is not evidence. it is also a matter of *when*: a
+breakpoint is translated before the program has run at all, and in DAP before it
+has been launched, so a translation that had to ask the debuggee would arrive
+after the question
+
+## a mapped frame carries both locations
+
+for the reason `BoundInSource` does: the one the user asked about and the one the
+interpreter is actually at.
+
+- `file` and `line` are the `.by`
+- `mapping` carries `Mapping::FromSource { generated }`, which is the file and
+    line the interpreter really has
+
+it is on the **frame** and not on every `StopReason` because a stop's location is
+always frame zero's — a breakpoint, a step, a pause, a raise and a fork all report
+the code object that is running. one field a client reads once beats seven that
+have to agree
 
 this matters for the same reason the whole document does. when a user does not
-believe the debugger, they need to be able to see what it saw
+believe the debugger, they need to be able to see what it saw. DAP puts it on the
+stack frame's `source.origin` — which the spec's own example calls "inlined
+content from source map" — and MCP puts `mapped` and `generated` on the frame.
+`Facet::GeneratedLocation` is what makes that a rule rather than a habit:
+`crates/bpd/tests/parity.rs` fails if one front end reaches it and the other does
+not
+
+## a generated line no `.by` line is behind
+
+prelude, a lowering's own scaffolding, an import the source never wrote. **the
+map says so itself** — that is the `None` in its table — so it is a fact rather
+than a gap
+
+such a frame keeps the **generated** location, and carries
+`Mapping::InGeneratedPython { reason }` saying which line of which file has no
+`.by` behind it. reporting a `.by` line there would be the debugger writing a line
+the user never did, and reporting a path in a temporary directory with nothing to
+explain it would leave a person with no idea why they are looking at it
+
+a breakpoint can never bind to one of these — binding refuses the same case — but
+a step, a pause and a raise can all land on one, and the module frame of a build
+sits on prelude for as long as its imports take
+
+## frames below the mapped ones
+
+`_by_runner.py`, the import machinery, the standard library, a dependency. the
+map is about the files the transpile produced and says nothing about any of these,
+so they are reported exactly as the interpreter has them, with no `mapping` at
+all. dressing one as `.by` would be inventing a source file for it
+
+a stack of a `.by` program therefore has both kinds in it, and each frame says
+which it is
+
+## naming a line back
+
+a frame that reports `demo.by:11` is a frame a client will name a line of
+`demo.by` against. `setNextStatement` translates the line the other way through
+the same table before it moves anything — a debugger that answered in one file's
+lines and took orders in another's would be two debuggers. a `.by` line the
+transpiler generated nothing for is a refusal naming it, not a move to somewhere
+near it
+
+## the source a query reads
+
+`Source::Lines` for a mapped frame is the **`.by`**, and it is proved twice. the
+generated python is proved the way every frame's source is — it compiles, and the
+running code object is in what came out, so its line table is the thing producing
+the line numbers — and then the `.by` behind it is checked against the digest the
+map carries
+
+that second check is the one `bpd` cannot make from out here. it hashed the file
+at launch and a user asking to see it is asking about *now*; an editor that saved
+in between leaves a file whose lines are wrong with total confidence. the answer
+is `Unverified::NotTheSameSource`, which says to transpile again
+
+the window is the `.by` lines the proved code object covers, read out of the table
+rather than mapped at its ends — one `.by` line becomes several generated ones and
+some generate none
+
+## what is still generated python
+
+- **`replaceCode`** takes a file whose code the process is running, and the code
+    the process is running is the generated `.py`. a `.by` is not something the
+    interpreter can compile, and replacing a build's code means transpiling it
+    again — which is `by`'s to do and not `bpd`'s. it is named as generated
+    python because that is what it is, rather than accepting a `.by` and doing
+    something adjacent to what was asked
+- **a django template frame** has no generated line at all: django does not
+    compile a template to python, so there is nothing for a line map to be about.
+    it carries no `mapping` for that reason and not by omission

@@ -285,6 +285,17 @@ pub enum FromAgent {
         source: bpd_core::Source,
     },
 
+    /// the source map is installed, and it covers this many files
+    ///
+    /// the answer to [`FromEngine::MapSources`], and it is a count rather than
+    /// an acknowledgement with nothing in it: the engine sent a set of files
+    /// and a session where the two disagreed about how many arrived would be
+    /// one where some locations were mapped and some were not
+    SourcesMapped {
+        /// how many generated files the agent will map locations of
+        files: u32,
+    },
+
     /// the agent will not answer the request, and this is why
     Refused {
         /// what stood in the way
@@ -368,6 +379,28 @@ pub enum FromEngine {
     SetBreakpoints {
         /// every breakpoint that should be armed after this request
         breakpoints: Vec<SourceBreakpoint>,
+    },
+
+    /// report locations of this build's generated python as `.by` source
+    ///
+    /// sent once, at launch, while the debuggee is held at entry and before a
+    /// line of the program has run — so every location the agent ever produces
+    /// is produced with the map already installed
+    ///
+    /// **the tables cross and the decision does not.** a
+    /// [`bpd_core::MappedFile`] only exists because `bpd` hashed both files it
+    /// describes against disk first, out of process, and there is no
+    /// constructor that skips that. the agent applies a map it was handed; it
+    /// never decides that one is trustworthy, because a debuggee vouching for
+    /// the instrument that measures it is not evidence
+    ///
+    /// nothing about this is visible to the program. it is agent memory —
+    /// no module enters `sys.modules`, no path enters `sys.path`, nothing is
+    /// written to the environment — and `crates/bpd/tests/launch_parity.rs` is
+    /// the guard on that rather than this sentence
+    MapSources {
+        /// every `.by`/`.py` pair of the build, with the table between them
+        files: Vec<bpd_core::MappedFile>,
     },
 
     /// what every thread of the debuggee is doing

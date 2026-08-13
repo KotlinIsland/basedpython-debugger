@@ -695,15 +695,22 @@ fn frames(python: Python<'_>, error: &PyErr) -> Vec<TracebackFrame> {
             .getattr("tb_frame")
             .expect("a traceback entry has `tb_frame`");
         let code = frame.getattr("f_code").expect("a frame has `f_code`");
-        frames.push(TracebackFrame {
-            file: code
-                .getattr("co_filename")
+        // mapped for the reason a stack frame is: a traceback entry of a
+        // basedpython build names a `.by` line, and one entry of a traceback
+        // naming the generated python beside a stack that does not would be two
+        // answers about one location
+        let at = crate::sources::locate(
+            code.getattr("co_filename")
                 .and_then(|name| name.extract())
                 .expect("a code object's `co_filename` is a string"),
-            line: entry
+            entry
                 .getattr("tb_lineno")
                 .and_then(|line| line.extract())
                 .expect("a traceback entry's `tb_lineno` is an integer"),
+        );
+        frames.push(TracebackFrame {
+            file: at.file,
+            line: at.line,
             function: code
                 .getattr("co_qualname")
                 .and_then(|name| name.extract())
