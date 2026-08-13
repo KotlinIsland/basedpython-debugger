@@ -53,27 +53,39 @@ architectural one
 
 ## what to share before then
 
-the plumbing is duplicated now, and the language plugin is **ahead** on three
-things it hit first. they are recorded here because `bpd`'s plugin has not
-solved them and in two cases has not proved it does not need to:
+the plumbing is duplicated now, and the language plugin hit three things first.
+all three are settled for `bpd` now, and the first is kept here because it was
+settled the other way round from what this page expected:
 
 - **the console.** `DapXDebugProcess` assumes the adapter owns the debuggee and
     builds a console over its own process handler. `bpd` spawns the interpreter
     itself, so the debuggee is not the adapter's process. `basedpython-pycharm`
-    overrode `createXDebugProcess` for this; `editors/intellij/` does not, and
-    **nothing asserts that the debugged program's own output reaches the IDE
-    console**. that is the first thing to check
+    overrode `createXDebugProcess` for this — and **`editors/intellij/` needs no
+    override**, which was checked by driving one rather than reasoned about. the
+    console the platform builds is over a `DefaultDebugProcessHandler` that has
+    no process behind it either way, and what fills it is
+    `formatAndPrintOutput`, which prints DAP `output` events into it. so who
+    spawned the debuggee never comes into it. the session test asserts the
+    program's own stdout and stderr are in that console, and
+    [the intellij page](intellij.md#the-console) records what the platform does
 - **output events.** debugpy opens every session with two bare events reading
     `ptvsd` and `debugpy`, which land in front of the program's first line, so
-    the language plugin drops adapter `output` events on the floor. `bpd` sends
-    them with proper `stdout` and `stderr` categories
-    (`crates/bpd_dap/src/adapter.rs`), so the same filtering is probably wrong
-    for `bpd` — **probably**, and that is the point: it is untested
+    the language plugin drops adapter `output` events on the floor. that
+    filtering **is** wrong for `bpd`, and it is now driven rather than guessed
+    at: `bpd` sends the program's two streams under `stdout` and `stderr`
+    (`crates/bpd_dap/src/adapter.rs`) and sends no `output` event of its own —
+    the `{"listening":…}` announcement goes on `bpd dap`'s own stdout, which the
+    client reads off the pipe. dropping them here would drop the program
 - **how a failure surfaces.** a missing adapter thrown from the wrong place
     reaches the user as an IDE internal error naming `CoroutineScheduler`.
     `bpd`'s plugin raises `ExecutionException` deliberately and
     `testAConfigurationThatCannotFindBpdIsRefused` covers it, so this one is
     already handled — it is listed because it is the trap, not because it is open
+
+what the two plugins do share is one thing neither can fix from a plugin: a
+debuggee's stdout is a pipe, and cpython block-buffers a piped stdout, so an
+unflushed `print` is not in the console until the program exits. it is the
+adapter's to solve or to refuse, not the IDE's
 
 ## the platform, as both plugins found it
 

@@ -61,6 +61,19 @@ class BpdDebugAdapterDescriptor : DebugAdapterDescriptor<BpdAdapterId>() {
             PyExceptionBreakpointType::class.java,
         )
 
+    /**
+     * start `bpd dap --listen 0` and hand the platform a connection to it
+     *
+     * `executionResult` is what the run configuration's own `RunProfileState`
+     * produced, and a bpd configuration's is `EmptyRunProfileState`, whose
+     * `execute` answers null — nothing is executed from here, because what
+     * starts the program is the `launch` request the platform sends. so there is
+     * never one to read, and a console is not built over it either: the
+     * platform's own `DapXDebugProcess` prints every DAP `output` event into the
+     * session's console itself, and bpd sends the program's stdout and stderr as
+     * `output` events under those categories. `editors/intellij/src/test/` drives
+     * that and asserts the program's own lines arrive
+     */
     override suspend fun launchDebugAdapter(
         environment: ExecutionEnvironment,
         executionResult: ExecutionResult?,

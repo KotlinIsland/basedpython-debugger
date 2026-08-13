@@ -12,6 +12,7 @@ import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.platform.dap.DapLaunchArgumentsProvider
 import com.intellij.platform.dap.DebugAdapterSupportProvider
+import com.intellij.terminal.TerminalExecutionConsole
 import com.intellij.testFramework.HeavyPlatformTestCase
 import com.intellij.testFramework.PlatformTestUtil
 import com.intellij.xdebugger.XDebugSession
@@ -61,6 +62,13 @@ import java.util.concurrent.TimeUnit
 class BpdSessionTest : HeavyPlatformTestCase() {
     /** the comment in `program.py` that says which line to stop on */
     private val marker = "# bpd: the session stops here"
+
+    /** what `program.py` writes on each of its two streams, before it stops */
+    private val wrote =
+        mapOf(
+            "stdout" to "bpd: the program wrote this on stdout",
+            "stderr" to "bpd: the program wrote this on stderr",
+        )
 
     /**
      * how long any one step of the session is given
@@ -243,6 +251,32 @@ class BpdSessionTest : HeavyPlatformTestCase() {
             }
         assertEquals("`total` is 0 + 1 + 2 at the breakpoint", "3", presentation(total))
 
+        // the program's own output, in the IDE's console, while it is stopped —
+        // which is the moment a person is reading it
+        //
+        // this is the one `basedpython-pycharm` had to override
+        // `createXDebugProcess` for, because `DapXDebugProcess` builds a console
+        // over its own process handler and the debuggee is not the adapter's
+        // process. bpd needs no override, and this is what says so: the platform
+        // prints every DAP `output` event into that console itself, and bpd
+        // sends the program's two streams as `output` events carrying `stdout`
+        // and `stderr`
+        for ((stream, line) in wrote) {
+            waitFor("the program's $stream reaching the IDE console") {
+                console(session).contains(line)
+            }
+        }
+
+        // and nothing else is in there. `bpd dap --listen 0` announces its port
+        // on its own stdout and `BpdConnection` reads that line off the pipe, so
+        // it is not the debuggee's output and never becomes an `output` event —
+        // this is what would say so if it ever did
+        assertEquals(
+            "the IDE console holds a line the program did not write",
+            emptyList<String>(),
+            said(console(session)) - wrote.values.toSet(),
+        )
+
         // the program has not run past the breakpoint, so it has not written its file
         assertFalse(
             "the program reached its last statement before the breakpoint stopped it",
@@ -333,6 +367,43 @@ class BpdSessionTest : HeavyPlatformTestCase() {
             said.contains("give an absolute path, or a bare command name to look up on PATH"),
         )
     }
+
+    /**
+     * what the IDE's console holds, as a person looking at it would read it
+     *
+     * the platform builds a [TerminalExecutionConsole] for a DAP session and
+     * `DapXDebugProcess.formatAndPrintOutput` prints every `output` event into
+     * it, so this is the console's own buffer rather than a second reading of
+     * anything bpd sent. the cast is checked rather than assumed: a platform
+     * that stopped building this console would be a platform whose console is
+     * somewhere else, and reading an empty string from the wrong object would
+     * report that as the program having written nothing
+     */
+    private fun console(session: XDebugSession): String {
+        val shown =
+            checkNotNull(session.consoleView) {
+                "the session has no console view, so there is nowhere for the program's own " +
+                    "output to be shown"
+            }
+        val terminal =
+            shown as? TerminalExecutionConsole
+                ?: throw AssertionError(
+                    "the session's console is a ${shown.javaClass.name}, and this reads a " +
+                        "${TerminalExecutionConsole::class.java.name} — which is what the " +
+                        "platform's own DapXDebugProcess builds and prints `output` events into",
+                )
+        return terminal.terminalWidget.text
+    }
+
+    /**
+     * the lines of the console that hold anything, trimmed
+     *
+     * the console is a terminal emulator: it pads its screen with blanks, and it
+     * is told to write `\r\n` for a program that has no pty. neither is
+     * something the program wrote
+     */
+    private fun said(console: String): List<String> =
+        console.lines().map { it.trim() }.filter { it.isNotEmpty() }
 
     /**
      * one level of a frame's children, as the variables view would ask for them
