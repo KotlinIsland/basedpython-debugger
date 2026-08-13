@@ -112,17 +112,30 @@ fn read_client(
             Ok(Some(message)) => message,
             Ok(None) => {
                 // the client vanished without saying so. the debuggee is not
-                // left running with nothing watching it
+                // left running with nothing watching it — and a failure here is
+                // not reportable, because the only thing left that could be
+                // told is the process that has just been asked to stop existing
                 stopping.store(true, Ordering::Relaxed);
-                end_debuggee(interrupt);
+                drop(end_debuggee(interrupt));
                 return Ok(());
             }
             Err(error) => {
                 stopping.store(true, Ordering::Relaxed);
-                end_debuggee(interrupt);
+                drop(end_debuggee(interrupt));
                 return Err(error);
             }
         };
+
+        // a response is the client answering **this adapter**, and it is queued
+        // whatever it is called: a response carries the command it answers, so
+        // dispatching on the name alone would read the answer to a question of
+        // the adapter's as a request of the client's
+        if message.kind == "response" {
+            if queue.send(message).is_err() {
+                return Ok(());
+            }
+            continue;
+        }
 
         match message.command.as_deref() {
             Some("pause") => {
@@ -143,9 +156,24 @@ fn read_client(
 
             Some("disconnect" | "terminate") => {
                 stopping.store(true, Ordering::Relaxed);
-                end_debuggee(interrupt);
+                let ended = end_debuggee(interrupt);
                 let mut writer = output.lock().expect(WRITING);
                 writer.respond(&message, None)?;
+                // a program bpd did not start cannot be ended by bpd, and the
+                // client is told which of the two happened rather than reading
+                // the `terminated` below as a program that has been stopped.
+                // what really ends one is the agent inside it: the control
+                // connection goes when this process does, and the agent will
+                // not carry the debuggee on without a debugger
+                if let Err(reason) = ended {
+                    writer.event(
+                        "output",
+                        &serde_json::json!({
+                            "category": "console",
+                            "output": format!("bpd did not end the program: {reason}\n"),
+                        }),
+                    )?;
+                }
                 writer.event("terminated", &serde_json::json!({}))?;
                 return Ok(());
             }
@@ -159,15 +187,19 @@ fn read_client(
     }
 }
 
-/// end the debuggee, if one was ever started
+/// end the debuggee, if one was ever started, and say why not if it was not
 ///
-/// a failure here is not reportable: the client is going away, and the only
-/// thing left that could be told is the process that has just been asked to
-/// stop existing
-fn end_debuggee(interrupt: &Held) {
-    if let Some(reaching) = interrupt.lock().expect(REACHING).as_mut() {
-        let ended = reaching.terminate();
-        drop(ended);
+/// the one that cannot be ended is the one bpd did not **start**: a session
+/// that arrived on bpd's listener, and a launch the client ran in a terminal it
+/// owns. there is nothing to signal and nothing to reap, and it is refused by
+/// name rather than quietly doing nothing — so the reason comes back here for
+/// a caller that still has a client to tell
+fn end_debuggee(interrupt: &Held) -> Result<(), String> {
+    match interrupt.lock().expect(REACHING).as_mut() {
+        Some(reaching) => reaching
+            .terminate()
+            .map_err(|error| describe(error.as_ref())),
+        None => Ok(()),
     }
 }
 
@@ -185,6 +217,15 @@ fn end_debuggee(interrupt: &Held) {
 /// polls its listener inside a wait, so this changes what is held rather than
 /// what is done
 const WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// how long the adapter waits for a client to answer a `runInTerminal`
+///
+/// generous, because answering it means a client opening a terminal and a
+/// person may be asked to allow it. bounded all the same: the whole point of
+/// waiting for the answer is that a client which cannot start the program says
+/// so, and a wait with no end would turn one that says nothing into a session
+/// that hangs with no cause
+const TERMINAL_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// the field a `startDebugging` configuration names the session in
 ///
@@ -209,13 +250,16 @@ struct Adapter {
     /// debugged: a `startDebugging` reverse request is only honest if the
     /// session it asks for can arrive
     reachable: Reachable,
-    /// whether the client said it can start a session this adapter asks for
+    /// what the client said it could do, in `initialize`
+    client: ClientCan,
+    /// what arrived while the adapter was waiting for a client's answer
     ///
-    /// `supportsStartDebuggingRequest` is a **client** capability, in
-    /// `initialize`'s arguments, so it is recorded rather than advertised. a
-    /// client without it is not sent one, and asking for a debugged child is
-    /// refused before anything forks
-    start_debugging: bool,
+    /// the answer to a `runInTerminal` is the one thing the adapter waits for
+    /// on the client's own channel, and anything else that arrives in that
+    /// window is set aside rather than dropped or answered out of turn. a
+    /// client is entitled to send whatever it likes; what it is not entitled to
+    /// is having it silently disappear
+    deferred: Vec<Incoming>,
     session: Option<Box<dyn Session>>,
     configuration: Option<Configuration>,
     /// whether the client has finished sending its configuration
@@ -255,7 +299,8 @@ impl Adapter {
             interrupt,
             stopping,
             reachable,
-            start_debugging: false,
+            client: ClientCan::default(),
+            deferred: Vec::new(),
             session: None,
             configuration: None,
             configured: false,
@@ -321,10 +366,18 @@ impl Adapter {
                 continue;
             }
 
-            let Ok(message) = commands.recv() else {
-                return Ok(());
+            // what was set aside while the adapter waited for a client's answer
+            // to a reverse request, in the order it arrived. before the channel,
+            // because a message that arrived first is answered first
+            let message = if self.deferred.is_empty() {
+                let Ok(message) = commands.recv() else {
+                    return Ok(());
+                };
+                message
+            } else {
+                self.deferred.remove(0)
             };
-            let handled = self.handle(launcher, &message);
+            let handled = self.handle(launcher, &message, commands);
             match handled {
                 Ok(()) => {}
                 Err(Aborted::Refuse(reason)) => self.refuse(&message, &reason)?,
@@ -343,13 +396,20 @@ impl Adapter {
         self.session.is_some() && self.configured && !self.exited && self.announced.is_empty()
     }
 
-    fn handle(&mut self, launcher: &dyn Launcher, message: &Incoming) -> Answered {
-        // the client answering a reverse request. `startDebugging` is the only
-        // one this adapter sends and there is nothing to do about the answer:
-        // the session it asked for arrives on a connection of its own, or it
-        // does not and the child stays held, which is a fact the client already
-        // has. what must not happen is this being refused as an unknown
-        // request, which is what every other `type` gets
+    fn handle(
+        &mut self,
+        launcher: &dyn Launcher,
+        message: &Incoming,
+        commands: &Receiver<Incoming>,
+    ) -> Answered {
+        // the client answering a reverse request. the one that is waited for —
+        // `runInTerminal` — was taken off this channel by the launch that sent
+        // it, so anything reaching here is a `startDebugging`, and there is
+        // nothing to do about that answer: the session it asked for arrives on
+        // a connection of its own, or it does not and the child stays held,
+        // which is a fact the client already has. what must not happen is this
+        // being refused as an unknown request, which is what every other `type`
+        // gets
         if message.kind == "response" {
             return Ok(());
         }
@@ -362,7 +422,7 @@ impl Adapter {
 
         match message.command.as_deref() {
             Some("initialize") => self.initialize(message),
-            Some("launch") => self.launch(launcher, message),
+            Some("launch") => self.launch(launcher, message, commands),
             Some("attach") => self.attach(launcher, message),
             Some("configurationDone") => self.configuration_done(message),
             Some("setBreakpoints") => self.set_breakpoints(message),
@@ -434,12 +494,18 @@ impl Adapter {
             )));
         }
 
-        // a **client** capability, and the only one this adapter reads. it is
-        // what decides whether a debugged child can be offered at all: a client
-        // that cannot start a session this adapter asks for would leave one held
-        // for ever, so asking for one is refused rather than half delivered
-        self.start_debugging =
-            message.arguments["supportsStartDebuggingRequest"] == serde_json::Value::Bool(true);
+        // the two **client** capabilities, and the only ones this adapter
+        // reads. each decides whether something can be offered at all, and each
+        // is checked at `launch` rather than discovered later: a client that
+        // cannot start a session this adapter asks for would leave a debugged
+        // child held for ever, and one that cannot run a command line in a
+        // terminal would leave a launch waiting for an agent nothing started
+        self.client = ClientCan {
+            start_debugging: message.arguments["supportsStartDebuggingRequest"]
+                == serde_json::Value::Bool(true),
+            run_in_terminal: message.arguments["supportsRunInTerminalRequest"]
+                == serde_json::Value::Bool(true),
+        };
 
         self.respond(message, Some(capabilities()))?;
         Ok(())
@@ -484,7 +550,12 @@ impl Adapter {
         Ok(())
     }
 
-    fn launch(&mut self, launcher: &dyn Launcher, message: &Incoming) -> Answered {
+    fn launch(
+        &mut self,
+        launcher: &dyn Launcher,
+        message: &Incoming,
+        commands: &Receiver<Incoming>,
+    ) -> Answered {
         if self.session.is_some() {
             return Err("this session already has a program running".into());
         }
@@ -507,13 +578,19 @@ impl Adapter {
             ));
         }
 
-        let program = Arc::new(Console {
-            output: Arc::clone(&self.output),
-        });
-        match launcher
-            .launch(&configuration, program)
-            .map_err(|error| failed(&error))?
-        {
+        let started = match configuration.console.kind() {
+            Some(kind) => self.start_in_a_terminal(launcher, &configuration, kind, commands)?,
+            None => {
+                let program = Arc::new(Console {
+                    output: Arc::clone(&self.output),
+                });
+                launcher
+                    .launch(&configuration, program)
+                    .map_err(|error| failed(&error))?
+            }
+        };
+
+        match started {
             Started::Stopped(session) => {
                 let reaching = session.interrupt().map_err(|error| failed(&error))?;
                 *self.interrupt.lock().expect(REACHING) = Some(reaching);
@@ -540,6 +617,130 @@ impl Adapter {
                 Ok(())
             }
         }
+    }
+
+    /// have the client start the program in a terminal it owns
+    ///
+    /// the `runInTerminal` reverse request, and the only honest way for a
+    /// debuggee under this adapter to have a terminal: an adapter cannot make
+    /// one, and a pseudo-terminal in front of a debug console would be
+    /// `isatty()` answering `True` about a thing that is not a terminal — see
+    /// [launching a debuggee](../../../docs/development/launching.md#runinterminal-the-client-owns-the-terminal-and-starts-the-program)
+    ///
+    /// what is handed over is exactly what bpd would have spawned, and the
+    /// agent connects **back** as it always does. so the difference is the last
+    /// step of a launch rather than a second kind of launch — and everything
+    /// that follows from bpd not being the parent is already the rule for a
+    /// session that arrived on its listener
+    ///
+    /// the answer is **waited for**. a client that could not run the command
+    /// line says so, and a launch that went on to wait for the agent anyway
+    /// would report a timeout thirty seconds later with the cause already in
+    /// hand
+    fn start_in_a_terminal(
+        &mut self,
+        launcher: &dyn Launcher,
+        configuration: &Configuration,
+        kind: &'static str,
+        commands: &Receiver<Incoming>,
+    ) -> Result<Started, Aborted> {
+        if !self.client.run_in_terminal {
+            return Err(Aborted::Refuse(
+                "`console` asks for the program to run in a terminal, and that is \
+                 the `runInTerminal` reverse request — which this client did not \
+                 say it supports in `initialize`. an adapter cannot make a \
+                 terminal: the client owns the one the program would run on, so \
+                 a client that cannot be asked would leave this launch waiting \
+                 for an agent nothing was going to start. take `console` out and \
+                 the program runs on the debug console, which is what bpd does \
+                 without it — its output arrives as `output` events, its stdin \
+                 is `/dev/null`, and `isatty()` is `False`"
+                    .to_string(),
+            ));
+        }
+
+        let output = Arc::clone(&self.output);
+        let title = format!("bpd: {}", configuration.program.display());
+        // set aside rather than dropped or answered out of turn: a client is
+        // entitled to send whatever it likes while it is being asked something
+        let mut deferred = Vec::new();
+        // a connection that failed is not a refusal, and the closure below can
+        // only report one. so it is kept and raised out here, where the
+        // difference between "the client said no" and "there is no client" is
+        // still expressible
+        let mut wire = None;
+
+        let started = launcher.launch_in_terminal(configuration, &mut |invocation| {
+            let environment: serde_json::Map<String, serde_json::Value> = invocation
+                .env
+                .iter()
+                .map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone())))
+                .collect();
+            let asked = output
+                .lock()
+                .expect(WRITING)
+                .request(
+                    "runInTerminal",
+                    &serde_json::json!({
+                        "kind": kind,
+                        "title": title,
+                        "cwd": invocation.directory,
+                        "args": invocation.arguments,
+                        "env": environment,
+                    }),
+                )
+                .map_err(|error| {
+                    let said = describe(&error);
+                    wire = Some(error);
+                    Failed::from(said)
+                })?;
+
+            let deadline = std::time::Instant::now() + TERMINAL_PATIENCE;
+            loop {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                // the two ways there is no answer are not the same thing, and a
+                // client reading the wrong one goes looking for the wrong
+                // problem: one is a client that is still there
+                let arrived = commands.recv_timeout(left).map_err(|why| {
+                    Failed::from(match why {
+                        std::sync::mpsc::RecvTimeoutError::Timeout => format!(
+                            "the client was asked to run the program in a terminal \
+                             and did not answer within {}s, so bpd cannot tell \
+                             whether it was ever started",
+                            TERMINAL_PATIENCE.as_secs()
+                        ),
+                        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                            "the client hung up while it was being asked to run the \
+                             program in a terminal, so bpd cannot tell whether it \
+                             was ever started"
+                                .to_string()
+                        }
+                    })
+                })?;
+                if arrived.request_seq != Some(asked) {
+                    deferred.push(arrived);
+                    continue;
+                }
+                if arrived.success == Some(true) {
+                    return Ok(());
+                }
+                // the client's own words for why, because they are the only
+                // account of what happened in a terminal bpd cannot see
+                return Err(Failed::from(format!(
+                    "the client did not run the program in a terminal: {}",
+                    arrived
+                        .message
+                        .as_deref()
+                        .unwrap_or("it answered the `runInTerminal` request without saying why")
+                )));
+            }
+        });
+
+        self.deferred.append(&mut deferred);
+        if let Some(error) = wire {
+            return Err(Aborted::Wire(error));
+        }
+        started.map_err(|error| failed(&error))
     }
 
     fn configuration_done(&mut self, message: &Incoming) -> Answered {
@@ -1859,7 +2060,7 @@ impl Adapter {
     /// it held for ever — so both halves are checked here and neither is
     /// discovered later
     fn can_debug_children(&self) -> Result<(), Aborted> {
-        if !self.start_debugging {
+        if !self.client.start_debugging {
             return Err(Aborted::Refuse(
                 "`debugChildren` needs the client to support the `startDebugging` \
                  reverse request, and this one did not say it does in \
@@ -2060,6 +2261,22 @@ impl Adapter {
             },
         }
     }
+}
+
+/// what the client said it could do, in `initialize`
+///
+/// **client** capabilities rather than the adapter's, which is why they are
+/// recorded rather than advertised, and both are the same shape of thing: each
+/// is a thing bpd can only offer if the client can be asked for something. so
+/// each is checked at `launch`, before anything has started — the alternative
+/// to refusing there is discovering it when a child is already held, or when a
+/// session is already waiting for an agent nobody was asked to start
+#[derive(Debug, Default, Clone, Copy)]
+struct ClientCan {
+    /// `supportsStartDebuggingRequest` — a session for a debugged child
+    start_debugging: bool,
+    /// `supportsRunInTerminalRequest` — a command line, in a terminal it owns
+    run_in_terminal: bool,
 }
 
 /// what a handler returns: nothing, or the reason it got no further

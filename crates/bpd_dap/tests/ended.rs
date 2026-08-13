@@ -120,6 +120,20 @@ impl Launcher for Fake {
         })))
     }
 
+    /// a terminal launch is another way to be a program bpd did not start
+    ///
+    /// and it ends the same way, which is what this file is about. the
+    /// conversation drives the shorter of the two rather than both: what a
+    /// terminal launch adds is the reverse request that starts it, and that is
+    /// `coverage.rs`'s and `crates/bpd/tests/dap.rs`'s
+    fn launch_in_terminal(
+        &self,
+        _configuration: &Configuration,
+        _ask: &mut dyn FnMut(&bpd_dap::Invocation) -> Result<(), Failed>,
+    ) -> Result<Started, Failed> {
+        Err("this fake starts nothing in a terminal".into())
+    }
+
     /// this fake launches, and nothing takes up a session of it
     ///
     /// a second session only exists when a program forked under a debugger, and

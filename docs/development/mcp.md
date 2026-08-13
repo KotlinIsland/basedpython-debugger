@@ -191,8 +191,10 @@ takes JSON Schema input, so it goes across as itself:
 { "file": "app.py", "line": 40, "hits": { "hits": "every", "count": 3 } }
 ```
 
-this is the one capability of the core that DAP has no route to at all, and it
-is the only entry in the parity test's list of justified exceptions
+this is the one capability of the core that DAP has no route to at all, and one
+of the two entries in the parity test's list of justified exceptions. the other
+is the one that goes the other way — a terminal for the debuggee, which
+[an agent has none of](#the-programs-own-output-comes-back-on-the-answer)
 
 ### no argument is accepted that is not named
 
@@ -245,10 +247,26 @@ decision. this server speaks on stdio and has no second transport, so its stdin
 the stream, which corrupted the session rather than merely hanging the program.
 so a program that calls `input()` gets `EOFError` at the line that asked for it,
 and an agent that needs a program to consume input gives it a file, an argument
-or the environment. there is no tool that writes to a debuggee's stdin: DAP has
-no such request either — its answer is `runInTerminal`, which neither front end
-has — and a channel here alone would be a capability the DAP adapter does not
-have
+or the environment. there is no tool that writes to a debuggee's stdin, and
+there is not going to be one
+
+**this is where the two front ends differ, and it is written down rather than
+left to be noticed.** DAP's answer for a program that needs a terminal is the
+`runInTerminal` reverse request, and the adapter implements it: the client is
+handed the command line and starts the program in a terminal **it owns**, so the
+program has a real one. that works because the client already has a terminal.
+here there is none on either side — an agent reads the program's output out of a
+tool's answer, has no keystrokes to deliver and nothing that would render an
+escape sequence — so the equivalent would be this server opening a
+pseudo-terminal and calling it the agent's, which is `isatty()` answering `True`
+about a thing that is not a terminal. that is the one thing this debugger will
+not do
+
+so it is a **named exception** to the parity rule rather than a gap: the entry is
+in `crates/bpd/tests/parity.rs`'s `JUSTIFIED` list against MCP, the reason is in
+`bpd_mcp::reach_of_facet`, and the rule the two of them satisfy is
+[the parity rule](dap.md#the-parity-rule-both-sided) — supported wherever the
+protocol can carry it, with a written reason where it cannot
 
 it is bounded: the most recent 64 KiB, because what a program printed just
 before it stopped is what the stop is about, and whatever fell off the front is
@@ -400,9 +418,18 @@ it bites in two places:
     them, and requires that any "cannot" is in a hand written list with the reason
     beside it
 
-the list has one entry: DAP and the hit condition. adding a second means editing
-the test, which is the point — a gap that appears quietly is how two front ends
-drift apart
+the list has two entries, one against each front end. **DAP and the hit
+condition**, because DAP carries one as a string with no agreed meaning; and
+**MCP and a terminal for the debuggee**, because `runInTerminal` asks a client
+that owns a terminal to make one and an agent owns none. adding a third means
+editing the test, which is the point — a gap that appears quietly is how two
+front ends drift apart
+
+the second one is also what the rule is *for*, read the right way round: it is
+not "MCP is missing something", it is "the capability is supported wherever the
+protocol can carry it, and here is why one cannot". a facet is what caught it at
+all — a terminal is not a request, so a rule that only enumerated variants would
+never have asked the question
 
 ### and about what the debugger says
 

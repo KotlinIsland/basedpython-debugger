@@ -468,6 +468,11 @@ makes every message after it unreadable. so the program's stdout and stderr are
 pipes, read by a thread each, and forwarded — as DAP `output` events with a
 `stdout` or `stderr` category, and as the same distinction over MCP
 
+that is what a launch does when the front end is the thing reading the program's
+output. the one launch where it is not is a DAP client asking for a terminal of
+its own, and then there are no pipes and no forwarding at all —
+[below](#runinterminal-the-client-owns-the-terminal-and-starts-the-program)
+
 that leaves a judgement to make, because there is no bare run to copy: what is
 the debuggee's output going *to*. it is going to a program — the DAP client —
 which reads it and renders it in a debug console. `python program.py | client`
@@ -497,8 +502,7 @@ that are all the same reason:
 - it fixes the timeliness of output by changing what the program *is*, and DAP
     already has the answer for a program that genuinely needs a terminal:
     `runInTerminal`, where the client owns the terminal and makes it. that is
-    why the request exists. `bpd` does not implement it yet, and that is a gap
-    in the adapter rather than a reason to fake the thing it asks for
+    why the request exists, and `bpd` implements it — see below
 
 ### the same two give the debuggee no stdin at all
 
@@ -541,12 +545,13 @@ adapter giving one program two answers about its own world
 
 a program that genuinely needs input has one honest route, and it is DAP's:
 `runInTerminal`, where the client starts the program in a terminal it owns and
-the terminal is a real one. `bpd` does not implement it yet, and that is the gap
-to close rather than a reason to invent a channel here — a pipe the adapter
-wrote to would be a capability in one adapter and not the other, which
-[the parity rule](dap.md#the-parity-rule-both-sided) forbids. until then a
-program under `bpd dap` or `bpd mcp` takes its input from a file, an argument or
-the environment, and `bpd launch` is the path that still has a terminal
+the terminal is a real one. that is the next section, and it is why no channel
+was invented here — a pipe the adapter wrote to would be a debugger delivering
+keystrokes to a program that has no terminal to receive them at, and it would be
+a capability in one adapter and not the other. under `bpd mcp`, which has no
+such request and no terminal on either side, a program still takes its input
+from a file, an argument or the environment; that gap is
+[written down](dap.md#the-parity-rule-both-sided) rather than left to be noticed
 
 `a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds` in
 `crates/bpd/tests/dap.rs` runs on **both** transports and pins two of the three,
@@ -554,6 +559,93 @@ and `..._rather_than_the_servers` in `crates/bpd/tests/mcp.rs` pins the last. th
 loopback half is not vacuous: the listening adapter is started with a marked line
 in its own stdin, so a debuggee that inherited it reads the marker and the
 assertion says what was taken
+
+### `runInTerminal`: the client owns the terminal, and starts the program
+
+a DAP client asks for it with `"console": "integratedTerminal"` or
+`"externalTerminal"` in its launch configuration, and then the debuggee is on a
+**real** terminal: `isatty()` is `True`, the buffering is a terminal's, and
+`input()` returns the line somebody typed. it is the only route to either under
+this adapter, and the reason it works when a pseudo-terminal of `bpd`'s would
+not is that the terminal is one the client already **has**
+
+what changes is the last step of a launch and nothing before it. the interpreter
+is probed, the source map is loaded, the agent is staged, the listener is bound
+and the environment is written exactly as they are for a spawn — and then,
+instead of `Command::spawn`, the argument vector and the environment go to the
+client in the reverse request. the agent connects **back** to the engine from
+the terminal, which is the same connection a launched debuggee makes, so
+everything after the handshake is one implementation:
+
+```text
+bpd                                        the client              a terminal
+ │
+ ├─ probe, map, stage, bind, write the environment
+ ├─ runInTerminal ────────────────────────▶ │
+ │                                          ├─ opens one ─────────────▶ │
+ │                                          ├─ runs the argument vector ┤
+ │  ◀──────────── the response ─────────────┤                           │
+ │                                                                      │
+ │  ◀──────────── connect, handshake ───────────── python -c "import bpd_agent…"
+ │  ◀──────────── stopped: entry ──────────────────┤
+ └─ the launch is answered
+```
+
+the answer to the reverse request is **waited for**, and that is the difference
+between a refusal and a hang: a client that could not run the command line says
+so, and the launch is refused with what it said. a client that answers nothing
+at all is given thirty seconds and then the same refusal with that as the reason
+
+three things follow from bpd not being the parent of that process, and each is
+reported rather than papered over:
+
+- **the program's output does not reach the debugger at all.** there are no
+    pipes to read: the terminal is the program's stdout and stderr, and the
+    client is the thing that owns it. so no `output` event carries a line of the
+    program's on this path, and nothing claims to. that is the trade — a debug
+    console gets the program's output and not a terminal, a terminal gets the
+    program its own streams and the debugger sees none of it
+- **there is no exit code.** the program ends, the control connection closes,
+    and what it exited with is not `bpd`'s to read. that is `Running::Ended`,
+    which already existed for a session that arrived on the listener, and DAP
+    gets `terminated` with deliberately **no** `exited` — the event carries an
+    `exitCode` as a required field and a zero would be invented
+- **`bpd` cannot end it.** ending a debuggee is signalling the child `bpd`
+    holds and reaping it, and there is no child. so `disconnect` is answered and
+    the refusal — "bpd did not start that process and is not its parent" — goes
+    to the client on the `console` category rather than being swallowed, which
+    is the shape a client reads as a program that has been stopped. what does
+    end it is the agent: the control connection goes when the adapter does, and
+    the agent's own rule is that it exits the program rather than carrying it on
+    with no debugger attached — on its own stderr, which here is the terminal
+    the person is looking at
+
+a program that fails to start is the other side of the same fact. a
+`SyntaxError` is printed by the interpreter **in the client's terminal**, and
+what `bpd` can say is that the agent connected and the program never reached its
+first statement — so the refusal says exactly that, and says where the words
+are. there is no `ExitedBeforeStopping` here, because that carries an exit
+status and there is none
+
+`a_program_the_client_starts_in_a_terminal_really_has_one` in
+`crates/bpd/tests/dap.rs` is the whole of it, on **both** transports: a real
+`bpd dap`, a real pseudo-terminal the test client opens, the argument vector run
+in it exactly as it arrived, `isatty` read off the program's own output, and a
+line typed at the terminal that the program reads with `input()`. the client
+capability is checked by `a_terminal_is_refused_when_the_client_never_said_it_had_one`,
+which is the refusal at `launch` — before an interpreter is probed, an agent is
+staged or a port is bound
+
+#### it is refused when the client cannot be asked
+
+`supportsRunInTerminalRequest` is a **client** capability, in `initialize`'s
+arguments, and it is the second one this adapter reads —
+`supportsStartDebuggingRequest` being the first. a client that has not
+advertised it cannot be asked to start anything, so a launch asking for a
+terminal would wait for an agent nobody was going to start. it is refused at
+`launch`, by name, with what the program gets instead. that is the same shape as
+`debugChildren`'s refusal and for the same reason: the only moment at which
+refusing costs nothing is before anything has happened
 
 ### the parity test could not see any of this, and now can
 

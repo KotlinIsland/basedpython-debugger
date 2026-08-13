@@ -122,15 +122,31 @@ pub enum Facet {
     /// one — and a user who does not believe the debugger then has no way to
     /// see what it saw. enumerating variants would never find it
     GeneratedLocation,
+
+    /// the debuggee running on a **terminal the front end's client owns**
+    ///
+    /// not carried by any request at all, which is why it is here rather than
+    /// being one: a front end that has taken the program's output over has
+    /// taken bpd's own streams for itself, so the debuggee gets pipes and an
+    /// empty stdin — and a program that reads its input, or asks `isatty()`,
+    /// behaves differently because of it. whether a front end can put a real
+    /// terminal back is a capability of the front end, and a rule that only
+    /// enumerated requests would never find it
+    ///
+    /// it is the one facet that is not a payload. every other entry here is a
+    /// shape a protocol either has a field for or has not; this one is a thing
+    /// the client has to **have**
+    Terminal,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
         Self::GeneratedLocation,
+        Self::Terminal,
     ];
 
     /// what to call this capability in a message about it
@@ -140,6 +156,7 @@ impl Facet {
             Self::ValueBounds => "the bounds on how much of a value is read",
             Self::Session => "naming the session a request is for",
             Self::GeneratedLocation => "the generated python behind a `.by` frame",
+            Self::Terminal => "running the debuggee on a terminal the client owns",
         }
     }
 }

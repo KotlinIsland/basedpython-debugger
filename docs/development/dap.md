@@ -220,6 +220,7 @@ user could see accepted and never get
 | `stopOnEntry`    | `false`   | stay stopped before the first statement                |
 | `stopTheWorld`   | `false`   | hold every thread that can be held, for each stop      |
 | `debugChildren`  | `false`   | debug a child the program **forks** — see below        |
+| `console`        | see below | where the program runs, and what its streams are       |
 | `variables`      | see below | how much of a value to read                            |
 | `threadSettleMs` | `50`      | how far apart the two samples a thread census compares |
 
@@ -240,10 +241,11 @@ things are true, because the alternative is discovering them when a child is
 already held:
 
 - the client advertised **`supportsStartDebuggingRequest`** in `initialize`.
-    that is a *client* capability, not one bpd advertises, and it is the only one
-    this adapter reads. DAP's only way to hand a second program to a client is to
-    ask it to start a second session, so a client that cannot be asked would
-    leave the child held with nothing able to reach it
+    that is a *client* capability, not one bpd advertises, and it is one of the
+    two this adapter reads — `supportsRunInTerminalRequest` being the other.
+    DAP's only way to hand a second program to a client is to ask it to start a
+    second session, so a client that cannot be asked would leave the child held
+    with nothing able to reach it
 - the adapter is **reachable by a second connection**, which means
     `bpd dap --listen`. on stdio the second session `startDebugging` asks for
     would be another `bpd dap` process, with an engine of its own that this
@@ -276,6 +278,40 @@ that `bpdSession`. it is **not** PEP 768 attaching and nothing is injected into
 anything: the process is already there and already held, and what the second
 connection takes up is a session the engine already holds. an `attach` that does
 not name `bpdSession` is still refused with the PEP 768 reason
+
+### `console`
+
+where the program runs, which decides what its standard streams **are**:
+
+| value                          | what the program gets                                                                                                 |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `internalConsole`, the default | pipes, forwarded as `output` events, and `/dev/null` for stdin. `isatty()` is `False` and `input()` raises `EOFError` |
+| `integratedTerminal`           | a real terminal, inside the client                                                                                    |
+| `externalTerminal`             | a real terminal, opened outside it                                                                                    |
+
+either terminal is the **`runInTerminal`** reverse request: the client is handed
+the argument vector and the environment `bpd` would have spawned, and starts it
+in a terminal it owns. the agent then connects back from there exactly as it
+does from a process `bpd` started, so it is the last step of a launch that
+differs and nothing before it
+
+it is the only way a debuggee under this adapter has a terminal, and the only
+way one **reads input**. a debug console is not a terminal — it delivers no
+keystrokes, has no size, and shows a cursor escape literally — so putting a
+pseudo-terminal in front of one would be `isatty()` claiming something that is
+not true. that reasoning, and everything that follows from `bpd` not being the
+parent of a process the client started, is in
+[launching a debuggee](launching.md#runinterminal-the-client-owns-the-terminal-and-starts-the-program).
+in short: the program's output goes to the terminal and **not** to the client as
+`output` events, there is no exit code to report, and `disconnect` says so
+rather than claiming to have ended the program
+
+it is refused at `launch` unless the client advertised
+**`supportsRunInTerminalRequest`** in `initialize` — the second and last client
+capability this adapter reads. the refusal names it and says what the program
+gets without it, for the reason `debugChildren`'s does: a client that cannot be
+asked to start the program would leave the launch waiting for an agent nothing
+was going to start
 
 ### `variables`
 
@@ -455,6 +491,11 @@ and `stderr` categorised separately. that is unconditional rather than a thing
 bound, and a `print` landing in the middle of *that* is a client that cannot
 find the port
 
+a launch that asked for a terminal is the one thing that changes it, and it
+changes it by taking the program's output away from `bpd` altogether: there are
+no pipes to read, the client owns the stream, and **no** `output` event carries
+a line of the program's. what `bpd` says about the program still does
+
 what `bpd` itself has to say goes on the **`console`** category instead, and the
 one thing that currently does is a python child the program started. `console`
 and not `stdout`, because the program did not write it and a client that showed
@@ -478,10 +519,18 @@ reachable was really asked for, so an entry that reads well and is not true
 fails
 
 **one capability is out of DAP's reach**, and it is the hit condition — for the
-reason below, which is DAP's rather than bpd's. it is the only entry in the
-parity test's hand written list of justified exceptions, and it is only
-acceptable there because MCP does carry it. a capability neither front end can
-reach fails that test outright
+reason below, which is DAP's rather than bpd's. it is acceptable only because
+MCP does carry it: a capability neither front end can reach fails that test
+outright
+
+it is one of the two entries in the parity test's hand written list of justified
+exceptions, and the other one goes the other way. **a terminal for the debuggee
+is out of MCP's reach**: `runInTerminal` works by asking a client that owns a
+terminal to make one, and an MCP client is an agent that reads the program's
+output out of a tool's answer — there is no terminal in that picture, and a
+pseudo-terminal the server opened and called one would be `isatty()` answering
+`True` about a thing that is not. the list is short and is meant to stay short;
+what it forbids is the gap nobody wrote down
 
 one capability is reachable only as its parts. `Request::Run` is a resume
 followed by a wait, and DAP needs those separately: a `continue` has to be
@@ -596,18 +645,6 @@ request, and a client that does not know about one never sends it
     and the answer says when the bound bit
 - **`restart`**, **function breakpoints**, **data breakpoints**, **goto**,
     **step back**, and **`setExpression`**
-- **`runInTerminal`**. it is the reverse request a client answers by starting
-    the program in a terminal it owns, and it is the *only* honest way for a
-    debuggee under this adapter to have one — the program's output here goes to
-    a debug console, which is not a terminal, so its streams are pipes and
-    `isatty()` is `False`. why that is the right answer rather than a
-    pseudo-terminal, and what follows from it for buffering, is in
-    [launching a debuggee](launching.md#the-debuggees-own-standard-streams).
-    it is also the only route to a debuggee that **reads input**: a launch
-    through this adapter gives the program `/dev/null` as its stdin on both
-    transports, so `input()` raises `EOFError` at the line that asked. nothing
-    in DAP carries a client's keystrokes to a debuggee any other way, and a
-    channel invented here would be a capability MCP does not have
 
 the vs code extension is **driven in the editor it is for**. its schema is
 pinned to `bpd_dap::Configuration` by a test that fails if either side moves,

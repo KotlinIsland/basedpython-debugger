@@ -137,6 +137,32 @@ pub trait ProgramOutput: Send + Sync + 'static {
     fn wrote(&self, stream: Stream, text: &str);
 }
 
+/// the command line a client is asked to run in a terminal it owns
+///
+/// what `runInTerminal` carries, and it is the whole of what bpd would have
+/// spawned: the argument vector with the interpreter first, the environment the
+/// agent reads, and the directory a spawn would have inherited. a client that
+/// dropped any of it would start a different program from the one bpd prepared
+///
+/// the strings are `String` rather than `OsString` because DAP carries a
+/// command line as json. a path that is not utf-8 is refused by whatever builds
+/// one of these, naming the value — a lossy conversion here would ask the client
+/// to run a path that is not the path
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invocation {
+    /// the whole command line, the interpreter first
+    pub arguments: Vec<String>,
+
+    /// the variables to set, in addition to the ones the terminal already has
+    ///
+    /// every one of them is taken back out of the environment by the agent
+    /// before any of the program's code runs
+    pub env: Vec<(String, String)>,
+
+    /// the directory to run it in
+    pub directory: String,
+}
+
 /// something that starts a debuggee from a client's launch configuration
 ///
 /// `&self` and `Sync` because more than one connection can be served at once:
@@ -152,6 +178,32 @@ pub trait Launcher: Sync {
         &self,
         configuration: &crate::Configuration,
         output: std::sync::Arc<dyn ProgramOutput>,
+    ) -> Result<Started, Failed>;
+
+    /// have **somebody else** start the program, and wait for its agent
+    ///
+    /// what `runInTerminal` needs: everything up to the spawn is the same, and
+    /// then `ask` is given the [`Invocation`] instead of a process being
+    /// started here. the agent connects back exactly as it does from a process
+    /// bpd started, which is why this is a different last step rather than a
+    /// different launch
+    ///
+    /// there is no `output` parameter, and its absence is the honest half of
+    /// this: the client owns the terminal, the program's streams are that
+    /// terminal, and bpd never sees a byte of them. an adapter that took a sink
+    /// here would be one that never wrote to it
+    ///
+    /// `ask` returning an error is the client saying it did not start the
+    /// program, and nothing is waited for afterwards
+    ///
+    /// # errors
+    ///
+    /// when `ask` fails, and when no agent connects — which on this path cannot
+    /// be told from a program that never started, because bpd is not its parent
+    fn launch_in_terminal(
+        &self,
+        configuration: &crate::Configuration,
+        ask: &mut dyn FnMut(&Invocation) -> Result<(), Failed>,
     ) -> Result<Started, Failed>;
 
     /// take up a session this launcher's debuggee already holds

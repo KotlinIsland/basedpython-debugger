@@ -176,6 +176,20 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
              and line the interpreter is at, or, for generated python no `.by` \
              line is behind, the map's own reason there is none",
         ),
+
+        // the reverse request exists for exactly this, and it is the only
+        // honest way an adapter gives a debuggee a terminal: the client owns
+        // one and makes it, where an adapter has none to give. a pseudo-terminal
+        // in front of a debug console would be `isatty()` answering `True`
+        // about a thing that delivers no keystrokes and has no size
+        Facet::Terminal => Reach::Direct(
+            "the `runInTerminal` reverse request, asked for by `console` in the \
+             launch configuration — the client is handed the argument vector \
+             and the environment bpd would have spawned, and the agent connects \
+             back from the terminal exactly as it does from a process bpd \
+             started. it is refused at `launch` unless the client advertised \
+             `supportsRunInTerminalRequest`",
+        ),
     }
 }
 

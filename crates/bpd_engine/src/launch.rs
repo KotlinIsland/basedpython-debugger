@@ -1618,7 +1618,7 @@ pub fn launch(
     program: &Program,
     args: &[OsString],
 ) -> Result<Launched> {
-    start(interpreter, program, args, None)
+    start(interpreter, program, args, Start::Here(None))
 }
 
 /// launch with the debuggee's own output in pipes rather than on bpd's streams
@@ -1644,17 +1644,103 @@ pub fn launch_piped(
     args: &[OsString],
     on_spawn: impl FnOnce(std::process::ChildStdout, std::process::ChildStderr) + 'static,
 ) -> Result<Launched> {
-    start(interpreter, program, args, Some(Box::new(on_spawn)))
+    start(
+        interpreter,
+        program,
+        args,
+        Start::Here(Some(Box::new(on_spawn))),
+    )
+}
+
+/// hand the launch to somebody else, and wait for the agent it starts
+///
+/// what DAP's `runInTerminal` needs. everything up to the spawn is the same —
+/// the interpreter is probed, the map is loaded, the agent is staged, the
+/// listener is bound and the environment is written — and then `start_it` is
+/// given the [`Invocation`] instead of a `Command` being spawned. the agent
+/// connects **back** exactly as it does from a process bpd started, which is
+/// why this is a different last step rather than a different launch
+///
+/// the debuggee is then **not bpd's child**, and everything that follows from
+/// that is already the rule for a session that arrived on the retained
+/// listener: there is no exit status to read, so the program being over is
+/// [`Running::Ended`], and ending it is refused by name
+///
+/// `start_it` returning an error is the client saying it did not start the
+/// program, and nothing is waited for afterwards — a wait for an agent that was
+/// never launched is a timeout with a cause nobody would find
+pub fn launch_in_terminal(
+    interpreter: &Capabilities,
+    program: &Program,
+    args: &[OsString],
+    start_it: impl FnOnce(
+        &Invocation,
+    ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>,
+) -> Result<Launched> {
+    start(
+        interpreter,
+        program,
+        args,
+        Start::Elsewhere(Box::new(start_it)),
+    )
 }
 
 /// what to do with the debuggee's own output the moment it exists
 type OnSpawn = Box<dyn FnOnce(std::process::ChildStdout, std::process::ChildStderr)>;
 
+/// what somebody else is asked to run, and what it needs around it
+type StartIt<'a> = Box<
+    dyn FnOnce(&Invocation) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>
+        + 'a,
+>;
+
+/// who starts the interpreter
+enum Start<'a> {
+    /// bpd does, and this is what to do with its output when it exists
+    ///
+    /// `None` leaves all three of the debuggee's standard streams inherited,
+    /// which is what makes a run under `bpd launch` indistinguishable from a
+    /// bare one
+    Here(Option<OnSpawn>),
+
+    /// somebody else does, and this is how they are asked
+    Elsewhere(StartIt<'a>),
+}
+
+/// the command line that starts a debuggee, for something else to run
+///
+/// every part of what [`start`] would have spawned, and nothing that is bpd's
+/// own: the whole argument vector with the interpreter first, the environment
+/// entries the agent reads, and the directory a spawn would have inherited.
+/// a caller that dropped one of them would be starting a different program from
+/// the one bpd prepared — a missing `PYTHONPATH` is an interpreter that cannot
+/// import the agent, and a missing token is a connection the listener refuses
+///
+/// the values are [`OsString`]s because a path is. rendering them for a
+/// protocol that carries text is the front end's, and so is refusing one that
+/// will not render
+#[derive(Debug, Clone)]
+pub struct Invocation {
+    /// the whole command line, the interpreter first
+    pub arguments: Vec<OsString>,
+
+    /// the variables to set, **in addition to** whatever the client already has
+    ///
+    /// bpd's own environment is where these were going to be written, so a
+    /// terminal that starts with the client's environment and adds these is the
+    /// same environment a spawn would have produced. every one of them is taken
+    /// back out by the agent before any user code runs
+    pub env: Vec<(String, OsString)>,
+
+    /// the directory to run it in, which is the one bpd is in
+    pub directory: PathBuf,
+}
+
 fn start(
     interpreter: &Capabilities,
     program: &Program,
     args: &[OsString],
-    piped: Option<OnSpawn>,
+    how: Start<'_>,
 ) -> Result<Launched> {
     interpreter
         .require_debuggable()
@@ -1682,20 +1768,36 @@ fn start(
     let listener = Listener::bind()?;
     let endpoint = listener.endpoint()?;
 
-    let mut command = Command::new(&interpreter.executable);
-    command
-        .arg("-c")
-        .arg(BOOTSTRAP)
-        .args(args)
-        .env(env::ENDPOINT, endpoint.to_string())
-        .env(env::TOKEN, listener.token_hex())
-        .env(env::TARGET, program.target())
-        .env(env::FORM, program.form().as_str())
+    let mut arguments = vec![
+        OsString::from(&interpreter.executable),
+        OsString::from("-c"),
+        OsString::from(BOOTSTRAP),
+    ];
+    arguments.extend(args.iter().cloned());
+
+    let mut environment = vec![
+        (
+            env::ENDPOINT.to_string(),
+            OsString::from(endpoint.to_string()),
+        ),
+        (env::TOKEN.to_string(), OsString::from(listener.token_hex())),
+        (env::TARGET.to_string(), program.target().to_os_string()),
+        (
+            env::FORM.to_string(),
+            OsString::from(program.form().as_str()),
+        ),
         // both are taken back out of the environment before any user code runs,
         // exactly like the four above. what puts the child's pair back — under
         // the names a child reads — is `debugChildren`, and nothing else
-        .env(env::CHILD_TOKEN, listener.child_token_hex())
-        .env(env::SITECUSTOMIZE, child_hook.python_path());
+        (
+            env::CHILD_TOKEN.to_string(),
+            OsString::from(listener.child_token_hex()),
+        ),
+        (
+            env::SITECUSTOMIZE.to_string(),
+            OsString::from(child_hook.python_path()),
+        ),
+    ];
 
     // the agent is imported by putting its staged directory in front of
     // whatever `PYTHONPATH` this process inherited. **in front of** and not
@@ -1706,9 +1808,54 @@ fn start(
     if let Some(inherited) = std::env::var_os("PYTHONPATH") {
         import_path.push(if cfg!(windows) { ";" } else { ":" });
         import_path.push(&inherited);
-        command.env(env::PYTHON_PATH, inherited);
+        environment.push((env::PYTHON_PATH.to_string(), inherited));
     }
-    command.env("PYTHONPATH", import_path);
+    environment.push(("PYTHONPATH".to_string(), import_path));
+
+    // somebody else runs it, and the wait for the agent is the same wait. what
+    // is different is everything that follows from bpd not being the parent,
+    // and every one of those is already the rule for a session that arrived on
+    // this listener rather than being launched on it
+    let piped = match how {
+        Start::Here(piped) => piped,
+        Start::Elsewhere(start_it) => {
+            let invocation = Invocation {
+                arguments,
+                env: environment,
+                // the directory a spawn would have inherited. a client that ran
+                // the command somewhere else would run a different program for
+                // a relative path, and resolve a different `sys.path[0]`
+                directory: std::env::current_dir().map_err(|source| Error::Spawn {
+                    interpreter: interpreter.executable.clone(),
+                    source,
+                })?,
+            };
+            start_it(&invocation).map_err(|source| Error::NotStarted { source })?;
+            return attached_in_terminal(listener, map);
+        }
+    };
+
+    spawned_here(interpreter, &arguments, &environment, piped, listener, map)
+}
+
+/// spawn the interpreter here, and wait for the agent in the child bpd holds
+///
+/// the ordinary half of a launch, and the one that has a **child**: an exit
+/// status to read, a process to poll while the agent is being waited for, and
+/// something to kill when it never announces itself
+fn spawned_here(
+    interpreter: &Capabilities,
+    arguments: &[OsString],
+    environment: &[(String, OsString)],
+    piped: Option<OnSpawn>,
+    listener: Listener,
+    map: Option<bpd_core::SourceMap>,
+) -> Result<Launched> {
+    let mut command = Command::new(&interpreter.executable);
+    command.args(&arguments[1..]);
+    for (name, value) in environment {
+        command.env(name, value);
+    }
 
     if piped.is_some() {
         command
@@ -1720,12 +1867,13 @@ fn start(
             // handed the program `'Content-Length: 68\r'`, and the request
             // those bytes were the header of was answered by nothing
             //
-            // nothing carries a client's keystrokes to a debuggee — DAP's
-            // answer for a program that needs them is `runInTerminal`, where the
-            // client owns the terminal — so what is left is the empty stream
-            // `python program.py < /dev/null` has. `input()` there raises
-            // `EOFError` at the line that asked, which is an outcome with a name
-            // rather than a hang
+            // nothing carries a client's keystrokes down a pipe to a debuggee,
+            // and DAP's answer for a program that needs them is a terminal the
+            // client owns — `launch_in_terminal`, which is a different last
+            // step rather than a channel bolted onto this one. so what is left
+            // here is the empty stream `python program.py < /dev/null` has.
+            // `input()` there raises `EOFError` at the line that asked, which is
+            // an outcome with a name rather than a hang
             //
             // **null and not a closed descriptor.** cpython sets `sys.stdin` to
             // `None` when descriptor 0 is not open, and then `input()` raises
@@ -1793,6 +1941,43 @@ fn start(
         attached: vec![Attached {
             held: vec![stop],
             child: Some(Arc::new(Mutex::new(child))),
+            ..Attached::connected(session)
+        }],
+    };
+    if let Some(map) = map {
+        debuggee.map_sources(map)?;
+    }
+    Ok(Launched::Stopped(debuggee))
+}
+
+/// wait for the agent of a debuggee **somebody else** started
+///
+/// the same wait as a launch's, minus the one thing bpd no longer has: a child
+/// to poll. so a debuggee that never starts at all cannot be told from one that
+/// is slow, and what is left is the deadline — which is why the refusal names
+/// the terminal rather than the agent. the process bpd cannot see is the
+/// process whose output the person can
+fn attached_in_terminal(listener: Listener, map: Option<bpd_core::SourceMap>) -> Result<Launched> {
+    let mut session = listener.accept(|| Ok(None)).map_err(|error| match error {
+        Error::AttachTimeout { timeout } => Error::NoAgentFromTerminal { timeout },
+        other => other,
+    })?;
+
+    // there is no status to read here and no `ExitedBeforeStopping` to report.
+    // a program that does not compile takes this path — the agent connects and
+    // then fails to build the program — and what it said is in the terminal the
+    // client opened, in the interpreter's own words
+    let stop = match session.expect_stop() {
+        Ok(stop) => stop,
+        Err(Error::AgentGone { .. }) => return Err(Error::EndedInTerminal),
+        Err(error) => return Err(error),
+    };
+
+    let mut debuggee = Debuggee {
+        listener,
+        map: None,
+        attached: vec![Attached {
+            held: vec![stop],
             ..Attached::connected(session)
         }],
     };

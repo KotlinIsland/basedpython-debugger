@@ -809,6 +809,173 @@ fn a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds(transport: 
     client.finish();
 }
 
+/// a program that says what its streams are and then reads a line of input
+///
+/// both halves matter and they are the two things a debuggee under this adapter
+/// has never had. `isatty()` is what `rich`, `click` and `pytest` check, and
+/// `input()` on the debug console raises `EOFError` at the line that asked —
+/// which is honest and is not a program that reads its input
+const A_TERMINAL_PROBE: &str = r#"import sys
+
+print("streams", sys.stdin.isatty(), sys.stdout.isatty(), flush=True)
+answer = input("who? ")
+print("answered", answer, flush=True)
+sys.exit(0)
+"#;
+
+/// the two transports, for the scenario below
+///
+/// `#[cfg(unix)]` rather than skipped, exactly as the terminal comparison in
+/// `launch_parity.rs` is: windows has no pseudo-terminal of this shape, so
+/// there is nothing there for this test to be about
+#[cfg(unix)]
+mod a_program_the_client_starts_in_a_terminal_really_has_one {
+    #[test]
+    fn over_stdio() {
+        super::a_program_the_client_starts_in_a_terminal_really_has_one(super::Transport::Stdio);
+    }
+
+    #[test]
+    fn over_loopback_tcp() {
+        super::a_program_the_client_starts_in_a_terminal_really_has_one(super::Transport::Loopback);
+    }
+}
+
+#[cfg(unix)]
+fn a_program_the_client_starts_in_a_terminal_really_has_one(transport: Transport) {
+    // the whole of `runInTerminal` in one session. bpd prepares a launch and
+    // hands the command line to the client instead of spawning it; the client
+    // starts it on a terminal **it** owns; the agent connects back from there
+    // exactly as it does from a process bpd started
+    //
+    // what that buys is the two things a debug console cannot give a program,
+    // and both are asserted from the program's own output rather than from
+    // anything the adapter claims: `isatty()` is true on a real terminal, and
+    // `input()` returns the line somebody typed
+    let fixture = Fixture::new("terminal", A_TERMINAL_PROBE);
+    let terminal = bpd_test::terminal::Terminal::open();
+    let mut client = Client::start(transport);
+
+    client.request(
+        "initialize",
+        // the client capability that makes any of this possible. without it the
+        // launch below is refused by name, which is its own test
+        &serde_json::json!({ "adapterID": "bpd", "supportsRunInTerminalRequest": true }),
+    );
+    let launched = client.launch_in_terminal(
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "console": "integratedTerminal",
+        }),
+        &terminal,
+    );
+    assert_eq!(
+        launched["success"], true,
+        "the client started the program and the launch was refused: {launched}"
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+
+    // the program is running on the terminal and its output is **there** rather
+    // than in the protocol. `True True` is the claim only a real terminal makes
+    let started = terminal.wait_for("streams", PATIENCE);
+    assert!(
+        started.contains("streams True True"),
+        "the program was started in a terminal and does not think it is on one. \
+         it wrote:\n{started}"
+    );
+
+    // and it reads what is typed at it, which is the thing `/dev/null` cannot
+    // do. `input()` on the debug console raises `EOFError` at this line
+    terminal.type_line("morgan");
+    let answered = terminal.wait_for("answered", PATIENCE);
+    assert!(
+        answered.contains("answered morgan"),
+        "the program did not read the line typed at its terminal. it wrote:\n{answered}"
+    );
+
+    // the program ends, and what the client is told about that is exactly what
+    // is true: `terminated`, and **no** `exited`, because bpd is not that
+    // process's parent and never learns what it exited with
+    client.event("terminated");
+    assert!(
+        !client
+            .seen
+            .iter()
+            .any(|message| message["type"] == "event" && message["event"] == "exited"),
+        "`exited` carries an `exitCode` and bpd has none to carry: {:#?}",
+        client.seen
+    );
+    let said = client.output();
+    assert!(
+        said.contains("did not start that process"),
+        "the client is told why there is no exit code, and got {said:?}"
+    );
+
+    // and none of the program's own output came back as `output` events. the
+    // client owns the terminal, so bpd never sees a byte of it — an adapter
+    // that reported some would be reporting output it does not have
+    assert!(
+        !said.contains("streams") && !said.contains("answered"),
+        "the program's output went to the client's terminal and the adapter \
+         reported it anyway: {said:?}"
+    );
+
+    // and ending it is refused **by name** rather than quietly doing nothing,
+    // which is the shape a client reads as a program that has been stopped
+    client.request("disconnect", &serde_json::json!({}));
+    client.event("terminated");
+    let ended = client.output();
+    assert!(
+        ended.contains("bpd did not end the program"),
+        "a program bpd did not start cannot be ended by bpd, and the client was \
+         left to read the `terminated` as one that had been: {ended:?}"
+    );
+
+    client.finish();
+}
+
+#[test]
+fn a_terminal_is_refused_when_the_client_never_said_it_had_one() {
+    // `supportsRunInTerminalRequest` is a **client** capability. a client that
+    // cannot be asked to start the program would leave this launch waiting for
+    // an agent nothing was ever going to start, so it is refused at `launch` —
+    // before an interpreter is probed, an agent is staged or a port is bound,
+    // which is the only moment at which refusing costs nothing
+    let fixture = Fixture::new("terminal", A_TERMINAL_PROBE);
+    let mut client = Client::start(Transport::Stdio);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    let refused = client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "console": "externalTerminal",
+        }),
+    );
+    assert_eq!(refused["success"], false, "{refused}");
+    let said = refused["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a refusal says why: {refused}"));
+    assert!(
+        said.contains("runInTerminal"),
+        "the refusal has to name what the client is missing, and said {said:?}"
+    );
+    assert!(
+        said.contains("take `console` out"),
+        "and what to do instead, and said {said:?}"
+    );
+    assert!(
+        said.contains("isatty"),
+        "and what the program gets without it, and said {said:?}"
+    );
+
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
 /// the interpreter the built agent matches
 fn interpreter() -> String {
     bpd_test::agent::matching_interpreter()
@@ -841,6 +1008,12 @@ struct Client {
     reads: Box<dyn BufRead + Send>,
     /// the port this adapter bound, when it is listening on one
     listening: Option<Listener>,
+    /// the program **this client** started, when it was asked to start one
+    ///
+    /// only a `runInTerminal` produces one, and it is held for the reason the
+    /// adapter is: it belongs to the client, so nothing else is going to reap
+    /// it — bpd is not its parent and says so
+    started: Option<Child>,
     /// the token to put on the next message, until it has been presented
     ///
     /// only the loopback transport has one. a pipe has exactly one writer and
@@ -950,6 +1123,7 @@ impl Listener {
             reads: Box::new(BufReader::new(socket)),
             token: Some(self.token.clone()),
             listening: Some(self),
+            started: None,
             seen: Vec::new(),
             taken: 0,
             seq: 0,
@@ -996,6 +1170,7 @@ impl Client {
             writes: Box::new(writes),
             reads: Box::new(reads),
             listening: None,
+            started: None,
             token: None,
             seen: Vec::new(),
             taken: 0,
@@ -1005,6 +1180,17 @@ impl Client {
 
     /// send a request and read until its answer arrives
     fn request(&mut self, command: &str, arguments: &serde_json::Value) -> serde_json::Value {
+        let sent = self.send(command, arguments);
+        loop {
+            let message = self.next_message();
+            if message["type"] == "response" && message["request_seq"] == sent {
+                return message;
+            }
+        }
+    }
+
+    /// send a request without waiting for its answer
+    fn send(&mut self, command: &str, arguments: &serde_json::Value) -> i64 {
         self.seq += 1;
         let sent = self.seq;
         let body = serde_json::json!({
@@ -1027,9 +1213,78 @@ impl Client {
         self.writes
             .flush()
             .expect("the adapter is reading its end of the connection");
+        sent
+    }
 
+    /// launch, and start the program in `terminal` when the adapter asks
+    ///
+    /// the exchange this is written for cannot be driven by [`Self::request`]:
+    /// the adapter does not answer the `launch` until the client has said it
+    /// started the program, so a client that waited for its own answer first
+    /// would deadlock against an adapter waiting for it
+    ///
+    /// what it does with the request is what a real client does with one — it
+    /// runs **exactly** the argument vector and the environment it was handed,
+    /// on a terminal of its own. a test that improved on either would be
+    /// testing a command line bpd never sent
+    #[cfg(unix)]
+    fn launch_in_terminal(
+        &mut self,
+        arguments: &serde_json::Value,
+        terminal: &bpd_test::terminal::Terminal,
+    ) -> serde_json::Value {
+        let sent = self.send("launch", arguments);
         loop {
             let message = self.next_message();
+            if message["type"] == "request" && message["command"] == "runInTerminal" {
+                let asked = &message["arguments"];
+                let words = asked["args"].as_array().unwrap_or_else(|| {
+                    panic!("the client is handed an argument vector: {message}")
+                });
+                let mut command = Command::new(
+                    words[0]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("the interpreter comes first: {message}")),
+                );
+                for word in &words[1..] {
+                    command.arg(
+                        word.as_str()
+                            .unwrap_or_else(|| panic!("a command line is words: {message}")),
+                    );
+                }
+                for (name, value) in asked["env"]
+                    .as_object()
+                    .unwrap_or_else(|| panic!("the environment is an object: {message}"))
+                {
+                    command.env(
+                        name,
+                        value
+                            .as_str()
+                            .unwrap_or_else(|| panic!("an environment value is text: {message}")),
+                    );
+                }
+                command.current_dir(
+                    asked["cwd"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("the request names a directory: {message}")),
+                );
+                self.started = Some(terminal.run(command));
+
+                let seq = message["seq"]
+                    .as_i64()
+                    .unwrap_or_else(|| panic!("every message carries a seq: {message}"));
+                let body = serde_json::json!({
+                    "seq": 0, "type": "response", "request_seq": seq,
+                    "success": true, "command": "runInTerminal", "body": {},
+                })
+                .to_string();
+                write!(self.writes, "Content-Length: {}\r\n\r\n{body}", body.len())
+                    .expect("the adapter is reading its end of the connection");
+                self.writes
+                    .flush()
+                    .expect("the adapter is reading its end of the connection");
+                continue;
+            }
             if message["type"] == "response" && message["request_seq"] == sent {
                 return message;
             }
@@ -1220,6 +1475,16 @@ impl Drop for Client {
         // than failed
         self.finished.store(true, Ordering::Relaxed);
         end(&self.adapter);
+
+        // and the program this client was asked to start in a terminal, which
+        // nothing else would reap: bpd is not its parent, which is the whole
+        // point of the request that produced it
+        if let Some(started) = self.started.as_mut() {
+            let killed = started.kill();
+            drop(killed);
+            let reaped = started.wait();
+            drop(reaped);
+        }
     }
 }
 
@@ -1402,7 +1667,7 @@ fn debugging_a_forked_child_is_refused_when_the_client_could_not_take_one_up() {
     let mut client = Client::start(Transport::Loopback);
 
     // deliberately without `supportsStartDebuggingRequest`, which is a *client*
-    // capability and the only one this adapter reads
+    // capability and one of the two this adapter reads
     client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
     let refused = client.request(
         "launch",

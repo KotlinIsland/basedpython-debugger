@@ -154,6 +154,17 @@ pub struct Incoming {
     /// the arguments, still as json because each command has its own shape
     #[serde(default)]
     pub arguments: serde_json::Value,
+    /// which of **this adapter's** requests a response answers
+    ///
+    /// only a response carries one. DAP is not one-directional: an adapter can
+    /// ask a client for something, and the answer names the `seq` the question
+    /// went out with — which is the only way to tell one answer from another
+    /// when two questions are outstanding
+    pub request_seq: Option<i64>,
+    /// whether the client did what a reverse request asked
+    pub success: Option<bool>,
+    /// why it did not, when it did not
+    pub message: Option<String>,
 }
 
 /// one message's header block, as it arrived
@@ -374,25 +385,28 @@ impl<W: Write> Writer<W> {
         }))
     }
 
-    /// ask the **client** for something
+    /// ask the **client** for something, and return the `seq` it went out with
     ///
     /// DAP is not one-directional: a handful of requests go the other way, and
-    /// `startDebugging` — the one this adapter sends — is how the spec answers a
-    /// debuggee that became two processes. it asks the client to start a whole
+    /// this adapter sends two. `startDebugging` is how the spec answers a
+    /// debuggee that became two processes — it asks the client to start a whole
     /// second debug session, because a DAP session **is** a connection and there
-    /// is nowhere on one to put a second program
+    /// is nowhere on one to put a second program. `runInTerminal` is how it
+    /// answers a debuggee that needs a terminal, which an adapter cannot make
     ///
-    /// nothing waits for the answer. the client's response arrives on the same
-    /// stream as its requests and carries the `request_seq` this message's `seq`
-    /// becomes; what the adapter does about it is decline to treat it as a
-    /// request, because a client that started the session has already done the
-    /// only thing that was asked of it
-    pub fn request(&mut self, command: &str, arguments: &serde_json::Value) -> Result<(), Error> {
+    /// the answer to either arrives on the same stream as the client's own
+    /// requests, carrying this `seq` as its `request_seq`. whether anything
+    /// waits for it is the caller's: nothing waits for a `startDebugging`,
+    /// because a client that started the session has already done the only
+    /// thing that was asked of it, and a `runInTerminal` is waited for, because
+    /// what it answers is whether the program was started at all
+    pub fn request(&mut self, command: &str, arguments: &serde_json::Value) -> Result<i64, Error> {
         self.send(serde_json::json!({
             "type": "request",
             "command": command,
             "arguments": arguments,
-        }))
+        }))?;
+        Ok(self.seq)
     }
 
     /// say something that answers nothing
