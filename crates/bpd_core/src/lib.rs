@@ -10,9 +10,11 @@
 //!
 //! [`parity`] is the second of those two enumerated — the surface, the
 //! capabilities carried inside it, and the vocabulary a front end uses to say
-//! how it reaches one. it is about this crate's own enum rather than about any
-//! protocol, which is why it is here and not in an adapter that would then be
-//! the only one it fitted
+//! how it reaches one. it enumerates what the debugger **says** as well, because
+//! [`Reporting`] having no default bodies forces an implementation to exist and
+//! is satisfied by an empty one. it is about this crate's own enums rather than
+//! about any protocol, which is why it is here and not in an adapter that would
+//! then be the only one it fitted
 //!
 //! nothing in this crate knows about DAP, MCP, or any wire format. the adapters
 //! are thin translations of the types defined here, which is what keeps the
@@ -44,7 +46,7 @@ pub use error::{Error, Result};
 pub use exception::{PythonError, TracebackFrame};
 pub use frame::{Frame, FrameId, FrameKind, Scope};
 pub use jump::{Jump, Jumped, Suspendable, Unrestartable};
-pub use parity::{Facet, Reach, surface};
+pub use parity::{Carried, Facet, Naming, Reach, Told, ran, ran_as, say, surface};
 pub use query::{
     Answer, Appeared, Changed, Difference, FrameState, Frames, Moved, NotCompared, NotRead,
     QueryPart, ScopeState, Seen, Side, Snapshot, SnapshotId, Source, State, StateQuery, Subject,

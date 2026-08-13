@@ -1,11 +1,11 @@
 //! [`Reporting`] sinks for tests that drive a debuggee
 //!
-//! a running program says three kinds of thing that answer nothing — a
-//! logpoint's record, a pause's acknowledgement, and a child process it
-//! started. a test that sets no logpoint, arms no pause and starts no child
-//! should say so rather than quietly absorb one, because a fact about the
-//! program arriving where nobody looks is how a test passes while proving
-//! something else
+//! a running program says several kinds of thing that answer nothing — every
+//! one of them is a `bpd_core::Told`, and a logpoint's record, a pause's
+//! acknowledgement and a child process it started are three. a test that sets no
+//! logpoint, arms no pause and starts no child should say so rather than quietly
+//! absorb one, because a fact about the program arriving where nobody looks is
+//! how a test passes while proving something else
 
 use bpd_core::{Blindspot, LogRecord, Reporting, SessionId, Spawn};
 

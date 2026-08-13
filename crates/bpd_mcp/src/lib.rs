@@ -49,7 +49,7 @@ pub mod session;
 pub mod tools;
 pub mod wire;
 
-pub use coverage::{reach_of, reach_of_facet, surface};
+pub use coverage::{carriage_of, reach_of, reach_of_facet, surface};
 pub use prompts::{Prompt, prompts};
 pub use resources::{Resource, resources};
 pub use server::{PROTOCOL_VERSION, serve};

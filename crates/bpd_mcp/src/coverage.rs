@@ -7,12 +7,18 @@
 //! [`reach_of_facet`] does the same for the capabilities carried inside a
 //! request
 //!
+//! [`carriage_of`] is the same thing for the other direction — what the debugger
+//! **says** without being asked. that half was held by `bpd_core::Reporting`,
+//! which has no default bodies, so an implementation had to exist and an empty
+//! one satisfied it. as [`bpd_core::Told`] it is data, and the same exhaustive
+//! match applies
+//!
 //! `crates/bpd_mcp/tests/coverage.rs` drives the server through a whole session
-//! and checks this table against what the session was really asked.
-//! `crates/bpd/tests/parity.rs` is the two-sided half, and compares it against
-//! DAP's answer
+//! and checks these tables against what the session was really asked and what the
+//! client was really told. `crates/bpd/tests/parity.rs` is the two-sided half,
+//! and compares them against DAP's answers
 
-use bpd_core::parity::{Facet, Reach};
+use bpd_core::parity::{Carried, Facet, Reach, Told};
 use bpd_core::session::Request;
 
 pub use bpd_core::parity::surface;
@@ -96,6 +102,88 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
             "sessions, which lists them, and the optional `session` argument of \
              every tool that is about one. a tool that is about a stop needs \
              neither: the stop carries the session it was reported from",
+        ),
+    }
+}
+
+/// how one thing the debugger says reaches an agent
+///
+/// exhaustive, for the reason [`reach_of`] is: a fact added to the core is a
+/// compile error here rather than a fact an agent silently never hears
+///
+/// every entry is [`Carried::Pulled`], and that is the whole asymmetry between
+/// the two front ends. MCP has no push — this server writes nothing that is not
+/// an answer to something the client asked — so a fact that arrives while the
+/// program is running is kept and handed over on the next answer instead of
+/// being sent when it happens. it is a route rather than a gap, and it is the
+/// one that has to be watched: a server that kept a fact and never handed it
+/// over would look exactly like this until somebody read what an answer really
+/// carried, which is what `crates/bpd_mcp/tests/coverage.rs` does
+pub const fn carriage_of(told: Told) -> Carried {
+    match told {
+        Told::Logged => Carried::Pulled(
+            "the `logged` key of the answer to whichever call the program was \
+             running during, with the breakpoint, the file, the line, the thread \
+             and which qualifying hit it was",
+        ),
+
+        Told::Pausing => Carried::Pulled(
+            "`pause_armed_while_running` under the `logged` key, which is the \
+             threads that were running python when the pause went on",
+        ),
+
+        // its own key rather than part of the logs. an agent that found a child
+        // under `logged` would reasonably read it as a logpoint having fired
+        Told::Spawned => Carried::Pulled(
+            "`spawned.started` on the answer to the call the program was running \
+             during, one entry per child, each saying what bpd can tell about it \
+             being python and that bpd is not debugging it",
+        ),
+
+        Told::BlindSpot => Carried::Pulled(
+            "`spawned.cannot_see`, beside the children rather than instead of \
+             them — an agent that read `started: []` without it would conclude \
+             there were none — with `silence_is_not_evidence` as the field to act \
+             on",
+        ),
+
+        Told::Attached => Carried::Pulled(
+            "`attached.sessions` on the next answer, and the `sessions` tool \
+             afterwards. both, because MCP has no push and a **held** process \
+             nothing was told about is a hung program: the answer is what makes \
+             it news, and the tool is what makes it learnable by an agent that \
+             was not listening",
+        ),
+
+        Told::Stopped => Carried::Pulled(
+            "`outcome: stopped` on the answer to the control tool that let the \
+             program run, with the stop, the thread, the reason and the frames — \
+             one call, one answer, and no event to correlate",
+        ),
+
+        Told::Exited => Carried::Pulled("`outcome: exited`, carrying `exit_code`"),
+
+        Told::Finishing => Carried::Pulled(
+            "`outcome: finishing`, carrying `held` — the threads that have to be \
+             resumed before the interpreter can finalize",
+        ),
+
+        // a separate outcome from `exited`, and deliberately without an
+        // `exit_code` field rather than with a null one: the program is over and
+        // the number is not bpd's to give
+        Told::Ended => Carried::Pulled(
+            "`outcome: ended`, deliberately with no `exit_code` field at all — a \
+             null would read as a number that was measured",
+        ),
+
+        // the outcome DAP has nowhere to put, and the one this front end most
+        // needs: every control tool here blocks until the program stops again,
+        // so a deadline that passes is what the call returns
+        Told::StillRunning => Carried::Pulled(
+            "`outcome: timed_out`, carrying `waited_ms` and what is held now. it \
+             is never rendered as a stop: nothing was held and nothing was read \
+             off the program, so no location is reported for it, not even a \
+             sampled one",
         ),
     }
 }

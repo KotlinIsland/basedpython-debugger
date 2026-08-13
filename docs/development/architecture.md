@@ -202,6 +202,41 @@ genuinely cannot carry one says so with the reason rather than leaving a gap.
 the whole of it is [the DAP adapter](dap.md) and
 [the MCP adapter](mcp.md)
 
+### the rule is about both directions
+
+a `Request` and a `Facet` are what a client **asks for**. what the debugger
+**says** is the other half of the same rule, and it was held by a trait —
+`bpd_core::Reporting`, whose methods have no default bodies. that forces an
+implementation to exist and is satisfied by an **empty one**: nothing failed if
+an adapter took a logpoint's record, or a forked child that is sitting there
+held, and dropped it on the floor
+
+so it is data too. `bpd_core::parity::Told` is one of every fact the debugger
+produces that nobody asked for — the `Reporting` methods, and the outcomes of a
+running program — and `Carried` is how a front end says it passes one on:
+
+- **`Carried::Pushed`** is DAP's answer to all of them. it has an event stream,
+    so it says a thing when it happens
+- **`Carried::Pulled`** is MCP's answer to all of them. it has no push at all —
+    the server writes nothing that is not an answer to a call — so a fact that
+    arrives while the program is running is kept and handed over on the next
+    answer. a route rather than a gap, and the one that has to be watched: a
+    server that kept a fact and never handed it over looks exactly the same from
+    outside
+- **`Carried::Nowhere`** is a front end saying its protocol has nowhere to put
+    one, with the reason. there is one, and it is DAP and a deadline that passes
+    with the program still running
+
+`crates/bpd/tests/parity.rs` compares the two answers, requires that everything
+reaches at least one front end, and requires that a "cannot" is in a hand
+written list with the reason beside it — the sibling of the list for
+capabilities, kept separate so a stale line in one cannot excuse a gap in the
+other. what it cannot do is watch either claim come true, and **saying it is
+reached is not the same as reaching it**. so each adapter's coverage test drives
+a real conversation in which the session says one of everything, and then goes
+and reads what the client was really sent. an adapter with an empty `Reporting`
+method passes every other test there is and fails that one
+
 ### a session is named
 
 `bpd` debugs one program per session, and a session is one control connection to

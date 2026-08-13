@@ -11,8 +11,11 @@
 //! refusals afterwards say the program is over *and* why there is no number
 //!
 //! the fake here is deliberately tiny and separate from `coverage.rs`: that one
-//! drives the whole tool surface against a program that is still there, and a
-//! session that ended would change every answer in it
+//! drives the whole tool surface, and a session that ended would change every
+//! answer in it. that this outcome reaches the agent **at all** is one of the
+//! things `coverage.rs` now enforces for every one of them, as `bpd_core::Told`
+//! — this is the part of it that is particular to this outcome: not merely that
+//! the agent is told, but that it is told the truth and not an invented number
 
 use std::sync::Arc;
 
