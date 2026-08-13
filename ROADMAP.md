@@ -436,10 +436,10 @@ result is
 
 ## after the MVP
 
-### M6 — basedpython · breakpoints done, frames not
+### M6 — basedpython · done
 
-`.by` breakpoints through a verified source map. **the map and the breakpoints
-are done. frames are not**, and that is where this milestone stands
+`.by` breakpoints through a verified source map, and every location the debugger
+reports said in `.by` lines
 
 this was recorded as **blocked upstream** — "the transpiler has to emit a source
 map with provenance for generated lines and a hash of both artefacts". all of it
@@ -465,8 +465,27 @@ against a real `by run` before anything was built on them. see
     verified is the exact failure the contract refuses
 - a `.by` breakpoint is translated into the generated python before the agent
     sees it and every answer about it is translated back before a client does.
-    the agent never learns a source map exists, so a `.by` program's `sys.modules`
-    and `sys.path` are what a bare run of the same generated python has
+    that half stays out of process, because a breakpoint is set before there is a
+    program to ask
+- **frames, stops, tracebacks, thread samples, log records and the source a query
+    reads are all in `.by` lines.** the substitution happens in the **agent**,
+    where a location is made from a code object and a frame — eight places in one
+    crate, against thirty a location can leave through. mapping some of those
+    thirty and not the others would report two different files for one location,
+    which is worse than consistently reporting the interpreter's
+- a mapped frame carries the generated location beside the `.by` one, for the
+    reason `BoundInSource` does, and `Facet::GeneratedLocation` makes both front
+    ends carry it — DAP on the frame's `source.origin`, MCP on the frame itself
+- a generated line the map marks `None` keeps the generated location and says so.
+    it is prelude, no `.by` line is behind it, and reporting one would be the
+    debugger writing a line the user never did. `_by_runner.py` and everything
+    under it is untouched for the same reason: the map says nothing about it
+- **the tables reach the agent and the verification does not.** `SourceMap::load`
+    is the only constructor and it hashes both files before it returns, so what
+    crosses could not exist unchecked. a `.by` program's `sys.modules` and
+    `sys.path` are still what a bare run of the same generated python has, and
+    `a_program_in_a_basedpython_build_cannot_tell_the_map_reached_the_debuggee`
+    is the proof rather than the claim
 - `Binding::BoundInSource` carries **both** locations, and a `.by` line the
     transpiler generated nothing for moves forward the way a non-executable line
     does — with the answer read back out of the map, so what it says about where
@@ -479,20 +498,19 @@ against a real `by run` before anything was built on them. see
 
 **what is left**
 
-- **frames.** a stop, a stack frame and a traceback still report the generated
-    python. that is honest — nothing claims a `.by` location it was not given one
-    for — but it is half of what this milestone is for. it is a separate piece
-    because a location leaves the debugger through about thirty fields, and
-    mapping some of them and not the others would report two different files for
-    one location
+- **`replaceCode` is generated python.** the code the process runs is the
+    generated `.py`, and replacing a build's code means transpiling it again —
+    which is `by`'s job. it is named as generated python rather than accepting a
+    `.by` and doing something adjacent to what was asked
 - **a subcommand that sets the run up.** what a person types today is a two line
     wrapper handed to `by run` through `PYTHON`, written out on the source mapping
     page and driven end to end against the real `by` binary. `bpd by <module>`
     would write that wrapper itself, and it is sugar over a thing that already
     works rather than the thing that makes it work
 - **the `basedpython-pycharm` switch.** the plugin's reason for staying on
-    debugpy was that bpd could not debug `.by` at all. half of that is now false;
-    the frames half is not. see
+    debugpy was that bpd could not debug `.by` at all, and that is no longer
+    true — the decision is now the plugin's rather than a thing it is waiting
+    for. see
     [bpd and the basedpython pycharm plugin](docs/development/basedpython-pycharm.md)
 
 ### M7 — django templates · done

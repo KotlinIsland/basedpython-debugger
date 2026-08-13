@@ -33,6 +33,7 @@ mod replace;
 mod run;
 mod session;
 mod source;
+mod sources;
 mod spawns;
 mod steps;
 mod stops;
@@ -464,7 +465,12 @@ fn on_line<'py>(
         return Ok(events::disable(python));
     }
 
-    let file: String = code.getattr("co_filename")?.extract()?;
+    // where this is **reported**, which for a basedpython build is the `.by`
+    // line the generated one came from. `line` itself stays the generated line
+    // everywhere it decides anything: it is what the breakpoint table is keyed
+    // by and what the interpreter offered
+    let at = sources::locate(code.getattr("co_filename")?.extract()?, line);
+    let (file, reported) = (at.file, at.line);
     let thread = events::thread_ident(python)?;
 
     let mut stopping = Vec::new();
@@ -472,7 +478,7 @@ fn on_line<'py>(
     if let Some(plans) = plans {
         let at = conditions::Location {
             file: &file,
-            line,
+            line: reported,
             thread,
         };
         // held across every expression of every breakpoint on this line, so a
@@ -513,7 +519,7 @@ fn on_line<'py>(
                 part: raised.part,
                 expression: raised.expression,
                 file,
-                line,
+                line: reported,
                 error: raised.error,
             },
         )?;
@@ -529,11 +535,19 @@ fn on_line<'py>(
             StopReason::Breakpoint {
                 breakpoints: stopping,
                 file,
-                line,
+                line: reported,
             },
         )?;
     } else if let Some(kind) = landed {
-        session::stop(python, thread, StopReason::Stepped { kind, file, line })?;
+        session::stop(
+            python,
+            thread,
+            StopReason::Stepped {
+                kind,
+                file,
+                line: reported,
+            },
+        )?;
     } else if world::parking() {
         // nothing on this line decided to stop, so a stopped world still has to
         // catch the thread here — otherwise a line that holds a breakpoint
@@ -541,7 +555,14 @@ fn on_line<'py>(
         world::park(python, thread);
     } else if pause::pausing() && pause::claim() {
         pause::disarm(python)?;
-        session::stop(python, thread, StopReason::Paused { file, line })?;
+        session::stop(
+            python,
+            thread,
+            StopReason::Paused {
+                file,
+                line: reported,
+            },
+        )?;
     }
 
     // deliberately not `DISABLE`: a breakpoint that fired once still exists,
@@ -725,11 +746,7 @@ fn on_py_unwind<'py>(
             session::stop(
                 python,
                 events::thread_ident(python)?,
-                StopReason::Uncaught {
-                    error: conditions::capture(python, &PyErr::from_value(exception.clone())),
-                    file: code.getattr("co_filename")?.extract()?,
-                    line: frame.getattr("f_lineno")?.extract()?,
-                },
+                uncaught(python, code, &frame, exception)?,
             )?;
         }
     }
@@ -756,16 +773,44 @@ fn on_raise<'py>(
     }
 
     let frame = events::current_frame(python)?;
+    let at = at_of(code, &frame)?;
     session::stop(
         python,
         events::thread_ident(python)?,
         StopReason::Raised {
             error: conditions::capture(python, &PyErr::from_value(exception.clone())),
-            file: code.getattr("co_filename")?.extract()?,
-            line: frame.getattr("f_lineno")?.extract()?,
+            file: at.file,
+            line: at.line,
         },
     )?;
     Ok(python.None().into_bound(python))
+}
+
+/// the stop an exception leaving the outermost frame reports
+///
+/// a function of its own so that the two exception stops read the location the
+/// same way. they are the only stops whose file comes from the code object and
+/// whose line comes from the frame, and the pair has to be mapped together
+fn uncaught(
+    python: Python<'_>,
+    code: &Bound<'_, PyAny>,
+    frame: &Bound<'_, PyAny>,
+    exception: &Bound<'_, PyAny>,
+) -> PyResult<StopReason> {
+    let at = at_of(code, frame)?;
+    Ok(StopReason::Uncaught {
+        error: conditions::capture(python, &PyErr::from_value(exception.clone())),
+        file: at.file,
+        line: at.line,
+    })
+}
+
+/// where a running frame is, as a client should be told it
+fn at_of(code: &Bound<'_, PyAny>, frame: &Bound<'_, PyAny>) -> PyResult<sources::Reported> {
+    Ok(sources::locate(
+        code.getattr("co_filename")?.extract()?,
+        frame.getattr("f_lineno")?.extract()?,
+    ))
 }
 
 /// `sys.monitoring`, or an error naming what is missing

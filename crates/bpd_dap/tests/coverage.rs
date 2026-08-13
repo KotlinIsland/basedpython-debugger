@@ -41,6 +41,15 @@ use bpd_dap::{
 /// the interpreter's identity for the one thread this fake ever holds
 const THREAD: u64 = 4242;
 
+/// the `.by` the fake's mapped frame is reported in
+const MAPPED_TO: &str = "/src/demo.by";
+
+/// the generated python that mapped frame is really running
+///
+/// the location a front end has to be able to show. a client that was given
+/// only `demo.by:11` has no way to check the debugger against the interpreter
+const GENERATED_FROM: &str = "/tmp/.by-build/demo.py";
+
 /// the session this fake's stops are reported from
 ///
 /// the engine mints one per debuggee and a fake has no engine, so this stands
@@ -130,7 +139,7 @@ fn every_capability_of_the_core_is_reachable_through_a_dap_request() {
 #[test]
 fn every_capability_carried_inside_a_request_is_reached_or_says_why_not() {
     let asked = Asked::default();
-    drive(&asked);
+    let client = drive(&asked);
     let recorded = asked.lock().expect("the recorder is not poisoned");
 
     for facet in Facet::ALL {
@@ -159,6 +168,23 @@ fn every_capability_carried_inside_a_request_is_reached_or_says_why_not() {
              the session was asked for {detail:?}"
         );
     }
+
+    // and the location a mapped frame is really at. the frame said `demo.by:11`
+    // and a client shown only that cannot check the debugger against the
+    // interpreter — `origin` is DAP's own field for where a source came from,
+    // and the generated file and line have to be in it
+    let origins: Vec<String> = client
+        .frames()
+        .iter()
+        .filter_map(|frame| frame["source"]["origin"].as_str().map(ToString::to_string))
+        .collect();
+    assert!(
+        origins
+            .iter()
+            .any(|origin| origin.contains(GENERATED_FROM) && origin.contains("14")),
+        "the stack reported `{MAPPED_TO}` and no source said where the \
+         interpreter really is: {origins:?}"
+    );
 
     // and the capability the adapter reaches on its own: a DAP request has no
     // field for a session, so the adapter puts one on every request it makes.
@@ -737,6 +763,16 @@ impl Transcript {
         })
     }
 
+    /// every stack frame the adapter reported, across every `stackTrace`
+    fn frames(&self) -> Vec<&serde_json::Value> {
+        self.messages
+            .iter()
+            .filter(|message| message["command"] == "stackTrace")
+            .filter_map(|message| message["body"]["stackFrames"].as_array())
+            .flatten()
+            .collect()
+    }
+
     fn refusals(&self) -> Vec<String> {
         self.messages
             .iter()
@@ -918,6 +954,7 @@ fn snapshot(stop: u64, query: &bpd_core::StateQuery) -> bpd_core::Snapshot {
                     id: FrameId { stop, depth: 0 },
                     file: "/tmp/fake.py".to_string(),
                     line: 3,
+                    mapping: None,
                     kind: bpd_core::FrameKind::Python {
                         function: "main".to_string(),
                         first_line: 1,
@@ -1074,6 +1111,7 @@ impl Session for FakeSession {
                         id: FrameId { stop, depth: 0 },
                         file: "/tmp/page.html".to_string(),
                         line: 2,
+                        mapping: None,
                         kind: bpd_core::FrameKind::Template {
                             node: "VariableNode".to_string(),
                             python: FrameId { stop, depth: 1 },
@@ -1083,13 +1121,32 @@ impl Session for FakeSession {
                         id: FrameId { stop, depth: 1 },
                         file: "/tmp/fake.py".to_string(),
                         line: 3,
+                        mapping: None,
+                        kind: bpd_core::FrameKind::Python {
+                            function: "main".to_string(),
+                            first_line: 1,
+                        },
+                    },
+                    // a frame of a basedpython build, reported at the `.by`
+                    // line it came from. the generated location is the fact a
+                    // client has to be able to reach — see `MAPPED_TO`
+                    Frame {
+                        id: FrameId { stop, depth: 2 },
+                        file: MAPPED_TO.to_string(),
+                        line: 11,
+                        mapping: Some(bpd_core::Mapping::FromSource {
+                            generated: bpd_core::Located {
+                                file: std::path::PathBuf::from(GENERATED_FROM),
+                                line: 14,
+                            },
+                        }),
                         kind: bpd_core::FrameKind::Python {
                             function: "main".to_string(),
                             first_line: 1,
                         },
                     },
                 ],
-                depth: 2,
+                depth: 3,
                 mode: Mode::NonStop,
             }),
             // the shape rather than the substance: that a script really drives

@@ -86,23 +86,173 @@ pub struct Located {
     pub line: u32,
 }
 
-/// one `.by`/`.py` pair the map describes
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Pair {
+/// one `.by`/`.py` pair the map describes, and the rule between them
+///
+/// **the whole translation lives here**, in one type, because there are two
+/// places that apply it. `bpd` maps a breakpoint on its way in and a binding on
+/// its way back out; the agent maps every location it reports, from a table it
+/// is sent. two implementations of "which `.by` line is this" would be two
+/// answers about one location, which is the failure this module exists to
+/// prevent — so the agent is sent one of these rather than a table and a
+/// description of what to do with it
+///
+/// it carries no digest of the generated python and there is no constructor
+/// that checks one. **verification is `bpd`'s, out of process**: it hashes both
+/// files before [`SourceMap::load`] returns, and the debuggee never decides
+/// that a map is trustworthy. [`Self::digest`] is the `.by`'s alone, and it is
+/// here for the one thing the agent does that `bpd` cannot — reading the
+/// program's own filesystem, at the moment it is asked, to show the source
+/// around a line
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MappedFile {
     /// the generated python, canonicalised
-    generated: PathBuf,
+    pub generated: PathBuf,
     /// the `.by` it was transpiled from, canonicalised
-    source: PathBuf,
+    pub source: PathBuf,
+    /// the digest of the `.by`, as [`MAP_FILENAME`] wrote it
+    ///
+    /// `bpd` recomputed it before this value existed. it is carried on so that
+    /// anything reading the `.by` **later** can check it again, which is the
+    /// difference between showing a user their source and showing them a file
+    /// that has since been edited
+    pub digest: String,
     /// indexed by zero-based generated line, holding the zero-based `.by` line
     ///
     /// `None` is prelude the transpiler emitted that no `.by` line is behind
-    lines: Vec<Option<u32>>,
+    pub lines: Vec<Option<u32>>,
 }
 
-impl Pair {
+impl MappedFile {
+    /// the `.by` line a generated line came from
+    ///
+    /// the direction a frame, a stop and a traceback go, and every failure is
+    /// an [`Unmapped`] naming a file rather than a line
+    pub fn to_source(&self, line: u32) -> Result<u32, Unmapped> {
+        let covered = u32::try_from(self.lines.len()).unwrap_or(u32::MAX);
+        // a line is one-based here and the table is zero-based. line 0 is not a
+        // line any file has, and it is the caller's own confusion rather than a
+        // property of the map, so it is the same answer as a line past the end
+        let index = line.checked_sub(1).filter(|index| *index < covered);
+        let Some(index) = index else {
+            return Err(Unmapped::PastTheEnd {
+                file: self.generated.clone(),
+                line,
+                covered,
+            });
+        };
+        match self.lines[index as usize] {
+            Some(source) => Ok(source + 1),
+            None => Err(Unmapped::NoSourceLine {
+                file: self.generated.clone(),
+                line,
+                source: self.source.clone(),
+            }),
+        }
+    }
+
+    /// the generated line a `.by` line becomes
+    ///
+    /// the direction a breakpoint goes, and the map is forward-only, so this is
+    /// a search rather than a lookup. the rule it applies, in two steps that are
+    /// each worth stating:
+    ///
+    /// 1. the `.by` line asked for, or the **next one after it** that the
+    ///    transpiler generated anything for. a blank line and a comment generate
+    ///    nothing, and a location on one moves forward exactly as it does in
+    ///    ordinary python
+    /// 2. among the generated lines that `.by` line became — one source line can
+    ///    become several — the **first**, because landing anywhere but the first
+    ///    would be landing in the middle of a statement
+    ///
+    /// what makes step 1 safe is that the caller maps the answer back. the
+    /// interpreter may move a breakpoint on again to reach an executable line,
+    /// and mapping that answer through [`Self::to_source`] is what makes the
+    /// report of where it went a true one rather than the line that was asked
+    /// for
+    pub fn to_generated(&self, line: u32) -> Result<u32, Unmapped> {
+        let wanted = line.saturating_sub(1);
+        let target = self
+            .lines
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|candidate| *candidate >= wanted)
+            .min();
+        let Some(target) = target else {
+            return Err(Unmapped::NoGeneratedLine {
+                file: self.source.clone(),
+                requested: line,
+                last_mapped: self.last_source_line().map(|last| last + 1),
+            });
+        };
+        let index = self
+            .lines
+            .iter()
+            .position(|entry| *entry == Some(target))
+            .unwrap_or_else(|| {
+                unreachable!("`target` was taken from the table, so the table holds it")
+            });
+        Ok(u32::try_from(index + 1).unwrap_or(u32::MAX))
+    }
+
     /// the last `.by` line anything was generated for, if any
     fn last_source_line(&self) -> Option<u32> {
         self.lines.iter().flatten().copied().max()
+    }
+}
+
+/// what the source map said about a location that is being reported
+///
+/// carried beside a location rather than replacing it, for the reason
+/// [`crate::Binding::BoundInSource`] carries both: a client that shows the
+/// `.by` is showing the truth, one that shows the generated python is too, and
+/// what neither is doing is inventing a third location out of the two
+///
+/// `None` — no `Mapping` at all — is the ordinary case. the location is the
+/// interpreter's own and nothing mapped it, which is every location of a
+/// program that is not basedpython and every location of a file this build did
+/// not generate: the standard library, a dependency, and the `_by_runner.py`
+/// shim `by run` starts
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mapped", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Mapping {
+    /// the location beside this is `.by` source, and the interpreter is here
+    ///
+    /// the generated location is not shown by default and is one field away,
+    /// which is what a user who does not believe the debugger needs
+    FromSource {
+        /// where the interpreter really is
+        generated: Located,
+    },
+
+    /// the location beside this is generated python, and this is why
+    ///
+    /// the map covers the file and has no `.by` line for that line of it —
+    /// prelude, a lowering's own scaffolding, an import the source never wrote.
+    /// reporting a `.by` line here would be the debugger inventing one, and
+    /// reporting the generated location **without saying so** would leave a
+    /// temporary path in front of a user with nothing to explain it
+    InGeneratedPython {
+        /// what the map said, which names the file and the line
+        reason: Unmapped,
+    },
+}
+
+impl std::fmt::Display for Mapping {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FromSource { generated } => write!(
+                formatter,
+                "basedpython source. the interpreter is at `{}` line {}, which \
+                 is the python `by` generated from it",
+                generated.file.display(),
+                generated.line
+            ),
+            Self::InGeneratedPython { reason } => {
+                write!(formatter, "generated python, not `.by` source: {reason}")
+            }
+        }
     }
 }
 
@@ -115,7 +265,7 @@ impl Pair {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceMap {
     /// keyed by the canonical generated path, so a lookup is one comparison
-    pairs: BTreeMap<PathBuf, Pair>,
+    pairs: BTreeMap<PathBuf, MappedFile>,
 }
 
 /// why a location has no counterpart, which is never answered with a guess
@@ -432,9 +582,10 @@ impl SourceMap {
             let source = canonical(&entry.source)?;
             pairs.insert(
                 generated.clone(),
-                Pair {
+                MappedFile {
                     generated,
                     source,
+                    digest: digests.source,
                     lines: entry.lines,
                 },
             );
@@ -460,96 +611,62 @@ impl SourceMap {
                 file: generated.to_path_buf(),
             });
         };
-        let covered = u32::try_from(pair.lines.len()).unwrap_or(u32::MAX);
-        // a line is one-based here and the table is zero-based. line 0 is not a
-        // line any file has, and it is the caller's own confusion rather than a
-        // property of the map, so it is the same answer as a line past the end
-        let index = line.checked_sub(1).filter(|index| *index < covered);
-        let Some(index) = index else {
-            return Err(Unmapped::PastTheEnd {
-                file: pair.generated.clone(),
-                line,
-                covered,
-            });
-        };
-        let entry = pair.lines[index as usize];
-        let Some(source_line) = entry else {
-            return Err(Unmapped::NoSourceLine {
-                file: pair.generated.clone(),
-                line,
-                source: pair.source.clone(),
-            });
-        };
         Ok(Located {
             file: pair.source.clone(),
-            line: source_line + 1,
+            line: pair.to_source(line)?,
         })
     }
 
     /// the generated python location a `.by` location becomes
     ///
-    /// the direction a breakpoint goes, and the map is forward-only, so this is
-    /// a search rather than a lookup. the rule it applies, in two steps that are
-    /// each worth stating:
-    ///
-    /// 1. the `.by` line asked for, or the **next one after it** that the
-    ///    transpiler generated anything for. a blank line and a comment generate
-    ///    nothing, and a breakpoint on one moves forward exactly as it does in
-    ///    ordinary python
-    /// 2. among the generated lines that `.by` line became — one source line can
-    ///    become several — the **first**, because a stop anywhere but the first
-    ///    would land in the middle of a statement
-    ///
-    /// what makes step 1 safe is that the caller maps the answer back. the
-    /// interpreter may move a breakpoint on again to reach an executable line,
-    /// and mapping that answer through [`Self::to_source`] is what makes the
-    /// report of where it went a true one rather than the line that was asked
-    /// for
+    /// the direction a breakpoint goes. the rule is [`MappedFile::to_generated`]
     pub fn to_generated(&self, source: &Path, line: u32) -> Result<Located, Unmapped> {
         let Some(pair) = self.pair_from(source) else {
             return Err(Unmapped::NotInTheMap {
                 file: source.to_path_buf(),
             });
         };
-        let wanted = line.saturating_sub(1);
-        let target = pair
-            .lines
-            .iter()
-            .flatten()
-            .copied()
-            .filter(|candidate| *candidate >= wanted)
-            .min();
-        let Some(target) = target else {
-            return Err(Unmapped::NoGeneratedLine {
-                file: pair.source.clone(),
-                requested: line,
-                last_mapped: pair.last_source_line().map(|last| last + 1),
-            });
-        };
-        let index = pair
-            .lines
-            .iter()
-            .position(|entry| *entry == Some(target))
-            .unwrap_or_else(|| {
-                unreachable!("`target` was taken from the table, so the table holds it")
-            });
         Ok(Located {
             file: pair.generated.clone(),
-            line: u32::try_from(index + 1).unwrap_or(u32::MAX),
+            line: pair.to_generated(line)?,
         })
     }
 
+    /// the pairs this map holds, for the debuggee that applies them
+    ///
+    /// **what crosses to the agent.** the agent is handed the tables and never
+    /// the decision: this value only exists because [`SourceMap::load`] already
+    /// hashed both files of every pair against disk, and there is no other way
+    /// to have one. a debuggee that verified its own map would be the thing
+    /// being measured vouching for the instrument
+    #[must_use]
+    pub fn files(&self) -> Vec<MappedFile> {
+        self.pairs.values().cloned().collect()
+    }
+
     /// the pair whose generated python is that file
-    fn pair_generating(&self, file: &Path) -> Option<&Pair> {
+    fn pair_generating(&self, file: &Path) -> Option<&MappedFile> {
         let file = file.canonicalize().ok()?;
         self.pairs.get(&file)
     }
 
     /// the pair whose `.by` source is that file
-    fn pair_from(&self, file: &Path) -> Option<&Pair> {
+    fn pair_from(&self, file: &Path) -> Option<&MappedFile> {
         let file = file.canonicalize().ok()?;
         self.pairs.values().find(|pair| pair.source == file)
     }
+}
+
+/// the digest of some bytes, in the form [`MAP_FILENAME`] writes one
+///
+/// public because the agent recomputes it: `bpd` checked the `.by` at launch,
+/// and the debuggee is the only thing that can check it **again** at the moment
+/// a user asks to see it. the algorithm is named in the value for the reason it
+/// is named in the file — a reader that met one it could not recompute and
+/// compared the hex anyway would be comparing something it never produced
+#[must_use]
+pub fn digest(bytes: &[u8]) -> String {
+    format!("{ALGORITHM}:{}", digest_of(bytes))
 }
 
 /// a path as the filesystem really spells it

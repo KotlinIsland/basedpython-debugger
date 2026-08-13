@@ -749,7 +749,7 @@ impl Adapter {
                     "name": frame.name(),
                     "line": frame.line,
                     "column": 1,
-                    "source": source_of(&frame.file),
+                    "source": mapped_source_of(&frame.file, frame.mapping.as_ref()),
                 })
             })
             .collect();
@@ -2333,6 +2333,25 @@ fn source_of(file: &str) -> serde_json::Value {
     } else {
         serde_json::json!({ "name": file })
     }
+}
+
+/// a DAP source for a frame's file, saying so when a source map placed it
+///
+/// `origin` is DAP's own field for exactly this — its example is "inlined
+/// content from source map" — and it is where a frame reported as `.by` says
+/// where the interpreter really is. that location is not shown by default in
+/// any client and it is one line of the same object away, which is what a user
+/// who does not believe the debugger needs
+///
+/// there is no match on the mapping here. one sentence says it, it is written
+/// in the core, and both front ends read the same one — two adapters wording it
+/// themselves is two descriptions of one fact
+fn mapped_source_of(file: &str, mapping: Option<&bpd_core::Mapping>) -> serde_json::Value {
+    let mut source = source_of(file);
+    if let Some(mapping) = mapping {
+        source["origin"] = serde_json::Value::String(mapping.to_string());
+    }
+    source
 }
 
 /// the program's own stdout and stderr, as the client sees them

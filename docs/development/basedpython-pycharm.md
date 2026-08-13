@@ -17,30 +17,39 @@ work, and it should end somewhere
 
 ## why they are not merged today
 
-**they do not fully overlap in capability yet.** `basedpython-pycharm` reports
-`.by` frames and `bpd` does not, so folding a working `.by` debugger into a
-plugin that cannot yet replace it would trade something for nothing
+**the capability gap is closed.** this page used to say `basedpython-pycharm`
+reported `.by` frames and `bpd` did not, so folding a working `.by` debugger into
+a plugin that could not replace it would trade something for nothing. that is no
+longer the state
 
-**but the gap is much smaller than this project recorded, and half of it is now
-closed.** M6 said the transpiler had to emit a map with provenance and a hash, as
-though none existed. `by run` writes `_by_sourcemap.py` today — indexed by
-generated line, holding the `.by` line it came from and `None` where a prelude
-has no source, which *is* the provenance, plus `DIGESTS` over both files each
-entry describes. the language plugin ships source-mapped `.by` debugging on it,
+M6 said the transpiler had to emit a map with provenance and a hash, as though
+none existed. `by run` writes `_by_sourcemap.py` today — indexed by generated
+line, holding the `.by` line it came from and `None` where a prelude has no
+source, which *is* the provenance, plus `DIGESTS` over both files each entry
+describes. the language plugin ships source-mapped `.by` debugging on it,
 verified end to end, and its `docs/debugging.md` records that the identical
 "blocked upstream" belief it had held for a long time was false
 
-**`bpd` now binds a `.by` breakpoint through that map**, per
-[source mapping](source-mapping.md). what is still missing on this side is `.by`
-**frames**: a stop and a stack report the generated python. that is honest rather
-than wrong — nothing claims a `.by` location it was not given one for — and it is
-the half that decides whether this plugin can switch
+**`bpd` binds a `.by` breakpoint through that map, and reports every location it
+has in `.by` lines** — a stop, a stack frame, a traceback entry, a thread's
+sample, a logpoint's record and the source a query reads. see
+[source mapping](source-mapping.md)
+
+two things it does that a debugpy path does not:
+
+- a mapped frame carries the **generated** location beside the `.by` one, so a
+    person who does not believe the debugger can see what it saw. in DAP it is
+    the stack frame's `source.origin`
+- a generated line no `.by` line is behind keeps the generated location and says
+    which line of which file has none. prelude is not attributed to whichever
+    `.by` line was nearest, and neither is the runner shim underneath the build
 
 where the two implementations differ is the digest. the language plugin maps a
 line whether or not the pair of files is still the pair the map was built from;
 `bpd` refuses the whole build when either has moved, before the interpreter is
 started, because a line that came from a map nobody verified against the thing it
-maps is the exact failure the contract refuses
+maps is the exact failure the contract refuses. it checks the `.by` again when a
+user asks to *read* it, too, which is the case a launch-time check cannot cover
 
 and the scopes differ. `bpd` is a python debugger. a person debugging ordinary
 python has no reason to install a basedpython language plugin to get one, and a
@@ -49,13 +58,16 @@ merge would make that the only way
 ## where this is going
 
 the end state is not "bpd's plugin absorbed into the language plugin". it is
-**`basedpython-pycharm` switching its adapter from debugpy to `bpd`** once M6's
-frames land. `.by` **breakpoints** already bind through a verified map;
-debugging the transpiled python is the fallback this project's roadmap describes
-as temporary, and what is left of it is the frames — which is the whole reason
-the source mapping rule is "total or absent, no identity fallback"
+**`basedpython-pycharm` switching its adapter from debugpy to `bpd`**, and what
+was blocking that is done. the decision is now the language plugin's rather than
+something it is waiting on
 
-when that happens the two plugins have one adapter between them, and whether
+what a switch needs from this side is the wrapper `by run` is pointed at through
+`PYTHON`, which is two lines and is written out on the source mapping page. `bpd`
+has no subcommand that writes it yet, and that is sugar over a thing that already
+works
+
+when the switch happens the two plugins have one adapter between them, and whether
 they are one artefact or two is a packaging question rather than an
 architectural one
 

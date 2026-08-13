@@ -179,6 +179,14 @@ struct Attached {
     /// map. it is per session rather than on the debuggee because a session is
     /// what holds a breakpoint set, and the two have to be replaced together
     map: Option<Arc<bpd_core::SourceMap>>,
+    /// whether this session's agent has been handed the map's tables
+    ///
+    /// the agent reports every location of the build as the `.by` line it came
+    /// from, and it can only do that once it has them. a session that joined —
+    /// an `exec`'d child, which is a fresh interpreter — has not been sent them
+    /// with the launch, so this is what stops a second send and what makes the
+    /// first one happen before the child runs anything
+    mapped: bool,
     /// where each translated breakpoint went, by the id the client gave it
     ///
     /// the record [`mapping::restore`] reads to put an answer back into `.by`
@@ -589,7 +597,20 @@ impl Debuggee {
     /// only way to have one, and it checks both digests of every entry against
     /// the files on disk before it returns. so what this installs is a map that
     /// was true a moment ago rather than one that claims to be
-    fn map_sources(&mut self, map: bpd_core::SourceMap) {
+    ///
+    /// it is installed in **two** places, and they are not the same job. here,
+    /// so a `.by` breakpoint becomes a generated line before the agent sees one
+    /// — that translation has to happen before the program has run, and in DAP
+    /// before it has been launched. and in the **agent**, so that every
+    /// location the debuggee reports comes back as the `.by` line it came from.
+    /// a location leaves through about thirty fields and translating them on
+    /// the way out means finding every one of them; missing one reports two
+    /// different files for a single location
+    ///
+    /// the agent is sent the tables and never the decision. it is handed a map
+    /// that was already checked and applies it, because a debuggee vouching for
+    /// the instrument that measures it is not evidence
+    fn map_sources(&mut self, map: bpd_core::SourceMap) -> Result<()> {
         let armed: usize = self
             .attached
             .iter()
@@ -604,8 +625,10 @@ impl Debuggee {
         let map = Arc::new(map);
         for session in &mut self.attached {
             session.map = Some(Arc::clone(&map));
+            session.map_debuggee()?;
         }
         self.map = Some(map);
+        Ok(())
     }
 
     /// decide whether a forked child of the program becomes a session of its own
@@ -1025,6 +1048,7 @@ impl Attached {
             pending_blind: Vec::new(),
             pending_joined: Vec::new(),
             map: None,
+            mapped: false,
             translated: std::collections::BTreeMap::new(),
             snapshots: Vec::new(),
         }
@@ -1091,6 +1115,52 @@ impl Attached {
                 answers.extend(sent.refused);
                 Ok(mapping::reorder(&sent.order, answers))
             }
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// hand this session's agent the tables it reports locations through
+    ///
+    /// sent while the debuggee is held at entry, before a line of the program
+    /// has run, so there is no location it could have produced without the map.
+    /// the answer is the count, and it is compared: an agent that installed
+    /// fewer files than were sent would map some of the build's locations and
+    /// not others, which is the inconsistency this whole layer is about
+    ///
+    /// what crosses is [`bpd_core::MappedFile`], which cannot be built without
+    /// [`bpd_core::SourceMap::load`] having hashed both files it describes
+    /// against disk first. the debuggee applies a map; it never decides one is
+    /// trustworthy
+    fn map_debuggee(&mut self) -> Result<()> {
+        const EXPECTED: &str = "the source map to be installed";
+
+        let files = self
+            .map
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("the map is installed before it is sent"))
+            .files();
+        let sent = u32::try_from(files.len()).unwrap_or(u32::MAX);
+
+        let mut aside = Aside::new();
+        // `send_and_wait` rather than `ask`, which is what puts this request
+        // ahead of every other one: `ask` is where a session that has not been
+        // sent the map yet is sent it, and going back through it here would be
+        // this request waiting for itself
+        let answer = self.send_and_wait(&FromEngine::MapSources { files }, EXPECTED, &mut aside)?;
+        self.pending_spawns.extend(aside.spawned);
+        self.pending_blind.extend(aside.blind);
+        self.pending_joined.extend(aside.joined);
+
+        match answer {
+            FromAgent::SourcesMapped { files } if files == sent => {
+                self.mapped = true;
+                Ok(())
+            }
+            FromAgent::SourcesMapped { files } => unreachable!(
+                "{sent} mapped files were sent to the agent and it installed \
+                 {files}. the engine and the agent are built and shipped \
+                 together, and the handshake refuses a mismatch"
+            ),
             other => Err(unexpected(&other, EXPECTED)),
         }
     }
@@ -1372,6 +1442,16 @@ impl Attached {
                 None => bpd_core::Error::NotStopped { wanted: expected },
             }
             .into());
+        }
+        // before anything else this session is ever asked, and once. the
+        // launched session is sent the map at launch and this is what covers a
+        // session that **joined** later — an `exec`'d child is a fresh
+        // interpreter with a fresh agent, and a fork inherits the tables in
+        // memory along with everything else. nothing of a joined session's
+        // program can have run before the client resumed it, and a resume comes
+        // through here
+        if self.map.is_some() && !self.mapped {
+            self.map_debuggee()?;
         }
         self.send_and_wait(request, expected, reporting)
     }
@@ -1717,7 +1797,7 @@ fn start(
         }],
     };
     if let Some(map) = map {
-        debuggee.map_sources(map);
+        debuggee.map_sources(map)?;
     }
     Ok(Launched::Stopped(debuggee))
 }

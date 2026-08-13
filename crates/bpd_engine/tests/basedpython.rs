@@ -28,7 +28,7 @@
 use std::path::{Path, PathBuf};
 
 use bpd_core::Running;
-use bpd_core::source_map::MAP_FILENAME;
+use bpd_core::source_map::{MAP_FILENAME, Mapping};
 use bpd_core::{Binding, Resolved, SourceBreakpoint, StopReason, Unbound};
 use bpd_engine::{Debuggee, Launched};
 
@@ -108,6 +108,57 @@ fn line_table() -> Vec<Option<u32>> {
     ]
 }
 
+/// a `.by` that raises, so a traceback has more than one frame of the build
+///
+/// a second pair rather than a flag on the first: what is under test is a
+/// traceback, and a traceback needs a call in it
+const RAISING: &str = "\
+def boom() -> int:
+    return 1 // 0
+
+
+def main() -> None:
+    boom()
+
+
+main()  # the outermost frame the exception leaves
+";
+
+/// the python `by` would have transpiled [`RAISING`] to
+const RAISING_GENERATED: &str = "\
+import sys
+
+
+def boom() -> int:
+    return 1 // 0
+
+
+def main() -> None:
+    boom()
+
+
+main()
+";
+
+/// which `.by` line each line of [`RAISING_GENERATED`] came from
+fn raising_table() -> Vec<Option<u32>> {
+    vec![
+        // the three line prelude, which no `.by` line is behind
+        None,
+        None,
+        None,
+        Some(0), // def boom
+        Some(1), // return 1 // 0
+        Some(2),
+        Some(3),
+        Some(4), // def main
+        Some(5), // boom()
+        Some(6),
+        Some(7),
+        Some(8), // main()
+    ]
+}
+
 /// a basedpython build directory: the `.by`, the python, and the map
 struct Build {
     directory: tempfile::TempDir,
@@ -123,6 +174,15 @@ impl Build {
     }
 
     fn with(lines: &[Option<u32>]) -> Self {
+        Self::pair(SOURCE, GENERATED, lines)
+    }
+
+    /// the build whose program raises, for the traceback
+    fn raising() -> Self {
+        Self::pair(RAISING, RAISING_GENERATED, &raising_table())
+    }
+
+    fn pair(by: &str, py: &str, lines: &[Option<u32>]) -> Self {
         let directory = tempfile::tempdir().expect("a temporary directory");
         // canonicalised for the reason every fixture in this suite is: a
         // temporary directory is under `/var` on macos and `/tmp` names it
@@ -134,8 +194,8 @@ impl Build {
             .expect("the directory was just made");
         let source = root.join("demo.by");
         let generated = root.join("demo.py");
-        std::fs::write(&source, SOURCE).expect("the `.by` is written");
-        std::fs::write(&generated, GENERATED).expect("the generated python is written");
+        std::fs::write(&source, by).expect("the `.by` is written");
+        std::fs::write(&generated, py).expect("the generated python is written");
         let build = Self {
             directory,
             source,
@@ -168,6 +228,26 @@ impl Build {
         .expect("the map is written");
     }
 
+    /// a shim that runs the generated python, the way `by run` does
+    ///
+    /// `_by_runner.py` upstream, and what it buys here is a stack with frames
+    /// **under** the build in it: the shim itself and the import machinery it
+    /// goes through. none of that is basedpython and none of it may be dressed
+    /// as it
+    fn runner(&self) -> PathBuf {
+        let path = self.root().join("runner.py");
+        std::fs::write(
+            &path,
+            format!(
+                "import runpy\n\
+                 runpy.run_path({:?}, run_name=\"__main__\")\n",
+                self.generated.display().to_string()
+            ),
+        )
+        .expect("the runner is written");
+        path
+    }
+
     fn root(&self) -> PathBuf {
         self.directory
             .path()
@@ -196,10 +276,15 @@ fn digest(path: &Path) -> String {
 
 /// launch the generated python out of its build directory
 fn launch(build: &Build) -> Debuggee {
+    launch_program(build, &build.generated)
+}
+
+/// launch one file of the build directory, so the map beside it is found
+fn launch_program(build: &Build, program: &Path) -> Debuggee {
     let arguments = [build.marks.clone().into_os_string()];
     match bpd_engine::launch(
         bpd_test::agent::matching_interpreter(),
-        &bpd_engine::Program::Script(build.generated.clone()),
+        &bpd_engine::Program::Script(program.to_path_buf()),
         &arguments,
     ) {
         Ok(Launched::Stopped(debuggee)) => debuggee,
@@ -261,7 +346,7 @@ fn a_by_breakpoint_binds_to_the_generated_line_and_says_both_locations() {
 }
 
 #[test]
-fn the_program_stops_on_the_generated_line_the_by_breakpoint_bound_to() {
+fn the_stop_names_the_by_line_the_breakpoint_was_set_on() {
     let build = Build::new();
     let mut debuggee = launch(&build);
     let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
@@ -275,15 +360,151 @@ fn the_program_stops_on_the_generated_line_the_by_breakpoint_bound_to() {
     let StopReason::Breakpoint { file, line, .. } = &reason else {
         panic!("the program was supposed to stop on the breakpoint, and it {reason:?}")
     };
-    // the stop names the file the interpreter is really in, which is the
-    // generated python. it is a frame of a `.py` and saying otherwise would be
-    // this milestone's own lie — the `.by` half of the answer is in the binding
-    assert_eq!(Path::new(file), build.generated);
-    assert_eq!(*line, bpd_test::debuggee::line_of(GENERATED, "write_text"));
+    // the whole of the other half. the user asked about a line of `demo.by` and
+    // the stop is about that line — the generated python it really ran is one
+    // field of the frame away, and both of them are true
+    assert_eq!(Path::new(file), build.source);
+    assert_eq!(*line, asked);
     assert_eq!(
         build.answer(),
         "",
         "the program is held before the line ran, so it has written nothing"
+    );
+}
+
+#[test]
+fn the_stack_reports_the_by_and_carries_where_the_interpreter_really_is() {
+    // the consistency rule, which is the one that matters most. a stop that
+    // said `demo.by:11` beside a frame that said `demo.py:14` would be the
+    // debugger contradicting itself about one place
+    let build = Build::new();
+    let mut debuggee = launch(&build);
+    let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
+    set(&mut debuggee, asked, &build.source);
+    let reason = run_to_stop(&mut debuggee);
+    let StopReason::Breakpoint { file, line, .. } = &reason else {
+        panic!("it was supposed to stop on the breakpoint: {reason:?}")
+    };
+
+    let stack = debuggee.the_stack(None).expect("the stack was walked");
+
+    let top = stack.frames.first().expect("a held thread has a stack");
+    assert_eq!(&top.file, file, "the stop and the frame are one location");
+    assert_eq!(top.line, *line);
+    let Some(Mapping::FromSource { generated }) = &top.mapping else {
+        panic!("a frame of the build says it is mapped, and this is {top:?}")
+    };
+    assert_eq!(generated.file, build.generated);
+    assert_eq!(
+        generated.line,
+        bpd_test::debuggee::line_of(GENERATED, "write_text"),
+        "the frame carries where the interpreter is, which is what a user who \
+         does not believe the debugger needs"
+    );
+
+    // and every frame of the build, not only the one that stopped. the module
+    // frame under it is `demo.by` too
+    for frame in &stack.frames {
+        assert_eq!(
+            Path::new(&frame.file),
+            build.source,
+            "every frame of this stack is the build's: {:?}",
+            stack.frames
+        );
+    }
+}
+
+#[test]
+fn a_generated_line_no_by_line_is_behind_is_reported_as_python_and_says_why() {
+    // a prelude line has no `.by` behind it — the map says so itself — and
+    // reporting one as a `.by` line would be the debugger writing a line the
+    // user never did. so the location stays the generated one, and the frame
+    // carries the map's own reason rather than leaving a temporary path in
+    // front of a user with nothing to explain it
+    let build = Build::new();
+    let mut debuggee = launch(&build);
+    let prelude = bpd_test::debuggee::line_of(GENERATED, "from pathlib import Path");
+
+    let resolved = set(&mut debuggee, prelude, &build.generated);
+    assert!(
+        matches!(resolved.binding, Binding::Bound { .. }),
+        "a breakpoint in the generated python binds as ordinary python: {resolved:?}"
+    );
+    let reason = run_to_stop(&mut debuggee);
+
+    let StopReason::Breakpoint { file, line, .. } = &reason else {
+        panic!("it was supposed to stop in the prelude: {reason:?}")
+    };
+    assert_eq!(Path::new(file), build.generated);
+    assert_eq!(*line, prelude);
+
+    let stack = debuggee.the_stack(None).expect("the stack was walked");
+    let top = stack.frames.first().expect("a held thread has a stack");
+    let Some(Mapping::InGeneratedPython { reason }) = &top.mapping else {
+        panic!("a prelude frame says what the map said about it, and this is {top:?}")
+    };
+    assert!(
+        matches!(reason, bpd_core::Unmapped::NoSourceLine { .. }),
+        "{reason:?}"
+    );
+    let said = reason.to_string();
+    assert!(said.contains("demo.py"), "{said}");
+    assert!(said.contains("demo.by"), "{said}");
+}
+
+#[test]
+fn frames_below_the_build_are_not_dressed_as_basedpython() {
+    // `by run` starts a runner shim and the interpreter's own machinery is
+    // under that. none of it is `.by`, the map says nothing about any of it,
+    // and a debugger that mapped a frame it had no entry for would be
+    // inventing a source file
+    let build = Build::new();
+    let runner = build.runner();
+    let mut debuggee = launch_program(&build, &runner);
+    let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
+
+    // the module is not compiled at launch — the runner has not run it yet —
+    // so the breakpoint binds when the file is loaded, which is what the run
+    // reports
+    set(&mut debuggee, asked, &build.source);
+    let reason = run_to_stop(&mut debuggee);
+    assert!(
+        matches!(reason, StopReason::Breakpoint { .. }),
+        "it was supposed to reach the breakpoint through the runner: {reason:?}"
+    );
+
+    let stack = debuggee.the_stack(None).expect("the stack was walked");
+    let mapped: Vec<&str> = stack
+        .frames
+        .iter()
+        .filter(|frame| frame.mapping.is_some())
+        .map(|frame| frame.file.as_str())
+        .collect();
+    let untouched: Vec<&str> = stack
+        .frames
+        .iter()
+        .filter(|frame| frame.mapping.is_none())
+        .map(|frame| frame.file.as_str())
+        .collect();
+
+    assert!(
+        !mapped.is_empty() && !untouched.is_empty(),
+        "this stack was supposed to have both kinds of frame in it: {:?}",
+        stack.frames
+    );
+    for file in mapped {
+        assert_eq!(Path::new(file), build.source, "a mapped frame is the `.by`");
+    }
+    for file in &untouched {
+        assert_ne!(
+            Path::new(file),
+            build.source,
+            "a frame the map says nothing about is reported as itself"
+        );
+    }
+    assert!(
+        untouched.iter().any(|file| file.ends_with("runner.py")),
+        "the shim that started the build is one of them: {untouched:?}"
     );
 }
 
@@ -430,6 +651,230 @@ fn a_python_breakpoint_in_a_mapped_build_is_untouched_by_the_map() {
         matches!(resolved.binding, Binding::Bound { .. }),
         "a python breakpoint stays a python one: {resolved:?}"
     );
+}
+
+#[test]
+fn an_exception_of_the_build_is_reported_in_by_lines_all_the_way_down() {
+    // a traceback is a location too, and one entry naming the generated python
+    // beside a stack that does not would be two answers about one place
+    let build = Build::raising();
+    let mut debuggee = launch(&build);
+    debuggee
+        .set_exception_breakpoints(false, true)
+        .expect("the exception breakpoints were set");
+
+    let reason = run_to_stop(&mut debuggee);
+
+    let StopReason::Uncaught { error, file, line } = &reason else {
+        panic!("it was supposed to stop where the exception leaves: {reason:?}")
+    };
+    assert_eq!(Path::new(file), build.source);
+    assert_eq!(
+        *line,
+        bpd_test::debuggee::line_of(RAISING, "the outermost frame")
+    );
+    let named: Vec<&str> = error
+        .traceback
+        .iter()
+        .map(|frame| frame.file.as_str())
+        .collect();
+    assert!(
+        named.len() >= 2,
+        "the exception came through the frames it was raised in: {named:?}"
+    );
+    for file in &named {
+        assert_eq!(
+            Path::new(file),
+            build.source,
+            "every frame of this traceback is the build's: {named:?}"
+        );
+    }
+    assert!(
+        error
+            .traceback
+            .iter()
+            .any(|frame| frame.line == bpd_test::debuggee::line_of(RAISING, "1 // 0")),
+        "and the line it was raised on is the `.by`'s: {:?}",
+        error.traceback
+    );
+}
+
+#[test]
+fn the_source_around_a_by_frame_is_the_by_and_is_checked_against_the_map() {
+    // showing the generated python beside a `.by` location would be the
+    // contradiction this milestone is about. the `.by` is read on the
+    // debuggee's own filesystem and checked against the digest the transpiler
+    // wrote, which is the only thing that can say it is still that file
+    let build = Build::new();
+    let mut debuggee = launch(&build);
+    let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
+    set(&mut debuggee, asked, &build.source);
+    run_to_stop(&mut debuggee);
+
+    let source = the_source(&mut debuggee, 2);
+
+    let bpd_core::Source::Lines {
+        at, lines, total, ..
+    } = &source
+    else {
+        panic!("the `.by` is on disk and is the file the map describes: {source:?}")
+    };
+    assert_eq!(*at, asked, "the window is around the `.by` line");
+    assert_eq!(
+        *total,
+        u32::try_from(SOURCE.lines().count()).expect("a fixture is not that long"),
+        "the file is the `.by`, so its length is the `.by`'s"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("print(answer)")),
+        "these are the lines of the `.by` the user wrote: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("write_text")),
+        "and not the generated python's: {lines:?}"
+    );
+}
+
+#[test]
+fn a_by_edited_after_the_launch_refuses_the_source_rather_than_showing_it() {
+    // `bpd` checked this file at launch and the user is asking about now. an
+    // editor that saved the `.by` in between leaves a file whose lines are
+    // wrong with total confidence, which is the failure a source map exists to
+    // prevent
+    let build = Build::new();
+    let mut debuggee = launch(&build);
+    let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
+    set(&mut debuggee, asked, &build.source);
+    run_to_stop(&mut debuggee);
+    std::fs::write(&build.source, format!("# an edit\n{SOURCE}")).expect("the user saves");
+
+    let source = the_source(&mut debuggee, 2);
+
+    let bpd_core::Source::Unverified { why } = &source else {
+        panic!("the `.by` moved and its lines were shown anyway: {source:?}")
+    };
+    assert!(
+        matches!(why, bpd_core::Unverified::NotTheSameSource { .. }),
+        "{why:?}"
+    );
+    let said = why.to_string();
+    assert!(said.contains("demo.by"), "{said}");
+    assert!(said.contains("transpile again"), "{said}");
+}
+
+#[test]
+fn a_frame_reported_as_by_is_moved_by_naming_a_by_line() {
+    // the inbound half. once a frame says `demo.by:11`, the line a client names
+    // against it is a line of `demo.by` — a debugger that answered in one
+    // file's lines and took orders in another's would be two debuggers
+    let build = Build::new();
+    let mut debuggee = launch(&build);
+    let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
+    set(&mut debuggee, asked, &build.source);
+    run_to_stop(&mut debuggee);
+    let frame = debuggee
+        .the_stack(None)
+        .expect("the stack was walked")
+        .frames
+        .first()
+        .expect("a held thread has a stack")
+        .id;
+
+    // back to the line above, which is `answer = add(2, 3)` in the `.by`
+    let back = bpd_test::debuggee::line_of(SOURCE, "answer = add(2, 3)");
+    let jumped = debuggee
+        .set_next_statement(frame, back)
+        .expect("the frame was moved");
+
+    assert!(
+        matches!(jumped.outcome, bpd_core::Jump::Moved { .. }),
+        "{jumped:?}"
+    );
+    assert_eq!(
+        Path::new(&jumped.at.file),
+        build.source,
+        "where the frame is now is said the way a client was told the rest"
+    );
+    assert_eq!(
+        jumped.at.line, back,
+        "and it is the `.by` line that was named"
+    );
+}
+
+#[test]
+fn a_by_line_nothing_was_generated_for_refuses_the_move_rather_than_guessing() {
+    let build = Build::new();
+    let mut debuggee = launch(&build);
+    let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
+    set(&mut debuggee, asked, &build.source);
+    run_to_stop(&mut debuggee);
+    let frame = debuggee
+        .the_stack(None)
+        .expect("the stack was walked")
+        .frames
+        .first()
+        .expect("a held thread has a stack")
+        .id;
+    let past = u32::try_from(SOURCE.lines().count() + 10).expect("a fixture is not that long");
+
+    let error = debuggee
+        .set_next_statement(frame, past)
+        .expect_err("nothing was generated for that line of the `.by`");
+
+    let said = format!("{error}");
+    assert!(said.contains("demo.by"), "{said}");
+    assert!(said.contains("generated nothing"), "{said}");
+}
+
+#[test]
+fn where_a_thread_is_is_sampled_in_by_terms() {
+    // a `Where` has no frame id on it and nowhere to carry the generated
+    // location, and it is still the same location a frame of the same code
+    // reports. one of them naming the other file would be the contradiction
+    let build = Build::new();
+    let mut debuggee = launch(&build);
+    let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
+    set(&mut debuggee, asked, &build.source);
+    run_to_stop(&mut debuggee);
+
+    let census = debuggee
+        .threads(std::time::Duration::from_millis(0))
+        .expect("the threads were sampled");
+
+    let places: Vec<&bpd_core::Where> = census
+        .threads
+        .iter()
+        .filter_map(|thread| thread.at.as_ref())
+        .collect();
+    assert!(
+        !places.is_empty(),
+        "the held thread is somewhere: {census:?}"
+    );
+    assert!(
+        places
+            .iter()
+            .any(|at| Path::new(&at.file) == build.source && at.line == asked),
+        "the held thread is at the `.by` line the stack reports: {places:?}"
+    );
+}
+
+/// the source around the frame that stopped, as a state query reads it
+fn the_source(debuggee: &mut Debuggee, around: u32) -> bpd_core::Source {
+    let snapshot = debuggee
+        .the_query(bpd_core::StateQuery {
+            frames: 1,
+            source: Some(around),
+            ..bpd_core::StateQuery::default()
+        })
+        .expect("the state was read");
+    snapshot
+        .state
+        .frames
+        .into_iter()
+        .next()
+        .expect("a held thread has a frame")
+        .source
+        .expect("the query asked for source")
 }
 
 /// run to the next stop, and hand back the reason it stopped for

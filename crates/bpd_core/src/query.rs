@@ -272,6 +272,20 @@ pub enum Unverified {
         /// the file that was read
         file: String,
     },
+
+    /// the frame is `.by`, and the `.by` is not the one that was transpiled
+    ///
+    /// the generated python is proved the way every other frame's source is —
+    /// it compiles and the running code object is in what came out — and then
+    /// the `.by` behind it is checked against the digest the map carries. a
+    /// file that has moved since the transpile is the failure a source map
+    /// exists to prevent, and it is reported rather than shown
+    NotTheSameSource {
+        /// the `.by` that was read
+        file: String,
+        /// the generated python it was transpiled to
+        generated: String,
+    },
 }
 
 impl std::fmt::Display for Unverified {
@@ -305,6 +319,14 @@ impl std::fmt::Display for Unverified {
                 "`{file}` is not utf-8. it compiled, so the interpreter read it \
                  under an encoding it declared — deciding that encoding again \
                  here would be a second implementation of a rule cpython owns"
+            ),
+            Self::NotTheSameSource { file, generated } => write!(
+                formatter,
+                "`{file}` is not the file `{generated}` was transpiled from — it \
+                 has been edited since the build. this frame's line is a line of \
+                 that build, so bpd will not show it against source that no \
+                 longer matches. transpile again and debug the build that comes \
+                 out"
             ),
         }
     }
@@ -1117,6 +1139,7 @@ mod tests {
     fn frame(depth: u32, function: &str, line: u32) -> Frame {
         Frame {
             id: FrameId { stop: 1, depth },
+            mapping: None,
             file: "/tmp/a.py".to_string(),
             line,
             kind: FrameKind::Python {

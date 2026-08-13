@@ -112,11 +112,26 @@ pub enum Facet {
     /// be a front end that cannot reach a second one, and the two of them
     /// drifting over that is exactly what the parity rule is for
     Session,
+
+    /// where the interpreter really is, for a frame reported in `.by` source —
+    /// [`crate::Mapping`]
+    ///
+    /// carried on the **answer** to a stack rather than in the request, which
+    /// is the same problem one step along: a front end can implement every
+    /// variant, report a mapped frame's `.by` location, and drop the generated
+    /// one — and a user who does not believe the debugger then has no way to
+    /// see what it saw. enumerating variants would never find it
+    GeneratedLocation,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 3] = [Self::HitCondition, Self::ValueBounds, Self::Session];
+    pub const ALL: [Self; 4] = [
+        Self::HitCondition,
+        Self::ValueBounds,
+        Self::Session,
+        Self::GeneratedLocation,
+    ];
 
     /// what to call this capability in a message about it
     pub const fn name(self) -> &'static str {
@@ -124,6 +139,7 @@ impl Facet {
             Self::HitCondition => "a breakpoint's hit condition",
             Self::ValueBounds => "the bounds on how much of a value is read",
             Self::Session => "naming the session a request is for",
+            Self::GeneratedLocation => "the generated python behind a `.by` frame",
         }
     }
 }

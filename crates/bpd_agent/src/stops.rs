@@ -236,6 +236,9 @@ pub(crate) fn route(request: FromEngine) {
             return;
         }
         FromEngine::SetBreakpoints { .. } => Address::Any("the breakpoints to resolve"),
+        // about the process: the map is how **every** location the agent
+        // reports is read, so it is not one thread's
+        FromEngine::MapSources { .. } => Address::Any("the source map to install"),
         FromEngine::SetExceptionBreakpoints { .. } => {
             Address::Any("the exception breakpoints to set")
         }

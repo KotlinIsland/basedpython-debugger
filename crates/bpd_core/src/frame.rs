@@ -45,6 +45,20 @@ pub struct Frame {
     pub file: String,
     /// the line of that file the frame is on now
     pub line: u32,
+    /// what the source map said about the two fields above, when one did
+    ///
+    /// `None` is the ordinary case: nothing mapped this location and it is the
+    /// interpreter's own. for a basedpython build it is what says **which of
+    /// the two files** the fields above name — a `.by` line with the generated
+    /// location beside it, or generated python with the map's own reason why no
+    /// `.by` line is behind it
+    ///
+    /// it is on a frame and not on a [`crate::StopReason`] because the stop's
+    /// location is always this frame's: a breakpoint, a step, a pause, a raise
+    /// and a fork all report the code object that is running, which is frame
+    /// zero. one field that a client reads once beats seven that have to agree
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mapping: Option<crate::source_map::Mapping>,
     /// what the frame is, and what only that kind of frame has
     ///
     /// flattened on the wire, so a frame is one object carrying a `kind`
