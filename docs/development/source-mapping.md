@@ -198,8 +198,8 @@ is alive for the whole session, `bpd` finds the map where the program is, and
 every `.by` breakpoint resolves through it. the same wrapper is what a DAP or MCP
 front end goes through, because all three reach the map the same way
 
-`bpd` does not yet have a subcommand that writes that wrapper for you, and
-[ROADMAP.md](../../ROADMAP.md) says so under M6
+`bpd` does not yet have a subcommand that writes that wrapper for you, and the
+roadmap's M6 entry says so
 
 ## what is mapped, and what is not yet
 

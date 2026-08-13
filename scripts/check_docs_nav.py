@@ -10,6 +10,7 @@ two drifting apart
 
 from __future__ import annotations
 
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -27,6 +28,28 @@ def nav_paths(nav: object) -> list[str]:
     if isinstance(nav, dict):
         return [path for value in nav.values() for path in nav_paths(value)]
     return []
+
+
+def escaping_links() -> list[str]:
+    """every relative link that leaves `docs/`
+
+    a docs page can only link to another docs page: the site is built from this
+    directory, so `../../ROADMAP.md` resolves to nothing and `zensical build
+    --strict` fails on it. that has been written three separate times, always by
+    someone reaching for the roadmap, and each time it was found by a CI job
+    rather than by the hooks — so it is checked here, where it costs nothing
+    """
+    escaping = []
+    for page in sorted(DOCS.rglob("*.md")):
+        for number, line in enumerate(page.read_text().splitlines(), start=1):
+            for target in re.findall(r"\]\(([^)]+)\)", line):
+                if target.startswith(("http://", "https://", "#", "mailto:")):
+                    continue
+                landing = (page.parent / target.split("#", 1)[0]).resolve()
+                if not landing.is_relative_to(DOCS.resolve()):
+                    here = page.relative_to(DOCS)
+                    escaping.append(f"{here}:{number} -> {target}")
+    return escaping
 
 
 def main() -> int:
@@ -49,6 +72,11 @@ def main() -> int:
     report(
         "duplicated in the zensical.toml nav",
         sorted({p for p in nav if nav.count(p) > 1}),
+    )
+    report(
+        "linking out of docs/, which the site cannot resolve — quote the file "
+        "or say its name instead of linking to it",
+        escaping_links(),
     )
 
     if problems:
