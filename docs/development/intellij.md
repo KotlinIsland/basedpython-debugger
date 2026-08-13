@@ -231,6 +231,24 @@ list above, plus both refusals: a `bpd executable` naming a file that is not
 there is refused by `checkConfiguration` with the path and the remedy in the
 sentence, and a relative one is refused rather than resolved
 
+**checked mechanically, in `cargo test`** — `crates/bpd_dap/tests/intellij.rs`:
+
+- every attribute the plugin sends in its `launch` request is one
+    `bpd_dap::Configuration` reads, with the field names taken from serde rather
+    than from a copy of them. this matters more here than it does for vs code:
+    `Configuration` deliberately does **not** deny unknown fields, because a DAP
+    `launch` carries the client's own keys — so a misspelled attribute is not an
+    error, it is a setting a person fills in and never gets, and nothing else
+    would ever say so
+- every attribute the adapter reads is either sent or excused by name, and each
+    excuse carries its reason
+- every attribute sent is stored on the run configuration and both written and
+    read back by the settings editor, so none is a constant wearing a
+    configuration and none is a field nobody can reach
+- the manifest depends on `intellij.platform.dap` and on python support, the
+    adapter id is still `bpd`, and the plugin still starts
+    `bpd dap --listen 0`
+
 **not checked.** the suite drives one platform per run, and CI drives linux, so
 the windows `PATHEXT` branch of the lookup has no coverage. `debug children` is
 sent in the launch request and the adapter's refusal is not driven from here —
