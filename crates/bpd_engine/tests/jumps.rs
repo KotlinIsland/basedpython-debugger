@@ -136,7 +136,9 @@ fn stopped_by(debuggee: &mut Debuggee, breakpoints: &[SourceBreakpoint]) -> Stop
         .expect("the breakpoint request was answered");
     for (requested, resolved) in breakpoints.iter().zip(&resolved) {
         match &resolved.binding {
-            Binding::Bound { line, .. } | Binding::BoundInTemplate { line, .. } => assert_eq!(
+            Binding::Bound { line, .. }
+            | Binding::BoundInTemplate { line, .. }
+            | Binding::BoundInSource { line, .. } => assert_eq!(
                 *line, requested.line,
                 "the fixture line has to be executable, or the test is about a \
                  different line than it says"

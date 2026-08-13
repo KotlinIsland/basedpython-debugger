@@ -119,9 +119,9 @@ fn launch(fixture: &Fixture) -> Debuggee {
 /// how a breakpoint's condition will be answered, or the reason it did not bind
 fn evaluation(resolved: &Resolved) -> Evaluation {
     match &resolved.binding {
-        Binding::Bound { evaluation, .. } | Binding::BoundInTemplate { evaluation, .. } => {
-            *evaluation
-        }
+        Binding::Bound { evaluation, .. }
+        | Binding::BoundInTemplate { evaluation, .. }
+        | Binding::BoundInSource { evaluation, .. } => *evaluation,
         Binding::Unbound { reason } => {
             panic!("breakpoint {} did not bind: {reason}", resolved.id)
         }
@@ -132,7 +132,9 @@ fn evaluation(resolved: &Resolved) -> Evaluation {
 fn unbound(resolved: &Resolved) -> &Unbound {
     match &resolved.binding {
         Binding::Unbound { reason } => reason,
-        Binding::Bound { line, .. } | Binding::BoundInTemplate { line, .. } => panic!(
+        Binding::Bound { line, .. }
+        | Binding::BoundInTemplate { line, .. }
+        | Binding::BoundInSource { line, .. } => panic!(
             "breakpoint {} bound to line {line}, and was not supposed to",
             resolved.id
         ),

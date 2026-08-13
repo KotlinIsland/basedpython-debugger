@@ -91,6 +91,15 @@ fn bound(resolved: &Resolved) -> (u32, &[Site]) {
              {nodes:?}, and this asked about a python binding",
             resolved.id
         ),
+        Binding::BoundInSource {
+            line, generated, ..
+        } => panic!(
+            "breakpoint {} bound to line {line} of a `.by`, generated as line \
+             {} of `{}`, and this asked about a python binding",
+            resolved.id,
+            generated.line,
+            generated.file.display()
+        ),
         Binding::Unbound { reason } => {
             panic!("breakpoint {} did not bind: {reason}", resolved.id)
         }
@@ -103,6 +112,11 @@ fn unbound(resolved: &Resolved) -> &Unbound {
         Binding::Unbound { reason } => reason,
         Binding::Bound { line, sites, .. } => panic!(
             "breakpoint {} bound to line {line} in {sites:?}, and was not supposed to",
+            resolved.id
+        ),
+        Binding::BoundInSource { line, .. } => panic!(
+            "breakpoint {} bound to line {line} of a `.by`, and was not \
+             supposed to bind at all",
             resolved.id
         ),
         Binding::BoundInTemplate { line, nodes, .. } => panic!(
@@ -741,6 +755,11 @@ fn a_path_that_differs_only_in_case_is_never_bound_to_a_different_file() {
         Binding::Unbound { reason } => assert!(
             matches!(reason, Unbound::Unresolvable { .. }),
             "the filesystem says that path is not there, and got {reason}"
+        ),
+        Binding::BoundInSource { generated, .. } => panic!(
+            "there is no source map in this session, and that path bound as \
+             basedpython generated at `{}`",
+            generated.file.display()
         ),
         Binding::BoundInTemplate { nodes, .. } => {
             panic!("a python file bound as a django template, in {nodes:?}")

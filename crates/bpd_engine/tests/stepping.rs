@@ -230,7 +230,9 @@ fn held_at(debuggee: &mut Debuggee, file: &Path, line: u32) -> Stop {
         .set_breakpoints(vec![SourceBreakpoint::at(1, file, line)])
         .expect("the breakpoint request was answered");
     match &resolved[0].binding {
-        Binding::Bound { line: bound, .. } | Binding::BoundInTemplate { line: bound, .. } => {
+        Binding::Bound { line: bound, .. }
+        | Binding::BoundInTemplate { line: bound, .. }
+        | Binding::BoundInSource { line: bound, .. } => {
             assert_eq!(
                 *bound, line,
                 "the fixture line has to be executable, or the test is about a \

@@ -83,7 +83,9 @@ fn launch(fixture: &Fixture) -> Debuggee {
 fn bound(resolved: &[Resolved]) {
     for resolution in resolved {
         match &resolution.binding {
-            Binding::Bound { .. } | Binding::BoundInTemplate { .. } => {}
+            Binding::Bound { .. }
+            | Binding::BoundInTemplate { .. }
+            | Binding::BoundInSource { .. } => {}
             Binding::Unbound { reason } => {
                 panic!("breakpoint {} did not bind: {reason}", resolution.id)
             }

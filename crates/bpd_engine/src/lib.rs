@@ -15,6 +15,7 @@
 pub mod agent;
 pub mod cache;
 pub mod launch;
+mod mapping;
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -112,6 +113,34 @@ pub enum Error {
         root: PathBuf,
         /// what was found in it, and what it would take to fix
         reason: String,
+    },
+
+    /// there is a basedpython source map beside the program and it cannot be used
+    ///
+    /// found rather than asked for, and still fatal. the map is only ever there
+    /// because `by` put it there, so a program running out of a directory that
+    /// has one **is** a transpiled program — and running it while ignoring a map
+    /// that cannot be trusted would report every `.by` location wrongly, or
+    /// report none at all without saying why
+    #[error("the basedpython build this program runs out of cannot be mapped")]
+    SourceMap {
+        /// what is wrong with it
+        #[source]
+        source: bpd_core::source_map::MapError,
+    },
+
+    /// a source map arrived after breakpoints had already been resolved
+    ///
+    /// the map decides what a `.by` breakpoint binds to, so a set resolved
+    /// before it arrived was resolved by a different rule. rather than leave two
+    /// answers about one breakpoint standing, this refuses — install the map
+    /// before the first set, which is what `bpd by` does at launch
+    #[error(
+        "a basedpython source map was installed after {resolved} breakpoints          had already been resolved. those were resolved without it, so they          would disagree with everything resolved after — install the map before          the first breakpoint set"
+    )]
+    MapAfterBreakpoints {
+        /// how many breakpoints had already been answered
+        resolved: usize,
     },
 
     /// the control plane could not be brought up

@@ -302,7 +302,9 @@ pub fn replaced(replacement: &Replaced) -> serde_json::Value {
             }
             for one in rebound {
                 notes.push(match &one.binding {
-                    Binding::Bound { line, .. } | Binding::BoundInTemplate { line, .. } => {
+                    Binding::Bound { line, .. }
+                    | Binding::BoundInTemplate { line, .. }
+                    | Binding::BoundInSource { line, .. } => {
                         format!(
                             "breakpoint {} is bound to line {line} now — it was \
                              armed on a code object nothing will execute any \
@@ -426,6 +428,30 @@ pub fn breakpoints(
                         rendered["moved"] = format!(
                             "line {} renders no django node, so this moved to \
                              line {line}, which does",
+                            asked.map_or(0, |asked| asked.line)
+                        )
+                        .into();
+                    }
+                }
+                Binding::BoundInSource {
+                    line,
+                    generated,
+                    sites,
+                    evaluation,
+                } => {
+                    rendered["bound"] = true.into();
+                    rendered["line"] = (*line).into();
+                    rendered["evaluation"] = serde_json::json!(evaluation);
+                    rendered["sites"] = serde_json::json!(sites);
+                    // both locations, because both are real and neither stands
+                    // in for the other. `line` is the `.by` the agent reading
+                    // this asked about; `generated` is where the interpreter
+                    // will really stop, and it is what makes the code objects
+                    // in `sites` mean anything
+                    rendered["generated"] = serde_json::json!(generated);
+                    if asked.is_some_and(|asked| asked.line != *line) {
+                        rendered["moved"] = format!(
+                            "line {} generated nothing bpd can stop on, so this                              moved to line {line}, which did",
                             asked.map_or(0, |asked| asked.line)
                         )
                         .into();
