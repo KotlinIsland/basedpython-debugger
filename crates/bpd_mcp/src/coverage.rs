@@ -113,6 +113,24 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
              state, which carry the sentence `bpd_core::Mapping` renders and \
              the generated file and line themselves",
         ),
+
+        // the one facet an MCP tool cannot carry, and the only one that is not
+        // a payload: everything else here is a shape, and JSON Schema carries
+        // any shape. a terminal is a thing the client has to **have**
+        Facet::Terminal => Reach::Unreachable {
+            why: "there is no terminal on this side to give. an MCP client is an \
+                  agent — it reads the program's output out of a tool's answer, \
+                  and there is no terminal in that picture for a debuggee to run \
+                  on, no keystrokes to deliver to one and nothing that would \
+                  render an escape sequence. DAP's `runInTerminal` works because \
+                  it asks a client that **owns** a terminal to make one, and the \
+                  equivalent here would be this server opening a pseudo-terminal \
+                  and calling it the agent's — which is `isatty()` answering \
+                  `True` about a thing that is not a terminal, in a debugger \
+                  whose whole rule is that what it reports is true. an agent \
+                  that needs a program to consume input gives it a file, an \
+                  argument or the environment",
+        },
     }
 }
 

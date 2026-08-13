@@ -125,6 +125,15 @@ fn every_attribute_the_plugin_leaves_out_is_one_it_could_not_honour() {
         // field is honest where a field that did nothing would not be
         String::from("variables"),
         String::from("threadSettleMs"),
+        // asking for a terminal is the `runInTerminal` reverse request, and
+        // whether it is answered is the **platform's** — the IDE's DAP layer
+        // owns the connection and says in `initialize` what it supports, and
+        // this plugin does not write that word. a run configuration offering a
+        // terminal the platform then declined would be the setting a person
+        // fills in and does not get, which is what this file exists to stop.
+        // nothing is silent about it either way: bpd refuses a `console` it
+        // cannot honour at `launch`, by name
+        String::from("console"),
     ]
     .into();
 

@@ -95,6 +95,20 @@ pub struct Configuration {
     #[serde(default)]
     pub debug_children: bool,
 
+    /// where the program runs, and therefore what its standard streams are
+    ///
+    /// the debug console by default, which is what this adapter has always
+    /// given a debuggee: pipes, forwarded as `output` events, and `/dev/null`
+    /// for stdin. either terminal is the `runInTerminal` reverse request — the
+    /// client starts the program in a terminal it owns, so the program has a
+    /// **real** one and `isatty()` is true
+    ///
+    /// it is refused at `launch` unless the client said it supports that
+    /// request in `initialize`, because a client that cannot be asked would
+    /// leave the session waiting for an agent nothing was going to start
+    #[serde(default)]
+    pub console: Console,
+
     /// run the program without debugging it
     ///
     /// refused rather than ignored. bpd has no path that launches a program
@@ -102,6 +116,46 @@ pub struct Configuration {
     /// run would be measuring something it did not ask for
     #[serde(default)]
     pub no_debug: bool,
+}
+
+/// where a debuggee's standard streams come from
+///
+/// the names are the ones a `launch.json` already has for this, because a
+/// person writing one has met them in every other python debugger. what the two
+/// terminals differ in is the `kind` of the `runInTerminal` request, and that is
+/// the client's own decision about where to put a terminal — bpd has nothing to
+/// say about it beyond passing the word through
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Console {
+    /// the client's debug console, which is not a terminal
+    ///
+    /// the program's stdout and stderr are pipes this adapter reads and
+    /// forwards as `output` events, and its stdin is `/dev/null`. that is what
+    /// `python program.py | client < /dev/null` gives, which is the bare run a
+    /// debug console is the same shape as
+    #[default]
+    InternalConsole,
+
+    /// a terminal inside the client
+    IntegratedTerminal,
+
+    /// a terminal the client opens outside itself
+    ExternalTerminal,
+}
+
+impl Console {
+    /// the `kind` of the `runInTerminal` request this asks for, if it asks
+    ///
+    /// `None` is the debug console, which is not a terminal and asks for
+    /// nothing
+    pub const fn kind(self) -> Option<&'static str> {
+        match self {
+            Self::InternalConsole => None,
+            Self::IntegratedTerminal => Some("integrated"),
+            Self::ExternalTerminal => Some("external"),
+        }
+    }
 }
 
 impl Configuration {
@@ -139,6 +193,11 @@ mod tests {
         assert!(!configuration.stop_on_entry);
         assert!(!configuration.stop_the_world);
         assert!(!configuration.no_debug);
+        // the debug console, which is what this adapter has always given a
+        // debuggee. a default of either terminal would change what every
+        // existing session's program *is*
+        assert_eq!(configuration.console, Console::InternalConsole);
+        assert_eq!(configuration.console.kind(), None);
         assert_eq!(configuration.variables, Detail::default());
         assert_eq!(configuration.settle(), Threads::SETTLE);
     }
@@ -177,6 +236,37 @@ mod tests {
         )
         .expect_err("`dept` is not a bound on a value");
         assert!(error.to_string().contains("dept"), "said {error}");
+    }
+
+    #[test]
+    fn each_terminal_asks_for_the_kind_of_the_reverse_request_it_is() {
+        // the word goes through to the client, which is what decides where a
+        // terminal goes. a spelling the client does not know would be a
+        // configuration accepted here and refused there
+        assert_eq!(
+            parse(r#"{"program": "a.py", "console": "integratedTerminal"}"#)
+                .console
+                .kind(),
+            Some("integrated")
+        );
+        assert_eq!(
+            parse(r#"{"program": "a.py", "console": "externalTerminal"}"#)
+                .console
+                .kind(),
+            Some("external")
+        );
+
+        // and a spelling that is not one of the three is refused rather than
+        // taking the default, which would be a program running somewhere the
+        // user did not ask for
+        let error = serde_json::from_str::<Configuration>(
+            r#"{"program": "a.py", "console": "integrated"}"#,
+        )
+        .expect_err("`integrated` is not one of the three");
+        assert!(
+            error.to_string().contains("integratedTerminal"),
+            "said {error}"
+        );
     }
 
     #[test]

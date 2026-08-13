@@ -29,7 +29,9 @@ use bpd_core::{Request, SessionId, Stop};
 use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
-pub use launch::{Debuggee, Launched, Program, launch, launch_piped};
+pub use launch::{
+    Debuggee, Invocation, Launched, Program, launch, launch_in_terminal, launch_piped,
+};
 
 /// the result type for engine operations
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -185,6 +187,53 @@ pub enum Error {
         /// how long was waited
         timeout: Duration,
     },
+
+    /// whoever was asked to start the debuggee says it did not
+    ///
+    /// nothing is waited for after this. a wait for an agent that was never
+    /// launched is a timeout thirty seconds later with a cause nobody would
+    /// find, and the thing that was asked has just said what went wrong
+    #[error("the program was not started")]
+    NotStarted {
+        /// what the thing that was asked said
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// the debuggee was started in somebody else's terminal and never connected
+    ///
+    /// the sibling of [`Self::AttachTimeout`] for a launch bpd did not spawn.
+    /// it is a **different** message rather than the same one, because the
+    /// thing to go and look at is different: there is no child to poll, so bpd
+    /// cannot tell a program that failed to start from one that is slow — and
+    /// the terminal the client opened is where the interpreter said which
+    #[error(
+        "the program was started in a terminal the client owns and no agent \
+         connected within {}s. bpd is not that process's parent, so it cannot \
+         say whether the interpreter ever ran — the terminal the client opened \
+         is where the interpreter's own output is, and a command that failed to \
+         start says why there",
+        timeout.as_secs()
+    )]
+    NoAgentFromTerminal {
+        /// how long was waited
+        timeout: Duration,
+    },
+
+    /// the debuggee in somebody else's terminal ended before it was held
+    ///
+    /// what a program that does not compile does on that path: the agent
+    /// connects, fails to build the program, and the interpreter prints the
+    /// `SyntaxError` where it was started. there is no exit code to report with
+    /// it — bpd is not that process's parent
+    #[error(
+        "the program started in a terminal the client owns ended before it \
+         reached its first statement. bpd is not that process's parent, so \
+         there is no exit code to report — the terminal the client opened has \
+         the interpreter's own words for what went wrong, a `SyntaxError` among \
+         them"
+    )]
+    EndedInTerminal,
 
     /// the control connection failed
     #[error("the control connection to the agent failed")]

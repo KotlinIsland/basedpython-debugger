@@ -153,6 +153,25 @@ fn every_contributed_attribute_declares_the_type_and_the_default_the_adapter_use
                 assert_eq!(schema["type"], "string");
                 assert_eq!(schema["default"], serde_json::json!(adapter.python));
             }
+            // the one attribute that is a choice of three rather than a value.
+            // the words are the adapter's own — they are what serde reads — and
+            // a schema that offered a fourth would be completing a spelling the
+            // adapter refuses
+            "console" => {
+                assert_eq!(schema["type"], "string");
+                assert_eq!(
+                    schema["enum"],
+                    serde_json::json!([
+                        "internalConsole",
+                        "integratedTerminal",
+                        "externalTerminal"
+                    ])
+                );
+                assert_eq!(
+                    schema["default"],
+                    serde_json::to_value(adapter.console).expect("a console is one of three words")
+                );
+            }
             "stopOnEntry" => flag(schema, adapter.stop_on_entry),
             "stopTheWorld" => flag(schema, adapter.stop_the_world),
             "debugChildren" => flag(schema, adapter.debug_children),

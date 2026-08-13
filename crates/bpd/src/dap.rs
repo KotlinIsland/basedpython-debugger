@@ -13,8 +13,12 @@
 //! its stdin is **`/dev/null`**, for the mirror image of that reason: over
 //! stdio this process's stdin is the protocol, and a debuggee reading it took
 //! the client's next request out of the stream. under `--listen` it belongs to
-//! whatever spawned this. neither is the debuggee's, and DAP's way to give a
-//! program real input is `runInTerminal`
+//! whatever spawned this. neither is the debuggee's
+//!
+//! the one launch that is none of the above is `runInTerminal`, where the
+//! client starts the program in a terminal it owns: there are no pipes then and
+//! no `/dev/null` either, because the program's three streams are that terminal
+//! and bpd is not even its parent
 //!
 //! under `--listen` the protocol is on the socket instead, and this process's
 //! stdout carries exactly one line: where the adapter bound and what a client
@@ -119,6 +123,41 @@ const HOLDING: &str =
     "nothing panics holding the debuggee: every path through it is one dispatch or one read";
 
 impl Engine {
+    /// probe the interpreter a configuration names, once nothing else is running
+    ///
+    /// the refusal is the same on both launch paths, and it is here rather than
+    /// in each so that a second `launch` cannot get past it by choosing the
+    /// other one
+    fn ready_for(&self, configuration: &Configuration) -> Result<Capabilities, Failed> {
+        if self.debuggee.lock().expect(HOLDING).is_some() {
+            return Err("this adapter already has a program. a second connection to it                         takes up a session of that one, which is what a `startDebugging`                         reverse request asks a client to do"
+                .into());
+        }
+        Ok(Capabilities::probe(&configuration.python)?)
+    }
+
+    /// keep what a launch produced, as the session this connection serves
+    fn hold(&self, launched: Launched) -> Result<Started, Failed> {
+        Ok(match launched {
+            Launched::Stopped(debuggee) => {
+                let session = only_session_of(&debuggee)?;
+                let held = Arc::new(Mutex::new(debuggee));
+                *self.debuggee.lock().expect(HOLDING) = Some(Arc::clone(&held));
+                Started::Stopped(Box::new(Attached {
+                    debuggee: held,
+                    session,
+                }))
+            }
+            // only a launch bpd **spawned** can answer with this: it is the
+            // child's exit status, and a program started in the client's own
+            // terminal has no status bpd can read. the engine reports that one
+            // as a failure naming the terminal instead
+            Launched::ExitedBeforeStopping(status) => Started::ExitedBeforeStopping {
+                code: status.code(),
+            },
+        })
+    }
+
     /// the debuggee, once something has launched one
     fn held(&self) -> Result<Arc<Mutex<Debuggee>>, Failed> {
         self.debuggee
@@ -140,41 +179,39 @@ impl Launcher for Engine {
         configuration: &Configuration,
         output: Arc<dyn ProgramOutput>,
     ) -> Result<Started, Failed> {
-        if self.debuggee.lock().expect(HOLDING).is_some() {
-            return Err("this adapter already has a program. a second connection to it                         takes up a session of that one, which is what a `startDebugging`                         reverse request asks a client to do"
-                .into());
-        }
-        let interpreter = Capabilities::probe(&configuration.python)?;
-        let arguments: Vec<OsString> = configuration
-            .args
-            .iter()
-            .map(|argument| OsString::from(argument.clone()))
-            .collect();
-
+        let interpreter = self.ready_for(configuration)?;
         let launched = bpd_engine::launch_piped(
             &interpreter,
             &Program::Script(configuration.program.clone()),
-            &arguments,
+            &arguments_of(configuration),
             move |stdout, stderr| {
                 forward(stdout, Stream::Stdout, &output);
                 forward(stderr, Stream::Stderr, &output);
             },
         )?;
+        self.hold(launched)
+    }
 
-        Ok(match launched {
-            Launched::Stopped(debuggee) => {
-                let session = only_session_of(&debuggee)?;
-                let held = Arc::new(Mutex::new(debuggee));
-                *self.debuggee.lock().expect(HOLDING) = Some(Arc::clone(&held));
-                Started::Stopped(Box::new(Attached {
-                    debuggee: held,
-                    session,
-                }))
-            }
-            Launched::ExitedBeforeStopping(status) => Started::ExitedBeforeStopping {
-                code: status.code(),
-            },
-        })
+    /// the same launch, with the client running the command line instead
+    ///
+    /// the engine prepares everything a spawn needs and hands it over, so what
+    /// differs is the last step. the two conversions here are DAP's rather than
+    /// the engine's: a command line goes over the wire as **json strings**, and
+    /// a path that is not utf-8 is refused by name rather than being made into
+    /// one that nearly is
+    fn launch_in_terminal(
+        &self,
+        configuration: &Configuration,
+        ask: &mut dyn FnMut(&bpd_dap::Invocation) -> Result<(), Failed>,
+    ) -> Result<Started, Failed> {
+        let interpreter = self.ready_for(configuration)?;
+        let launched = bpd_engine::launch_in_terminal(
+            &interpreter,
+            &Program::Script(configuration.program.clone()),
+            &arguments_of(configuration),
+            |invocation| ask(&carried(invocation)?),
+        )?;
+        self.hold(launched)
     }
 
     fn attach(&self, session: u64) -> Result<Started, Failed> {
@@ -193,6 +230,57 @@ impl Launcher for Engine {
             session: named,
         })))
     }
+}
+
+/// the program's own arguments, as the engine takes them
+fn arguments_of(configuration: &Configuration) -> Vec<OsString> {
+    configuration
+        .args
+        .iter()
+        .map(|argument| OsString::from(argument.clone()))
+        .collect()
+}
+
+/// the engine's invocation, as DAP can carry it
+///
+/// DAP carries a command line as json, which is text. a path that is not utf-8
+/// is refused **naming the value**, because the alternative is asking a client
+/// to run a path that is not the path — a replacement character where a byte
+/// was, and a program that runs from somewhere else or does not run at all
+fn carried(invocation: &bpd_engine::Invocation) -> Result<bpd_dap::Invocation, Failed> {
+    let text = |what: &str, value: &std::ffi::OsStr| -> Result<String, Failed> {
+        value.to_str().map(ToString::to_string).ok_or_else(|| {
+            Failed::from(format!(
+                "{what} is `{}`, which is not valid utf-8. DAP carries the \
+                 command line for `runInTerminal` as json strings, and bpd will \
+                 not ask a client to run a path that is not the path. run this \
+                 one on the debug console instead, which needs no such \
+                 conversion",
+                value.to_string_lossy()
+            ))
+        })
+    };
+
+    let mut arguments = Vec::with_capacity(invocation.arguments.len());
+    for argument in &invocation.arguments {
+        arguments.push(text("an argument of the command line", argument)?);
+    }
+    let mut env = Vec::with_capacity(invocation.env.len());
+    for (name, value) in &invocation.env {
+        env.push((
+            name.clone(),
+            text(&format!("the value of `{name}`"), value)?,
+        ));
+    }
+
+    Ok(bpd_dap::Invocation {
+        arguments,
+        env,
+        directory: text(
+            "the directory bpd is running in",
+            invocation.directory.as_os_str(),
+        )?,
+    })
 }
 
 /// the session a freshly launched debuggee holds, which is its only one

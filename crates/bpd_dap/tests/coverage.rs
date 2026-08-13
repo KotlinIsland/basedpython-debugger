@@ -50,6 +50,14 @@ const MAPPED_TO: &str = "/src/demo.by";
 /// only `demo.by:11` has no way to check the debugger against the interpreter
 const GENERATED_FROM: &str = "/tmp/.by-build/demo.py";
 
+/// a variable the fake's invocation carries, to be found in what was asked for
+///
+/// the environment is not decoration on a `runInTerminal`: it is how the agent
+/// learns where to connect and what token to present, so a client handed the
+/// argument vector without it would start an interpreter that never becomes a
+/// debuggee
+const TERMINAL_MARK: &str = "BPD_ENDPOINT";
+
 /// the session this fake's stops are reported from
 ///
 /// the engine mints one per debuggee and a fake has no engine, so this stands
@@ -153,6 +161,12 @@ fn every_capability_carried_inside_a_request_is_reached_or_says_why_not() {
         }
     }
 
+    // three of the four DAP reaches are read off this conversation below.
+    // `Facet::Terminal` is the fourth and is read off a conversation of its own,
+    // in `a_client_that_owns_a_terminal_is_asked_to_start_the_program_in_it`:
+    // asking for one changes what a launch **is**, so it is a different launch
+    // rather than another request in this one
+
     // the claim under test: DAP has nowhere on a request to put the bounds on a
     // value read, so the launch configuration is the route — and the
     // conversation set `children` to 7 there. a session asked for the default
@@ -212,6 +226,111 @@ fn every_capability_carried_inside_a_request_is_reached_or_says_why_not() {
             );
         }
     }
+}
+
+#[test]
+fn a_client_that_owns_a_terminal_is_asked_to_start_the_program_in_it() {
+    // the claim `reach_of_facet` makes about `Facet::Terminal`, read against
+    // what the adapter really sent. an adapter that took `console` and launched
+    // on the debug console anyway would pass every other test in this file
+    let asked = terminal_launch(true);
+
+    let request = asked
+        .messages
+        .iter()
+        .find(|message| message["type"] == "request" && message["command"] == "runInTerminal")
+        .unwrap_or_else(|| {
+            panic!(
+                "`console` asked for a terminal and the client was never asked \
+                 for one: {:?}",
+                asked.messages
+            )
+        });
+    assert_eq!(
+        request["arguments"]["kind"], "integrated",
+        "the client decides where a terminal goes, and the word goes through: {request}"
+    );
+
+    // the whole command line, and the environment with it. either half missing
+    // is an interpreter that starts and never becomes a debuggee
+    let arguments = request["arguments"]["args"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the client is handed an argument vector: {request}"));
+    assert!(
+        arguments.iter().any(|argument| argument
+            .as_str()
+            .is_some_and(|word| word.contains("bpd_agent"))),
+        "the command line the client was handed does not start the agent: {request}"
+    );
+    assert_eq!(
+        request["arguments"]["env"][TERMINAL_MARK], "127.0.0.1:4711",
+        "the environment the agent reads did not go with it: {request}"
+    );
+    assert_eq!(
+        request["arguments"]["cwd"], "/tmp",
+        "a client that ran the command somewhere else would run a different \
+         program for a relative path: {request}"
+    );
+
+    // and the launch was answered only after the client said it had started it
+    let launched = asked
+        .messages
+        .iter()
+        .position(|message| message["type"] == "response" && message["command"] == "launch")
+        .unwrap_or_else(|| panic!("the launch was never answered: {:?}", asked.messages));
+    let requested = asked
+        .messages
+        .iter()
+        .position(|message| message["type"] == "request" && message["command"] == "runInTerminal")
+        .expect("the request was found above");
+    assert!(
+        requested < launched,
+        "the launch was answered before the client had been asked to start the \
+         program, so bpd would have been waiting for an agent it had not asked \
+         anybody to start"
+    );
+    assert_eq!(
+        asked.messages[launched]["success"], true,
+        "the client started the program and the launch was refused anyway: {:?}",
+        asked.messages[launched]
+    );
+}
+
+#[test]
+fn a_client_with_no_terminal_is_refused_at_launch_and_asked_for_nothing() {
+    // `supportsRunInTerminalRequest` is a **client** capability. a client
+    // without it cannot be asked, so a launch that asked anyway would sit
+    // waiting for an agent nothing was ever going to start — which is a hang
+    // with no cause, and the reason this is refused at the one moment nothing
+    // has happened yet
+    let asked = terminal_launch(false);
+
+    assert!(
+        !asked
+            .messages
+            .iter()
+            .any(|message| message["command"] == "runInTerminal"),
+        "a client that cannot answer it was asked anyway: {:?}",
+        asked.messages
+    );
+
+    let launched = asked
+        .messages
+        .iter()
+        .find(|message| message["type"] == "response" && message["command"] == "launch")
+        .unwrap_or_else(|| panic!("the launch was never answered: {:?}", asked.messages));
+    assert_eq!(launched["success"], false, "{launched}");
+    let said = launched["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a refusal says why: {launched}"));
+    assert!(
+        said.contains("runInTerminal"),
+        "the refusal names what the client is missing, and said {said:?}"
+    );
+    assert!(
+        said.contains("take `console` out"),
+        "and what to do instead, and said {said:?}"
+    );
 }
 
 #[test]
@@ -412,6 +531,114 @@ fn drive(asked: &Asked) -> Transcript {
     drive_until(asked, Told::Exited)
 }
 
+/// launch asking for a terminal, as a client that can answer for one and as one
+/// that cannot
+///
+/// a conversation of its own rather than a branch of the one above, because the
+/// launch is the whole of what differs: the client is asked to start the
+/// program, and everything after the answer is the session the other
+/// conversation drives at length
+///
+/// the client here **answers** the reverse request, which nothing else in this
+/// file does. what that proves is the order — the launch is not answered until
+/// the program has been started, so bpd never waits for an agent nobody was
+/// asked to start
+fn terminal_launch(advertised: bool) -> Transcript {
+    let (to_adapter, mut client_writes) = std::io::pipe().expect("a pipe is available");
+    let (client_reads, from_adapter) = std::io::pipe().expect("a pipe is available");
+
+    let served = std::thread::spawn(move || {
+        bpd_dap::serve(
+            &Fake {
+                asked: Asked::default(),
+                ending: Told::Exited,
+            },
+            Box::new(to_adapter),
+            Box::new(from_adapter),
+            &bpd_dap::Reachable::Nowhere,
+        )
+    });
+
+    let mut reader = Messages::new(client_reads);
+    let mut seq = 0;
+    let send = |writer: &mut std::io::PipeWriter, message: serde_json::Value| {
+        let body = message.to_string();
+        write!(writer, "Content-Length: {}\r\n\r\n{body}", body.len())
+            .expect("the adapter is reading");
+        writer.flush().expect("the adapter is reading");
+    };
+
+    seq += 1;
+    send(
+        &mut client_writes,
+        serde_json::json!({
+            "seq": seq, "type": "request", "command": "initialize",
+            "arguments": { "supportsRunInTerminalRequest": advertised },
+        }),
+    );
+    reader.response_to(seq);
+
+    seq += 1;
+    let launch = seq;
+    send(
+        &mut client_writes,
+        serde_json::json!({
+            "seq": launch, "type": "request", "command": "launch",
+            "arguments": { "program": "/tmp/fake.py", "console": "integratedTerminal" },
+        }),
+    );
+
+    // read until the launch is answered, answering the reverse request on the
+    // way if one arrives. a client that waited for its own answer first would
+    // deadlock against an adapter waiting for it, which is the shape of this
+    // exchange and the reason it is driven rather than assumed
+    loop {
+        let message = reader.next_message();
+        let answering = message["type"] == "request" && message["command"] == "runInTerminal";
+        let sequence = message["seq"]
+            .as_i64()
+            .expect("every message carries a seq");
+        let answered = message["type"] == "response" && message["request_seq"] == launch;
+        reader.seen.push(message);
+        if answering {
+            send(
+                &mut client_writes,
+                serde_json::json!({
+                    "type": "response", "seq": 0, "request_seq": sequence,
+                    "success": true, "command": "runInTerminal",
+                    // the pid of the shell the client started it in. bpd reads
+                    // neither: it is not that process's parent, and a number a
+                    // client reported is not something a debugger may treat as
+                    // a process it can see
+                    "body": { "shellProcessId": 4242 },
+                }),
+            );
+        }
+        if answered {
+            break;
+        }
+    }
+
+    seq += 1;
+    send(
+        &mut client_writes,
+        serde_json::json!({
+            "seq": seq, "type": "request", "command": "disconnect", "arguments": {},
+        }),
+    );
+    reader.response_to(seq);
+    drop(client_writes);
+
+    served
+        .join()
+        .expect("the adapter did not panic")
+        .expect("the adapter served the whole conversation");
+
+    Transcript {
+        messages: reader.seen,
+    }
+}
+
 /// the same conversation, run to one of the two ways a program can end
 ///
 /// `ending` is what the fake answers the last wait with. a program bpd started
@@ -474,9 +701,11 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
         &mut client_writes,
         &mut reader,
         "initialize",
-        // the one **client** capability this adapter reads. without it a
-        // debugged fork is refused, because a client that cannot start the
-        // session `startDebugging` asks for would leave the child held
+        // one of the two **client** capabilities this adapter reads — the other
+        // is `supportsRunInTerminalRequest`, which this conversation does not
+        // ask for and `terminal_launch` does. without it a debugged fork is
+        // refused, because a client that cannot start the session
+        // `startDebugging` asks for would leave the child held
         serde_json::json!({ "supportsStartDebuggingRequest": true }),
     );
     answer(
@@ -882,13 +1111,10 @@ struct FakeSession {
     said: bool,
 }
 
-impl Launcher for Fake {
-    fn launch(
-        &self,
-        _configuration: &Configuration,
-        _output: Arc<dyn ProgramOutput>,
-    ) -> Result<Started, Failed> {
-        Ok(Started::Stopped(Box::new(FakeSession {
+impl Fake {
+    /// the session this fake hands out, however it was asked for
+    fn session(&self, ending: Told) -> Started {
+        Started::Stopped(Box::new(FakeSession {
             asked: Arc::clone(&self.asked),
             held: vec![stop_at(1, StopReason::Entry)],
             remaining: vec![stop_at(
@@ -903,9 +1129,44 @@ impl Launcher for Fake {
             // still held are both things a real one does before it ends, and
             // neither ends it — so both come before whichever ending this
             // conversation is driving
-            over: vec![Told::StillRunning, Told::Finishing, self.ending],
+            over: vec![Told::StillRunning, Told::Finishing, ending],
             said: false,
-        })))
+        }))
+    }
+}
+
+impl Launcher for Fake {
+    fn launch(
+        &self,
+        _configuration: &Configuration,
+        _output: Arc<dyn ProgramOutput>,
+    ) -> Result<Started, Failed> {
+        Ok(self.session(self.ending))
+    }
+
+    /// the same session, with the client asked to start the program
+    ///
+    /// what the fake is for here is the **asking**: the invocation is recorded
+    /// so that the conversation can read what the client was handed, and the
+    /// session that comes back is the one every other test in this file drives.
+    /// that a real interpreter really starts on a real terminal this way is
+    /// `crates/bpd/tests/dap.rs`
+    fn launch_in_terminal(
+        &self,
+        _configuration: &Configuration,
+        ask: &mut dyn FnMut(&bpd_dap::Invocation) -> Result<(), Failed>,
+    ) -> Result<Started, Failed> {
+        let invocation = bpd_dap::Invocation {
+            arguments: vec![
+                "python3".to_string(),
+                "-c".to_string(),
+                "import bpd_agent; bpd_agent.main()".to_string(),
+            ],
+            env: vec![(TERMINAL_MARK.to_string(), "127.0.0.1:4711".to_string())],
+            directory: "/tmp".to_string(),
+        };
+        ask(&invocation)?;
+        Ok(self.session(self.ending))
     }
 
     /// this fake launches, and nothing takes up a session of it

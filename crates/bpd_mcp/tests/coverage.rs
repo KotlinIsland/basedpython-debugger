@@ -136,7 +136,22 @@ fn every_capability_carried_inside_a_request_reaches_the_session() {
     let client = drive(&asked);
     let recorded = asked.lock().expect("the recorder is not poisoned");
 
+    // every facet that is a **payload** reaches, because an MCP tool takes JSON
+    // Schema input and there is no shape it cannot carry. the one exception is
+    // the one that is not a payload: a terminal is a thing the client has to
+    // have, and an agent has none — so it is named here rather than being
+    // covered by a rule that would let the next gap through with it
     for facet in Facet::ALL {
+        if facet == Facet::Terminal {
+            assert!(
+                !reach_of_facet(facet).reaches(),
+                "`{}` is said to reach an agent, and this server has no terminal \
+                 to give a debuggee — one it opened itself would be a \
+                 pseudo-terminal called a terminal",
+                facet.name()
+            );
+            continue;
+        }
         assert!(
             reach_of_facet(facet).reaches(),
             "`{}` is said to be out of an agent's reach, and an MCP tool takes \

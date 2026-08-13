@@ -60,9 +60,10 @@ pub mod wire;
 
 pub use adapter::serve;
 pub use capabilities::capabilities;
-pub use configuration::Configuration;
+pub use configuration::{Configuration, Console};
 pub use coverage::{carriage_of, reach_of, reach_of_facet, surface};
 pub use listen::Listening;
 pub use session::{
-    Failed, Interrupt, Launcher, ProgramOutput, Reachable, Session, Started, Stream, describe,
+    Failed, Interrupt, Invocation, Launcher, ProgramOutput, Reachable, Session, Started, Stream,
+    describe,
 };

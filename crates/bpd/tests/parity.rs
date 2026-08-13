@@ -52,6 +52,13 @@ const JUSTIFIED: &[(&str, &str)] = &[
     // there is nothing to map it onto — and MCP, whose tools take JSON Schema
     // input, carries the typed form as itself
     ("DAP", "a breakpoint's hit condition"),
+    // an MCP client is an agent and has no terminal for a program to run on:
+    // it reads the program's output out of a tool's answer. DAP's
+    // `runInTerminal` works by asking a client that **owns** a terminal to make
+    // one, and the equivalent here would be this server opening a
+    // pseudo-terminal and calling it the agent's — `isatty()` answering `True`
+    // about a thing that is not a terminal
+    ("MCP", "running the debuggee on a terminal the client owns"),
 ];
 
 /// everything the debugger says that one front end cannot pass on, and which
