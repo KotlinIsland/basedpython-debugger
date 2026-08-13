@@ -1073,15 +1073,12 @@ impl Attached {
         // a `.by` breakpoint is translated into the generated python before
         // the agent sees it, and the answer is translated back before anybody
         // else does. the agent never learns a source map exists
-        let mapping::Sent {
-            breakpoints,
-            refused,
-            translated,
-        } = mapping::send(self.map.as_deref(), breakpoints);
+        let sent = mapping::send(self.map.as_deref(), breakpoints);
+        let breakpoints = sent.breakpoints;
         // replaced whole, like the set it describes. a translation left over
         // from the last set would map an answer through a route this one never
         // took
-        self.translated = translated;
+        self.translated = sent.translated;
 
         let request = FromEngine::SetBreakpoints { breakpoints };
         match self.ask(&request, EXPECTED, reporting)? {
@@ -1089,10 +1086,10 @@ impl Attached {
                 let mut answers = self.restore(resolved);
                 // the ones the map refused never went to the agent, so they are
                 // put back here. a client asked about every breakpoint in the
-                // set and is owed an answer about every one of them
-                answers.extend(refused);
-                answers.sort_by_key(|answer| answer.id);
-                Ok(answers)
+                // set and is owed an answer about every one of them, in the
+                // order it asked
+                answers.extend(sent.refused);
+                Ok(mapping::reorder(&sent.order, answers))
             }
             other => Err(unexpected(&other, EXPECTED)),
         }

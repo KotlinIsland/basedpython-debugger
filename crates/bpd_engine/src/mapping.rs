@@ -63,6 +63,33 @@ pub(crate) struct Sent {
     pub(crate) refused: Vec<Resolved>,
     /// where each translated breakpoint went, by its client id
     pub(crate) translated: BTreeMap<u32, Translated>,
+    /// the ids of the set, in the order the client asked about them
+    ///
+    /// a breakpoint the map refused never reaches the agent, so the agent's
+    /// answers are a subset in its own order and the refusals have to be put
+    /// back among them. a client that reads an answer by position — every DAP
+    /// client does, because `setBreakpoints` answers an array — would otherwise
+    /// read the answer to one breakpoint as the answer to another
+    pub(crate) order: Vec<u32>,
+}
+
+/// put a set of answers back into the order they were asked about
+pub(crate) fn reorder(order: &[u32], mut answers: Vec<Resolved>) -> Vec<Resolved> {
+    let at: BTreeMap<u32, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index))
+        .collect();
+    answers.sort_by_key(|answer| {
+        at.get(&answer.id).copied().unwrap_or_else(|| {
+            unreachable!(
+                "breakpoint {} was answered and it was not in the set that was \
+                 asked about",
+                answer.id
+            )
+        })
+    });
+    answers
 }
 
 /// whether a file is basedpython source, which only a map can place
@@ -77,7 +104,10 @@ pub(crate) fn is_source(file: &Path) -> bool {
 /// map that has nothing to say: with no map at all a `.by` breakpoint is refused
 /// naming what would produce one, and every other file goes through untouched
 pub(crate) fn send(map: Option<&SourceMap>, breakpoints: Vec<SourceBreakpoint>) -> Sent {
-    let mut sent = Sent::default();
+    let mut sent = Sent {
+        order: breakpoints.iter().map(|breakpoint| breakpoint.id).collect(),
+        ..Sent::default()
+    };
     for breakpoint in breakpoints {
         if !is_source(&breakpoint.file) {
             sent.breakpoints.push(breakpoint);

@@ -2674,4 +2674,48 @@ mod tests {
             "said {pending}"
         );
     }
+
+    #[test]
+    fn a_by_breakpoint_keeps_the_by_location_and_still_says_where_it_really_is() {
+        use bpd_core::source_map::Located;
+        use bpd_core::{Evaluation, Site};
+
+        // DAP's `Breakpoint` has one source and one line. the `.by` is what goes
+        // in them, because that is the file the client asked about and the one
+        // it will put a marker in — and the generated location is not dropped
+        // for want of a field, because a person who does not believe the
+        // debugger has to be able to see what it saw
+        let requested = SourceBreakpoint::at(4, "/src/app.by", 7);
+        let rendered = rendered_breakpoint(
+            &Resolved {
+                id: 4,
+                binding: Binding::BoundInSource {
+                    line: 7,
+                    generated: Located {
+                        file: PathBuf::from("/tmp/build/app.py"),
+                        line: 19,
+                    },
+                    sites: vec![Site {
+                        qualname: "main".to_string(),
+                        first_line: 12,
+                        offset: 4,
+                    }],
+                    evaluation: Evaluation::Always,
+                },
+            },
+            &requested,
+        );
+
+        assert_eq!(rendered["verified"], true);
+        assert_eq!(
+            rendered["line"], 7,
+            "the `.by` line is what the client sees"
+        );
+        assert_eq!(rendered["source"]["path"], "/src/app.by");
+        let said = rendered["message"]
+            .as_str()
+            .expect("a mapped breakpoint says where it really is");
+        assert!(said.contains("/tmp/build/app.py"), "said {said}");
+        assert!(said.contains("line 19"), "said {said}");
+    }
 }
