@@ -1,0 +1,27 @@
+[package]
+name = "bpd_release"
+description = "assemble and verify the layout a released bpd is shipped as"
+edition = { workspace = true }
+rust-version = { workspace = true }
+version = { workspace = true }
+publish = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+
+[[bin]]
+name = "bpd-release"
+path = "src/main.rs"
+
+[dependencies]
+bpd_core = { workspace = true }
+bpd_engine = { workspace = true }
+
+clap = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

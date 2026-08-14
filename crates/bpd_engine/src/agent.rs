@@ -686,7 +686,15 @@ fn unreadable(path: &Path) -> impl FnOnce(io::Error) -> Error + use<> {
     }
 }
 
-fn cargo_artifact_name() -> String {
+/// what cargo names the agent artifact on this platform
+///
+/// public because a **release** has to place it under exactly this name: the
+/// scan above joins it onto each tag directory, so an agent copied in under the
+/// name it happened to be built as assembles cleanly, verifies cleanly, and is
+/// then invisible at launch. `bpd_release` uses this one rather than a second
+/// spelling of it
+#[must_use]
+pub fn cargo_artifact_name() -> String {
     if cfg!(windows) {
         format!("{MODULE}.dll")
     } else if cfg!(target_vendor = "apple") {
