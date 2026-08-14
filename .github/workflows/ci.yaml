@@ -118,6 +118,30 @@ jobs:
             test "$ran" = "the-program-ran"
           done
 
+      # the layout above is assembled by this workflow, and a release is
+      # assembled by `bpd-release`. those being two different things is how a
+      # release comes to carry an agent under a name nothing looks for — which
+      # assembles cleanly, verifies cleanly, and is invisible at every launch.
+      # so the release path is built and driven here too
+      #
+      # **nothing is uploaded.** this produces a directory, checks it is what it
+      # says, and launches through it. what happens to a release afterwards is a
+      # decision nobody has made
+      - run: cargo build --bin bpd-release
+      - name: a release layout is assembled, verified, and launched through
+        run: |
+          set -euo pipefail
+          ./target/debug/bpd-release assemble \
+            --binary target/debug/bpd \
+            --agent 3.13=target/debug/agents/3.13/libbpd_agent.so \
+            --agent 3.14=target/debug/agents/3.14/libbpd_agent.so \
+            --out target/release-layout
+          ./target/debug/bpd-release verify target/release-layout
+          for python in python3.13 python3.14; do
+            ran=$(./target/release-layout/bpd launch --python "$python" -c 'print("the-program-ran")')
+            test "$ran" = "the-program-ran"
+          done
+
   cross:
     name: cross-compile ${{ matrix.target }}
     runs-on: ubuntu-latest
