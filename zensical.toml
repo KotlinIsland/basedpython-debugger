@@ -76,6 +76,7 @@ development = [
     "development/mcp.md",
     "development/scripts.md",
     "development/queries.md",
+    "development/facts.md",
     "development/releasing.md",
     "development/testing.md",
     "development/overhead.md",

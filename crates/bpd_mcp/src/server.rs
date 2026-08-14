@@ -446,6 +446,26 @@ impl<'a> Server<'a> {
                     other => unreachable!("a scope read was answered with {other:?}"),
                 }
             }
+            "facts" => {
+                let args: FactsArgs = parse(name, arguments)?;
+                let frame = self.frame_of(
+                    args.stop,
+                    args.session,
+                    args.frame,
+                    "what is provable about a frame's names",
+                )?;
+                match self.ask_in(
+                    args.session,
+                    Request::Facts {
+                        frame,
+                        names: args.names,
+                        limit: args.limit,
+                    },
+                )? {
+                    Response::Facts(facts) => Ok(render::facts(&facts)),
+                    other => unreachable!("a fact request was answered with {other:?}"),
+                }
+            }
             "template_context" => {
                 let args: TemplateContextArgs = parse(name, arguments)?;
                 let frame = self.frame_of(
@@ -1557,6 +1577,20 @@ struct VariablesArgs {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct FactsArgs {
+    #[serde(default)]
+    session: Option<u64>,
+    #[serde(default)]
+    stop: Option<u64>,
+    #[serde(default)]
+    frame: u32,
+    names: Vec<String>,
+    #[serde(default)]
+    limit: bpd_core::Limit,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TemplateContextArgs {
     #[serde(default)]
     session: Option<u64>,
@@ -1896,6 +1930,7 @@ mod tests {
         "resume" => Resume,
         "stack" => StackArgs,
         "variables" => VariablesArgs,
+        "facts" => FactsArgs,
         "template_context" => TemplateContextArgs,
         "evaluate" => EvaluateArgs,
         "set_variable" => SetVariableArgs,

@@ -162,6 +162,46 @@ pub fn variables(read: &Variables) -> serde_json::Value {
     })
 }
 
+/// what is provable about a frame's names, and for how long
+///
+/// the stability is rendered as the sentence it is rather than as a tag. an
+/// agent reading `until the object's contents are mutable` knows what it may
+/// carry the reading past; one reading `"contents"` has to be told separately
+pub fn facts(facts: &bpd_core::Facts) -> serde_json::Value {
+    let proved: Vec<serde_json::Value> = facts
+        .proved
+        .iter()
+        .map(|fact| {
+            serde_json::json!({
+                "name": fact.name,
+                "scope": fact.scope.to_string(),
+                "observed": fact.observed,
+                "permanent": fact.stability.is_permanent(),
+                "stability": fact.stability.to_string(),
+            })
+        })
+        .collect();
+
+    let silent: Vec<serde_json::Value> = facts
+        .silent
+        .iter()
+        .map(|silent| {
+            serde_json::json!({
+                "name": silent.name,
+                "why": silent.why.to_string(),
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "proved": proved,
+        // a name that produced nothing and said nothing would be
+        // indistinguishable from one bound to something uninteresting
+        "silent": silent,
+        "mode": facts.mode.to_string(),
+    })
+}
+
 /// what a template frame's django context holds, layer by layer
 ///
 /// the layers stay layers, and the shadowing between them is named rather than

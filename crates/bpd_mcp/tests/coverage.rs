@@ -432,6 +432,10 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
         &serde_json::json!({ "scope": "local", "detail": { "children": 7 } }),
     );
     client.call(
+        "facts",
+        &serde_json::json!({ "names": ["total", "self.limit"], "limit": { "depth": 3 } }),
+    );
+    client.call(
         "template_context",
         &serde_json::json!({ "frame": 0, "detail": { "children": 7 } }),
     );
@@ -687,6 +691,7 @@ fn tool_order() -> Vec<&'static str> {
         "stop_the_world",
         "stack",
         "variables",
+        "facts",
         "template_context",
         "evaluate",
         "set_variable",
@@ -1239,6 +1244,21 @@ impl Session for FakeSession {
                 unbound: Vec::new(),
                 unreadable: Vec::new(),
                 omitted: Vec::new(),
+                mode: Mode::NonStop,
+            }),
+            Request::Facts { names, .. } => Response::Facts(bpd_core::Facts {
+                proved: names
+                    .iter()
+                    .map(|name| bpd_core::Fact {
+                        name: name.clone(),
+                        scope: bpd_core::Scope::Local,
+                        observed: bpd_core::Observed::IsInt {
+                            text: "1".to_string(),
+                        },
+                        stability: bpd_core::Stability::Permanent,
+                    })
+                    .collect(),
+                silent: Vec::new(),
                 mode: Mode::NonStop,
             }),
             Request::Evaluate { .. } | Request::SetVariable { .. } => {

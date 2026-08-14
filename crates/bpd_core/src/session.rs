@@ -491,6 +491,35 @@ pub enum Request {
         /// how much of the value read back to report
         detail: Detail,
     },
+
+    /// what the debugger can **prove** about some of a frame's names
+    ///
+    /// [`Request::Variables`] answers what a scope holds right now, which is a
+    /// statement about a moment. this answers what is true of a name *and* how
+    /// far past that moment the answer can be carried — because a client
+    /// reasoning about code that has not run yet needs the second half and
+    /// cannot derive it. only something holding the object can say whether a
+    /// reading of it can go stale, and that is the whole of why this is a
+    /// capability of the debugger rather than something a client works out
+    ///
+    /// the names are named rather than "all of them": a client asking this is
+    /// analysing a region of source and knows which names that region mentions,
+    /// and every other local in the frame is a read nobody asked for. a name
+    /// may be a dotted path, and every segment of one is read out of an
+    /// object's own storage or not at all
+    ///
+    /// **it runs none of the program.** a reading that would need `__bool__`,
+    /// `__len__`, a property or a `__getattr__` is not taken and not guessed
+    /// at — the name comes back in [`crate::Facts::silent`] naming what would
+    /// have run. see [`crate::fact`]
+    Facts {
+        /// which frame
+        frame: FrameId,
+        /// the names to prove things about, each a name or a dotted path
+        names: Vec<String>,
+        /// how much one fact may cost
+        limit: crate::fact::Limit,
+    },
 }
 
 impl Request {
@@ -520,6 +549,7 @@ impl Request {
             Self::Query { .. } => "the state of a stop",
             Self::Diff { .. } => "the difference between two states",
             Self::SetVariable { .. } => "writing a variable",
+            Self::Facts { .. } => "what is provable about a frame's names",
             Self::ReplaceCode { .. } => "replacing a file's code",
             Self::SetNextStatement { .. } => "setting the next statement",
             Self::RestartFrame { .. } => "restarting a frame",
@@ -566,6 +596,7 @@ impl Request {
             | Self::Evaluate { frame, .. }
             | Self::SetVariable { frame, .. }
             | Self::SetNextStatement { frame, .. }
+            | Self::Facts { frame, .. }
             | Self::RestartFrame { frame } => Some(frame.stop),
         }
     }
@@ -684,6 +715,9 @@ pub enum Response {
 
     /// what one scope of one frame holds
     Variables(Variables),
+
+    /// what is provable about a frame's names, and for how long
+    Facts(crate::fact::Facts),
 
     /// what a template frame's django context holds, layer by layer
     TemplateContext(TemplateContext),

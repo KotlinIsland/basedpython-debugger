@@ -22,6 +22,7 @@ mod code;
 mod conditions;
 mod events;
 mod exceptions;
+mod facts;
 mod files;
 // `fork` is posix, and so is `os.register_at_fork`. there is nothing on windows
 // for this to be the answer to

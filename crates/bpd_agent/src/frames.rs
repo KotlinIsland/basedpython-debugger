@@ -50,6 +50,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::conditions::{self, capture};
+use crate::facts::Prover;
 use crate::values::Reader;
 use crate::{events, sources, templates, world};
 
@@ -361,6 +362,79 @@ impl<'py> Stopped<'py> {
             omitted,
             mode: world::mode(),
         })
+    }
+
+    /// what is provable about some of a frame's names, and for how long
+    ///
+    /// the names are resolved the way python resolves them — the first scope of
+    /// the frame that holds one wins, in the order the compiler would search —
+    /// rather than out of the merged `f_locals`, for the reason the scopes are
+    /// reported separately at all
+    ///
+    /// every name asked about comes back in exactly one of the two lists. a
+    /// name that produced no facts and no reason would be indistinguishable
+    /// from one bound to something uninteresting
+    pub(crate) fn facts(
+        &mut self,
+        id: FrameId,
+        names: Vec<String>,
+        limit: bpd_core::Limit,
+    ) -> PyResult<FromAgent> {
+        let frame = match self.frame(id, "what is provable about a frame's names")? {
+            Ok(frame) => frame,
+            Err(reason) => return Ok(FromAgent::Refused { reason }),
+        };
+        let place = Place::of(&frame)?;
+        let prover = Prover::new(self.python, limit);
+
+        let mut proved = Vec::new();
+        let mut silent = Vec::new();
+        for name in names {
+            match Self::prove(&place, &prover, &name, limit)? {
+                Ok(facts) => proved.extend(facts),
+                Err(why) => silent.push(bpd_core::Silent { name, why }),
+            }
+        }
+
+        Ok(FromAgent::Facts {
+            frame: id,
+            proved,
+            silent,
+            mode: world::mode(),
+        })
+    }
+
+    /// everything provable about one name or dotted path
+    fn prove(
+        place: &Place<'py>,
+        prover: &Prover<'py>,
+        name: &str,
+        limit: bpd_core::Limit,
+    ) -> PyResult<Result<Vec<bpd_core::Fact>, bpd_core::Silence>> {
+        let mut segments = name.split('.');
+        let root = segments.next().unwrap_or(name);
+        let rest: Vec<&str> = segments.collect();
+
+        let segments = rest.len() + 1;
+        if segments > limit.depth as usize {
+            return Ok(Err(bpd_core::Silence::TooDeep {
+                segments,
+                limit: limit.depth,
+            }));
+        }
+
+        let Some(scope) = place.scopes_holding(root)?.into_iter().next() else {
+            return Ok(Err(bpd_core::Silence::Unbound));
+        };
+        let Held::Value(value) = place.read(scope, root)? else {
+            return Ok(Err(bpd_core::Silence::Unbound));
+        };
+
+        let value = match prover.follow(&value, &rest)? {
+            Ok(value) => value,
+            Err(why) => return Ok(Err(why)),
+        };
+        Ok(Ok(prover.about(&value, name, scope)?))
     }
 
     /// one pass over a scope at one depth
