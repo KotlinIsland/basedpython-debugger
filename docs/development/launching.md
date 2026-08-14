@@ -15,6 +15,33 @@ is the part everything else needs: the agent attaches, the program is genuinely
 held before it has run, and letting it go produces a run indistinguishable from
 a bare one
 
+## `--debug-children`
+
+```sh
+bpd launch --python python3.14 --debug-children manage.py runserver
+```
+
+the program's children become debuggees of their own instead of being reported
+and left alone — the same setting DAP reaches as `debugChildren` and MCP as
+`debug_children`, and [child processes](subprocesses.md#a-child-that-is-debugged)
+is the design. it is **off** unless asked for, and the flag goes before the
+program, like `--python`: everything from the first positional on is the
+program's own
+
+what this command does with a child is what it does with the program: says
+where it is held, and lets it go. it has no ui to hold one in, and a child that
+arrives held with nothing able to resume it is a hung program — which is why the
+flag needed the sink before it needed the flag. it also waits for **every**
+session before it returns, because leaving would close the connection to a child
+that is still running and the agent answers a vanished debugger by ending the
+process. [child processes](subprocesses.md#what-bpd-launch-debug-children-does-with-one)
+has both, and the one difference this makes to when the command returns
+
+the setting is asked for while the program is still held at its entry stop, so
+it is in place before the program has run the line that could make a child. a
+refusal — there is no `fork` on this platform — is a refusal before the program
+ran, which is the rule an unsupported interpreter is refused by
+
 ## the three forms
 
 an interpreter can be entered three ways, and **none of them is a special case

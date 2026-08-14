@@ -573,9 +573,49 @@ hangs programs by default. debugpy defaults its equivalent to on and that is the
 one thing in its design not to copy
 
 it is `bpd_core::Request::DebugChildren`, reached as the `debugChildren` field
-of a DAP launch configuration and as MCP's `debug_children` tool. what comes
-back is what the **agent** says is set, read off the process that will make the
-child rather than echoed from the request
+of a DAP launch configuration, as MCP's `debug_children` tool, and as
+`bpd launch --debug-children`. what comes back is what the **agent** says is
+set, read off the process that will make the child rather than echoed from the
+request
+
+### what `bpd launch --debug-children` does with one
+
+it **says where the child is and lets it go**, and then waits for it. that is
+the honest answer for a front end with no ui: `bpd launch` sets no breakpoints
+and has nothing to hold a program in, so a child left held would be waiting for
+a resume nobody in this process can send — which is the hung program DAP refuses
+`debugChildren` to avoid when a client cannot take a second session
+
+so every session is driven the same way, in a rotation: resume whatever it is
+holding, wait a turn for what it does next, move on. a rotation rather than one
+wait, because a supervisor blocked in `waitpid` on a child that is held would
+otherwise be waited on for ever while the child waits to be let go — the two
+deadlocks meeting in the middle. what a person sees is three lines:
+
+```text
+bpd: the program started a python child, running the interpreter this program is running, and bpd is not debugging it (_posixsubprocess.fork_exec: …)
+bpd: session 2 joined — a child of this program is being debugged, and is held before it has run anything
+bpd: session 2 is held — started by pid 2306, at its own interpreter startup — none of its program has been compiled yet, so it has no line and no stack. `bpd launch` has nothing to hold a program in, so it is let go
+```
+
+the first of those three contradicts the other two, and it is **wrong** rather
+than a wording preference: `bpd is not debugging it` is `bpd_core::Spawn`'s
+sentence, written for the default, and it is unconditional — so DAP prints it on
+its `console` and MCP puts `debugged: false` beside it while the child is being
+debugged. it is not this command's to fix on its own, because the whole point of
+the sentence living in `bpd_core` is that all three front ends say the same
+words. it is [what is not built](#what-is-not-built) below
+
+**it returns when every session has ended**, not when the launched program has,
+and it exits with the launched program's code. leaving earlier would close the
+connection to a child that is still running, which the agent reads as the
+debugger vanishing and answers by ending the process — the debugger killing a
+program it was asked to watch. so a child that outlives its parent keeps
+`bpd launch --debug-children` alive with it, which a bare run does not do and is
+the one difference this flag makes to when the command returns
+
+the flag goes **before** the program, like `--python`: everything from the first
+positional on belongs to the program
 
 **one setting, two mechanisms.** there is one question a user asks and two ways a
 child comes into being, so they are set together and never apart — a debuggee
@@ -817,6 +857,16 @@ turning it **off** puts all of it back, exactly: `PYTHONPATH` as it was, absent
 if it was absent, which is not the same as set and empty
 
 ## what is not built
+
+**a child report that knows children are being debugged.** `bpd_core::Spawn`'s
+sentence ends `bpd is not debugging it`, and it says that whether or not
+`debugChildren` is on. with it on the fork case is flatly false — the child does
+**not** give the debugger up, it opens a session of its own — and the `exec`
+case is true only of the instant the child was asked for. all three front ends
+carry it: the CLI on stderr, DAP on `console`, and MCP as `says` beside a
+`debugged: false` that is wrong the same way. the fix is for the report to carry
+the setting from the agent, which knows it, rather than for each front end to
+patch the words on the way out
 
 **a token per child.** see above: the environment block is fixed before bpd is
 told a child is coming, and the only mechanism that could rewrite it is the one
