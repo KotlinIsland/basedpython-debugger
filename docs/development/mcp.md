@@ -464,10 +464,20 @@ over on the next answer**:
 | a way of starting a child this interpreter hides  | `spawned.cannot_see`, beside the children rather than instead of them |
 | a debugged fork joining                           | `attached.sessions`, and the `sessions` tool afterwards               |
 | a thread stopping                                 | `outcome: stopped`, with the frames                                   |
-| the program exiting                               | `outcome: exited`, with `exit_code`                                   |
+| the program exiting                               | `outcome: exited`, with `exit_code` and `output_complete`             |
 | the program ending with threads still held        | `outcome: finishing`, with `held`                                     |
 | the program being over with no exit bpd can read  | `outcome: ended`, deliberately with no `exit_code` field at all       |
 | a deadline passing with the program still running | `outcome: timed_out`, with `waited_ms`                                |
+
+`output_complete` is on **every** exit rather than only the one where something
+is wrong, and that is the point of it: a field that appeared only on failure
+could not be told from a server that does not report it, so an agent reading its
+absence would be guessing. `false` means the program is gone and something that
+outlived it — a child it started — still holds the stream it was writing to, and
+a `note` says so; output after that answer was written by the child, not by the
+program that ended. what
+[launching a debuggee](launching.md#a-program-is-not-reported-over-until-what-it-wrote-has-been-carried)
+describes is where the wait itself lives
 
 **a pull is a legitimate route and it is the one that has to be watched.** a
 server that kept a fact and never handed it over looks exactly like one that

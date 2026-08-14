@@ -28,10 +28,10 @@ use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Addressed, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, Exit, FrameId,
-    Joined, Jumped, LogRecord, Replaced, Reporting, Request, Resolved, Response, Running, Scope,
-    Script, SessionId, Snapshot, SnapshotId, SourceBreakpoint, Spawn, Stack, StateQuery, StepKind,
-    Stop, TemplateContext, Threads, Transcript, Variables, Which, WorldStopped,
+    Addressed, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, Exit, Forwarded,
+    FrameId, Joined, Jumped, LogRecord, Replaced, Reporting, Request, Resolved, Response, Running,
+    Scope, Script, SessionId, Snapshot, SnapshotId, SourceBreakpoint, Spawn, Stack, StateQuery,
+    StepKind, Stop, TemplateContext, Threads, Transcript, Variables, Which, WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine};
@@ -230,6 +230,17 @@ pub struct Debuggee {
     listener: Listener,
     /// the debuggees, in the order their agents attached
     attached: Vec<Attached>,
+    /// what is carrying this program's output somewhere, if anything is
+    ///
+    /// held per **debuggee** and not per session, because the pipe is: a
+    /// debugged fork inherits the write end its parent was given, so what a
+    /// child prints comes out of the same descriptor and is read by the same
+    /// thread. whichever session is reported over, it is this that says whether
+    /// what was written has been carried
+    ///
+    /// `None` when there is no pipe of bpd's at all — a launch that left the
+    /// streams inherited, or a program bpd did not start
+    forwarders: Option<Forwarders>,
 }
 
 impl Debuggee {
@@ -1024,7 +1035,21 @@ impl Debuggee {
                             interpreter: PathBuf::from("the debuggee"),
                             source,
                         })?;
-                    return Ok(Running::Exited { status, rebound });
+                    // the program is reaped, and what it printed may still be
+                    // in a pipe: this arm was reached because the **control
+                    // connection** closed, and the descriptors carrying its
+                    // output are different ones with no order against that. so
+                    // the forwarding is waited for here, before the exit is
+                    // reported, rather than left to race the report
+                    let output = self
+                        .forwarders
+                        .as_mut()
+                        .map_or(Forwarded::Everything, Forwarders::drained);
+                    return Ok(Running::Exited {
+                        status,
+                        rebound,
+                        output,
+                    });
                 }
             }
         }
@@ -1638,11 +1663,16 @@ pub fn launch(
 /// nobody is reading fills up, and a process whose pipe is full stops — so a
 /// launcher that waited first and handed the pipes over afterwards would hang
 /// on any program that says more than a pipe buffer holds
+///
+/// what it hands back is what is reading them, and that is not a formality: the
+/// engine waits for it before reporting the program over, so that a client is
+/// never told a program has finished while a line it printed is still in a pipe.
+/// see [`Forwarders`]
 pub fn launch_piped(
     interpreter: &Capabilities,
     program: &Program,
     args: &[OsString],
-    on_spawn: impl FnOnce(std::process::ChildStdout, std::process::ChildStderr) + 'static,
+    on_spawn: impl FnOnce(std::process::ChildStdout, std::process::ChildStderr) -> Forwarders + 'static,
 ) -> Result<Launched> {
     start(
         interpreter,
@@ -1686,7 +1716,90 @@ pub fn launch_in_terminal(
 }
 
 /// what to do with the debuggee's own output the moment it exists
-type OnSpawn = Box<dyn FnOnce(std::process::ChildStdout, std::process::ChildStderr)>;
+///
+/// it hands back what is doing the reading, because the engine has to be able
+/// to **wait** for it: see [`Forwarders`]
+type OnSpawn = Box<dyn FnOnce(std::process::ChildStdout, std::process::ChildStderr) -> Forwarders>;
+
+/// the threads carrying a debuggee's output somewhere, and the wait for them
+///
+/// a front end that pipes the debuggee reads the two streams on threads of its
+/// own, and those threads are the only thing that knows whether the last of what
+/// the program wrote has been carried. the engine learns the program is over on
+/// the **control connection**, which is a different descriptor with no order
+/// against them — so without this, `bpd` reports a program finished while a line
+/// it printed is still in a pipe
+///
+/// [`Self::drained`] is what closes that, and it is deliberately **bounded**.
+/// each thread ends at end-of-file, and end-of-file needs every write end
+/// closed: a forked child inherits one, so a program that leaves a child running
+/// never reaches it. an unbounded wait here would turn "the program exited" into
+/// a hang for exactly the programs this debugger exists to follow
+#[derive(Debug)]
+pub struct Forwarders(Vec<std::thread::JoinHandle<()>>);
+
+/// how long the debuggee's own output is waited for once the program is gone
+///
+/// end-of-file has already been reached in the ordinary case — the process that
+/// held the write end is dead — so this is not a delay a program pays. it is
+/// what stops a **child** holding the stream open from turning an exit into a
+/// hang, and it is generous because the only cost of it being generous is paid
+/// by a program that has already ended
+const OUTPUT_PATIENCE: Duration = Duration::from_secs(2);
+
+/// how often the wait above looks again
+///
+/// `JoinHandle` has no join-with-deadline, so this polls `is_finished` and then
+/// joins one that has already ended — which cannot block
+const OUTPUT_POLL: Duration = Duration::from_millis(2);
+
+impl Forwarders {
+    /// the threads carrying the debuggee's output
+    pub fn on(threads: Vec<std::thread::JoinHandle<()>>) -> Self {
+        Self(threads)
+    }
+
+    /// nothing is carrying it, because it was never bpd's to carry
+    ///
+    /// what an inherited stream is: the program wrote to the terminal itself,
+    /// so there is no pipe to drain and the order is the kernel's
+    pub fn inherited() -> Self {
+        Self(Vec::new())
+    }
+
+    /// wait for what is left of the program's output, for as long as
+    /// [`OUTPUT_PATIENCE`]
+    ///
+    /// a thread that panicked is joined and its panic dropped rather than
+    /// resumed: this is called on the way to reporting a program's exit, and
+    /// turning a forwarder's panic into a panic here would lose the exit status
+    /// the caller is waiting for. what it costs is carried out —
+    /// [`Forwarded::StillHeldOpen`] is what a caller sees, because a thread that
+    /// died is one whose stream is no longer being read
+    fn drained(&mut self) -> Forwarded {
+        let deadline = Instant::now() + OUTPUT_PATIENCE;
+        while self.0.iter().any(|thread| !thread.is_finished()) {
+            if Instant::now() >= deadline {
+                return Forwarded::StillHeldOpen;
+            }
+            std::thread::sleep(OUTPUT_POLL);
+        }
+
+        // joined first and judged after, rather than `any` over the joins.
+        // `any` short-circuits, so the first thread that panicked would leave
+        // the rest dropped un-joined — a thread whose panic nobody collected.
+        // they have all finished by here, so none of these can block
+        let joined: Vec<_> = self
+            .0
+            .drain(..)
+            .map(std::thread::JoinHandle::join)
+            .collect();
+        if joined.iter().any(Result::is_err) {
+            return Forwarded::StillHeldOpen;
+        }
+        Forwarded::Everything
+    }
+}
 
 /// what somebody else is asked to run, and what it needs around it
 type StartIt<'a> = Box<
@@ -1889,6 +2002,7 @@ fn spawned_here(
         source,
     })?;
 
+    let mut forwarders = None;
     if let Some(hand_over) = piped {
         let stdout = child
             .stdout
@@ -1898,7 +2012,7 @@ fn spawned_here(
             .stderr
             .take()
             .expect("the command asked for a stderr pipe and cargo has not taken it");
-        hand_over(stdout, stderr);
+        forwarders = Some(hand_over(stdout, stderr));
     }
 
     let session = listener.accept(|| {
@@ -1927,6 +2041,19 @@ fn spawned_here(
                 interpreter: interpreter.executable.clone(),
                 source,
             })?;
+            // the same rule as a program that exits after running: what it said
+            // is waited for before it is reported over. it matters more here
+            // than anywhere, because what a program that never started wrote is
+            // the **interpreter's own words about why** — a `SyntaxError`, a
+            // missing module — and a caller handed the outcome without them has
+            // nothing to tell anybody
+            //
+            // the verdict has nowhere to go and is not carried: a program that
+            // never ran a line of its own had nothing to fork, so the only
+            // thing that could hold these streams open is gone with it
+            if let Some(forwarders) = forwarders.as_mut() {
+                forwarders.drained();
+            }
             return Ok(Launched::ExitedBeforeStopping(status));
         }
         Err(error) => return Err(error),
@@ -1943,6 +2070,7 @@ fn spawned_here(
             child: Some(Arc::new(Mutex::new(child))),
             ..Attached::connected(session)
         }],
+        forwarders,
     };
     if let Some(map) = map {
         debuggee.map_sources(map)?;
@@ -1980,6 +2108,9 @@ fn attached_in_terminal(listener: Listener, map: Option<bpd_core::SourceMap>) ->
             held: vec![stop],
             ..Attached::connected(session)
         }],
+        // somebody else started this program in a terminal they own, so its
+        // output never passed through bpd and there is no pipe to drain
+        forwarders: None,
     };
     if let Some(map) = map {
         debuggee.map_sources(map)?;

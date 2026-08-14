@@ -1132,7 +1132,9 @@ fn a_file_only_half_seen_binds_nothing_and_says_which_half_is_missing() {
                 assert_eq!(stopped_for(&stop.reason), [1]);
                 rebindings.extend(rebound);
             }
-            Running::Exited { status, rebound } => {
+            Running::Exited {
+                status, rebound, ..
+            } => {
                 assert!(status.success(), "the program exited with {status}");
                 rebindings.extend(rebound);
                 break;

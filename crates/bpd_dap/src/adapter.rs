@@ -39,9 +39,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use bpd_core::{
-    Addressed, Binding, Detail, Evaluated, FrameId, LogRecord, Reporting, Request, Resolved,
-    Response, Running, Scope, SessionId, SourceBreakpoint, StepKind, Stop, StopReason, Unbound,
-    Value, Which, exit_code,
+    Addressed, Binding, Detail, Evaluated, Forwarded, FrameId, LogRecord, Reporting, Request,
+    Resolved, Response, Running, Scope, SessionId, SourceBreakpoint, StepKind, Stop, StopReason,
+    Unbound, Value, Which, exit_code,
 };
 
 use crate::capabilities::capabilities;
@@ -1877,8 +1877,28 @@ impl Adapter {
             // timeout to be the answer to. the loop goes round and waits again
             Running::StillRunning { .. } => Ok(()),
             Running::Stopped { .. } => self.announce(),
-            Running::Exited { status, .. } => {
+            Running::Exited { status, output, .. } => {
                 self.exited = true;
+                // said **before** the exit rather than after it, because it is
+                // about everything that follows: a client reads `exited` as the
+                // end of the program's output, and a line arriving after one it
+                // was not warned about is a line it will attribute to a run that
+                // had already finished
+                if output == Forwarded::StillHeldOpen {
+                    // what bpd waited for and did not get, rather than the
+                    // reason it did not get it. end-of-file needs every write
+                    // end of the pipe closed, and a child that outlived the
+                    // program is what usually holds one — but bpd did not watch
+                    // the descriptor and naming a cause it did not see would be
+                    // the invention this whole line exists to avoid
+                    self.say(
+                        "the program has exited and its output is still being written: \
+                         bpd waited for the stream it wrote to and it did not end, \
+                         which is what a child outliving the program looks like. \
+                         anything after this line was written by whatever still holds \
+                         that stream, and not by the program that just ended\n",
+                    )?;
+                }
                 self.event(
                     "exited",
                     &serde_json::json!({ "exitCode": exit_code(status) }),

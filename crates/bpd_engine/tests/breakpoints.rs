@@ -163,7 +163,9 @@ fn finish(mut debuggee: Debuggee) {
         .run(&mut bpd_test::reporting::Unreported)
         .expect("the debuggee was resumed")
     {
-        Running::Exited { status, rebound } => {
+        Running::Exited {
+            status, rebound, ..
+        } => {
             assert!(status.success(), "the program exited with {status}");
             assert!(rebound.is_empty(), "nothing is set, and got {rebound:?}");
         }

@@ -37,7 +37,7 @@ use crate::breakpoint::{LogRecord, SourceBreakpoint};
 use crate::frame::{FrameId, Scope};
 use crate::query::{SnapshotId, StateQuery, Wanted};
 use crate::script::{Budget, Script, Step};
-use crate::session::{Reporting, Request, Running, SessionId, Threads};
+use crate::session::{Forwarded, Reporting, Request, Running, SessionId, Threads};
 use crate::spawn::{Blindspot, Spawn, Verdict};
 use crate::stop::{Reported, StepKind, StopReason};
 use crate::thread::Which;
@@ -345,6 +345,15 @@ pub mod mark {
     /// the sentence every blind spot ends up saying, whatever renders it
     pub const BLIND_TO: &str = "silence here does not mean";
 
+    /// what an exit whose output is **still being written** says, whatever
+    /// renders it
+    ///
+    /// the exit [`super::ran`] holds is one of these, because it is the half a
+    /// front end can drop without anything failing: an ordinary exit says
+    /// nothing extra, so an adapter that ignored it would look right until the
+    /// one run where the order of the output cannot be trusted
+    pub const STILL_WRITING: &str = "still being written";
+
     /// the session the debugged fork [`super::say`] makes arrived as
     pub const JOINED: u64 = 424_242;
 
@@ -463,9 +472,15 @@ pub fn ran() -> Vec<Running> {
             )),
             rebound: Vec::new(),
         },
+        // held open, for the reason `say` makes a child that is being taken up:
+        // it is the half a front end can drop with nothing failing. an exit
+        // whose output had all arrived says nothing extra, so a front end that
+        // ignored the field would look right on every ordinary program and be
+        // silent on the one where the order cannot be trusted
         Running::Exited {
             status: exited_with(mark::EXIT_CODE),
             rebound: Vec::new(),
+            output: Forwarded::StillHeldOpen,
         },
         Running::Finishing {
             threads: vec![mark::HELD_AT_THE_END],

@@ -818,25 +818,34 @@ fn with_children_debugged(fixture: &Fixture, form: Form) -> Run {
     let collected: Arc<Mutex<(String, String)>> =
         Arc::new(Mutex::new((String::new(), String::new())));
     let writing = Arc::clone(&collected);
+    // the reading threads are handed to the engine rather than detached, which
+    // is what makes the comparison below sound: the engine waits for them before
+    // it reports the program exited, so everything the program wrote is in
+    // `collected` by the time there is an exit status to compare
     let launched = bpd_engine::launch_piped(interpreter(), &program, &[], move |stdout, stderr| {
-        for (mut stream, which) in [
-            (Box::new(stdout) as Box<dyn std::io::Read + Send>, 0_usize),
-            (Box::new(stderr) as Box<dyn std::io::Read + Send>, 1),
-        ] {
-            let into = Arc::clone(&writing);
-            std::thread::spawn(move || {
-                let mut read = String::new();
-                // a pipe nobody reads fills up and stops the process, so both
-                // are drained for as long as the program has them open
-                let _finished = stream.read_to_string(&mut read);
-                let mut held = into.lock().expect("nothing panics holding the output");
-                if which == 0 {
-                    held.0.push_str(&read);
-                } else {
-                    held.1.push_str(&read);
-                }
-            });
-        }
+        bpd_engine::Forwarders::on(
+            [
+                (Box::new(stdout) as Box<dyn std::io::Read + Send>, 0_usize),
+                (Box::new(stderr) as Box<dyn std::io::Read + Send>, 1),
+            ]
+            .into_iter()
+            .map(|(mut stream, which)| {
+                let into = Arc::clone(&writing);
+                std::thread::spawn(move || {
+                    let mut read = String::new();
+                    // a pipe nobody reads fills up and stops the process, so
+                    // both are drained for as long as the program has them open
+                    let _finished = stream.read_to_string(&mut read);
+                    let mut held = into.lock().expect("nothing panics holding the output");
+                    if which == 0 {
+                        held.0.push_str(&read);
+                    } else {
+                        held.1.push_str(&read);
+                    }
+                })
+            })
+            .collect(),
+        )
     })
     .expect("the debuggee launched");
 
