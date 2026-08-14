@@ -691,7 +691,16 @@ pub fn tools() -> Vec<Tool> {
                 a name may be a dotted path — `self.limit` — and every segment                 is read out of an object's own storage. every name asked about                 comes back in exactly one of `proved` and `silent`."
                 .to_string(),
             schema: {
-                let mut properties = frame_properties();
+                // not `frame_properties`: those carry a `detail`, which bounds
+                // how much of a value **graph** is read. a fact carries one
+                // value and is bounded by `limit` instead, and a schema
+                // advertising an argument the tool does not take is an
+                // instruction an agent would follow and bpd would refuse
+                let mut properties = serde_json::json!({
+                    "session": integer(SESSION),
+                    "stop": integer(STOP),
+                    "frame": integer(FRAME),
+                });
                 properties["names"] = serde_json::json!({
                     "type": "array",
                     "items": { "type": "string" },
