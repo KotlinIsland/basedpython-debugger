@@ -334,6 +334,58 @@ fn a_client_with_no_terminal_is_refused_at_launch_and_asked_for_nothing() {
 }
 
 #[test]
+fn a_replacement_under_a_live_frame_that_is_not_a_boolean_is_refused_rather_than_guessed_at() {
+    // its own test rather than a line in the shared conversation, because that
+    // conversation is read by a test asserting nothing in it was refused — and
+    // this is a refusal on purpose
+    //
+    // what it is protecting is not tidiness. `evenUnderALiveFrame` decides
+    // whether the process ends up running two versions of one function, and an
+    // adapter that read `"yes"` as truthy would make that trade on a typo
+    let client = drive(&Asked::default());
+
+    // the console half of the claim in `reach_of_facet`, read rather than
+    // believed. the body carries the report because serde does that for free;
+    // the console line is what a user watching a debug console sees, and it is
+    // the same place a refusal's reason goes — succeeding here costs what
+    // failing usually saves, so it belongs in the same stream
+    let told: Vec<&serde_json::Value> = client
+        .events("output")
+        .into_iter()
+        .filter(|event| {
+            event["body"]["output"]
+                .as_str()
+                // the applied case by its own words. "two versions of one
+                // function" alone matches the **refusal** in the same
+                // conversation, which says the same thing about why it refused
+                // — an assertion that cannot tell those apart passes with the
+                // report it is checking for deleted
+                .is_some_and(|text| text.contains("bpd replaced the code under a live frame"))
+        })
+        .collect();
+    assert!(
+        !told.is_empty(),
+        "a replacement was applied under a live frame and the console never \
+         said what it cost"
+    );
+    for event in told {
+        assert_eq!(
+            event["body"]["category"], "important",
+            "DAP has a category for exactly this and it was not used: {event}"
+        );
+    }
+
+    let said = client
+        .refusal_of("bpd/replaceCode")
+        .expect("a non-boolean was read as an answer rather than refused");
+    assert!(
+        said.contains("two versions of one function"),
+        "the refusal has to say what the flag would have cost, or a client \
+         cannot tell it from a schema quibble. it said {said}"
+    );
+}
+
+#[test]
 fn a_stop_that_ends_takes_its_references_with_it() {
     let asked = Asked::default();
     let client = drive(&asked);
@@ -882,6 +934,45 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
          than a yes or a no: {replaced}"
     );
 
+    // the same request with the guarantee traded away, which is the only route
+    // to a live frame being applied rather than refused. an editor that carried
+    // the flag and dropped the report would make that trade for its user in
+    // silence, so what is read here is the report and not the table claiming it
+    let traded = answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/replaceCode",
+        serde_json::json!({ "file": "/tmp/fake.py", "evenUnderALiveFrame": true }),
+    );
+    assert_eq!(
+        traded["body"]["outcome"]["replaced"], "applied",
+        "the flag is what turns a live frame from a refusal into a report, and \
+         the answer was {traded}"
+    );
+    let left_behind = traded["body"]["outcome"]["still_running"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the report of what it cost is missing: {traded}"));
+    assert!(
+        !left_behind.is_empty(),
+        "the replacement was applied under a live frame and named no frame: \
+         {traded}"
+    );
+    assert_eq!(
+        left_behind[0]["function"], "main",
+        "the frame has to be named, or nobody can tell which code is doubled: \
+         {traded}"
+    );
+
+    // and a value that is not a boolean, refused on purpose. `refusals` exempts
+    // this one by what it says rather than by its command, so an *unintended*
+    // `bpd/replaceCode` refusal is still visible
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/replaceCode",
+        serde_json::json!({ "file": "/tmp/fake.py", "evenUnderALiveFrame": "yes" }),
+    );
+
     // the whole of a stop in one call, and the difference between two of them.
     // DAP's own way of reading state is the tree walk above, and it keeps it —
     // this is the same capability an agent's front end has, which is what the
@@ -1029,6 +1120,11 @@ impl Transcript {
             .iter()
             .filter(|message| message["type"] == "response" && message["success"] == false)
             .filter(|message| message["command"] != "variables")
+            // the one refusal the conversation makes on purpose, exempted by
+            // what it says rather than by its command: a `bpd/replaceCode`
+            // refused for any *other* reason is a conversation that did not
+            // reach what it was written to exercise, and stays visible
+            .filter(|message| !message.to_string().contains("evenUnderALiveFrame"))
             .map(ToString::to_string)
             .collect()
     }
@@ -1522,7 +1618,33 @@ impl Session for FakeSession {
             // adapter has to hand the whole of it over. that a real interpreter
             // really replaces code is
             // `crates/bpd_engine/tests/replacement.rs`
-            Request::ReplaceCode { file } => Response::Replaced(bpd_core::Replaced {
+            Request::ReplaceCode {
+                file,
+                even_under_a_live_frame,
+            } if even_under_a_live_frame =>
+            // the trade, taken. a front end that carried the flag and dropped
+            // the report would make it for its user in silence, so the fake
+            // answers with the one thing that says it was made
+            {
+                Response::Replaced(bpd_core::Replaced {
+                    file,
+                    outcome: bpd_core::Replacement::Applied {
+                        changed: Vec::new(),
+                        unchanged: Vec::new(),
+                        rebound: Vec::new(),
+                        still_running: vec![bpd_core::StillRunning {
+                            function: "main".to_string(),
+                            frame: bpd_core::LiveFrame::Thread {
+                                thread: THREAD,
+                                line: 3,
+                                held: Some(1),
+                            },
+                        }],
+                    },
+                    mode: Mode::NonStop,
+                })
+            }
+            Request::ReplaceCode { file, .. } => Response::Replaced(bpd_core::Replaced {
                 file,
                 outcome: bpd_core::Replacement::Refused {
                     because: vec![bpd_core::Unreplaceable::Running {

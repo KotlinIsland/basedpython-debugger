@@ -174,9 +174,36 @@ application, one level down
 
 it costs the case people most want this in: stopped at a breakpoint **inside**
 the function they just edited. it is refused, and the refusal names the frame and
-says to let it return first. the alternative — apply, and report which frames are
-still running the old version — is more useful and is a strictly weaker
-guarantee, and it is deliberately not what this does
+says to let it return first
+
+that refusal is the **default**, and the default is the guarantee. the
+alternative — apply, and report which frames are still running the old version —
+is more useful and a strictly weaker promise, so it is not a change of behaviour
+but a thing a caller asks for by name: `even_under_a_live_frame` on the request,
+`evenUnderALiveFrame` on `bpd/replaceCode`, `even_under_a_live_frame` on the MCP
+tool. it is not a flag on the engine's method either — there it is a second
+method, `replace_code_even_under_a_live_frame`, because a bare `true` at a call
+site says nothing about what it buys
+
+what comes back is `applied`, with every frame that will finish on the old code
+named in `still_running`. both front ends put it where a refusal's reason goes —
+an `important` console event under DAP, the first note of the answer under MCP —
+because this is the one case where *succeeding* costs what failing usually saves,
+and a caller who read an unqualified success would have been told the process is
+on one version of the code when it is on two
+
+**that list is true when it is made and not afterwards**, which is the part worth
+saying twice. the frames on it return on their own schedule and nothing reports
+when one has, so it says which frames were on the old code at the instant of the
+replacement. a client polling it as the state of the process now is reading a
+list that has been going out of date since it was written. that is why the
+ordinary answer is still a refusal: the honest version of this feature is
+strictly less useful than it first looks, and a caller has to want it knowing
+that
+
+a non-boolean is refused by name rather than read as truthy. the value decides
+whether the process ends up running two versions of one function, and an adapter
+that guessed would make that trade on a typo
 
 a frame that will run the code is not only one on a thread's stack. a generator,
 a coroutine or an async generator that is **suspended** holds a frame nothing is

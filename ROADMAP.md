@@ -835,10 +835,13 @@ replacement is worth offering
 
 see [hot code replacement](docs/development/hot-code-replacement.md)
 
-what is **not** built: applying a replacement while a frame is running the code
-and reporting which frames are still on the old version. it is more useful and a
-strictly weaker guarantee, and it was left out deliberately — "never half a
-process" is the rule this milestone commits to
+applying a replacement **while a frame is running the code** is built, and it is
+opt-in for the reason it was once left out: it is more useful and a strictly
+weaker guarantee, so "never half a process" is still what a caller gets without
+asking. asking turns the refusal into a report — the replacement is applied and
+every frame that will finish on the old code is named, where a refusal's reason
+would have gone. that list is true when it is made and not afterwards, because
+those frames return on their own schedule and nothing says when one has
 
 ## further out
 

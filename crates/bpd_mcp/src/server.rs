@@ -533,7 +533,13 @@ impl<'a> Server<'a> {
             }
             "replace_code" => {
                 let args: ReplaceCodeArgs = parse(name, arguments)?;
-                match self.ask_in(args.session, Request::ReplaceCode { file: args.file })? {
+                match self.ask_in(
+                    args.session,
+                    Request::ReplaceCode {
+                        file: args.file,
+                        even_under_a_live_frame: args.even_under_a_live_frame,
+                    },
+                )? {
                     Response::Replaced(replaced) => Ok(render::replaced(&replaced)),
                     other => unreachable!("a code replacement was answered with {other:?}"),
                 }
@@ -1625,6 +1631,14 @@ struct ReplaceCodeArgs {
     #[serde(default)]
     session: Option<u64>,
     file: PathBuf,
+    /// apply it even where a frame is running the code being replaced
+    ///
+    /// defaults to off, and that default is the guarantee rather than a
+    /// convenience: with it on the process runs two versions of one function
+    /// until those frames return, and an agent that had not asked for that must
+    /// not be handed it
+    #[serde(default)]
+    even_under_a_live_frame: bool,
 }
 
 /// a whole investigation, submitted as data

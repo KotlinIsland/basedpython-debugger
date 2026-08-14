@@ -160,6 +160,17 @@ fn every_capability_carried_inside_a_request_reaches_the_session() {
         );
     }
 
+    // the trade, read off what really came back rather than off the table that
+    // claims it. an agent that asked for a replacement under a live frame and
+    // was handed a bare `applied` would have been told the process is on one
+    // version of the code when it is on two — and a `reaches()` that is only a
+    // claim would not notice
+    assert!(
+        client.answered(&["\"still_running\"", "two versions of one function"]),
+        "`{}` is said to reach an agent and the answer never carried it",
+        Facet::LiveReplacement.name()
+    );
+
     // the capability DAP has no route for at all. the conversation asked for
     // every third qualifying hit, and a session that was handed `None` would
     // mean the tool parsed it and dropped it
@@ -506,6 +517,15 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
     client.call("wait", &serde_json::json!({ "deadline_ms": 500 }));
     client.call("wait", &serde_json::json!({ "deadline_ms": 500 }));
 
+    // last, and `tool_order` says so too. answers are found by their position
+    // among the calls, so one added in the middle moves every answer after it —
+    // this is the same tool as above with the guarantee traded away, which is
+    // the only route to a live frame being applied rather than refused
+    client.call(
+        "replace_code",
+        &serde_json::json!({ "file": "/tmp/fake.py", "even_under_a_live_frame": true }),
+    );
+
     for (tool, arguments) in extra {
         client.call(tool, arguments);
     }
@@ -685,6 +705,9 @@ fn tool_order() -> Vec<&'static str> {
         "wait",
         "wait",
         "wait",
+        // the replacement asked for under a live frame, last so that it moves
+        // nothing above it
+        "replace_code",
     ]
 }
 
@@ -1260,9 +1283,39 @@ impl Session for FakeSession {
             // bound again. the refused shape is what the DAP coverage drives, and
             // that a real interpreter really replaces code is
             // `crates/bpd_engine/tests/replacement.rs`
-            Request::ReplaceCode { file } => Response::Replaced(bpd_core::Replaced {
+            Request::ReplaceCode {
+                file,
+                even_under_a_live_frame,
+            } if even_under_a_live_frame =>
+            // the trade, taken. a front end that carried the flag and dropped
+            // the report would make it for its user in silence, so the fake
+            // answers with the one thing that says it was made
+            {
+                Response::Replaced(bpd_core::Replaced {
+                    file,
+                    outcome: bpd_core::Replacement::Applied {
+                        changed: Vec::new(),
+                        unchanged: Vec::new(),
+                        rebound: Vec::new(),
+                        still_running: vec![bpd_core::StillRunning {
+                            function: "main".to_string(),
+                            frame: bpd_core::LiveFrame::Thread {
+                                thread: THREAD,
+                                line: 3,
+                                held: Some(1),
+                            },
+                        }],
+                    },
+                    mode: Mode::NonStop,
+                })
+            }
+            Request::ReplaceCode { file, .. } => Response::Replaced(bpd_core::Replaced {
                 file,
                 outcome: bpd_core::Replacement::Applied {
+                    // nothing was live: this is the ordinary replacement, and
+                    // its guarantee is that the process is on one version of
+                    // the code. the arm above is the one that traded it away
+                    still_running: Vec::new(),
                     changed: vec![bpd_core::Rebound {
                         function: "main".to_string(),
                         was_at: 2,

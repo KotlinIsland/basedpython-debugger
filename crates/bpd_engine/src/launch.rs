@@ -495,9 +495,14 @@ impl Debuggee {
             Request::RestartFrame { frame } => Ok(Response::Jumped(
                 self.attached[at].move_frame(&FromEngine::RestartFrame { frame }, reporting)?,
             )),
-            Request::ReplaceCode { file } => Ok(Response::Replaced(
-                self.attached[at].replace_the_code(file, reporting)?,
-            )),
+            Request::ReplaceCode {
+                file,
+                even_under_a_live_frame,
+            } => Ok(Response::Replaced(self.attached[at].replace_the_code(
+                file,
+                even_under_a_live_frame,
+                reporting,
+            )?)),
             Request::RunScript { stop, script } => Ok(Response::Transcript(
                 self.execute(at, stop, &script, reporting)?,
             )),
@@ -814,7 +819,41 @@ impl Debuggee {
     /// functions now run different code and which breakpoints moved with them,
     /// or every reason it was refused — see [`bpd_core::Replaced`]
     pub fn replace_code(&mut self, file: impl Into<PathBuf>) -> Result<Replaced> {
-        match self.ask_for(Request::ReplaceCode { file: file.into() })? {
+        self.replacing(file, false)
+    }
+
+    /// the same, applied even where a frame is running the code
+    ///
+    /// **a weaker guarantee, and its own method rather than a flag.** a `true`
+    /// at a call site says nothing about what it buys, and what it buys is that
+    /// the process runs two versions of one function until those frames return.
+    /// the name is long because reaching for this should not be casual
+    ///
+    /// what comes back is applied, with every frame that will finish on the old
+    /// code named — and that list is true when it is made and not afterwards.
+    /// see [`bpd_core::StillRunning`]
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached, or the agent answers with something
+    /// else
+    pub fn replace_code_even_under_a_live_frame(
+        &mut self,
+        file: impl Into<PathBuf>,
+    ) -> Result<Replaced> {
+        self.replacing(file, true)
+    }
+
+    /// what both of them are
+    fn replacing(
+        &mut self,
+        file: impl Into<PathBuf>,
+        even_under_a_live_frame: bool,
+    ) -> Result<Replaced> {
+        match self.ask_for(Request::ReplaceCode {
+            file: file.into(),
+            even_under_a_live_frame,
+        })? {
             Response::Replaced(replaced) => Ok(replaced),
             other => unreachable!("a code replacement was answered with {other:?}"),
         }
@@ -1375,11 +1414,19 @@ impl Attached {
     fn replace_the_code(
         &mut self,
         file: PathBuf,
+        even_under_a_live_frame: bool,
         reporting: &mut dyn Reporting,
     ) -> Result<Replaced> {
         const EXPECTED: &str = "what replacing a file's code did";
 
-        match self.ask(&FromEngine::ReplaceCode { file }, EXPECTED, reporting)? {
+        match self.ask(
+            &FromEngine::ReplaceCode {
+                file,
+                even_under_a_live_frame,
+            },
+            EXPECTED,
+            reporting,
+        )? {
             FromAgent::Replaced { replaced } => Ok(replaced),
             other => Err(unexpected(&other, EXPECTED)),
         }

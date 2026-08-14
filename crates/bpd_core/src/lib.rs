@@ -54,7 +54,9 @@ pub use query::{
     Taken, Unverified, Wanted, WhyNot, difference,
 };
 pub use refusal::Refusal;
-pub use replace::{Divergence, LiveFrame, Rebound, Replaced, Replacement, Unreplaceable};
+pub use replace::{
+    Divergence, LiveFrame, Rebound, Replaced, Replacement, StillRunning, Unreplaceable,
+};
 pub use script::{
     Answered, At, Bound, Budget, Did, Disarmed, Halted, Landed, Outcome, Place, Predicate, Record,
     Script, Step, Transcript,

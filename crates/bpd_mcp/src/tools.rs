@@ -884,6 +884,25 @@ pub fn tools() -> Vec<Tool> {
                                         path text, so a symlink and the file it \
                                         points at are the same file",
                     },
+                    "even_under_a_live_frame": {
+                        "type": "boolean",
+                        "description": "apply it even where a frame is running \
+                                        the code being replaced. defaults to \
+                                        false, and that default is a guarantee \
+                                        rather than caution: a frame that is \
+                                        already running keeps its own code \
+                                        object and finishes on the old body, so \
+                                        until it returns the process runs two \
+                                        versions of one function and a stack is \
+                                        evidence about neither. with this on the \
+                                        replacement is applied and every frame \
+                                        that will finish on the old code is \
+                                        named in the answer — a list that is \
+                                        true when it is made and not afterwards, \
+                                        because those frames return on their own \
+                                        schedule and nothing reports when one \
+                                        has",
+                    },
                 }),
                 &["file"],
             ),
