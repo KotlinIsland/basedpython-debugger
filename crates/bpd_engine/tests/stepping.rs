@@ -15,9 +15,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
-use bpd_core::{Binding, Detail, Evaluated, Running, SourceBreakpoint, StepKind, Stop, StopReason};
+use bpd_core::{
+    Binding, Detail, Evaluated, Resolved, Running, SourceBreakpoint, StepKind, Stop, StopReason,
+};
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
+use bpd_test::trace::Trace;
 
 /// how long a test waits for a side effect it expects to happen
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -206,13 +209,93 @@ fn interpreter() -> &'static Capabilities {
     bpd_test::agent::matching_interpreter()
 }
 
-fn launch(fixture: &Fixture) -> Debuggee {
+/// a debuggee and the record of everything asked of it
+///
+/// the two travel together because a stepping failure is diagnosed from the
+/// pair. a step that lands in the wrong place says nothing on its own — it is
+/// wrong only relative to where the thread started and what was asked for — so
+/// every helper here writes to the trace, and every check prints it
+struct Driven {
+    debuggee: Debuggee,
+    trace: Trace,
+}
+
+impl Driven {
+    /// the stack, straight through — reading one is not a step
+    fn the_stack(&mut self, top: Option<u32>) -> bpd_engine::Result<bpd_core::Stack> {
+        self.debuggee.the_stack(top)
+    }
+
+    /// what is held right now
+    fn held(&self) -> Vec<Stop> {
+        self.debuggee.held()
+    }
+
+    /// arm a pause, recorded because it changes what a later stop means
+    fn pause(&mut self) -> bpd_engine::Result<Vec<u64>> {
+        self.trace.asked("pause");
+        self.debuggee.pause()
+    }
+
+    /// let every held thread go
+    fn resume_all(&mut self) -> bpd_engine::Result<Vec<u64>> {
+        self.trace.asked("resume all");
+        self.debuggee.resume_all()
+    }
+
+    /// replace the breakpoint set, recorded because a stop later is only
+    /// explicable against what was armed when it happened
+    fn set_breakpoints(
+        &mut self,
+        breakpoints: Vec<SourceBreakpoint>,
+    ) -> bpd_engine::Result<Vec<Resolved>> {
+        self.trace
+            .asked(format!("set {} breakpoint(s)", breakpoints.len()));
+        self.debuggee.set_breakpoints(breakpoints)
+    }
+
+    /// resume everything and wait, recording the outcome
+    ///
+    /// # errors
+    ///
+    /// whatever the debuggee answers with, unchanged
+    fn run(&mut self) -> bpd_engine::Result<Running> {
+        self.trace.run(&mut self.debuggee)
+    }
+
+    /// wait for what is already in motion, recording the outcome
+    ///
+    /// # errors
+    ///
+    /// whatever the debuggee answers with, unchanged
+    fn wait(&mut self) -> bpd_engine::Result<Running> {
+        self.trace.wait(&mut self.debuggee)
+    }
+
+    /// ask for a step without waiting for it
+    ///
+    /// what a test uses when the interesting part is what happens *instead* of
+    /// the step landing — a breakpoint inside the call it steps over
+    ///
+    /// # errors
+    ///
+    /// whatever the debuggee answers with, unchanged
+    fn the_step(&mut self, kind: StepKind) -> bpd_engine::Result<Vec<u64>> {
+        self.trace.asked(kind);
+        self.debuggee.the_step(kind)
+    }
+}
+
+fn launch(fixture: &Fixture) -> Driven {
     match bpd_engine::launch(
         interpreter(),
         &bpd_engine::Program::Script(fixture.path()),
         &[] as &[OsString],
     ) {
-        Ok(Launched::Stopped(debuggee)) => debuggee,
+        Ok(Launched::Stopped(debuggee)) => Driven {
+            debuggee,
+            trace: Trace::default(),
+        },
         Ok(Launched::ExitedBeforeStopping(status)) => {
             panic!("the debuggee exited with {status} instead of stopping")
         }
@@ -225,8 +308,8 @@ fn launch(fixture: &Fixture) -> Debuggee {
 /// every step test starts from a stop and then wants nothing else to interfere:
 /// a breakpoint left set would fire again inside the call a step runs, and the
 /// test would be measuring the breakpoint rather than the step
-fn held_at(debuggee: &mut Debuggee, file: &Path, line: u32) -> Stop {
-    let resolved = debuggee
+fn held_at(driven: &mut Driven, file: &Path, line: u32) -> Stop {
+    let resolved = driven
         .set_breakpoints(vec![SourceBreakpoint::at(1, file, line)])
         .expect("the breakpoint request was answered");
     match &resolved[0].binding {
@@ -242,53 +325,78 @@ fn held_at(debuggee: &mut Debuggee, file: &Path, line: u32) -> Stop {
         Binding::Unbound { reason } => panic!("the breakpoint did not bind: {reason}"),
     }
 
-    let stop = match debuggee
-        .run(&mut bpd_test::reporting::Unreported)
-        .expect("the debuggee was resumed")
-    {
-        Running::Stopped { stop, .. } => stop,
-        other => panic!("expected a breakpoint stop, got {other:?}"),
+    let stop = match driven.run() {
+        Ok(Running::Stopped { stop, .. }) => stop,
+        Ok(other) => panic!(
+            "expected a breakpoint stop, got {other:?}\n{}",
+            driven.trace
+        ),
+        Err(error) => panic!("the debuggee was not resumed: {error}\n{}", driven.trace),
     };
-    debuggee
+    driven
         .set_breakpoints(Vec::new())
         .expect("the breakpoint set was cleared");
     stop
 }
 
 /// step the only held thread and require that it landed
-fn stepped(debuggee: &mut Debuggee, kind: StepKind) -> Stop {
-    debuggee.the_step(kind).expect("the thread was stepped");
-    match debuggee
-        .wait(&mut bpd_test::reporting::Unreported)
-        .expect("the debuggee was waited on")
-    {
-        Running::Stopped { stop, .. } => stop,
-        other => panic!("expected a {kind} to land, got {other:?}"),
-    }
+fn stepped(driven: &mut Driven, kind: StepKind) -> Stop {
+    let Driven { debuggee, trace } = driven;
+    trace.stepped(debuggee, kind)
 }
 
 /// where a step landed, or what the stop turned out to be instead
-fn landing(stop: &Stop) -> (StepKind, &str, u32) {
+fn landing<'a>(driven: &Driven, stop: &'a Stop) -> (StepKind, &'a str, u32) {
     match &stop.reason {
         StopReason::Stepped { kind, file, line } => (*kind, file.as_str(), *line),
-        other => panic!("expected a step to have landed, got {other:?}"),
+        other => panic!(
+            "expected a step to have landed, got {other:?}\n{}",
+            driven.trace
+        ),
     }
 }
 
+/// require that a step landed on `line`
+///
+/// a function rather than an `assert_eq!` in each test, and that is the whole
+/// point of the trace: a comparison written in the test body prints the two
+/// numbers and nothing else, and the two numbers are never what says why. going
+/// through here means every landing check in this file carries the sequence
+/// that produced it, including the ones nobody has written yet
+fn landed_on(driven: &Driven, stop: &Stop, line: u32) {
+    let (_, _, landed) = landing(driven, stop);
+    assert_eq!(
+        landed, line,
+        "the step landed on line {landed} and should have landed on {line}\n{}",
+        driven.trace
+    );
+}
+
+/// require the kind a step landed as
+fn landed_as(driven: &Driven, stop: &Stop, kind: StepKind) {
+    let (landed, _, _) = landing(driven, stop);
+    assert_eq!(
+        landed, kind,
+        "the stop is a {landed} and should have been a {kind}\n{}",
+        driven.trace
+    );
+}
+
 /// `co_qualname` of the frame the held thread is in
-fn function(debuggee: &mut Debuggee) -> String {
-    let stack = debuggee.the_stack(Some(1)).expect("the stack was answered");
+fn function(driven: &mut Driven) -> String {
+    let stack = driven.the_stack(Some(1)).expect("the stack was answered");
     stack.frames[0].name().to_string()
 }
 
 /// what an expression is worth in the frame that is held
-fn value_of(debuggee: &mut Debuggee, expression: &str) -> String {
-    let frame = debuggee
+fn value_of(driven: &mut Driven, expression: &str) -> String {
+    let frame = driven
         .the_stack(Some(1))
         .expect("the stack was answered")
         .frames[0]
         .id;
-    match debuggee
+    match driven
+        .debuggee
         .evaluate(frame, expression, Detail::default())
         .expect("the expression was evaluated")
     {
@@ -298,15 +406,18 @@ fn value_of(debuggee: &mut Debuggee, expression: &str) -> String {
 }
 
 /// resume everything and require that the program finishes successfully
-fn to_exit(debuggee: &mut Debuggee) {
-    match debuggee
-        .run(&mut bpd_test::reporting::Unreported)
-        .expect("the debuggee was resumed")
-    {
-        Running::Exited { status, .. } => {
-            assert!(status.success(), "the program exited with {status}");
-        }
-        other => panic!("expected the program to finish, got {other:?}"),
+fn to_exit(driven: &mut Driven) {
+    match driven.run() {
+        Ok(Running::Exited { status, .. }) => assert!(
+            status.success(),
+            "the program exited with {status}\n{}",
+            driven.trace
+        ),
+        Ok(other) => panic!(
+            "expected the program to finish, got {other:?}\n{}",
+            driven.trace
+        ),
+        Err(error) => panic!("the debuggee was not resumed: {error}\n{}", driven.trace),
     }
 }
 
@@ -348,19 +459,23 @@ fn a_step_over_a_call_runs_it_and_lands_on_the_next_line() {
     let calling = line_of(PROGRAM, "doubled = helper(4)");
     let next = line_of(PROGRAM, "after_helper = doubled + 1");
 
-    let mut debuggee = launch(&fixture);
-    held_at(&mut debuggee, &fixture.path(), calling);
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), calling);
     assert!(
         !ran(&fixture, "helper_ran"),
         "the program is held before the call, so the call has not happened"
     );
 
-    let stop = stepped(&mut debuggee, StepKind::Over);
-    let (kind, file, line) = landing(&stop);
-    assert_eq!(kind, StepKind::Over);
-    assert_eq!(Path::new(file), fixture.path());
-    assert_eq!(line, next);
-    assert_eq!(function(&mut debuggee), "main");
+    let stop = stepped(&mut driven, StepKind::Over);
+    landed_as(&driven, &stop, StepKind::Over);
+    landed_on(&driven, &stop, next);
+    assert_eq!(
+        Path::new(landing(&driven, &stop).1),
+        fixture.path(),
+        "the step left the file it started in\n{}",
+        driven.trace
+    );
+    assert_eq!(function(&mut driven), "main");
 
     // the whole difference between over and in: the call was run, and the
     // program is not inside it
@@ -369,7 +484,7 @@ fn a_step_over_a_call_runs_it_and_lands_on_the_next_line() {
         "a step over runs the call it steps over"
     );
 
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -378,14 +493,13 @@ fn a_step_in_stops_on_the_first_line_of_the_call() {
     let calling = line_of(PROGRAM, "doubled = helper(4)");
     let first = line_of(PROGRAM, "inside = value * 2");
 
-    let mut debuggee = launch(&fixture);
-    held_at(&mut debuggee, &fixture.path(), calling);
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), calling);
 
-    let stop = stepped(&mut debuggee, StepKind::In);
-    let (kind, _, line) = landing(&stop);
-    assert_eq!(kind, StepKind::In);
-    assert_eq!(line, first);
-    assert_eq!(function(&mut debuggee), "helper");
+    let stop = stepped(&mut driven, StepKind::In);
+    landed_as(&driven, &stop, StepKind::In);
+    landed_on(&driven, &stop, first);
+    assert_eq!(function(&mut driven), "helper");
 
     // the proof that it stopped at the *first* line of the callee rather than
     // somewhere inside it: the marker on the line below has not been written
@@ -394,7 +508,7 @@ fn a_step_in_stops_on_the_first_line_of_the_call() {
         "a step in stops before the callee has run anything"
     );
 
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -403,14 +517,14 @@ fn a_step_in_on_a_line_that_calls_nothing_is_a_step_over() {
     let plain = line_of(PROGRAM, "stop_here = 1");
     let next = line_of(PROGRAM, "doubled = helper(4)");
 
-    let mut debuggee = launch(&fixture);
-    held_at(&mut debuggee, &fixture.path(), plain);
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), plain);
 
-    let stop = stepped(&mut debuggee, StepKind::In);
-    assert_eq!(landing(&stop).2, next);
-    assert_eq!(function(&mut debuggee), "main");
+    let stop = stepped(&mut driven, StepKind::In);
+    landed_on(&driven, &stop, next);
+    assert_eq!(function(&mut driven), "main");
 
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -419,15 +533,14 @@ fn a_step_out_finishes_the_frame_and_lands_in_the_caller() {
     let inside = line_of(PROGRAM, "inside = value * 2");
     let after = line_of(PROGRAM, "after_helper = doubled + 1");
 
-    let mut debuggee = launch(&fixture);
-    held_at(&mut debuggee, &fixture.path(), inside);
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), inside);
     assert!(!ran(&fixture, "helper_ran"));
 
-    let stop = stepped(&mut debuggee, StepKind::Out);
-    let (kind, _, line) = landing(&stop);
-    assert_eq!(kind, StepKind::Out);
-    assert_eq!(line, after);
-    assert_eq!(function(&mut debuggee), "main");
+    let stop = stepped(&mut driven, StepKind::Out);
+    landed_as(&driven, &stop, StepKind::Out);
+    landed_on(&driven, &stop, after);
+    assert_eq!(function(&mut driven), "main");
 
     // out means the frame was finished, not abandoned: the rest of it ran
     assert!(
@@ -435,7 +548,7 @@ fn a_step_out_finishes_the_frame_and_lands_in_the_caller() {
         "a step out runs the frame it steps out of to its end"
     );
 
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -444,26 +557,26 @@ fn a_step_over_a_recursive_call_stays_in_the_frame_it_was_made_in() {
     let call = line_of(PROGRAM, "deeper = recurse(n - 1)");
     let next = line_of(PROGRAM, "return deeper + n");
 
-    let mut debuggee = launch(&fixture);
-    held_at(&mut debuggee, &fixture.path(), call);
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), call);
     assert_eq!(
-        value_of(&mut debuggee, "n"),
-        value_of(&mut debuggee, "2"),
+        value_of(&mut driven, "n"),
+        value_of(&mut driven, "2"),
         "the first hit is the outermost call"
     );
 
     // the recursion re-enters the same code object, so every line of it is a
     // line the step is watching. a step that followed the code object rather
     // than the frame lands on `if n == 0` one level down
-    let stop = stepped(&mut debuggee, StepKind::Over);
-    assert_eq!(landing(&stop).2, next);
+    let stop = stepped(&mut driven, StepKind::Over);
+    landed_on(&driven, &stop, next);
     assert_eq!(
-        value_of(&mut debuggee, "n"),
-        value_of(&mut debuggee, "2"),
+        value_of(&mut driven, "n"),
+        value_of(&mut driven, "2"),
         "it landed in the frame the step was made in, not in a deeper one"
     );
 
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -473,29 +586,30 @@ fn a_step_over_a_yield_lands_on_the_next_line_of_the_same_generator() {
     let yielding = line_of(PROGRAM, "yield step_one");
     let second = line_of(PROGRAM, "step_two = tag");
 
-    let mut debuggee = launch(&fixture);
-    held_at(&mut debuggee, &fixture.path(), first);
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), first);
     assert_eq!(
-        value_of(&mut debuggee, "tag"),
-        value_of(&mut debuggee, "'left'"),
+        value_of(&mut driven, "tag"),
+        value_of(&mut driven, "'left'"),
         "the first generator to run is the one built first"
     );
 
-    assert_eq!(landing(&stepped(&mut debuggee, StepKind::Over)).2, yielding);
+    let stop = stepped(&mut driven, StepKind::Over);
+    landed_on(&driven, &stop, yielding);
 
     // the generator is suspended here, the consumer runs on, and a **second**
     // generator of the same function runs both of its first two lines before
     // this one is resumed. a yield is a suspension rather than a return, so the
     // step follows this frame across it
-    let stop = stepped(&mut debuggee, StepKind::Over);
-    assert_eq!(landing(&stop).2, second);
+    let stop = stepped(&mut driven, StepKind::Over);
+    landed_on(&driven, &stop, second);
     assert_eq!(
-        value_of(&mut debuggee, "tag"),
-        value_of(&mut debuggee, "'left'"),
+        value_of(&mut driven, "tag"),
+        value_of(&mut driven, "'left'"),
         "it landed in the generator it was stepping in, not in the other one"
     );
 
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -504,22 +618,22 @@ fn a_coroutine_awaited_from_two_places_steps_into_the_right_one() {
     let awaiting = line_of(PROGRAM, "second = await leaf(\"second\")");
     let first = line_of(PROGRAM, "marker = tag");
 
-    let mut debuggee = launch(&fixture);
-    held_at(&mut debuggee, &fixture.path(), awaiting);
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), awaiting);
 
     // the first `leaf` frame has been freed by now, and cpython hands its
     // address straight back to this one — which is why the step holds the frame
     // rather than its address
-    let stop = stepped(&mut debuggee, StepKind::In);
-    assert_eq!(landing(&stop).2, first);
-    assert_eq!(function(&mut debuggee), "leaf");
+    let stop = stepped(&mut driven, StepKind::In);
+    landed_on(&driven, &stop, first);
+    assert_eq!(function(&mut driven), "leaf");
     assert_eq!(
-        value_of(&mut debuggee, "tag"),
-        value_of(&mut debuggee, "'second'"),
+        value_of(&mut driven, "tag"),
+        value_of(&mut driven, "'second'"),
         "the step went into the coroutine the line it was on awaited"
     );
 
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -531,19 +645,19 @@ fn a_step_over_a_call_that_raises_lands_where_the_caller_catches_it() {
     // after the call it made raised
     let handler = line_of(PROGRAM, "    except ValueError:");
 
-    let mut debuggee = launch(&fixture);
-    held_at(&mut debuggee, &fixture.path(), calling);
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), calling);
     assert!(!ran(&fixture, "raiser_ran"));
 
     // the callee is left by an exception rather than by a return, and this
     // frame is not left at all — it catches it. the step lands on the first
     // line the frame reaches afterwards, which is the handler
-    let stop = stepped(&mut debuggee, StepKind::Over);
-    assert_eq!(landing(&stop).2, handler);
-    assert_eq!(function(&mut debuggee), "catching");
+    let stop = stepped(&mut driven, StepKind::Over);
+    landed_on(&driven, &stop, handler);
+    assert_eq!(function(&mut driven), "catching");
     assert!(ran(&fixture, "raiser_ran"), "the call really was made");
 
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -551,8 +665,8 @@ fn stepping_through_an_inlined_comprehension_stays_in_the_enclosing_function() {
     let fixture = Fixture::new("program", PROGRAM);
     let opening = line_of(PROGRAM, "squared = [");
 
-    let mut debuggee = launch(&fixture);
-    held_at(&mut debuggee, &fixture.path(), opening);
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), opening);
 
     // list, dict and set comprehensions have been inlined into the function
     // that contains them since cpython 3.12 and PEP 709, so there is no code
@@ -560,13 +674,13 @@ fn stepping_through_an_inlined_comprehension_stays_in_the_enclosing_function() {
     // land in. stepping through one walks the enclosing function's own lines
     let mut walked = Vec::new();
     loop {
-        let stop = stepped(&mut debuggee, StepKind::Over);
-        let held = function(&mut debuggee);
+        let stop = stepped(&mut driven, StepKind::Over);
+        let held = function(&mut driven);
         if held != "squares" {
             assert_eq!(held, "main", "it left `squares` by returning to `main`");
             break;
         }
-        walked.push(landing(&stop).2);
+        walked.push(landing(&driven, &stop).2);
         assert!(
             walked.len() < 20,
             "a comprehension over two items does not take twenty steps: {walked:?}"
@@ -577,7 +691,7 @@ fn stepping_through_an_inlined_comprehension_stays_in_the_enclosing_function() {
         walked.len() > 1,
         "the comprehension has lines of its own to step through, and got {walked:?}"
     );
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -586,8 +700,8 @@ fn a_step_is_offered_a_line_an_earlier_pass_disabled() {
     let entry = line_of(TWICE, "entered = n");
     let middle = line_of(TWICE, "middle = entered + 1");
 
-    let mut debuggee = launch(&fixture);
-    let resolved = debuggee
+    let mut driven = launch(&fixture);
+    let resolved = driven
         .set_breakpoints(vec![SourceBreakpoint::at(1, fixture.path(), entry)])
         .expect("the breakpoint request was answered");
     assert!(matches!(resolved[0].binding, Binding::Bound { .. }));
@@ -598,10 +712,7 @@ fn a_step_is_offered_a_line_an_earlier_pass_disabled() {
     // anyway, which needs the process-wide restart because PEP 669 has no
     // per-location undo
     for expected in [1, 2] {
-        match debuggee
-            .run(&mut bpd_test::reporting::Unreported)
-            .expect("the debuggee was resumed")
-        {
+        match driven.run().expect("the debuggee was resumed") {
             Running::Stopped { stop, .. } => match &stop.reason {
                 StopReason::Breakpoint { line, .. } => assert_eq!(*line, entry),
                 other => panic!("expected a breakpoint stop, got {other:?}"),
@@ -615,17 +726,17 @@ fn a_step_is_offered_a_line_an_earlier_pass_disabled() {
         // the breakpoint set is deliberately left alone. changing it restarts
         // the process's events on its own, which would undo the disables this
         // test is about and leave it proving nothing
-        let stop = stepped(&mut debuggee, StepKind::Over);
+        let stop = stepped(&mut driven, StepKind::Over);
         assert_eq!(
-            landing(&stop).2,
+            landing(&driven, &stop).2,
             middle,
             "the line after the breakpoint was disabled by the first call, and \
              a step that was never offered it lands in the caller instead"
         );
-        assert_eq!(function(&mut debuggee), "twice");
+        assert_eq!(function(&mut driven), "twice");
     }
 
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -634,23 +745,20 @@ fn a_breakpoint_reached_while_stepping_is_reported_as_a_breakpoint() {
     let calling = line_of(PROGRAM, "doubled = helper(4)");
     let inside = line_of(PROGRAM, "inside = value * 2");
 
-    let mut debuggee = launch(&fixture);
-    held_at(&mut debuggee, &fixture.path(), calling);
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), calling);
 
     // a breakpoint inside the call a step is stepping over. it is a stop the
     // client asked for, and reporting it as the step landing would be a
     // breakpoint the client never saw fire
-    debuggee
+    driven
         .set_breakpoints(vec![SourceBreakpoint::at(7, fixture.path(), inside)])
         .expect("the breakpoint request was answered");
 
-    debuggee
+    driven
         .the_step(StepKind::Over)
         .expect("the thread was stepped");
-    let stop = match debuggee
-        .wait(&mut bpd_test::reporting::Unreported)
-        .expect("the debuggee was waited on")
-    {
+    let stop = match driven.wait().expect("the debuggee was waited on") {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the breakpoint to stop it, got {other:?}"),
     };
@@ -664,10 +772,10 @@ fn a_breakpoint_reached_while_stepping_is_reported_as_a_breakpoint() {
         other => panic!("expected a breakpoint stop, got {other:?}"),
     }
 
-    debuggee
+    driven
         .set_breakpoints(Vec::new())
         .expect("the breakpoint set was cleared");
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -675,24 +783,21 @@ fn a_step_out_of_the_outermost_frame_lets_the_program_finish() {
     let fixture = Fixture::new("program", PROGRAM);
     let before = line_of(PROGRAM, "started = 1");
 
-    let mut debuggee = launch(&fixture);
-    held_at(&mut debuggee, &fixture.path(), before);
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), before);
     // the last statement of the module, reached by a step of its own so that
     // the next one has nowhere left to go
-    assert_eq!(function(&mut debuggee), "<module>");
-    stepped(&mut debuggee, StepKind::Over);
+    assert_eq!(function(&mut driven), "<module>");
+    stepped(&mut driven, StepKind::Over);
 
     // there is no frame above the program's own module that bpd would report —
     // the one above it is the `-c` the interpreter was entered through — so the
     // step has nowhere to land. it is given up, and what the program did is
     // what the client is told
-    debuggee
+    driven
         .the_step(StepKind::Over)
         .expect("the thread was stepped");
-    match debuggee
-        .wait(&mut bpd_test::reporting::Unreported)
-        .expect("the debuggee was waited on")
-    {
+    match driven.wait().expect("the debuggee was waited on") {
         Running::Exited { status, .. } => assert!(status.success()),
         other => panic!("expected the program to finish, got {other:?}"),
     }
@@ -705,42 +810,39 @@ fn stepping_one_thread_does_not_step_or_stop_another() {
     let first = line_of(SHARED, "a = tag");
     let second = line_of(SHARED, "b = gate(tag)");
 
-    let mut debuggee = launch(&fixture);
+    let mut driven = launch(&fixture);
     // both threads run this function. the condition is what makes the stop the
     // main thread's, and the spinner goes on calling it throughout
-    let resolved = debuggee
+    let resolved = driven
         .set_breakpoints(vec![
             SourceBreakpoint::at(1, fixture.path(), first).when("tag == 'main'"),
         ])
         .expect("the breakpoint request was answered");
     assert!(matches!(resolved[0].binding, Binding::Bound { .. }));
 
-    let stop = match debuggee
-        .run(&mut bpd_test::reporting::Unreported)
-        .expect("the debuggee was resumed")
-    {
+    let stop = match driven.run().expect("the debuggee was resumed") {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the main thread to stop, got {other:?}"),
     };
     assert_eq!(stop.thread, ident(&fixture, "main"));
-    debuggee
+    driven
         .set_breakpoints(Vec::new())
         .expect("the breakpoint set was cleared");
 
     // the spinner is running the very lines this step is watching. a step that
     // did not belong to a thread would land on whichever thread got there first
-    let landed = stepped(&mut debuggee, StepKind::Over);
+    let landed = stepped(&mut driven, StepKind::Over);
     assert_eq!(landed.thread, stop.thread, "the step is the main thread's");
-    assert_eq!(landing(&landed).2, second);
+    landed_on(&driven, &landed, second);
     assert_eq!(
-        value_of(&mut debuggee, "tag"),
-        value_of(&mut debuggee, "'main'")
+        value_of(&mut driven, "tag"),
+        value_of(&mut driven, "'main'")
     );
     assert_eq!(
-        debuggee.held().len(),
+        driven.held().len(),
         1,
         "the spinner was never held, and got {:?}",
-        debuggee.held()
+        driven.held()
     );
 
     // and it really was running the whole time, which is a file it wrote rather
@@ -753,7 +855,7 @@ fn stepping_one_thread_does_not_step_or_stop_another() {
         "the main thread is held one line past its breakpoint"
     );
 
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -763,49 +865,44 @@ fn a_step_is_offered_a_line_another_thread_would_have_disabled() {
     let calling = line_of(SHARED, "b = gate(tag)");
     let after = line_of(SHARED, "c = b");
 
-    let mut debuggee = launch(&fixture);
-    let resolved = debuggee
+    let mut driven = launch(&fixture);
+    let resolved = driven
         .set_breakpoints(vec![
             SourceBreakpoint::at(1, fixture.path(), first).when("tag == 'main'"),
         ])
         .expect("the breakpoint request was answered");
     assert!(matches!(resolved[0].binding, Binding::Bound { .. }));
-    match debuggee
-        .run(&mut bpd_test::reporting::Unreported)
-        .expect("the debuggee was resumed")
-    {
+    match driven.run().expect("the debuggee was resumed") {
         Running::Stopped { .. } => {}
         other => panic!("expected the main thread to stop, got {other:?}"),
     }
-    debuggee
+    driven
         .set_breakpoints(Vec::new())
         .expect("the breakpoint set was cleared");
 
-    assert_eq!(landing(&stepped(&mut debuggee, StepKind::Over)).2, calling);
+    let stop = stepped(&mut driven, StepKind::Over);
+    landed_on(&driven, &stop, calling);
 
     // this step is held open for as long as the test likes: the call it steps
     // over waits for a file. `DISABLE` is process wide, so the other thread
     // running the very same function through the whole of it would tell the
     // interpreter never to offer the line this step is waiting for
-    debuggee
+    driven
         .the_step(StepKind::Over)
         .expect("the thread was stepped");
     expect(&fixture, "gating");
     expect(&fixture, "spun_while_gated");
     tell(&fixture, "go");
 
-    let stop = match debuggee
-        .wait(&mut bpd_test::reporting::Unreported)
-        .expect("the debuggee was waited on")
-    {
+    let stop = match driven.wait().expect("the debuggee was waited on") {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the step to land, got {other:?}"),
     };
-    assert_eq!(landing(&stop).2, after);
-    assert_eq!(function(&mut debuggee), "shared");
+    landed_on(&driven, &stop, after);
+    assert_eq!(function(&mut driven), "shared");
 
     tell(&fixture, "stop");
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
 
 #[test]
@@ -864,24 +961,21 @@ fn the_interpreter_hands_a_freed_frames_address_to_the_next_one() {
 fn a_pause_holds_the_first_thread_that_reaches_a_line() {
     let fixture = Fixture::new("spinning", SPINNING);
 
-    let mut debuggee = launch(&fixture);
-    debuggee.resume_all().expect("the entry stop was resumed");
+    let mut driven = launch(&fixture);
+    driven.resume_all().expect("the entry stop was resumed");
     expect(&fixture, "running");
 
     // the one request made to a program with nothing held. it says which
     // threads were running python, because a program whose every thread is
     // parked in a C call reaches no line and nothing can hold one
-    let running = debuggee.pause().expect("the pause was armed");
+    let running = driven.pause().expect("the pause was armed");
     assert_eq!(
         running,
         vec![ident(&fixture, "main")],
         "the only thread of this program was going round a python loop"
     );
 
-    let stop = match debuggee
-        .wait(&mut bpd_test::reporting::Unreported)
-        .expect("the debuggee was waited on")
-    {
+    let stop = match driven.wait().expect("the debuggee was waited on") {
         Running::Stopped { stop, .. } => stop,
         other => panic!("expected the pause to hold a thread, got {other:?}"),
     };
@@ -896,7 +990,7 @@ fn a_pause_holds_the_first_thread_that_reaches_a_line() {
     // the loop asks the filesystem whether a file exists, and every line of
     // `genericpath` is a line a pause can hold. what is not in doubt is whose
     // thread it is and what it is doing, and the outermost frame says both
-    let stack = debuggee.the_stack(None).expect("the stack was answered");
+    let stack = driven.the_stack(None).expect("the stack was answered");
     let outermost = stack.frames.last().expect("a held thread has a stack");
     assert_eq!(Path::new(&outermost.file), fixture.path());
     assert_eq!(outermost.name(), "<module>");
@@ -906,5 +1000,5 @@ fn a_pause_holds_the_first_thread_that_reaches_a_line() {
     );
 
     tell(&fixture, "stop");
-    to_exit(&mut debuggee);
+    to_exit(&mut driven);
 }
