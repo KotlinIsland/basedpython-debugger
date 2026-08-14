@@ -402,6 +402,23 @@ const TURN: Duration = Duration::from_millis(20);
 /// to watch. so `bpd launch --debug-children` outlives a child that outlives its
 /// parent, and that is a real difference from a bare run of the same program:
 /// [child processes](../../../docs/development/subprocesses.md) says so out loud
+///
+/// # a child that arrives after the last session has ended
+///
+/// it cannot be one that is left held, and the reason is where a session is
+/// accepted: the engine takes a connection off the listener from **inside a
+/// wait**, and a wait is only ever made on a session that is still open. so a
+/// child the engine has taken is a child in [`Debuggee::sessions`], and this
+/// loop reads that list afresh every turn and drives every one of them to its
+/// end
+///
+/// a child whose connection had not been taken by then is attached to nothing.
+/// it is waiting for a handshake, and when this process exits it gets what any
+/// child that cannot reach the debugger gets: a line on its own stderr naming
+/// the endpoint and the failure, and a run with the tool taken off it. the
+/// shape that produces one is a parent that exits immediately after forking —
+/// so what it costs is a child that runs undebugged and says so, rather than a
+/// process nobody can resume
 fn every_session(
     debuggee: &mut Debuggee,
     watching: &mut Watching,
