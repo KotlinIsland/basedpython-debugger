@@ -846,9 +846,14 @@ fn shown(said: Told, told: &Transcript) -> bool {
         Told::BlindSpot => told.answered(&["\"cannot_see\"", "\"silence_is_not_evidence\":true"]),
         Told::Attached => told.answered(&["\"attached\"", &mark::JOINED.to_string()]),
         Told::Stopped => told.answered(&["\"outcome\":\"stopped\""]),
+        // the code, the field, **and** the reason. the exit `ran` makes is one
+        // whose output is still being written, and an agent handed the code
+        // alone would read every later line as part of a run that had ended
         Told::Exited => told.answered(&[
             "\"outcome\":\"exited\"",
             &format!("\"exit_code\":{}", mark::EXIT_CODE),
+            "\"output_complete\":false",
+            mark::STILL_WRITING,
         ]),
         Told::Finishing => told.answered(&[
             "\"outcome\":\"finishing\"",

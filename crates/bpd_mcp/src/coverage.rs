@@ -190,7 +190,13 @@ pub const fn carriage_of(told: Told) -> Carried {
              one call, one answer, and no event to correlate",
         ),
 
-        Told::Exited => Carried::Pulled("`outcome: exited`, carrying `exit_code`"),
+        // `output_complete` is the half that would otherwise go missing: an
+        // agent that read `exited` as the end of the program's output would
+        // attribute a child's later lines to a run that had already ended
+        Told::Exited => Carried::Pulled(
+            "`outcome: exited`, carrying `exit_code` and `output_complete` — with \
+             a `note` saying what still holds the stream when it is false",
+        ),
 
         Told::Finishing => Carried::Pulled(
             "`outcome: finishing`, carrying `held` — the threads that have to be \

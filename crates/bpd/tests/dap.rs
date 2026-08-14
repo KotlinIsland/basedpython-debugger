@@ -81,6 +81,7 @@ over_each_transport!(
     a_capability_that_is_not_advertised_is_refused_rather_than_guessed_at,
     a_client_is_refused_the_same_interpreter_the_command_line_is,
     a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds,
+    everything_a_program_printed_is_on_the_wire_before_it_is_reported_over,
 );
 
 /// a program with a local worth writing to, and a marker after the breakpoint
@@ -729,6 +730,82 @@ fn a_capability_that_is_not_advertised_is_refused_rather_than_guessed_at(transpo
 /// it is the stream of whatever spawned the adapter, and a debuggee that took a
 /// byte of it would be taking it from a reader that is already waiting on it.
 /// over stdio there is no need for a marker: the protocol *is* the stream, and
+/// a program that says far more than a pipe holds, and then stops saying it
+///
+/// the size is the whole point rather than decoration. a pipe holds about 64 KiB,
+/// so a program writing this much **cannot** have written it all by the time it
+/// exits — the last of it is still in the pipe, and whatever is reading it has
+/// more reads to do after the process is already gone. that is the window this
+/// test is about, made a certainty instead of something to wait for
+///
+/// the last line is distinct so that "the tail arrived" is one assertion rather
+/// than a count, and the flush is what puts each line in the pipe as it is
+/// written rather than in one block at exit
+const A_LOT_TO_SAY: &str = r#"for line in range(4000):
+    print(f"line {line} of a program with plenty to say", flush=True)
+print("the last thing this program said", flush=True)
+"#;
+
+/// the last line `A_LOT_TO_SAY` prints
+const THE_LAST_THING: &str = "the last thing this program said";
+
+/// the program's own output, and the moment the client is told it is over
+///
+/// these are two different descriptors: what the program writes goes down a
+/// **pipe** the front end reads on threads of its own, and the program being
+/// over arrives on the **control connection**. nothing orders one against the
+/// other, so without the engine waiting for the first before reporting the
+/// second, a client is told the program finished and then handed another line of
+/// its output
+///
+/// that is not a cosmetic ordering. an `exited` event is what a client uses to
+/// decide the run is done — to stop tailing the console, to render a result, to
+/// tear the session down — and a line arriving after it is a line that reaches
+/// nobody. `bpd` claims a run under it is indistinguishable from a bare one, and
+/// a bare run does not lose its last line
+fn everything_a_program_printed_is_on_the_wire_before_it_is_reported_over(transport: Transport) {
+    let fixture = Fixture::new("talker", A_LOT_TO_SAY);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+
+    // read no further than `exited`, which is what makes this an assertion about
+    // **order** rather than about arrival. the client's cursor stops there, so
+    // what it has is exactly the wire up to that event
+    let exited = client.event("exited");
+    assert_eq!(exited["body"]["exitCode"], 0, "the program runs to its end");
+
+    let said = client.output();
+    assert!(
+        said.contains(THE_LAST_THING),
+        "the program was reported over while the last thing it printed was \
+         still in a pipe. the client had {} bytes of its output at that point, \
+         ending {:?}",
+        said.len(),
+        said.chars().rev().take(80).collect::<String>(),
+    );
+    // and not just the tail: a line dropped out of the middle is the same defect
+    // with a luckier ending
+    for line in [0, 1_000, 2_500, 3_999] {
+        let expected = format!("line {line} of a program with plenty to say");
+        assert!(
+            said.contains(&expected),
+            "the client never got {expected:?}, so what the program wrote and \
+             what reached the client are not the same thing"
+        );
+    }
+
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
 /// what a debuggee reads there is a DAP message
 const NOT_THE_DEBUGGEES: &str = "this line belongs to whatever spawned bpd";
 

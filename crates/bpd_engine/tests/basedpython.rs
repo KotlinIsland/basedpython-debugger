@@ -884,7 +884,9 @@ fn run_to_stop(debuggee: &mut Debuggee) -> StopReason {
         .expect("the debuggee was resumed")
     {
         Running::Stopped { stop, .. } => stop.reason,
-        Running::Exited { status, rebound } => panic!(
+        Running::Exited {
+            status, rebound, ..
+        } => panic!(
             "it exited with {status} instead of stopping. what it said about \
              the breakpoints was {rebound:?}"
         ),

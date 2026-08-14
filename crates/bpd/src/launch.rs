@@ -25,7 +25,7 @@ use std::process::{ExitCode, ExitStatus};
 use std::time::Duration;
 
 use bpd_core::python::Capabilities;
-use bpd_core::{Addressed, Request, Response, Running};
+use bpd_core::{Addressed, Forwarded, Request, Response, Running};
 use bpd_engine::{Debuggee, Launched, Program};
 
 use crate::report_error;
@@ -334,10 +334,24 @@ fn alone(
         // stop it and nothing can change what a breakpoint resolves to.
         // both are stated rather than absorbed, because a stop nobody
         // handles is a debuggee left hanging
-        Ok(Running::Exited { status, rebound }) => {
+        Ok(Running::Exited {
+            status,
+            rebound,
+            output,
+        }) => {
             assert!(
                 rebound.is_empty(),
                 "no breakpoints were set, and the agent reported {rebound:?}"
+            );
+            // this launch leaves the debuggee's streams inherited, so its output
+            // never passed through bpd and there is nothing that could still be
+            // carrying it. anything else here is the engine reporting a pipe on
+            // a run that has none
+            assert_eq!(
+                output,
+                Forwarded::Everything,
+                "`bpd launch` inherits the program's streams, and the engine \
+                 reported {output:?}"
             );
             Ok(status)
         }

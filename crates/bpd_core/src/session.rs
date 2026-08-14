@@ -692,6 +692,44 @@ pub enum Response {
     Difference(Difference),
 }
 
+/// whether everything a program wrote had arrived by the time it was reported
+/// over
+///
+/// a front end that leaves the debuggee's streams inherited — `bpd launch` —
+/// has nothing to answer for: the program wrote to the terminal itself, and the
+/// order is the kernel's. one that reads them off a pipe does, because it learns
+/// the program exited on a **different** descriptor and the last bytes of the
+/// pipe can still be unread when it does. a client told the program is over and
+/// then handed another line of its output has been told the run finished before
+/// it did
+///
+/// so the wait for the pipe is bounded and its outcome is carried here rather
+/// than assumed. it cannot be unbounded: a **forked child** inherits the write
+/// end, so a program whose child outlives it never reaches end-of-file, and a
+/// debugger that waited for one would hang at the exit of every program that
+/// leaves a daemon behind
+/// no `Serialize`: this never goes on a wire. it is engine-to-front-end, in one
+/// process, and each front end renders it in its own protocol's shape — a
+/// console line for DAP, a boolean field for MCP
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Forwarded {
+    /// every byte the program wrote is already where it was going
+    ///
+    /// either the streams were never bpd's to carry, or the pipe reached
+    /// end-of-file and what read it is finished
+    Everything,
+
+    /// the program is gone and something still holds the stream it wrote to
+    ///
+    /// what a forked child that outlives its parent looks like from here. it is
+    /// not a failure and nothing has been dropped — what is still coming is the
+    /// **child's** output, and it keeps being forwarded. what it costs is the
+    /// order: a line arriving after this point cannot be said to have been
+    /// written before the program ended, so a front end says so rather than
+    /// letting a reader assume it
+    StillHeldOpen,
+}
+
 /// what a resumed debuggee did next
 ///
 /// deliberately closed: a third outcome is something every caller has to decide
@@ -712,6 +750,13 @@ pub enum Running {
         status: ExitStatus,
         /// what loading a file changed about the breakpoint set on the way
         rebound: Vec<Resolved>,
+        /// whether what the program wrote had all been forwarded by now
+        ///
+        /// carried rather than assumed, because a front end that reads the
+        /// debuggee's output off a pipe learns the program is over on a
+        /// **different** descriptor — the control connection — and the two have
+        /// no order between them. see [`Forwarded`]
+        output: Forwarded,
     },
 
     /// the program ran to its end with threads still held

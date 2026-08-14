@@ -30,7 +30,7 @@ use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
 pub use launch::{
-    Debuggee, Invocation, Launched, Program, launch, launch_in_terminal, launch_piped,
+    Debuggee, Forwarders, Invocation, Launched, Program, launch, launch_in_terminal, launch_piped,
 };
 
 /// the result type for engine operations

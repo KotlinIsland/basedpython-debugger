@@ -30,8 +30,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bpd_core::{
-    Addressed, Detail, Exit, HitCondition, LogRecord, Reporting, Request, Response, Running, Scope,
-    SessionId, SourceBreakpoint, StepKind, Stop, Threads, Which, exit_code, only_stop,
+    Addressed, Detail, Exit, Forwarded, HitCondition, LogRecord, Reporting, Request, Response,
+    Running, Scope, SessionId, SourceBreakpoint, StepKind, Stop, Threads, Which, exit_code,
+    only_stop,
 };
 
 use crate::prompts::prompts;
@@ -756,10 +757,33 @@ impl<'a> Server<'a> {
                 self.with_frames(&mut stopped, session, stop.stop, frames)?;
                 stopped
             }
-            Running::Exited { status, .. } => serde_json::json!({
-                "outcome": "exited",
-                "exit_code": exit_code(status),
-            }),
+            // `output_complete` is on every exit rather than only the unusual
+            // one, because an agent reading a field that appears only when
+            // something is wrong cannot tell "nothing was wrong" from "this
+            // server does not report it". the note is what carries the reason,
+            // and it is only there when there is one
+            Running::Exited { status, output, .. } => {
+                let mut exited = serde_json::json!({
+                    "outcome": "exited",
+                    "exit_code": exit_code(status),
+                    "output_complete": output == Forwarded::Everything,
+                });
+                if output == Forwarded::StillHeldOpen {
+                    // what bpd waited for and did not get, rather than the
+                    // reason it did not get it. naming a cause bpd did not
+                    // watch for would be the invention this field exists to
+                    // avoid
+                    exited["note"] = "the program has exited and its output is still being \
+                                      written: bpd waited for the stream it wrote to and it \
+                                      did not end, which is what a child outliving the \
+                                      program looks like. output after this point was \
+                                      written by whatever still holds that stream and not \
+                                      by the program that just ended, so it cannot be read \
+                                      as part of this run"
+                        .into();
+                }
+                exited
+            }
             // a separate outcome from `exited`, and deliberately **without** an
             // `exit_code` field rather than with a null one: the program is
             // over and the number is not bpd's to give

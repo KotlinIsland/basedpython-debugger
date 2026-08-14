@@ -187,7 +187,9 @@ fn run_to_stop(debuggee: &mut Debuggee) -> (StopReason, Vec<(u32, Binding)>) {
         .expect("the debuggee was resumed")
     {
         Running::Stopped { stop, rebound } => (stop.reason, latest(rebound)),
-        Running::Exited { status, rebound } => panic!(
+        Running::Exited {
+            status, rebound, ..
+        } => panic!(
             "it exited with {status} instead of stopping. what it said about \
              the breakpoints was {:?}",
             latest(rebound)
@@ -214,7 +216,9 @@ fn run_to_exit(debuggee: &mut Debuggee) -> Vec<(u32, Binding)> {
         .run(&mut bpd_test::reporting::Unreported)
         .expect("the debuggee was resumed")
     {
-        Running::Exited { status, rebound } => {
+        Running::Exited {
+            status, rebound, ..
+        } => {
             assert!(status.success(), "the debuggee exited with {status}");
             latest(rebound)
         }

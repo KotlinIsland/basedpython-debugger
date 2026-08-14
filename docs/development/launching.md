@@ -531,6 +531,61 @@ that are all the same reason:
     `runInTerminal`, where the client owns the terminal and makes it. that is
     why the request exists, and `bpd` implements it — see below
 
+### a program is not reported over until what it wrote has been carried
+
+a pipe read on a thread introduces a second channel, and the program being over
+arrives on neither of them. it arrives on the **control connection** — the agent's
+socket, which closes when the process dies — and nothing orders that against the
+pipes. so a forwarding thread that has not caught up yet is a client told the
+program finished while its last lines are still in a pipe
+
+that is not cosmetic. an `exited` event is what a client uses to decide the run
+is done: to stop tailing the console, to render a result, to tear the session
+down. a line arriving after it is a line that reaches nobody, and `bpd` claims a
+run under it is indistinguishable from a bare one — a bare run does not lose its
+last line
+
+measured, on a program printing four thousand lines and exiting: the client had
+**3665 of them** when it was told the program had exited. the rest arrived
+afterwards. a pipe holds about 64 KiB, so any program that writes more than that
+before ending has this window by construction, and the size of it is the size of
+whatever is left unread
+
+so the engine waits for the forwarding before it reports the exit. it is
+`bpd_engine::Forwarders`, handed over by whichever front end made the threads,
+and it is waited for in one place rather than in each of them — a rule kept by
+the thing that knows the program is over cannot be forgotten by a front end
+added later
+
+the wait is **bounded**, and that bound is the interesting part. a forwarding
+thread ends at end-of-file, and end-of-file needs every write end of the pipe
+closed — but a **forked child inherits one**. a program that leaves a child
+running never reaches end-of-file at all, so an unbounded wait here would turn
+"the program exited" into a hang for exactly the programs a debugger following
+children exists for
+
+what happens instead is that the wait gives up after two seconds and **says so**:
+
+- the CLI never sees it, and asserts as much — `bpd launch` inherits the
+    streams, so there is no pipe of `bpd`'s to drain and the order is the
+    kernel's
+- **DAP** writes a console line before the `exited` event, saying the program
+    has exited and something that outlived it still holds the stream
+- **MCP** carries `output_complete` on every exit — present whether or not
+    anything is wrong, because a field that appears only on failure cannot be
+    told from a server that does not report it — and a `note` giving the reason
+    when it is `false`
+
+what each of them says is that the wait did not finish, not *why* it did not.
+end-of-file needs every write end closed and a surviving child is what usually
+holds one — but `bpd` did not watch the descriptor, and naming a cause it did
+not see would be the invention the line exists to avoid
+
+nothing is dropped in that case either. whatever still holds the stream keeps
+being read and forwarded; what is lost is only the *claim* that a line was
+written before the program ended, and that claim is what is withdrawn rather
+than quietly kept
+
 ### the same two give the debuggee no stdin at all
 
 a captured launch gives the debuggee `/dev/null` as its stdin. it used to give

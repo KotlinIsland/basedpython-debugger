@@ -28,13 +28,14 @@
 use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader, Read, Write as _};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use bpd_core::python::Capabilities;
 use bpd_core::{Addressed, Reporting, Request, Response, SessionId, Stop};
 use bpd_dap::{
     Configuration, Failed, Launcher, Listening, ProgramOutput, Reachable, Session, Started, Stream,
 };
-use bpd_engine::{Debuggee, Launched, Program};
+use bpd_engine::{Debuggee, Forwarders, Launched, Program};
 
 use crate::report_error;
 
@@ -184,9 +185,15 @@ impl Launcher for Engine {
             &interpreter,
             &Program::Script(configuration.program.clone()),
             &arguments_of(configuration),
+            // handed back rather than detached: the engine waits for these
+            // before it reports the program over, so that a client is never
+            // told a program has finished while a line it printed is still in
+            // a pipe
             move |stdout, stderr| {
-                forward(stdout, Stream::Stdout, &output);
-                forward(stderr, Stream::Stderr, &output);
+                Forwarders::on(vec![
+                    forward(stdout, Stream::Stdout, &output),
+                    forward(stderr, Stream::Stderr, &output),
+                ])
             },
         )?;
         self.hold(launched)
@@ -300,7 +307,11 @@ fn only_session_of(debuggee: &Debuggee) -> Result<SessionId, Failed> {
 /// replacement character bpd put there. anything the program wrote that is not
 /// utf8 is still replaced, and that is the program's own bytes rather than the
 /// reader's cut
-fn forward(stream: impl Read + Send + 'static, which: Stream, output: &Arc<dyn ProgramOutput>) {
+fn forward(
+    stream: impl Read + Send + 'static,
+    which: Stream,
+    output: &Arc<dyn ProgramOutput>,
+) -> JoinHandle<()> {
     let output = Arc::clone(output);
     let started = std::thread::Builder::new()
         .name(format!("bpd-dap-{which:?}"))
@@ -316,13 +327,13 @@ fn forward(stream: impl Read + Send + 'static, which: Stream, output: &Arc<dyn P
             }
         });
 
-    if let Err(error) = started {
+    started.unwrap_or_else(|error| {
         // the pipe would fill and the program would stop on its next `print`,
         // which is a debuggee that looks hung for a reason nothing reported
         panic!(
             "the debuggee's {which:?} needs a thread to forward it, and one could not be started: {error}"
-        );
-    }
+        )
+    })
 }
 
 /// one DAP connection's view of one session of a debuggee

@@ -519,9 +519,15 @@ fn shown(said: Told, told: &Transcript) -> bool {
                 && message.to_string().contains(&mark::JOINED.to_string())
         }),
         Told::Stopped => !told.events("stopped").is_empty(),
-        Told::Exited => told.events("exited").iter().any(|event| {
-            event["body"]["exitCode"] == serde_json::json!(i64::from(mark::EXIT_CODE))
-        }),
+        // the code **and** the state of the program's output. the exit `ran`
+        // makes is one whose output is still being written, and an adapter that
+        // sent the code alone would leave a client reading every later line as
+        // part of a run that had already ended
+        Told::Exited => {
+            told.events("exited").iter().any(|event| {
+                event["body"]["exitCode"] == serde_json::json!(i64::from(mark::EXIT_CODE))
+            }) && told.output("console", mark::STILL_WRITING)
+        }
         Told::Finishing => told.output("console", &mark::HELD_AT_THE_END.to_string()),
         // `terminated` alone is not evidence: an exit produces one too. the
         // reason on the console is the part that only this outcome writes

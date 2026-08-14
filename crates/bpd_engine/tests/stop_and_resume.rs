@@ -40,7 +40,9 @@ fn to_exit(mut debuggee: bpd_engine::Debuggee) -> ExitStatus {
         .run(&mut bpd_test::reporting::Unreported)
         .expect("the debuggee ran to completion")
     {
-        Running::Exited { status, rebound } => {
+        Running::Exited {
+            status, rebound, ..
+        } => {
             assert!(rebound.is_empty(), "nothing was set, and got {rebound:?}");
             status
         }

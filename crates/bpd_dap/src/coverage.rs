@@ -249,8 +249,14 @@ pub const fn carriage_of(told: Told) -> Carried {
              `allThreadsStopped` only when the world really was stopped",
         ),
 
+        // the third half is the one a reader would not think to ask for: an exit
+        // whose output has **not** all arrived says so, because everything after
+        // it is a line the client would otherwise read as having been printed
+        // before the program ended
         Told::Exited => Carried::Pushed(
-            "an `exited` event carrying the code, and a `terminated` event after it",
+            "an `exited` event carrying the code, and a `terminated` event after \
+             it — with an `output` event in front of them when what the program \
+             wrote is still being written",
         ),
 
         Told::Finishing => Carried::Pushed(

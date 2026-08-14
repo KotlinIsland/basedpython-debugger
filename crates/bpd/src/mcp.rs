@@ -21,7 +21,7 @@ use std::thread::JoinHandle;
 
 use bpd_core::python::Capabilities;
 use bpd_core::{Addressed, Exit, Joined, Reporting, Response, SessionId, Stop};
-use bpd_engine::{Debuggee, Launched, Program};
+use bpd_engine::{Debuggee, Forwarders, Launched, Program};
 use bpd_mcp::{Configuration, Failed, Launcher, ProgramOutput, Session, Started, Stream};
 
 use crate::report_error;
@@ -68,44 +68,30 @@ impl Launcher for Engine {
             .map(|argument| OsString::from(argument.clone()))
             .collect();
 
-        let forwarding = Arc::new(std::sync::Mutex::new(Vec::new()));
+        // handed to the engine rather than held here: what a program wrote is
+        // waited for before the program is reported over, and that is the
+        // engine's rule for every front end rather than one this server keeps
+        // for itself
         let launched = bpd_engine::launch_piped(
             &interpreter,
             &Program::Script(configuration.program.clone()),
             &arguments,
-            {
-                let forwarding = Arc::clone(&forwarding);
-                move |stdout, stderr| {
-                    let mut threads = forwarding
-                        .lock()
-                        .expect("nothing panics holding the forwarders: it is one push");
-                    threads.push(forward(stdout, Stream::Stdout, &output));
-                    threads.push(forward(stderr, Stream::Stderr, &output));
-                }
+            move |stdout, stderr| {
+                Forwarders::on(vec![
+                    forward(stdout, Stream::Stdout, &output),
+                    forward(stderr, Stream::Stderr, &output),
+                ])
             },
         )?;
 
         Ok(match launched {
             Launched::Stopped(debuggee) => Started::Stopped(Box::new(Attached(debuggee))),
-            Launched::ExitedBeforeStopping(status) => {
-                // the forwarders are joined before this returns, so the
-                // interpreter's own words about why the program never started
-                // are on the answer rather than arriving after it. a client
-                // told nothing here has no way to find out what happened
-                let mut threads = forwarding
-                    .lock()
-                    .expect("nothing panics holding the forwarders: it is one drain");
-                for thread in threads.drain(..) {
-                    if thread.join().is_err() {
-                        return Err("a thread forwarding the debuggee's output panicked, so \
-                                    what the program said about why it did not start is lost"
-                            .into());
-                    }
-                }
-                Started::ExitedBeforeStopping {
-                    code: status.code(),
-                }
-            }
+            // the interpreter's own words about why the program never started
+            // are already on the answer rather than arriving after it: the
+            // engine waited for them before handing this back
+            Launched::ExitedBeforeStopping(status) => Started::ExitedBeforeStopping {
+                code: status.code(),
+            },
         })
     }
 }
