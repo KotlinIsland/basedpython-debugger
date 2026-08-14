@@ -9,6 +9,12 @@
 //! the cache is redirected with the same environment variables the resolution
 //! itself reads, rather than with a flag that would exist for the test's
 //! benefit. both are set, because which one is read is the platform's business
+//!
+//! there are **two** caches under that home — the agents, and the hook a child
+//! that was `exec`'d is entered through — and the command is about both. what is
+//! asserted per root is what differs between them: an entry of the second gains
+//! a `__pycache__` the first time an interpreter imports the hook, which is the
+//! one thing in either cache that bpd did not write
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,9 +40,21 @@ impl Home {
         }
     }
 
-    /// where `bpd` resolves its cache to, given this as the cache home
+    /// where `bpd` resolves its agent cache to, given this as the cache home
     fn cache(&self) -> PathBuf {
         self.directory.path().join("bpd").join("agents")
+    }
+
+    /// and the other one, holding the hook an `exec`'d child is entered through
+    fn children(&self) -> PathBuf {
+        self.directory.path().join("bpd").join("children")
+    }
+
+    /// put the child hook in it, the way a launch does, and say where
+    fn stage_hook(&self) -> PathBuf {
+        let staged = bpd_engine::agent::stage_child_hook_into(&self.children())
+            .unwrap_or_else(|error| panic!("could not stage the child hook: {error}"));
+        self.children().join(digest_of(staged.python_path()))
     }
 
     /// put the built agent in it, the way a launch would, and say where
@@ -201,6 +219,128 @@ fn something_bpd_never_wrote_stops_it_and_is_named() {
     );
     assert!(intruder.is_file(), "the stray file is never removed");
     assert!(entry.is_dir(), "and nothing is removed around it either");
+}
+
+/// the hook a child is entered through is cached the same way and was reported
+/// by nothing, which is the same unbounded growth by the side door
+#[test]
+fn the_report_names_both_caches_and_the_entry_this_bpd_stages_into_each() {
+    let home = Home::new();
+    let agent = home.stage();
+    let hook = home.stage_hook();
+    let run = home.run(&[]);
+
+    assert!(run.success, "{}", run.stderr);
+    for (root, entry) in [(home.cache(), &agent), (home.children(), &hook)] {
+        assert!(
+            run.stdout.contains(&root.display().to_string()),
+            "the report has to name `{}`\n{}",
+            root.display(),
+            run.stdout
+        );
+        assert!(
+            run.stdout.contains(&digest_of(entry)),
+            "and the entry in it that this bpd stages into\n{}",
+            run.stdout
+        );
+    }
+    assert!(
+        run.stdout.contains("sitecustomize"),
+        "a person reading two directories has to be told what the second one \
+         holds\n{}",
+        run.stdout
+    );
+}
+
+/// the entry an interpreter has imported the hook out of holds the bytecode it
+/// compiled as well, and it is the removal that has to survive that: bpd never
+/// wrote the `__pycache__`, and refusing to clear over one would leave this
+/// cache growing on every machine that has ever debugged a child
+#[test]
+fn clearing_takes_the_child_hook_and_the_bytecode_an_interpreter_left_beside_it() {
+    let home = Home::new();
+    let hook = home.stage_hook();
+
+    let interpreter = &bpd_test::agent::matching_interpreter().executable;
+    let ran = Command::new(interpreter)
+        .env("PYTHONPATH", &hook)
+        .args(["-c", "pass"])
+        .output()
+        .unwrap_or_else(|error| panic!("could not run `{}`: {error}", interpreter.display()));
+    assert!(
+        ran.status.success(),
+        "the staged hook did not import: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(
+        hook.join("__pycache__").is_dir(),
+        "cpython caches the bytecode of a module it imports beside the source, \
+         and this test is about clearing over that"
+    );
+
+    let run = home.run(&["clear"]);
+
+    assert!(run.success, "{}\n{}", run.stdout, run.stderr);
+    assert!(!hook.exists(), "the entry is really gone, bytecode and all");
+    assert!(
+        home.children().is_dir(),
+        "the cache directory itself is not an entry, and the next launch stages \
+         into it"
+    );
+}
+
+#[test]
+fn keeping_the_current_entries_leaves_the_hook_as_well_as_the_agent() {
+    let home = Home::new();
+    let agent = home.stage();
+    let hook = home.stage_hook();
+
+    let run = home.run(&["clear", "--keep-current"]);
+
+    assert!(run.success, "{}", run.stderr);
+    for entry in [&agent, &hook] {
+        assert!(
+            run.stdout
+                .contains(&format!("kept         {}", digest_of(entry))),
+            "`{}` is what this bpd stages, and was not said to be kept\n{}",
+            entry.display(),
+            run.stdout
+        );
+        assert!(entry.is_dir(), "and it is still there");
+    }
+}
+
+/// the refusal is about **a directory** — one with a surprise in it may not be
+/// the one bpd thinks it is — so it stops that one and not the other. the exit
+/// code still says the answer is not the whole answer
+#[test]
+fn something_bpd_never_wrote_in_one_cache_does_not_stop_the_other() {
+    let home = Home::new();
+    let agent = home.stage();
+    let hook = home.stage_hook();
+    let intruder = home.children().join("notes.txt");
+    std::fs::write(&intruder, "not bpd's").expect("the file can be written");
+
+    let run = home.run(&["clear"]);
+
+    assert!(
+        !run.success,
+        "a cache that was not cleared is not a success\n{}",
+        run.stdout
+    );
+    assert!(
+        run.stderr.contains(&intruder.display().to_string()),
+        "the refusal has to name what stopped it\n{}",
+        run.stderr
+    );
+    assert!(intruder.is_file(), "the stray is never removed");
+    assert!(hook.is_dir(), "and nothing is removed around it");
+    assert!(
+        !agent.exists(),
+        "the other cache holds nothing unaccounted for, and one directory's \
+         surprise is not a reason to leave every entry of another one where it \
+         is"
+    );
 }
 
 /// the failure this is really about is windows refusing to delete a shared

@@ -1,4 +1,4 @@
-//! `bpd cache` — see what the agent cache is holding, and reclaim it
+//! `bpd cache` — see what the staging caches are holding, and reclaim them
 //!
 //! staging keeps one copy of the agent per build and removes none, so the
 //! directory only grows: 89 entries and 448 MB of them on the machine this was
@@ -6,15 +6,21 @@
 //! than an omission — see [`bpd_engine::cache`] for why neither "what is still
 //! needed" nor "what can be deleted" is answerable from inside one `bpd`
 //!
+//! there are **two** such directories and this covers both: the agents, and the
+//! `sitecustomize` an `exec`'d child is entered through. they are reported as
+//! two sections rather than one listing because they are two directories with
+//! two current entries and two sizes — a single list would have to say which
+//! root every line was about, which is the heading doing the same work twice
+//!
 //! so this is the whole of it: `bpd cache` says what is there, and
 //! `bpd cache clear` takes it away. both exit non-zero when the answer is not
-//! the whole answer — an entry that would not go, or something in the directory
+//! the whole answer — an entry that would not go, or something in a directory
 //! that staging never wrote — because a cache command that printed "cleared"
 //! over four of five entries would be worse than one that did nothing
 
 use std::process::ExitCode;
 
-use bpd_engine::cache::{Cache, Cleared, Current};
+use bpd_engine::cache::{Cache, Cleared, Current, Kind};
 
 use crate::report_error;
 
@@ -35,29 +41,52 @@ enum Command {
 /// `bpd cache clear` arguments
 #[derive(Debug, clap::Args)]
 pub(crate) struct ClearArgs {
-    /// leave the entries the agents this `bpd` carries are already in, so the
-    /// next launch does not pay a cold load of one
+    /// leave the entries this `bpd` stages into — the agents it carries, and
+    /// the hook a debugged child is entered through
     #[arg(long)]
     keep_current: bool,
 }
 
-pub(crate) fn run(args: &Args) -> ExitCode {
-    let cache = match bpd_engine::cache::open() {
-        Ok(cache) => cache,
-        Err(error) => {
-            report_error(&error);
-            return ExitCode::FAILURE;
-        }
-    };
+/// both caches, in the order they are reported
+///
+/// the agents first because it is the one with the megabytes in it, and the one
+/// somebody asking about a cache is almost always asking about
+const BOTH: [Kind; 2] = [Kind::Agents, Kind::Children];
 
-    match &args.command {
-        None => report(&cache),
-        Some(Command::Clear(clear)) => self::clear(&cache, clear),
+pub(crate) fn run(args: &Args) -> ExitCode {
+    let mut ok = true;
+
+    for (at, kind) in BOTH.into_iter().enumerate() {
+        if at > 0 {
+            println!();
+        }
+        // one root failing to open is not the other one's answer. a cache that
+        // cannot be read is reported where it was reached, and the other is
+        // still described — what would be untrue is a report that left one out
+        // without saying so
+        match bpd_engine::cache::open(kind) {
+            Ok(cache) => {
+                ok &= match &args.command {
+                    None => report(&cache),
+                    Some(Command::Clear(clear)) => self::clear(&cache, clear),
+                };
+            }
+            Err(error) => {
+                report_error(&error);
+                ok = false;
+            }
+        }
+    }
+
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 
-/// what is in there, and what clearing it would cost
-fn report(cache: &Cache) -> ExitCode {
+/// what is in one of them, and what clearing it would cost
+fn report(cache: &Cache) -> bool {
     field("cache", &cache.root().display().to_string());
     if cache.present() {
         field("entries", &cache.entries().len().to_string());
@@ -72,24 +101,17 @@ fn report(cache: &Cache) -> ExitCode {
     // and asking can fail on its own — a `bpd` that carries no agent cannot
     // launch anything either, and naming a current entry would be a guess. the
     // report above is still true, so it is printed either way
-    //
-    // there is one per interpreter tag this `bpd` carries, because each is what
-    // a launch on the interpreter it is for would stage
-    let current = bpd_engine::cache::current();
+    let current = staged_by_this_bpd(cache.kind());
     let mut ok = true;
     match &current {
-        Ok(builds) => {
-            for build in builds {
-                field("current", build.digest());
-                let held = match cache.entry(build.digest()) {
-                    Some(entry) => format!(
-                        "staged, {} — clearing it costs the next launch a cold \
-                         load of the agent",
-                        size(entry.size())
-                    ),
+        Ok(staging) => {
+            for one in staging {
+                field("current", &one.digest);
+                let held = match cache.entry(&one.digest) {
+                    Some(entry) => format!("staged, {} — {}", size(entry.size()), one.costs),
                     None => "not staged yet — the next launch will put it there".to_owned(),
                 };
-                note(&format!("{} — {held}", carries(build)));
+                note(&format!("{} — {held}", one.what));
             }
         }
         Err(_) => {
@@ -123,10 +145,46 @@ fn report(cache: &Cache) -> ExitCode {
         ok = false;
     }
 
-    if ok {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+    ok
+}
+
+/// one entry this `bpd` would stage into a cache, said the way a person says it
+struct Staging {
+    digest: String,
+    /// what it holds
+    what: String,
+    /// what removing it costs the next launch
+    costs: &'static str,
+}
+
+/// every entry this `bpd` stages into one cache, or why it cannot say
+///
+/// the agents are a list, because a `bpd` carries one per interpreter tag and
+/// each is what a launch on the interpreter it is for would stage — and it is a
+/// question that can fail, since a `bpd` carrying no agent has none to name. the
+/// child hook is one and cannot fail: it is compiled into the binary
+fn staged_by_this_bpd(kind: Kind) -> Result<Vec<Staging>, bpd_engine::Error> {
+    match kind {
+        Kind::Agents => Ok(bpd_engine::cache::current()?
+            .iter()
+            .map(|build| Staging {
+                digest: build.digest().to_owned(),
+                what: carries(build),
+                costs: "clearing it costs the next launch a cold load of the agent",
+            })
+            .collect()),
+        Kind::Children => Ok(vec![Staging {
+            digest: bpd_engine::cache::current_child_hook(),
+            what: "the sitecustomize a debugged child is entered through".to_owned(),
+            // said rather than borrowed from the agent's line: this is a few
+            // hundred bytes of source, so what clearing it costs is a write and
+            // a compile rather than a cold load of a shared object, and
+            // claiming otherwise would be a reason to keep it that it has not
+            // got
+            costs: "clearing it costs the next launch with child debugging on a \
+                    write of the hook, and that launch's first child a compile \
+                    of it",
+        }]),
     }
 }
 
@@ -141,21 +199,25 @@ fn carries(build: &Current) -> String {
     }
 }
 
-/// take the entries away, and say exactly which ones went
-fn clear(cache: &Cache, args: &ClearArgs) -> ExitCode {
+/// take one cache's entries away, and say exactly which ones went
+fn clear(cache: &Cache, args: &ClearArgs) -> bool {
+    field("cache", &cache.root().display().to_string());
+
     let keep = if args.keep_current {
-        match bpd_engine::cache::current() {
-            Ok(builds) => builds,
+        match staged_by_this_bpd(cache.kind()) {
+            Ok(staging) => staging,
             // refused rather than cleared: `--keep-current` names an entry to
             // keep, and clearing everything because the current one could not
             // be identified is the opposite of what was asked
             Err(error) => {
                 report_error(&error);
                 eprintln!(
-                    "nothing has been removed. `bpd cache clear` without \
-                     `--keep-current` takes every entry, cold load and all"
+                    "nothing has been removed from `{}`. `bpd cache clear` \
+                     without `--keep-current` takes every entry, cold load and \
+                     all",
+                    cache.root().display()
                 );
-                return ExitCode::FAILURE;
+                return false;
             }
         }
     } else {
@@ -163,17 +225,16 @@ fn clear(cache: &Cache, args: &ClearArgs) -> ExitCode {
     };
 
     if !cache.present() {
-        field("cache", &cache.root().display().to_string());
         note("it is not there — nothing to remove");
-        return ExitCode::SUCCESS;
+        return true;
     }
 
-    let digests: Vec<&str> = keep.iter().map(Current::digest).collect();
+    let digests: Vec<&str> = keep.iter().map(|one| one.digest.as_str()).collect();
     let cleared = match cache.clear(&digests) {
         Ok(cleared) => cleared,
         Err(error) => {
             report_error(&error);
-            return ExitCode::FAILURE;
+            return false;
         }
     };
 
@@ -183,31 +244,42 @@ fn clear(cache: &Cache, args: &ClearArgs) -> ExitCode {
         for entry in cleared.kept() {
             field("kept", entry.digest());
             note(&format!(
-                "{} — an agent this bpd stages, so no launch pays a cold load",
-                size(entry.size())
+                "{} — {}",
+                size(entry.size()),
+                what_stages_it(&keep, entry.digest())
             ));
         }
-        // an agent this `bpd` carries that was not in the cache to begin with.
-        // saying so matters: the next launch stages it and pays the cold load
+        // something this `bpd` stages that was not in the cache to begin with.
+        // saying so matters: the next launch stages it and pays the cost
         // anyway, and a silent "kept nothing" would look like it had been kept
-        for build in &keep {
-            if cache.entry(build.digest()).is_none() {
+        for one in &keep {
+            if cache.entry(&one.digest).is_none() {
                 note(&format!(
                     "{} was not in the cache, so nothing was kept for it",
-                    carries(build)
+                    one.what
                 ));
             }
         }
     }
 
     if cleared.succeeded() {
-        return ExitCode::SUCCESS;
+        return true;
     }
-    failed(&cleared)
+    failed(&cleared);
+    false
+}
+
+/// what a kept entry holds, out of the list that named it to be kept
+fn what_stages_it(keep: &[Staging], digest: &str) -> String {
+    let one = keep
+        .iter()
+        .find(|one| one.digest == digest)
+        .unwrap_or_else(|| unreachable!("`{digest}` was kept because this list named it"));
+    format!("{}, so no launch stages it again", one.what)
 }
 
 /// every entry that would not go, named with what stopped it
-fn failed(cleared: &Cleared) -> ExitCode {
+fn failed(cleared: &Cleared) {
     println!();
     for failure in cleared.failures() {
         field("failed", &failure.path().display().to_string());
@@ -224,7 +296,6 @@ fn failed(cleared: &Cleared) -> ExitCode {
             "they are"
         }
     );
-    ExitCode::FAILURE
 }
 
 /// a count of entries, in the number a person would write

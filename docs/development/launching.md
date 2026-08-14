@@ -200,7 +200,7 @@ that directory is a **cache**, with one entry per distinct agent build:
 carrying several agents changes nothing here. the entry is keyed on the bytes,
 so several agents are simply several entries, and an entry still holds one file
 named for the platform's import suffix and nothing else — which is the rule
-[`bpd cache`](agent-cache.md) reads a directory by
+[`bpd cache`](caches.md) reads a directory by
 
 `$XDG_CACHE_HOME` is used instead of `~/.cache` when it is set to an absolute
 path, and windows uses `%LOCALAPPDATA%\bpd\agents\…\bpd_agent.pyd`. macOS gets
@@ -210,7 +210,7 @@ check and the directory is `bpd`'s own either way
 **no launch ever removes an entry**, which is what makes reuse safe and also
 what makes the directory grow without limit — 89 entries and 448 MiB of them on
 the machine this was written on. reclaiming it is a thing a person asks for,
-with [`bpd cache`](agent-cache.md), and never something a launch does on its own
+with [`bpd cache`](caches.md), and never something a launch does on its own
 
 it used to be a fresh temporary directory per launch, and that was **119 ms of a
 150 ms attach**: on macOS the first load of a shared object the system has never
@@ -277,7 +277,7 @@ happen
 
 ### what removes an entry
 
-**a person, and nothing else.** [`bpd cache clear`](agent-cache.md) is the only
+**a person, and nothing else.** [`bpd cache clear`](caches.md) is the only
 thing that takes an entry out; no launch, no timer and no threshold does it, and
 the reason is in that page
 
