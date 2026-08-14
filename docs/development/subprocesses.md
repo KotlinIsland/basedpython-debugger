@@ -701,6 +701,14 @@ eleven lines, in a directory of its own holding nothing else, cached under
 imports the agent, and calls one function. every decision it could contain
 belongs in the agent, where it is rust and is tested
 
+that is a second staging cache, pruned by nothing, and it is `bpd cache`'s to
+report and to clear along with the agents' — see
+[the staging caches](caches.md#there-are-two-of-them). the entry does not stay
+as it was staged: a child **imports** the hook, so cpython writes the bytecode
+of it into a `__pycache__` there, one per interpreter that has run under it.
+that is accounted for as part of the entry rather than treated as a surprise,
+which is the one thing either cache holds that bpd did not write
+
 it is **not** basedpython under `python/`: the architecture invariant puts a
 python layer there when it is more than about a dozen lines, and this is under
 that. it is also the one file in the tree that has to be readable by an

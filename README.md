@@ -56,9 +56,9 @@ cargo run --bin bpd -- cache
 `doctor` reports whether an interpreter can be debugged and refuses loudly when
 it cannot. `launch` runs a program with the agent attached, holds it before its
 first statement, and lets it go — producing a run indistinguishable from a bare
-one, which is checked rather than claimed. `cache` says what the agent staging
-cache is holding and clears it when asked — nothing prunes it on its own, and
-[the agent cache](docs/development/agent-cache.md) says why
+one, which is checked rather than claimed. `cache` says what the two staging
+caches are holding and clears them when asked — nothing prunes either on its
+own, and [the staging caches](docs/development/caches.md) says why
 
 ## documentation
 

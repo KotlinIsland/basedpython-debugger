@@ -1,12 +1,19 @@
-//! the agent staging cache, seen from outside a launch
+//! the staging caches, seen from outside a launch
 //!
-//! [`agent::stage_for`] keeps one copy of the agent per build, one per
-//! interpreter tag it carries, under `<cache>/<sha-256 of its bytes>/`, and
-//! never removes one. that is not an oversight — the name being the content is
-//! what makes reuse safe — but it does mean a rebuild leaves its predecessor
-//! behind for ever. on the machine this was written on the cache had reached
-//! **89 entries and 448 MB**, against one agent of 5.6 MB, and that number is
-//! what this module exists for
+//! there are **two**, and they are the same shape. [`agent::stage_for`] keeps
+//! one copy of the agent per build, one per interpreter tag a `bpd` carries,
+//! under `<cache>/<sha-256 of its bytes>/`, and never removes one; and
+//! [`agent::stage_child_hook`] keeps one copy of the `sitecustomize` an `exec`'d
+//! child is entered through, in a cache of its own, the same way. neither is
+//! oversight — the name being the content is what makes reuse safe — but it does
+//! mean a rebuild leaves its predecessor behind for ever. on the machine this
+//! was written on the agent cache had reached **89 entries and 448 MB**, against
+//! one agent of 5.6 MB, and that number is what this module exists for
+//!
+//! the child hook is a few hundred bytes rather than a few megabytes, so the
+//! second cache grows the same way and costs less. it is here because "nothing
+//! removes an entry" was the whole complaint, and a directory `bpd cache` did
+//! not know about would be that complaint again with a smaller number on it
 //!
 //! # why nothing here happens on its own
 //!
@@ -15,8 +22,9 @@
 //! would have to answer can be answered from inside one `bpd`:
 //!
 //! - **what is still needed.** an entry is on the `PYTHONPATH` of every
-//!   debuggee launched from it, including debuggees of another `bpd` on the
-//!   same machine that this one cannot see
+//!   debuggee launched from it — and, for a child hook, of every descendant of
+//!   one — including debuggees of another `bpd` on the same machine that this
+//!   one cannot see
 //! - **whether it can even be removed.** windows refuses to delete a shared
 //!   object a process has loaded, which is exactly what an entry in use looks
 //!   like — so a background pruner would fail there routinely, for a reason the
@@ -33,10 +41,15 @@
 //! cleared is the quiet lie this project exists to not tell
 //!
 //! it also refuses to remove anything it does not recognise. an entry is a
-//! 64 character hex directory holding the agent and nothing else, because that
-//! is all staging ever writes; anything else in the cache is reported and the
-//! whole operation stops, since a directory with a surprise in it is a
-//! directory that may not be the one this thinks it is
+//! 64 character hex directory holding what staging wrote and nothing else;
+//! anything else in the cache is reported and the whole operation stops, since a
+//! directory with a surprise in it is a directory that may not be the one this
+//! thinks it is
+//!
+//! what "what staging wrote" means is the one place the two differ, and it is
+//! [`Kind`] — an agent entry holds one extension module, and a child hook entry
+//! holds one source file **and** the `__pycache__` an interpreter wrote beside
+//! it, which is not bpd's doing and is the entry's all the same
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -49,16 +62,114 @@ use crate::{Error, Result};
 /// how many characters a sha-256 is, written as hex
 const DIGEST_LEN: usize = 64;
 
-/// one cached agent build
+/// where cpython keeps the compiled form of a source module, beside it
+const BYTECODE: &str = "__pycache__";
+
+/// which of the two staging caches a directory is
+///
+/// they are two directories because what is in an entry differs, and every rule
+/// in this module that could differ is on here rather than in a branch at the
+/// place it is used
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// `~/.cache/bpd/agents` — one entry per agent build
+    Agents,
+    /// `~/.cache/bpd/children` — one entry per `sitecustomize` a child is
+    /// entered through
+    Children,
+}
+
+impl Kind {
+    /// where this cache is for this user
+    pub fn root(self) -> Result<PathBuf> {
+        match self {
+            Self::Agents => agent::default_cache(),
+            Self::Children => agent::child_cache(),
+        }
+    }
+
+    /// what one entry of this cache holds, for a stray to be measured against
+    const fn holds(self) -> &'static str {
+        match self {
+            Self::Agents => "an entry holds the staged agent and nothing else, and that is not it",
+            Self::Children => {
+                "an entry holds the staged `sitecustomize` and the `__pycache__` \
+                 an interpreter compiled it into, and that is not either"
+            }
+        }
+    }
+
+    /// whether staging writes a file of this name into an entry
+    fn staged(self, name: &str) -> bool {
+        match self {
+            Self::Agents => agent::module_names().iter().any(|module| module == name),
+            Self::Children => name == agent::CHILD_MODULE,
+        }
+    }
+
+    /// the source file in an entry an interpreter compiles, if there is one
+    ///
+    /// this is the whole of what makes the two caches different to read, and it
+    /// is not bpd writing anything: the child hook is **imported**, out of a
+    /// directory on the child's `sys.path`, and cpython caches the bytecode of
+    /// every source module it imports in a `__pycache__` beside the source. an
+    /// entry that a debuggee's children have run under therefore holds one
+    /// `.pyc` per interpreter that imported it, and refusing to clear over that
+    /// would be refusing to clear the cache at all
+    ///
+    /// an agent is an extension module, which has no bytecode form, so a
+    /// `__pycache__` in one of those entries really is a surprise
+    const fn compiled(self) -> Option<&'static str> {
+        match self {
+            Self::Agents => None,
+            Self::Children => Some(agent::CHILD_MODULE),
+        }
+    }
+}
+
+/// whether `name` is a bytecode cache an interpreter wrote for `source`
+///
+/// PEP 3147 names one `<stem>.<interpreter tag>.pyc` —
+/// `sitecustomize.cpython-314.pyc` here, and `sitecustomize.cpython-314.opt-2.pyc`
+/// under `-OO`. the tag is the interpreter's to choose and a child can be any
+/// python, so what is checked is the part that is not: the stem is the module
+/// staging wrote, and the suffix is `.pyc`
+fn is_bytecode_of(source: &str, name: &str) -> bool {
+    let Some(stem) = source.strip_suffix(".py") else {
+        unreachable!("`{source}` is a python source file staging writes, and is named like one")
+    };
+    let Some(tag) = name
+        .strip_prefix(stem)
+        .and_then(|rest| rest.strip_suffix(".pyc"))
+    else {
+        return false;
+    };
+    // a tag, and not the empty string: `sitecustomize.pyc` is not something any
+    // interpreter since 3.2 writes, and it would shadow the source if it were
+    tag.strip_prefix('.').is_some_and(|tag| !tag.is_empty())
+}
+
+/// one cached entry — an agent build, or the `sitecustomize` a child imports
 #[derive(Debug, Clone)]
 pub struct Entry {
     digest: String,
     path: PathBuf,
     size: u64,
+    /// the files that were accounted for when the cache was read
+    ///
+    /// removal takes exactly these and nothing it has not already described,
+    /// which is what makes a `remove_dir` afterwards the check rather than a
+    /// formality
+    files: Vec<PathBuf>,
+    /// the directories inside it, which is at most the `__pycache__`
+    ///
+    /// removed after the files and before the entry, since a directory only
+    /// goes when it is empty
+    directories: Vec<PathBuf>,
 }
 
 impl Entry {
-    /// the sha-256 of the agent this entry holds, which is also its name
+    /// the sha-256 of what this entry holds, which is also its name
     pub fn digest(&self) -> &str {
         &self.digest
     }
@@ -161,21 +272,22 @@ impl Cleared {
     }
 }
 
-/// the agent cache as it is right now
+/// one of the staging caches as it is right now
 #[derive(Debug)]
 pub struct Cache {
+    kind: Kind,
     root: PathBuf,
     present: bool,
     entries: Vec<Entry>,
     strays: Vec<Stray>,
 }
 
-/// read the per-user cache, wherever a launch would stage into
+/// read the per-user cache of this kind, wherever a launch would stage into
 ///
 /// a cache that is not there is not a failure and is not created — it is a
 /// [`Cache`] whose [`present`](Cache::present) is false, holding nothing
-pub fn open() -> Result<Cache> {
-    open_at(&agent::default_cache()?)
+pub fn open(kind: Kind) -> Result<Cache> {
+    open_at(kind, &kind.root()?)
 }
 
 /// the same, for a cache directory of the caller's choosing
@@ -183,11 +295,12 @@ pub fn open() -> Result<Cache> {
 /// held to the rule staging is held to: a directory that is a link, is not a
 /// directory, belongs to another uid or is writable by anyone else is refused
 /// here exactly as it is refused there, by the same check
-pub fn open_at(root: &Path) -> Result<Cache> {
+pub fn open_at(kind: Kind, root: &Path) -> Result<Cache> {
     let metadata = match std::fs::symlink_metadata(root) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(Cache {
+                kind,
                 root: root.to_path_buf(),
                 present: false,
                 entries: Vec::new(),
@@ -202,7 +315,7 @@ pub fn open_at(root: &Path) -> Result<Cache> {
     let mut strays = Vec::new();
     for child in std::fs::read_dir(root).map_err(unreadable(root))? {
         let child = child.map_err(unreadable(root))?.path();
-        match classify(&child)? {
+        match classify(kind, &child)? {
             Found::Entry(entry) => entries.push(entry),
             Found::Stray(stray) => strays.push(stray),
             Found::EntryWithStrays(found) => strays.extend(found),
@@ -216,6 +329,7 @@ pub fn open_at(root: &Path) -> Result<Cache> {
     strays.sort_by(|one, other| one.path.cmp(&other.path));
 
     Ok(Cache {
+        kind,
         root: root.to_path_buf(),
         present: true,
         entries,
@@ -268,7 +382,21 @@ pub fn current() -> Result<Vec<Current>> {
         .collect()
 }
 
+/// the entry the `sitecustomize` this `bpd` carries stages into
+///
+/// one, and unlike [`current`] it cannot fail: the file is compiled into the
+/// binary, so there is nothing to go and look for and no state in which a `bpd`
+/// carries none
+pub fn current_child_hook() -> String {
+    agent::child_hook_digest()
+}
+
 impl Cache {
+    /// which cache this is
+    pub const fn kind(&self) -> Kind {
+        self.kind
+    }
+
     /// the directory itself
     pub fn root(&self) -> &Path {
         &self.root
@@ -282,7 +410,7 @@ impl Cache {
         self.present
     }
 
-    /// every cached agent build, by digest
+    /// every entry in it, by digest
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
@@ -297,7 +425,7 @@ impl Cache {
         self.entries.iter().map(Entry::size).sum()
     }
 
-    /// the entry holding the agent with this digest, if the cache has it
+    /// the entry with this digest, if the cache has it
     pub fn entry(&self, digest: &str) -> Option<&Entry> {
         self.entries.iter().find(|entry| entry.digest == digest)
     }
@@ -321,7 +449,7 @@ impl Cache {
                 0 => String::new(),
                 more => format!(", along with {more} more it did not write"),
             };
-            return Err(Error::UnexpectedInAgentCache {
+            return Err(Error::UnexpectedInCache {
                 root: self.root.clone(),
                 reason: format!(
                     "nothing has been removed. `{}` is in it, and {}{} — move \
@@ -357,30 +485,36 @@ impl Cache {
 
 /// take one entry away, without ever taking anything else
 ///
-/// the known names and then the directory, rather than a recursive remove: what
-/// is inside was read and accounted for when the cache was opened, and
-/// `remove_dir` refuses a directory that has gained something since instead of
-/// carrying it off. a race with a `bpd` publishing into this very entry
-/// therefore ends as a named failure rather than as a deletion nobody described
+/// what was accounted for when the cache was opened, and then the directories
+/// holding it, rather than a recursive remove: `remove_dir` refuses a directory
+/// that has gained something since instead of carrying it off. a race with a
+/// `bpd` publishing into this very entry, or with an interpreter writing a
+/// `.pyc` into it, therefore ends as a named failure rather than as a deletion
+/// nobody described
 fn remove(entry: &Entry) -> std::result::Result<(), Failure> {
-    for name in agent::module_names() {
-        let module = entry.path.join(name);
-        match std::fs::remove_file(&module) {
+    for file in &entry.files {
+        match std::fs::remove_file(file) {
             Ok(()) => {}
+            // somebody else got there first, which is this removal's request
+            // already satisfied rather than a failure of it. what says the entry
+            // is gone is the `remove_dir` below and not this
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(source) => {
                 return Err(Failure {
-                    path: module,
+                    path: file.clone(),
                     source,
                 });
             }
         }
     }
 
-    std::fs::remove_dir(&entry.path).map_err(|source| Failure {
-        path: entry.path.clone(),
-        source,
-    })
+    for directory in entry.directories.iter().chain(std::iter::once(&entry.path)) {
+        std::fs::remove_dir(directory).map_err(|source| Failure {
+            path: directory.clone(),
+            source,
+        })?;
+    }
+    Ok(())
 }
 
 /// what one thing in the cache directory turned out to be
@@ -394,7 +528,7 @@ enum Found {
     EntryWithStrays(Vec<Stray>),
 }
 
-fn classify(path: &Path) -> Result<Found> {
+fn classify(kind: Kind, path: &Path) -> Result<Found> {
     let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
         return Ok(Found::Stray(stray(
             path,
@@ -405,8 +539,8 @@ fn classify(path: &Path) -> Result<Found> {
     if !is_digest(name) {
         return Ok(Found::Stray(stray(
             path,
-            "an entry is named with the 64 hex characters of the agent's \
-             sha-256, and that is not one",
+            "an entry is named with the 64 hex characters of the sha-256 of \
+             what it holds, and that is not one",
         )));
     }
 
@@ -422,52 +556,93 @@ fn classify(path: &Path) -> Result<Found> {
     if !metadata.is_dir() {
         return Ok(Found::Stray(stray(
             path,
-            "an entry is a directory holding the agent, and that is not a \
+            "an entry is a directory holding what was staged, and that is not a \
              directory",
         )));
     }
 
-    read_entry(path, name)
+    read_entry(kind, path, name)
 }
 
-/// an entry directory, if everything in it is what staging writes
-fn read_entry(path: &Path, digest: &str) -> Result<Found> {
-    let names = agent::module_names();
-    let mut size = 0;
+/// an entry directory, if everything in it is accounted for
+fn read_entry(kind: Kind, path: &Path, digest: &str) -> Result<Found> {
+    let mut entry = Entry {
+        digest: digest.to_owned(),
+        path: path.to_path_buf(),
+        size: 0,
+        files: Vec::new(),
+        directories: Vec::new(),
+    };
     let mut strays = Vec::new();
 
     for child in std::fs::read_dir(path).map_err(unreadable(path))? {
         let child = child.map_err(unreadable(path))?.path();
-        let held = child
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(|name| names.iter().any(|module| module == name));
-
+        let name = child.file_name().and_then(std::ffi::OsStr::to_str);
         let metadata = std::fs::symlink_metadata(&child).map_err(unreadable(&child))?;
-        if !held || !metadata.is_file() {
-            strays.push(stray(
-                &child,
-                "an entry holds the staged agent and nothing else, and that is \
-                 not it",
-            ));
-            continue;
+
+        // a real directory and not a link to one: everything the removal
+        // touches is inside the entry, and a link named `__pycache__` is a way
+        // out of it
+        let compiled = kind
+            .compiled()
+            .filter(|_| name == Some(BYTECODE) && metadata.is_dir());
+
+        if name.is_some_and(|name| kind.staged(name)) && metadata.is_file() {
+            entry.size += metadata.len();
+            entry.files.push(child);
+        } else if let Some(source) = compiled {
+            read_bytecode(source, &child, &mut entry, &mut strays)?;
+            entry.directories.push(child);
+        } else {
+            strays.push(stray(&child, kind.holds()));
         }
-        size += metadata.len();
     }
 
     if strays.is_empty() {
-        // an entry with no module in it is still an entry, and still this
-        // cache's to remove. it is what a removal that failed half way through
-        // leaves behind, and refusing to finish that would be refusing to
-        // clean up after the last refusal
-        Ok(Found::Entry(Entry {
-            digest: digest.to_owned(),
-            path: path.to_path_buf(),
-            size,
-        }))
+        // an entry with nothing in it is still an entry, and still this cache's
+        // to remove. it is what a removal that failed half way through leaves
+        // behind, and refusing to finish that would be refusing to clean up
+        // after the last refusal
+        Ok(Found::Entry(entry))
     } else {
         Ok(Found::EntryWithStrays(strays))
     }
+}
+
+/// what an interpreter compiled the staged module into, if that is all it holds
+///
+/// the same rule one directory down: a file that is the bytecode of the module
+/// staging wrote is the entry's and is removed with it, and anything else stops
+/// the clear. a `__pycache__` is written by a **debuggee**, so this is the one
+/// place in either cache where what is accounted for was not written by bpd —
+/// and it is accounted for by name rather than by trusting the directory
+fn read_bytecode(
+    source: &str,
+    path: &Path,
+    entry: &mut Entry,
+    strays: &mut Vec<Stray>,
+) -> Result<()> {
+    for child in std::fs::read_dir(path).map_err(unreadable(path))? {
+        let child = child.map_err(unreadable(path))?.path();
+        let name = child.file_name().and_then(std::ffi::OsStr::to_str);
+        let metadata = std::fs::symlink_metadata(&child).map_err(unreadable(&child))?;
+
+        if name.is_some_and(|name| is_bytecode_of(source, name)) && metadata.is_file() {
+            entry.size += metadata.len();
+            entry.files.push(child);
+        } else {
+            let stem = source.trim_end_matches(".py");
+            strays.push(stray(
+                &child,
+                &format!(
+                    "`{BYTECODE}` in an entry holds what an interpreter compiled \
+                     `{source}` into, named `{stem}.<interpreter tag>.pyc`, and \
+                     that is not one of those"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn is_digest(name: &str) -> bool {
@@ -487,14 +662,14 @@ fn stray(path: &Path, reason: &str) -> Stray {
 /// name the file an io failure was about, since a bare `io::Error` names nothing
 fn unreadable(path: &Path) -> impl FnOnce(io::Error) -> Error + use<> {
     let path = path.to_path_buf();
-    move |source| Error::ReadAgentCache { path, source }
+    move |source| Error::ReadCache { path, source }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cache, open_at};
+    use super::{Cache, Kind, is_bytecode_of, open_at};
     use crate::Error;
-    use crate::agent::stage_artifact;
+    use crate::agent::{stage_artifact, stage_child_hook_into};
 
     /// a cache the test fills through the **real** staging code, with agents
     /// whose bytes are the test's to choose. writing entries by hand would be a
@@ -531,9 +706,56 @@ mod tests {
         }
 
         fn open(&self) -> Cache {
-            open_at(&self.root())
+            open_at(Kind::Agents, &self.root())
                 .unwrap_or_else(|error| panic!("the cache could not be read: {error}"))
         }
+    }
+
+    /// the same for the other cache, filled through the staging that writes it
+    ///
+    /// there is one hook rather than a choice of bytes — it is compiled into
+    /// the binary — so a fixture here has at most one entry, which is what the
+    /// cache really looks like on a machine that has not rebuilt bpd
+    struct Hooks {
+        directory: tempfile::TempDir,
+    }
+
+    impl Hooks {
+        fn new() -> Self {
+            Self {
+                directory: tempfile::tempdir().expect("a temporary directory can be made"),
+            }
+        }
+
+        fn root(&self) -> std::path::PathBuf {
+            self.directory.path().join("children")
+        }
+
+        fn stage(&self) -> std::path::PathBuf {
+            let staged = stage_child_hook_into(&self.root())
+                .unwrap_or_else(|error| panic!("staging the child hook failed: {error}"));
+            self.root().join(digest_of(staged.python_path()))
+        }
+
+        fn open(&self) -> Cache {
+            open_at(Kind::Children, &self.root())
+                .unwrap_or_else(|error| panic!("the cache could not be read: {error}"))
+        }
+    }
+
+    /// what an interpreter leaves in an entry the first time a child imports the
+    /// hook, written by hand here
+    ///
+    /// the *real* one is written by a real interpreter in
+    /// `crates/bpd_engine/tests/cache.rs`, which is what says this shape is the
+    /// shape cpython produces. this is for the cases that are about what the
+    /// reader does with one — including the ones an interpreter will not write
+    fn compiled_into(entry: &std::path::Path, name: &str, bytes: &str) -> std::path::PathBuf {
+        let directory = entry.join(super::BYTECODE);
+        std::fs::create_dir_all(&directory).expect("the directory can be made");
+        let file = directory.join(name);
+        std::fs::write(&file, bytes).expect("the file can be written");
+        file
     }
 
     /// the digest is the entry directory's name, taken from what staging
@@ -670,9 +892,9 @@ mod tests {
         let fixture = Fixture::new();
         std::fs::write(fixture.root(), "not a directory").expect("the file can be written");
 
-        let refused = open_at(&fixture.root());
+        let refused = open_at(Kind::Agents, &fixture.root());
 
-        let Err(Error::UntrustedAgentCache { path, reason }) = refused else {
+        let Err(Error::UntrustedCache { path, reason }) = refused else {
             panic!("a cache that is a file has to be refused, not read");
         };
         assert_eq!(path, fixture.root());
@@ -686,10 +908,10 @@ mod tests {
         fixture.stage("an agent");
         set_mode(&fixture.root(), 0o777);
 
-        let refused = open_at(&fixture.root());
+        let refused = open_at(Kind::Agents, &fixture.root());
         set_mode(&fixture.root(), 0o700);
 
-        let Err(Error::UntrustedAgentCache { reason, .. }) = refused else {
+        let Err(Error::UntrustedCache { reason, .. }) = refused else {
             panic!("a world writable cache has to be refused, not read");
         };
         assert!(reason.contains("0777"), "{reason}");
@@ -707,7 +929,7 @@ mod tests {
         assert_eq!(cache.strays()[0].path(), intruder);
         assert_eq!(cache.entries().len(), 1);
 
-        let Err(Error::UnexpectedInAgentCache { root, reason }) = cache.clear(&[]) else {
+        let Err(Error::UnexpectedInCache { root, reason }) = cache.clear(&[]) else {
             panic!("a cache holding something unaccounted for has to be refused");
         };
         assert_eq!(root, fixture.root());
@@ -735,7 +957,7 @@ mod tests {
         assert_eq!(cache.strays()[0].path(), extra);
 
         let refused = cache.clear(&[]);
-        assert!(matches!(refused, Err(Error::UnexpectedInAgentCache { .. })));
+        assert!(matches!(refused, Err(Error::UnexpectedInCache { .. })));
         assert!(extra.is_file());
         assert!(entry.is_dir());
     }
@@ -763,7 +985,7 @@ mod tests {
         assert!(cache.strays()[0].reason().contains("link"));
 
         let refused = cache.clear(&[]);
-        assert!(matches!(refused, Err(Error::UnexpectedInAgentCache { .. })));
+        assert!(matches!(refused, Err(Error::UnexpectedInCache { .. })));
         assert!(
             treasure.is_file(),
             "what a link points at is not the cache's"
@@ -822,5 +1044,195 @@ mod tests {
 
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
             .expect("the mode can be set");
+    }
+
+    /// the interpreter chooses the tag and a child can be any python, so what
+    /// is pinned is the part that is not the interpreter's to choose
+    #[test]
+    fn a_bytecode_file_is_one_named_for_the_module_staging_wrote() {
+        for name in [
+            "sitecustomize.cpython-314.pyc",
+            "sitecustomize.cpython-313.opt-2.pyc",
+            "sitecustomize.pypy311.pyc",
+        ] {
+            assert!(
+                is_bytecode_of("sitecustomize.py", name),
+                "`{name}` is what an interpreter writes for `sitecustomize.py`"
+            );
+        }
+        for name in [
+            // no interpreter since 3.2 writes this, and it would shadow the
+            // source if one did
+            "sitecustomize.pyc",
+            "sitecustomize.cpython-314.py",
+            "something_else.cpython-314.pyc",
+            "sitecustomize.cpython-314.pyc.bak",
+            "notes.txt",
+        ] {
+            assert!(
+                !is_bytecode_of("sitecustomize.py", name),
+                "`{name}` is not the compiled form of `sitecustomize.py`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_staged_child_hook_is_an_entry_with_the_size_it_holds() {
+        let hooks = Hooks::new();
+        let entry = hooks.stage();
+
+        let cache = hooks.open();
+
+        assert!(cache.present());
+        assert!(cache.strays().is_empty());
+        let found = cache
+            .entry(&super::current_child_hook())
+            .unwrap_or_else(|| panic!("the hook this bpd carries was staged into `{entry:?}`"));
+        assert_eq!(found.path(), entry);
+        assert_eq!(
+            found.size(),
+            std::fs::metadata(entry.join("sitecustomize.py"))
+                .expect("the staged hook is there")
+                .len()
+        );
+    }
+
+    /// the case the whole of [`Kind::compiled`] exists for. the directory is on
+    /// a child's `sys.path`, so the first child to import the hook leaves the
+    /// bytecode of it in the entry — and a rule that called that a surprise
+    /// would refuse to clear this cache on any machine that had ever debugged a
+    /// child
+    #[test]
+    fn the_bytecode_an_interpreter_left_beside_the_hook_goes_with_the_entry() {
+        let hooks = Hooks::new();
+        let entry = hooks.stage();
+        let compiled = compiled_into(
+            &entry,
+            "sitecustomize.cpython-314.pyc",
+            "not really bytecode",
+        );
+
+        let cache = hooks.open();
+        assert!(
+            cache.strays().is_empty(),
+            "an interpreter compiling the file bpd staged is not a surprise: {:?}",
+            cache.strays()
+        );
+        assert_eq!(cache.entries().len(), 1);
+        assert_eq!(
+            cache.size(),
+            std::fs::metadata(entry.join("sitecustomize.py"))
+                .expect("the staged hook is there")
+                .len()
+                + "not really bytecode".len() as u64,
+            "an entry holds the hook and what an interpreter compiled it into"
+        );
+
+        let cleared = cache
+            .clear(&[])
+            .unwrap_or_else(|error| panic!("clearing failed: {error}"));
+
+        assert!(cleared.succeeded());
+        assert_eq!(cleared.removed().len(), 1);
+        assert!(!compiled.exists(), "the bytecode goes with the entry");
+        assert!(!entry.exists(), "and so does the directory holding it");
+        assert!(
+            hooks.root().is_dir(),
+            "the cache directory itself is not an entry"
+        );
+    }
+
+    /// the same rule one directory down. what is accounted for there is the
+    /// compiled form of the file staging wrote, and nothing else is
+    #[test]
+    fn something_else_in_the_bytecode_directory_stops_the_whole_clear() {
+        let hooks = Hooks::new();
+        let entry = hooks.stage();
+        let compiled = compiled_into(&entry, "sitecustomize.cpython-314.pyc", "bytecode");
+        let intruder = compiled_into(&entry, "notes.txt", "not mine");
+
+        let cache = hooks.open();
+        assert_eq!(cache.strays().len(), 1);
+        assert_eq!(cache.strays()[0].path(), intruder);
+        assert!(
+            cache.entries().is_empty(),
+            "an entry with a surprise anywhere in it is not offered as one to remove"
+        );
+
+        let refused = cache.clear(&[]);
+        assert!(matches!(refused, Err(Error::UnexpectedInCache { .. })));
+        assert!(intruder.is_file(), "the stray is reported, never removed");
+        assert!(compiled.is_file(), "and nothing is removed around it");
+    }
+
+    /// an agent is an extension module and has no bytecode form, so nothing
+    /// ever compiles one — a `__pycache__` in one of those entries is a
+    /// surprise, and the allowance the other cache needs must not reach it
+    #[test]
+    fn a_bytecode_directory_in_an_agent_entry_is_a_surprise() {
+        let fixture = Fixture::new();
+        let entry = fixture.stage("an agent");
+        let compiled = compiled_into(&entry, "bpd_agent.cpython-314.pyc", "nothing wrote this");
+
+        let cache = fixture.open();
+        assert_eq!(cache.strays().len(), 1);
+        assert_eq!(
+            cache.strays()[0].path(),
+            entry.join("__pycache__"),
+            "the directory is what is unaccounted for, not what is inside it"
+        );
+
+        let refused = cache.clear(&[]);
+        assert!(matches!(refused, Err(Error::UnexpectedInCache { .. })));
+        assert!(compiled.is_file());
+    }
+
+    /// deleting is the one thing here that cannot be undone, and a link named
+    /// `__pycache__` is a way out of the entry
+    #[cfg(unix)]
+    #[test]
+    fn a_bytecode_directory_that_is_a_link_is_never_followed() {
+        let hooks = Hooks::new();
+        let entry = hooks.stage();
+        let outside = hooks.directory.path().join("somebody elses directory");
+        std::fs::create_dir_all(&outside).expect("the directory can be made");
+        let treasure = outside.join("sitecustomize.cpython-314.pyc");
+        std::fs::write(&treasure, "keep me").expect("the file can be written");
+        let link = entry.join("__pycache__");
+        std::os::unix::fs::symlink(&outside, &link).expect("the link can be made");
+
+        let cache = hooks.open();
+        assert_eq!(cache.strays().len(), 1);
+        assert_eq!(cache.strays()[0].path(), link);
+
+        let refused = cache.clear(&[]);
+        assert!(matches!(refused, Err(Error::UnexpectedInCache { .. })));
+        assert!(
+            treasure.is_file(),
+            "what a link points at is not the cache's"
+        );
+        assert!(
+            link.is_symlink(),
+            "and the link itself is reported, not removed"
+        );
+    }
+
+    #[test]
+    fn the_hook_that_was_asked_for_is_the_one_left_behind() {
+        let hooks = Hooks::new();
+        let entry = hooks.stage();
+
+        let cleared = hooks
+            .open()
+            .clear(&[&super::current_child_hook()])
+            .unwrap_or_else(|error| panic!("clearing failed: {error}"));
+
+        assert!(cleared.succeeded());
+        assert_eq!(cleared.removed().len(), 0);
+        assert_eq!(cleared.kept().len(), 1);
+        assert!(
+            entry.is_dir(),
+            "the hook the next launch stages is still there"
+        );
     }
 }

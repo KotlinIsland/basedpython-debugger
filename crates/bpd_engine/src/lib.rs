@@ -71,31 +71,32 @@ pub enum Error {
         source: io::Error,
     },
 
-    /// there is nowhere a per-user agent cache could go
-    #[error("bpd has nowhere to cache the agent: {reason}")]
-    NoAgentCache {
+    /// there is nowhere a per-user cache could go
+    #[error("bpd has nowhere to cache what it stages: {reason}")]
+    NoCacheHome {
         /// what was looked at, and what it would take to fix
         reason: String,
     },
 
-    /// the directory the agent is cached in cannot be trusted
+    /// a directory `bpd` stages into cannot be trusted
     ///
-    /// what is cached there is a shared object that gets loaded into the user's
-    /// own processes, so a directory somebody else can write to is somebody
-    /// else choosing what runs inside the debuggee. staging refuses rather than
-    /// quietly using a temporary directory instead, because a fallback would
-    /// turn a broken cache into a performance regression nobody notices
-    #[error("refusing to cache the agent in `{path}`: {reason}")]
-    UntrustedAgentCache {
+    /// what is cached there is loaded into the user's own processes — a shared
+    /// object in one cache, a `sitecustomize` a child imports in the other — so
+    /// a directory somebody else can write to is somebody else choosing what
+    /// runs inside the debuggee. staging refuses rather than quietly using a
+    /// temporary directory instead, because a fallback would turn a broken
+    /// cache into a performance regression nobody notices
+    #[error("refusing to cache in `{path}`: {reason}")]
+    UntrustedCache {
         /// the directory that was refused
         path: PathBuf,
         /// what is wrong with it, and what it would take to fix
         reason: String,
     },
 
-    /// the agent cache could not be read
-    #[error("could not read the agent cache: `{path}`")]
-    ReadAgentCache {
+    /// a staging cache could not be read
+    #[error("could not read the cache: `{path}`")]
+    ReadCache {
         /// the file or directory the failure was about
         path: PathBuf,
         /// the underlying failure
@@ -103,14 +104,14 @@ pub enum Error {
         source: io::Error,
     },
 
-    /// the agent cache holds something staging never put there
+    /// a staging cache holds something staging never put there
     ///
     /// a cache with a surprise in it may not be the directory `bpd` thinks it
     /// is, and the one operation here that cannot be undone is deleting — so
     /// this refuses the whole of it rather than removing what it does
     /// recognise and leaving the rest
-    #[error("refusing to change the agent cache `{root}`: {reason}")]
-    UnexpectedInAgentCache {
+    #[error("refusing to change the cache `{root}`: {reason}")]
+    UnexpectedInCache {
         /// the cache directory
         root: PathBuf,
         /// what was found in it, and what it would take to fix

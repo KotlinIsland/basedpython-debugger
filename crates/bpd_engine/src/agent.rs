@@ -95,7 +95,7 @@ const WINDOWS_SUFFIX: &str = ".pyd";
 const CHILD_HOOK: &str = include_str!("../resources/sitecustomize.py");
 
 /// what the file is called, which is the whole of how an interpreter finds it
-const CHILD_MODULE: &str = "sitecustomize.py";
+pub(crate) const CHILD_MODULE: &str = "sitecustomize.py";
 
 /// the agent, renamed into a directory an interpreter can import from
 #[derive(Debug)]
@@ -156,17 +156,20 @@ pub(crate) fn stage_artifact(cache: &Path, artifact: &Path) -> Result<Staged> {
 /// every descendant's `sys.path` — so anything else in it would be a module bpd
 /// had added to programs it is not even debugging
 ///
-/// it is a cache of its own rather than an entry of the agent's, and the reason
-/// is `bpd cache`: an entry there holds one file, named for the platform's
-/// extension suffix, and anything else in one stops a clear rather than being
-/// removed. a directory that held both would have to teach that check about a
-/// second shape to describe a directory it does not manage
+/// it is a cache of its own rather than an entry of the agent's, because the
+/// two hold different things: an agent entry holds one extension module, and
+/// this one holds a source file **and** the `__pycache__` cpython writes beside
+/// it the first time a child imports it. `bpd cache` knows both shapes and says
+/// which directory it is describing, rather than one entry having two
 pub fn stage_child_hook() -> Result<Staged> {
     stage_child_hook_into(&child_cache()?)
 }
 
 /// the same, into a cache directory of the caller's choosing
-pub(crate) fn stage_child_hook_into(cache: &Path) -> Result<Staged> {
+///
+/// the directory is held to the same rules as the default one, by the same
+/// check that holds the agent's
+pub fn stage_child_hook_into(cache: &Path) -> Result<Staged> {
     let bytes = CHILD_HOOK.as_bytes();
 
     trust(cache)?;
@@ -185,8 +188,17 @@ pub(crate) fn stage_child_hook_into(cache: &Path) -> Result<Staged> {
 }
 
 /// where the `sitecustomize` a child is entered through is cached
-fn child_cache() -> Result<PathBuf> {
+pub(crate) fn child_cache() -> Result<PathBuf> {
     Ok(cache_home()?.join("bpd").join("children"))
+}
+
+/// the entry the `sitecustomize` this `bpd` carries stages into
+///
+/// unlike an agent build there is nothing to go and find: the file is compiled
+/// into the binary, so this is the same bytes [`stage_child_hook`] writes,
+/// hashed the same way, and there is no state in which it cannot be named
+pub(crate) fn child_hook_digest() -> String {
+    digest(CHILD_HOOK.as_bytes())
 }
 
 /// whether the staged file is already exactly these bytes
@@ -330,7 +342,7 @@ pub(crate) fn trusted(cache: &Path, metadata: &std::fs::Metadata) -> Result<()> 
 }
 
 fn untrusted(cache: &Path, reason: &str) -> Error {
-    Error::UntrustedAgentCache {
+    Error::UntrustedCache {
         path: cache.to_path_buf(),
         reason: reason.to_owned(),
     }
@@ -388,7 +400,7 @@ fn cache_home() -> Result<PathBuf> {
 
     match std::env::home_dir() {
         Some(home) if home.is_absolute() => Ok(home.join(".cache")),
-        _ => Err(Error::NoAgentCache {
+        _ => Err(Error::NoCacheHome {
             reason: "neither `XDG_CACHE_HOME` nor `HOME` names an absolute \
                      directory, so there is nowhere a per-user cache could go"
                 .to_owned(),
@@ -408,7 +420,7 @@ fn cache_home() -> Result<PathBuf> {
 
     match std::env::home_dir() {
         Some(home) if home.is_absolute() => Ok(home.join("AppData").join("Local")),
-        _ => Err(Error::NoAgentCache {
+        _ => Err(Error::NoCacheHome {
             reason: "neither `LOCALAPPDATA` nor a user profile directory names \
                      an absolute path, so there is nowhere a per-user cache \
                      could go"
@@ -1090,7 +1102,7 @@ mod tests {
 
         let refused = stage_artifact(&root, &cache.artifact("an agent"));
 
-        let Err(Error::UntrustedAgentCache { path, reason }) = refused else {
+        let Err(Error::UntrustedCache { path, reason }) = refused else {
             panic!("a cache that is a file has to be refused, not used");
         };
         assert_eq!(path, root);
@@ -1110,7 +1122,7 @@ mod tests {
 
         let refused = stage_artifact(&root, &cache.artifact("an agent"));
 
-        let Err(Error::UntrustedAgentCache { path, reason }) = refused else {
+        let Err(Error::UntrustedCache { path, reason }) = refused else {
             panic!("a world writable cache has to be refused, not used");
         };
         assert_eq!(path, root);
@@ -1146,7 +1158,7 @@ mod tests {
 
         let refused = stage_artifact(&root, &cache.artifact("an agent"));
 
-        let Err(Error::UntrustedAgentCache { reason, .. }) = refused else {
+        let Err(Error::UntrustedCache { reason, .. }) = refused else {
             panic!("a group writable cache has to be refused, not used");
         };
         assert!(reason.contains("0770"), "{reason}");
@@ -1168,7 +1180,7 @@ mod tests {
         let cache = Cache::new();
         let refused = stage_artifact(Path::new("/"), &cache.artifact("an agent"));
 
-        let Err(Error::UntrustedAgentCache { reason, .. }) = refused else {
+        let Err(Error::UntrustedCache { reason, .. }) = refused else {
             panic!("a cache somebody else owns has to be refused, not used");
         };
         assert!(reason.contains("uid 0"), "{reason}");
@@ -1185,7 +1197,7 @@ mod tests {
 
         let refused = stage_artifact(&root, &cache.artifact("an agent"));
 
-        let Err(Error::UntrustedAgentCache { path, reason }) = refused else {
+        let Err(Error::UntrustedCache { path, reason }) = refused else {
             panic!("a cache reached through a link has to be refused, not used");
         };
         assert_eq!(path, root);
