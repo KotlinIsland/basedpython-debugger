@@ -792,13 +792,15 @@ fn parsed(run: &Run) -> Seen {
 
 /// the two forms this can be driven in
 ///
-/// **not** `-m`. the on case has to go through the engine — there is no
-/// `bpd launch` flag for child debugging, and there must not be one, because
-/// the CLI has no way to drive the second session a debugged child arrives as —
-/// and `bpd_engine::launch` takes no working directory, which is the one thing
-/// `-m` is resolved through. the off case above covers all three, and that is
-/// where the forms differ: what this adds is written at a **stop**, after the
-/// form has already decided everything it decides
+/// **not** `-m`, and only for the run that goes through the engine:
+/// `bpd_engine::launch` takes no working directory, which is the one thing `-m`
+/// is resolved through. the same guarantee driven through `bpd launch
+/// --debug-children` covers all three, because a command line has a directory
+///
+/// both are driven rather than one, because they are two ways in and the
+/// promise is about the debuggee either way. what this adds to a launch is
+/// written at a **stop**, after the form has already decided everything it
+/// decides
 const WITHOUT_A_WORKING_DIRECTORY: [Form; 2] = [Form::Script, Form::Command];
 
 /// run a fixture under the engine, with child debugging on, and collect what it
@@ -883,13 +885,54 @@ fn a_program_whose_children_are_debugged_can_tell_and_only_that_much() {
         let bare = parsed(&bare);
         let on = parsed(&with_children_debugged(&fixture, form));
 
-        for (name, value) in &on.environment {
-            let same = bare.environment.get(name) == Some(value);
-            assert!(
-                same || ALLOWED_WITH_CHILD_DEBUGGING
-                    .iter()
-                    .any(|(allowed, _)| allowed == name),
-                "as {form:?} a debuggee with child debugging on has `{name}` in \
+        only_the_enumerated_channel(form, &bare, &on);
+    }
+}
+
+/// the same guarantee, for the front end a person drives
+///
+/// `bpd launch --debug-children` reaches the same setting through the same
+/// session, and a promise about what a debuggee can see is a promise about the
+/// debuggee rather than about who asked. it is the same list, checked by the
+/// same function, so a fifth name fails in both places or in neither
+///
+/// all three forms here, because a command line has a working directory —
+/// [`WITHOUT_A_WORKING_DIRECTORY`] says why the engine-driven one has two
+#[test]
+fn a_program_launched_with_debug_children_can_tell_exactly_as_much_and_no_more() {
+    for form in EVERY_FORM {
+        let fixture = Fixture::new("what_it_sees", WHAT_THE_PROGRAM_CAN_SEE);
+        let bare = parsed(&fixture.run(interpreter(), form, &[]));
+
+        // the flag goes **before** the program, exactly as `--python` does:
+        // everything from the first positional on is the program's own
+        let mut debugged = Command::new(BPD);
+        debugged
+            .current_dir(fixture.directory())
+            .arg("launch")
+            .arg("--python")
+            .arg(&interpreter().executable)
+            .arg("--debug-children")
+            .args(invocation(&fixture, form, &[]));
+        let on = parsed(&finished(&mut debugged));
+
+        only_the_enumerated_channel(form, &bare, &on);
+    }
+}
+
+/// what a debuggee with child debugging on may differ by, and nothing else
+///
+/// one function for both drivers. the list is the point — see
+/// [`ALLOWED_WITH_CHILD_DEBUGGING`] — and two copies of the comparison would be
+/// two places for a name to be quietly allowed
+fn only_the_enumerated_channel(form: Form, bare: &Seen, on: &Seen) {
+    for (name, value) in &on.environment {
+        let same = bare.environment.get(name) == Some(value);
+        assert!(
+            same || ALLOWED_WITH_CHILD_DEBUGGING
+                .iter()
+                .any(|(allowed, _)| allowed == name),
+            "as {form:?} a debuggee with child debugging on has `{name}` in \
                  its environment, which a bare run of the same program does not \
                  have — or has differently — and which nothing in this list \
                  accounts for:\n{}\n\
@@ -897,69 +940,68 @@ fn a_program_whose_children_are_debugged_can_tell_and_only_that_much() {
                  program to notice the debugger. a name added here is a name \
                  every program run this way carries, so it needs a reason \
                  somebody can disagree with, not an entry",
-                child_reasons()
-            );
-        }
-
-        let lost: Vec<&String> = bare
-            .environment
-            .keys()
-            .filter(|name| !on.environment.contains_key(*name))
-            .collect();
-        assert!(
-            lost.is_empty(),
-            "as {form:?} the debuggee is missing {lost:?}, which a bare run has. \
-             child debugging adds a channel and takes nothing away"
-        );
-
-        for (name, _) in ALLOWED_WITH_CHILD_DEBUGGING {
-            assert!(
-                on.environment.contains_key(*name),
-                "as {form:?} the list claims `{name}`, and the program could not \
-                 read it. a reason nobody needs is a reason nobody reads — and a \
-                 channel that is not there is a child that will not attach"
-            );
-        }
-
-        // the two halves have to agree: what `PYTHONPATH` gained is what
-        // `sys.path` gained, and it is the **last** entry of both
-        let gained: Vec<&String> = on
-            .path
-            .iter()
-            .filter(|entry| !bare.path.contains(entry))
-            .collect();
-        assert_eq!(
-            gained.len(),
-            1,
-            "as {form:?} child debugging put {gained:?} on the import path. it \
-             is one directory, holding one file"
-        );
-        let added = gained[0];
-        assert_eq!(
-            on.path.last(),
-            Some(added),
-            "as {form:?} the entry is **appended**. anywhere else and it is a \
-             directory searched before something of the program's own, which is \
-             the debugger deciding what the program imports"
-        );
-        let separator = if cfg!(windows) { ';' } else { ':' };
-        assert_eq!(
-            on.environment["PYTHONPATH"]
-                .rsplit(separator)
-                .next()
-                .expect("a split has a last part"),
-            added.as_str(),
-            "as {form:?} `PYTHONPATH` and `sys.path` name different directories. \
-             a variable saying this interpreter imports from somewhere it does \
-             not is a lie about this process, and programs read it back"
-        );
-        assert_ne!(
-            on.environment["BPD_CHILD_AGENT"], *added,
-            "as {form:?} the agent's directory and the hook's are the same one. \
-             the hook is appended to every descendant's path, so anything beside \
-             it there is a module bpd added to programs it is not debugging"
+            child_reasons()
         );
     }
+
+    let lost: Vec<&String> = bare
+        .environment
+        .keys()
+        .filter(|name| !on.environment.contains_key(*name))
+        .collect();
+    assert!(
+        lost.is_empty(),
+        "as {form:?} the debuggee is missing {lost:?}, which a bare run has. \
+             child debugging adds a channel and takes nothing away"
+    );
+
+    for (name, _) in ALLOWED_WITH_CHILD_DEBUGGING {
+        assert!(
+            on.environment.contains_key(*name),
+            "as {form:?} the list claims `{name}`, and the program could not \
+                 read it. a reason nobody needs is a reason nobody reads — and a \
+                 channel that is not there is a child that will not attach"
+        );
+    }
+
+    // the two halves have to agree: what `PYTHONPATH` gained is what
+    // `sys.path` gained, and it is the **last** entry of both
+    let gained: Vec<&String> = on
+        .path
+        .iter()
+        .filter(|entry| !bare.path.contains(entry))
+        .collect();
+    assert_eq!(
+        gained.len(),
+        1,
+        "as {form:?} child debugging put {gained:?} on the import path. it \
+             is one directory, holding one file"
+    );
+    let added = gained[0];
+    assert_eq!(
+        on.path.last(),
+        Some(added),
+        "as {form:?} the entry is **appended**. anywhere else and it is a \
+             directory searched before something of the program's own, which is \
+             the debugger deciding what the program imports"
+    );
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    assert_eq!(
+        on.environment["PYTHONPATH"]
+            .rsplit(separator)
+            .next()
+            .expect("a split has a last part"),
+        added.as_str(),
+        "as {form:?} `PYTHONPATH` and `sys.path` name different directories. \
+             a variable saying this interpreter imports from somewhere it does \
+             not is a lie about this process, and programs read it back"
+    );
+    assert_ne!(
+        on.environment["BPD_CHILD_AGENT"], *added,
+        "as {form:?} the agent's directory and the hook's are the same one. \
+             the hook is appended to every descendant's path, so anything beside \
+             it there is a module bpd added to programs it is not debugging"
+    );
 }
 
 /// the child-debugging list, spelled out for a failure to print
