@@ -617,6 +617,25 @@ the one difference this flag makes to when the command returns
 the flag goes **before** the program, like `--python`: everything from the first
 positional on belongs to the program
 
+#### a child that arrives after the last session has ended
+
+it cannot be one that is left held, and the reason is where a session is
+accepted: the engine takes a connection off the listener from **inside a wait**,
+and a wait is only ever made on a session that is still open. so a child the
+engine has taken is a child in `sessions()`, and the rotation drives every one
+of those to its end before this command returns
+
+a child whose connection had not been taken by then is not attached to anything.
+it is waiting for a handshake, and when this process exits it gets what any
+child that cannot reach the debugger gets: a line on its own stderr naming the
+endpoint and the failure, and a run with the tool taken off it —
+[if it cannot reconnect](#if-it-cannot-reconnect) is the same path
+
+the shape that produces one is a double fork: a child that forks a grandchild
+and exits before the grandchild's connection is taken. what it costs is a
+grandchild that runs undebugged and says so, which is a stated limit rather than
+a process nobody can resume
+
 **one setting, two mechanisms.** there is one question a user asks and two ways a
 child comes into being, so they are set together and never apart — a debuggee
 where one was on and the other off would debug half the children a program makes,
