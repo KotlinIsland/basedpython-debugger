@@ -183,8 +183,11 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
                 let answer = stopped.restart_frame(frame)?;
                 attach::send(&answer);
             }
-            FromEngine::ReplaceCode { file } => {
-                let replaced = replace::replace(python, &file)?;
+            FromEngine::ReplaceCode {
+                file,
+                even_under_a_live_frame,
+            } => {
+                let replaced = replace::replace(python, &file, even_under_a_live_frame)?;
                 attach::send(&FromAgent::Replaced { replaced });
             }
             FromEngine::Threads { settle_ms } => {

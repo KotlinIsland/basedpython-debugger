@@ -290,7 +290,15 @@ pub fn replaced(replacement: &Replaced) -> serde_json::Value {
             changed,
             rebound,
             unchanged,
+            still_running,
         } => {
+            // first, because it qualifies everything under it: a replacement
+            // applied under a live frame did not put the process on one version
+            // of the code, and an agent reading the changes below without this
+            // would act on a process it has the wrong model of
+            for running in still_running {
+                notes.push(running.to_string());
+            }
             if changed.is_empty() {
                 notes.push(format!(
                     "nothing needed replacing: the {} code objects of that file \

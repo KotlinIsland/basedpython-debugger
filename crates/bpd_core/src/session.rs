@@ -456,6 +456,26 @@ pub enum Request {
     ReplaceCode {
         /// the file whose code to replace, on the debuggee's own filesystem
         file: PathBuf,
+
+        /// apply it even where a frame is running the code being replaced
+        ///
+        /// **off by default, and that default is the guarantee.** a replacement
+        /// made under a live frame leaves the process running two versions of
+        /// one function until that frame returns, and a stack whose frames
+        /// behave two different ways is evidence about neither — so the ordinary
+        /// answer is a refusal naming every frame that stood in the way
+        ///
+        /// asking for it turns those refusals into a **report**: the replacement
+        /// is applied and every frame still on the old code is named. that is a
+        /// weaker guarantee and it is the caller's to want, which is why it is a
+        /// field rather than a change of behaviour
+        ///
+        /// the report is true when it is made and not afterwards. a frame on the
+        /// list returns on its own schedule, and nothing tells the client when
+        /// one has — so it says which frames were still on the old code at the
+        /// moment of the replacement, and a caller reading it as the state of
+        /// the process now is reading it wrong. see [`crate::StillRunning`]
+        even_under_a_live_frame: bool,
     },
 
     /// write a variable of a frame, and read back what the frame holds after it

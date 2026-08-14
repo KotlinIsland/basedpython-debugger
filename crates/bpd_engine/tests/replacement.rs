@@ -516,6 +516,88 @@ fn a_changed_class_body_is_refused_and_a_changed_method_body_is_not() {
     // that already existed
 }
 
+/// what an applied replacement says about frames still on the old code
+fn still_running(replaced: &Replaced) -> &Vec<bpd_core::StillRunning> {
+    match &replaced.outcome {
+        Replacement::Applied { still_running, .. } => still_running,
+        Replacement::Refused { because } => {
+            let said: Vec<String> = because.iter().map(ToString::to_string).collect();
+            panic!("the replacement was refused: {said:#?}")
+        }
+    }
+}
+
+#[test]
+fn a_replacement_asked_for_under_a_live_frame_is_applied_and_names_every_frame_it_left_behind() {
+    // the trade this exists for, taken deliberately. the ordinary answer here is
+    // the refusal the test below asserts — the same program, the same edit, the
+    // same live frame — and the only difference is that the caller asked
+    //
+    // what makes it honest is that the cost is *returned* rather than assumed
+    // away: the frame that goes on running the old body is named, so a caller
+    // that wanted the replacement gets it and a caller that reads the answer
+    // knows the process is on two versions of one function until it returns
+    let (fixture, victim) = laid_out(VICTIM);
+    let mut debuggee = launch(&fixture);
+
+    let stop = stopped_inside(
+        &mut debuggee,
+        &victim,
+        line_of(VICTIM, r#"    return ("before", value)"#),
+    );
+
+    std::fs::write(&victim, EDITED).expect("the fixture directory is writable");
+    let replaced = debuggee
+        .replace_code_even_under_a_live_frame(&victim)
+        .expect("the replacement was answered");
+
+    let left_behind = still_running(&replaced);
+    let named = left_behind
+        .iter()
+        .find(|running| matches!(running.frame, LiveFrame::Thread { .. }))
+        .unwrap_or_else(|| panic!("nothing named the running frame: {left_behind:#?}"));
+    assert_eq!(named.function, "plain");
+    let LiveFrame::Thread { thread, held, .. } = named.frame else {
+        unreachable!("the match above required it")
+    };
+    assert_eq!(thread, stop.thread, "it named another thread");
+    assert_eq!(
+        held,
+        Some(stop.stop),
+        "the frame is one bpd is holding, and saying so is what separates it \
+         from a thread that is running and was sampled"
+    );
+
+    // the sentence has to say what was traded, not merely that a frame exists.
+    // a caller who asked for this and read `applied` with a bare list of frames
+    // would have been told a fact and not its consequence
+    let said = named.to_string();
+    assert!(
+        said.contains("two versions of one function"),
+        "the report has to name what it cost, and said {said}"
+    );
+
+    // and the replacement really happened: the same assertion the ordinary
+    // applied case makes, because "applied" that changed nothing would pass
+    // every check above
+    let (changed, _) = applied(&replaced);
+    assert!(
+        changed.iter().any(|one| one.function == "plain"),
+        "nothing was actually replaced: {changed:#?}"
+    );
+
+    // the live frame runs the body it started with, to completion. that is
+    // cpython's behaviour rather than bpd's choice, and it is the half of the
+    // trade a caller cannot see from the report alone
+    to_exit(&mut debuggee);
+    let ran = recorded(&fixture);
+    assert!(
+        ran.contains("'before'"),
+        "the frame that was already running finished on the old code, which is \
+         what `still_running` was warning about. it recorded {ran}"
+    );
+}
+
 #[test]
 fn a_frame_running_the_code_refuses_the_replacement_and_names_where_it_is() {
     let (fixture, victim) = laid_out(VICTIM);

@@ -49,7 +49,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use bpd_core::{Divergence, LiveFrame, Rebound, Replaced, Replacement, Suspendable, Unreplaceable};
+use bpd_core::{
+    Divergence, LiveFrame, Rebound, Replaced, Replacement, StillRunning, Suspendable, Unreplaceable,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
@@ -68,7 +70,11 @@ const CO_VARARGS: u32 = 0x4;
 const CO_VARKEYWORDS: u32 = 0x8;
 
 /// replace the code of one file with what is on disk, or refuse whole
-pub(crate) fn replace(python: Python<'_>, file: &Path) -> PyResult<Replaced> {
+pub(crate) fn replace(
+    python: Python<'_>,
+    file: &Path,
+    even_under_a_live_frame: bool,
+) -> PyResult<Replaced> {
     let refused = |because: Vec<Unreplaceable>| Replaced {
         file: file.to_path_buf(),
         outcome: Replacement::Refused { because },
@@ -122,6 +128,19 @@ pub(crate) fn replace(python: Python<'_>, file: &Path) -> PyResult<Replaced> {
     let live = Live::of(python, &plan.wanted())?;
     plan.check(python, &live)?;
 
+    // a live frame is a refusal unless the caller asked for it, and this is the
+    // only place that turns one into the other. it happens **before** the
+    // emptiness check so that "nothing is applied partially" still reads the
+    // whole list: a replacement refused for a signature change is refused for
+    // that whether or not a frame was also running
+    let mut plan = plan;
+    if !even_under_a_live_frame {
+        plan.refusals
+            .extend(plan.live.drain(..).map(|running| Unreplaceable::Running {
+                function: running.function,
+                frame: running.frame,
+            }));
+    }
     if !plan.refusals.is_empty() {
         return Ok(refused(plan.refusals));
     }
@@ -162,6 +181,10 @@ pub(crate) fn replace(python: Python<'_>, file: &Path) -> PyResult<Replaced> {
             changed,
             unchanged: plan.unchanged,
             rebound,
+            // empty unless the caller asked for a replacement under a live
+            // frame: without that, one of these is a refusal and this is never
+            // reached
+            still_running: plan.live,
         },
         mode: world::mode(),
     })
@@ -545,6 +568,15 @@ struct Plan<'py> {
     /// old code objects the file on disk has no counterpart for
     orphans: Vec<Bound<'py, PyAny>>,
     refusals: Vec<Unreplaceable>,
+    /// frames running code that is about to change
+    ///
+    /// kept apart from the refusals rather than filtered out of them later,
+    /// because what they are is decided by what the caller asked for and not by
+    /// what they are: with `even_under_a_live_frame` they are a report on an
+    /// applied replacement, and without it every one of them is a reason it was
+    /// refused. sorting them at the end would mean the refusal list was briefly
+    /// wrong, which is the list `nothing is applied partially` is checked against
+    live: Vec<StillRunning>,
 }
 
 impl<'py> Plan<'py> {
@@ -556,6 +588,7 @@ impl<'py> Plan<'py> {
             reached: Vec::new(),
             orphans: Vec::new(),
             refusals: Vec::new(),
+            live: Vec::new(),
         }
     }
 
@@ -724,7 +757,7 @@ impl<'py> Plan<'py> {
             let function: String = old.getattr("co_qualname")?.extract()?;
 
             for frame in live.frames.get(&address).into_iter().flatten() {
-                found.push(Unreplaceable::Running {
+                self.live.push(StillRunning {
                     function: function.clone(),
                     frame: frame.clone(),
                 });

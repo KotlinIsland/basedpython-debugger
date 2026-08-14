@@ -1075,7 +1075,28 @@ impl Adapter {
             )
         })?;
 
-        let replaced = match self.ask(Request::ReplaceCode { file: file.into() })? {
+        // an optional argument, defaulting off, because the default is the
+        // guarantee: a replacement under a live frame leaves the process
+        // running two versions of one function, and a client that had not asked
+        // for that must not be given it by an adapter's convenience
+        let even_under_a_live_frame = match message.arguments.get("evenUnderALiveFrame") {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Bool(asked)) => *asked,
+            Some(other) => {
+                return Err(Aborted::Refuse(format!(
+                    "`evenUnderALiveFrame` is a boolean and this was {other}. it \
+                     trades the guarantee that the process never runs two \
+                     versions of one function for a report of every frame that \
+                     will, and guessing which was meant is not a trade bpd can \
+                     make for a client"
+                )));
+            }
+        };
+
+        let replaced = match self.ask(Request::ReplaceCode {
+            file: file.into(),
+            even_under_a_live_frame,
+        })? {
             Response::Replaced(replaced) => replaced,
             other => unreachable!("a code replacement was answered with {other:?}"),
         };
@@ -1091,6 +1112,23 @@ impl Adapter {
                     &serde_json::json!({
                         "category": "important",
                         "output": format!("bpd did not replace the code: {reason}\n"),
+                    }),
+                )?;
+            }
+        }
+
+        // and the other way round: a replacement that **was** applied under a
+        // live frame is the one case where succeeding costs something, and the
+        // cost goes where a refusal's reason goes. a user who asked for this and
+        // then read an unqualified success would have been told the process is
+        // on one version of the code when it is on two
+        if let bpd_core::Replacement::Applied { still_running, .. } = &replaced.outcome {
+            for running in still_running {
+                self.event(
+                    "output",
+                    &serde_json::json!({
+                        "category": "important",
+                        "output": format!("bpd replaced the code under a live frame: {running}\n"),
                     }),
                 )?;
             }

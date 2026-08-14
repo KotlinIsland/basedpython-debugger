@@ -137,16 +137,28 @@ pub enum Facet {
     /// shape a protocol either has a field for or has not; this one is a thing
     /// the client has to **have**
     Terminal,
+
+    /// replacing a file's code **under a frame that is running it** —
+    /// [`Request::ReplaceCode`]
+    ///
+    /// a field of one request, and a capability all the same: it is the only
+    /// way to reach a replacement the ordinary rule refuses, and it trades the
+    /// guarantee that the process never runs two versions of one function for
+    /// a report of every frame that will. a front end without it cannot offer
+    /// the trade, and one that took the flag and dropped the report would be
+    /// making the trade **for** its user without saying so
+    LiveReplacement,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
         Self::GeneratedLocation,
         Self::Terminal,
+        Self::LiveReplacement,
     ];
 
     /// what to call this capability in a message about it
@@ -157,6 +169,7 @@ impl Facet {
             Self::Session => "naming the session a request is for",
             Self::GeneratedLocation => "the generated python behind a `.by` frame",
             Self::Terminal => "running the debuggee on a terminal the client owns",
+            Self::LiveReplacement => "replacing code under a frame that is running it",
         }
     }
 }
@@ -586,7 +599,11 @@ pub fn surface() -> Vec<Request> {
         },
         Request::SetNextStatement { frame, line: 2 },
         Request::RestartFrame { frame },
+        // asked for under a live frame, because that is the half a front end
+        // can drop with nothing failing: a replacement is made either way, and
+        // only a front end that carries the flag can offer the trade at all
         Request::ReplaceCode {
+            even_under_a_live_frame: true,
             file: std::path::PathBuf::from("a.py"),
         },
         Request::Query {

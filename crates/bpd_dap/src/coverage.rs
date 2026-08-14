@@ -124,6 +124,15 @@ pub const fn reach_of(request: &Request) -> Reach {
 /// exhaustive, for the reason [`reach_of`] is
 pub const fn reach_of_facet(facet: Facet) -> Reach {
     match facet {
+        // a boolean on the custom request that carries the replacement itself,
+        // and the report comes back two ways: in the body, whole, and as a
+        // console line per frame — the same place a refusal's reason goes,
+        // because succeeding here costs the same thing failing usually saves
+        Facet::LiveReplacement => Reach::Direct(
+            "`evenUnderALiveFrame` on `bpd/replaceCode`, with every frame still \
+             on the old code in the answer and on the console",
+        ),
+
         // the one capability of the core that DAP cannot carry, and the reason
         // is DAP's rather than bpd's: `hitCondition` is free text whose meaning
         // is a per-client convention. `>5`, `=5`, `%5` and a bare `5` are read

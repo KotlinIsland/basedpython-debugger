@@ -529,6 +529,12 @@ pub enum FromEngine {
     ReplaceCode {
         /// the file whose code to replace, as the client named it
         file: std::path::PathBuf,
+        /// apply it even where a frame is running the code being replaced
+        ///
+        /// carried to the agent rather than decided here, because the agent is
+        /// the only thing that can see the frames — see
+        /// `bpd_core::Request::ReplaceCode`
+        even_under_a_live_frame: bool,
     },
 
     /// write a variable of a frame
@@ -1024,12 +1030,24 @@ mod tests {
     #[test]
     fn a_replacement_and_what_it_changed_round_trip() {
         let request = FromEngine::ReplaceCode {
+            // the round trip has to carry it: the agent is the only thing that
+            // can see the frames, so a flag lost on the wire is a guarantee
+            // traded away by nobody
+            even_under_a_live_frame: true,
             file: PathBuf::from("/tmp/victim.py"),
         };
         let answer = FromAgent::Replaced {
             replaced: bpd_core::Replaced {
                 file: PathBuf::from("/tmp/victim.py"),
                 outcome: bpd_core::Replacement::Applied {
+                    still_running: vec![bpd_core::StillRunning {
+                        function: "worker".to_string(),
+                        frame: bpd_core::LiveFrame::Thread {
+                            thread: 12,
+                            line: 40,
+                            held: Some(3),
+                        },
+                    }],
                     changed: vec![bpd_core::Rebound {
                         function: "boom".to_string(),
                         was_at: 2,

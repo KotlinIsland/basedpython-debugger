@@ -121,6 +121,18 @@ pub enum Replacement {
         /// client that was not told would be watching a line it can see is
         /// armed and never reached
         rebound: Vec<Resolved>,
+
+        /// frames that go on running the code this replaced
+        ///
+        /// **empty unless the caller asked for it.** without
+        /// `even_under_a_live_frame` a frame running the code is a refusal, so
+        /// an applied replacement had none — and this being empty is then the
+        /// ordinary guarantee rather than an absence of information
+        ///
+        /// with it, this is what that guarantee was traded for, and it is the
+        /// whole of what was traded: every frame that will finish on the old
+        /// code, named. see [`StillRunning`] for what it does and does not say
+        still_running: Vec<StillRunning>,
     },
 
     /// nothing was changed, and this is everything that stood in the way
@@ -357,6 +369,38 @@ fn names(
         )?;
     }
     Ok(())
+}
+
+/// a frame that will finish on the code a replacement replaced
+///
+/// only ever produced when the caller asked for a replacement under a live
+/// frame. it is the cost of that, stated: until this frame returns, the process
+/// runs two versions of one function
+///
+/// **it is true when it is made and not afterwards.** a frame here returns on
+/// its own schedule and nothing reports when one has, so this says which frames
+/// were on the old code at the instant of the replacement. a caller reading it
+/// as the state of the process *now* is reading a list that has been going out
+/// of date since it was written — which is why the ordinary answer is a refusal
+/// and this one has to be asked for
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StillRunning {
+    /// `co_qualname` of the code it is running
+    pub function: String,
+    /// where the frame is
+    pub frame: LiveFrame,
+}
+
+impl std::fmt::Display for StillRunning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "`{}` was replaced while {} — that frame finishes on the code it \
+             started with, so until it returns the process is running two \
+             versions of one function",
+            self.function, self.frame
+        )
+    }
 }
 
 /// where a frame that is running the code was found
