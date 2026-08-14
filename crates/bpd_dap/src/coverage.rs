@@ -93,6 +93,13 @@ pub const fn reach_of(request: &Request) -> Reach {
 
         Request::Stack { .. } => Reach::Direct("stackTrace"),
         Request::Variables { .. } => Reach::Direct("variables"),
+
+        // DAP's `variables` answers what a scope holds, which is a statement
+        // about a moment, and has nowhere to put how long one stays true. an
+        // editor asking this is analysing code that has not run yet — the
+        // stability is the half it cannot derive — so it is an extension rather
+        // than a field bolted onto a `Variable`, which no client would read
+        Request::Facts { .. } => Reach::Direct("bpd/facts, a custom request"),
         // a template frame's `scopes` are the layers of its django context, one
         // DAP scope each, and `variables` on one reads that layer. DAP has no
         // idea what a template is and does not need one: a stack of dicts maps

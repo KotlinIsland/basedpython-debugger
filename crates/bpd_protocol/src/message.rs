@@ -26,8 +26,8 @@
 use std::io::{Read, Write};
 
 use bpd_core::{
-    ContextLayer, Detail, Entry, Evaluated, Frame, FrameId, LogRecord, Mode, Omitted, Refusal,
-    Reported, Resolved, Scope, SourceBreakpoint, StepKind, ThreadState, Which,
+    ContextLayer, Detail, Entry, Evaluated, Fact, Frame, FrameId, Limit, LogRecord, Mode, Omitted,
+    Refusal, Reported, Resolved, Scope, Silent, SourceBreakpoint, StepKind, ThreadState, Which,
 };
 
 use crate::frame::{self, Result};
@@ -225,6 +225,22 @@ pub enum FromAgent {
         /// reporting whichever came first would leave the other unsaid
         omitted: Vec<Omitted>,
         /// how the program was moving while this was taken
+        mode: Mode,
+    },
+
+    /// what is provable about some of a frame's names, and for how long
+    Facts {
+        /// which frame they were read from
+        frame: FrameId,
+        /// what was proved
+        proved: Vec<Fact>,
+        /// the names nothing could be proved about, and why for each
+        silent: Vec<Silent>,
+        /// how the program was moving while this was taken
+        ///
+        /// it qualifies the reading, not the judgement: whether a `list`'s
+        /// length is mutable is a property of `list`, and whether it was three
+        /// when it was read is a sample like any other
         mode: Mode,
     },
 
@@ -454,6 +470,20 @@ pub enum FromEngine {
         scope: Scope,
         /// how much of each value to read
         detail: Detail,
+    },
+
+    /// prove what can be proved about some of a frame's names
+    ///
+    /// what [`FromEngine::Variables`] is to a moment, this is to the code that
+    /// has not run yet: every answer carries how long it stays true. it runs
+    /// none of the program
+    Facts {
+        /// which frame
+        frame: FrameId,
+        /// the names to prove things about, each a name or a dotted path
+        names: Vec<String>,
+        /// how much one fact may cost
+        limit: Limit,
     },
 
     /// read the django template context of a template frame

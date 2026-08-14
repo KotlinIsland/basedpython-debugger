@@ -918,6 +918,29 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
         serde_json::json!({ "frameId": frame }),
     );
 
+    // what is provable about a frame's names, which `variables` has nowhere to
+    // put: a DAP `Variable` carries a value and has no field for how long that
+    // value can be relied on
+    let proved = answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/facts",
+        serde_json::json!({
+            "frameId": frame,
+            "names": ["total", "self.limit"],
+            "limit": { "depth": 3 },
+        }),
+    );
+    assert_eq!(
+        proved["body"]["proved"][0]["name"], "total",
+        "the answer names the names it was asked about: {proved}"
+    );
+    assert_eq!(
+        proved["body"]["proved"][0]["stability"]["stability"], "permanent",
+        "every fact carries how long it stays true, which is the half a \
+         `variables` answer cannot carry: {proved}"
+    );
+
     // making the process run the file that is on disk. DAP's own `restart`
     // throws the process away, which is the opposite of this, so it is an
     // extension — and the parity rule is why it is here at all: an editor is
@@ -1553,6 +1576,21 @@ impl Session for FakeSession {
                 unbound: Vec::new(),
                 unreadable: Vec::new(),
                 omitted: Vec::new(),
+                mode: Mode::NonStop,
+            }),
+            Request::Facts { names, .. } => Response::Facts(bpd_core::Facts {
+                proved: names
+                    .iter()
+                    .map(|name| bpd_core::Fact {
+                        name: name.clone(),
+                        scope: bpd_core::Scope::Local,
+                        observed: bpd_core::Observed::IsInt {
+                            text: "1".to_string(),
+                        },
+                        stability: bpd_core::Stability::Permanent,
+                    })
+                    .collect(),
+                silent: Vec::new(),
                 mode: Mode::NonStop,
             }),
             Request::TemplateContext { .. } => {

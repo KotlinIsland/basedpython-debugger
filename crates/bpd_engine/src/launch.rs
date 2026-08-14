@@ -466,6 +466,13 @@ impl Debuggee {
             } => Ok(Response::Variables(
                 self.attached[at].read_scope(frame, scope, detail, reporting)?,
             )),
+            Request::Facts {
+                frame,
+                names,
+                limit,
+            } => Ok(Response::Facts(
+                self.attached[at].prove_facts(frame, names, limit, reporting)?,
+            )),
             Request::TemplateContext { frame, detail } => Ok(Response::TemplateContext(
                 self.attached[at].read_template_context(frame, detail, reporting)?,
             )),
@@ -738,6 +745,23 @@ impl Debuggee {
         })? {
             Response::Variables(variables) => Ok(variables),
             other => unreachable!("a scope read was answered with {other:?}"),
+        }
+    }
+
+    /// what is provable about a frame's names, and for how long
+    pub fn facts(
+        &mut self,
+        frame: FrameId,
+        names: &[&str],
+        limit: bpd_core::Limit,
+    ) -> Result<bpd_core::Facts> {
+        match self.ask_for(Request::Facts {
+            frame,
+            names: names.iter().map(|name| (*name).to_string()).collect(),
+            limit,
+        })? {
+            Response::Facts(facts) => Ok(facts),
+            other => unreachable!("a fact request was answered with {other:?}"),
         }
     }
 
@@ -1346,6 +1370,36 @@ impl Attached {
                 unbound,
                 unreadable,
                 omitted,
+                mode,
+            }),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// what is provable about a frame's names, and for how long
+    fn prove_facts(
+        &mut self,
+        frame: FrameId,
+        names: Vec<String>,
+        limit: bpd_core::Limit,
+        reporting: &mut dyn Reporting,
+    ) -> Result<bpd_core::Facts> {
+        const EXPECTED: &str = "what is provable about a frame's names";
+
+        let request = FromEngine::Facts {
+            frame,
+            names,
+            limit,
+        };
+        match self.ask(&request, EXPECTED, reporting)? {
+            FromAgent::Facts {
+                proved,
+                silent,
+                mode,
+                ..
+            } => Ok(bpd_core::Facts {
+                proved,
+                silent,
                 mode,
             }),
             other => Err(unexpected(&other, EXPECTED)),

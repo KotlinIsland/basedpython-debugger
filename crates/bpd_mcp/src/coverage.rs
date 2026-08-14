@@ -56,6 +56,12 @@ pub const fn reach_of(request: &Request) -> Reach {
         ),
 
         Request::Variables { .. } => Reach::Direct("variables"),
+
+        // an agent reasoning about what a branch will do is the same reader
+        // an editor's inlay hint is, and it needs the same second half: not
+        // what a name holds, but how far past this line that can be carried
+        Request::Facts { .. } => Reach::Direct("facts"),
+
         Request::TemplateContext { .. } => Reach::Direct("template_context"),
         Request::Evaluate { .. } => Reach::Direct("evaluate"),
         Request::SetVariable { .. } => Reach::Direct("set_variable"),

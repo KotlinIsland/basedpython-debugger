@@ -453,6 +453,11 @@ impl Adapter {
             // identically — so they are extensions, for the reason a script is
             Some("bpd/state") => self.state(message),
             Some("bpd/diff") => self.diff(message),
+            // `variables` says what a scope holds and has nowhere to put how
+            // long that stays true. an editor drawing what a branch will do
+            // needs the second half, and there is no field on a DAP `Variable`
+            // that could carry it
+            Some("bpd/facts") => self.facts(message),
             // DAP's own `restart` throws the process away, which is the opposite
             // of this. an editor is where the file gets edited, so an editor is
             // where a replacement is worth offering — and the parity rule does
@@ -1027,6 +1032,58 @@ impl Adapter {
             .expect("a snapshot is built from types whose serde is derived");
         self.respond(message, Some(body))?;
         Ok(())
+    }
+
+    /// what is provable about a frame's names, and for how long
+    ///
+    /// the names come from the client because the client is the one reading
+    /// source: it knows which names the region it is analysing mentions, and
+    /// every other local in the frame is a read nobody asked for
+    fn facts(&mut self, message: &Incoming) -> Answered {
+        let reference = message.arguments["frameId"]
+            .as_i64()
+            .ok_or("a `bpd/facts` request arrived with no `frameId`")?;
+        let frame = match self.handles.get(reference) {
+            Some(Handle::Frame(frame) | Handle::TemplateFrame(frame)) => *frame,
+            Some(other) => {
+                return Err(Aborted::Refuse(format!(
+                    "{reference} names {other:?}, not a frame"
+                )));
+            }
+            None => return Err(stale(reference)),
+        };
+
+        let names: Vec<String> = message.arguments["names"]
+            .as_array()
+            .ok_or(
+                "a `bpd/facts` request needs `names`, the names to prove things                  about. it is a list rather than a whole scope because the                  client is the one reading the source that mentions them",
+            )?
+            .iter()
+            .filter_map(|name| name.as_str().map(str::to_string))
+            .collect();
+
+        // absent is the default rather than an error: `limit` bounds an answer
+        // and a client that does not care what it costs is not making a mistake
+        let limit: bpd_core::Limit = match message.arguments.get("limit") {
+            Some(limit) => serde_json::from_value(limit.clone()).map_err(|error| {
+                Aborted::Refuse(format!(
+                    "this is not a fact limit: {error}. it takes `text`, how                      much of a value one fact may carry, and `depth`, how many                      segments of a dotted path to follow"
+                ))
+            })?,
+            None => bpd_core::Limit::default(),
+        };
+
+        let facts = match self.ask(Request::Facts {
+            frame,
+            names,
+            limit,
+        })? {
+            Response::Facts(facts) => facts,
+            other => unreachable!("a fact request was answered with {other:?}"),
+        };
+        let body = serde_json::to_value(&facts)
+            .expect("facts are built from types whose serde is derived");
+        self.respond(message, Some(body))
     }
 
     /// what changed between two states this session read
