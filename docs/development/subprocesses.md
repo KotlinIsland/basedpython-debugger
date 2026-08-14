@@ -921,8 +921,17 @@ told a child is coming, and the only mechanism that could rewrite it is the one
 this design rules out
 
 **windows.** the mechanism is portable — `PYTHONPATH` and `sitecustomize` are not
-posix — but `debugChildren` is refused where there is no `fork`, because half a
-feature reported as the whole of one is what this project does not ship
+posix, and every child there is `exec`'d because there is no `fork` to make any
+other kind — so what is refused is not a thing that cannot work. `crate::children`
+is `#[cfg(unix)]` and has never been compiled or run on windows, and a feature
+nobody has seen work is one this project does not have
+
+the refusal says exactly that. it used to end "debugging a child that was
+**exec'd** is a different mechanism and bpd does not have it", which was true
+when it was written and stopped being true when that mechanism was built — a
+refusal whose reason is false is worse than one with no reason, so it now says
+the mechanism exists, that it is unbuilt here, and that it is refused for want of
+evidence rather than because it is impossible
 
 **`multiprocessing` with `spawn` or `forkserver` on 3.13 is still not
 *reported*.** that blind spot is about the audit hook and is

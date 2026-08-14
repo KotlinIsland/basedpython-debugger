@@ -300,8 +300,11 @@ impl std::fmt::Display for Refusal {
                  every child a program starts there is a fresh interpreter with \
                  none of this process's memory in it, so there is nothing to \
                  inherit a session and no `os.register_at_fork` to hand one \
-                 over in. debugging a child that was **exec'd** is a different \
-                 mechanism and bpd does not have it"
+                 over in. bpd does have the other mechanism — an `exec`'d child \
+                 is reached through `PYTHONPATH` and a `sitecustomize`, which \
+                 needs no `fork` — and it has never been built or run on this \
+                 platform, so it is refused here for want of evidence rather \
+                 than because it cannot work"
             ),
         }
     }
@@ -431,6 +434,22 @@ mod tests {
                     // a cause without an action leaves an agent to work out
                     // that it has to hold something first
                     "pausing it",
+                ],
+            ),
+            (
+                // the one refusal whose reason is **not** that the thing is
+                // impossible. half of child debugging needs `fork` and half of
+                // it does not, and a message that said bpd lacks the second
+                // half would be describing a version of bpd from before it was
+                // built
+                Refusal::NoFork {
+                    platform: "windows".to_string(),
+                },
+                vec![
+                    "windows",
+                    "has no `fork`",
+                    "bpd does have the other mechanism",
+                    "for want of evidence",
                 ],
             ),
         ];
