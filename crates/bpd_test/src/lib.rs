@@ -25,6 +25,7 @@ pub mod reporting;
 // and the test over it is unix-only for the same reason
 #[cfg(unix)]
 pub mod terminal;
+pub mod trace;
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;

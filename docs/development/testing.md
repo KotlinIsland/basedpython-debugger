@@ -415,6 +415,48 @@ a bare interpreter with no agent involved, by
 that ever changes, the tests around it start being able to fail, and the
 suppression becomes the thing holding the line
 
+## what a failure prints
+
+a test that drives one stop reports itself well enough: there is one stop, and
+printing it says everything. a test that drives **several** does not, and
+stepping is the case — a step is wrong only relative to where the thread started
+and what was asked for, so the landing on its own diagnoses nothing. `left: 9,
+right: 12` is a line number and a line number, and neither says which of the four
+steps before it went somewhere unexpected
+
+`bpd_test::trace` is what closes that. it records as it goes rather than
+reconstructing afterwards, because a reconstruction can only use what the test
+still holds and the interesting part is what it has already dropped. a wrong
+landing in `crates/bpd_engine/tests/stepping.rs` prints:
+
+```text
+assertion `left == right` failed: the stop is a step in and should have been a step over
+what led here, oldest first:
+  1.   -> set 1 breakpoint(s)
+  2.   -> run
+  3.   <- stopped: … Breakpoint { breakpoints: [1], …, line: 76 }
+  4.   -> step in
+  5.   <- stepping [8336743808]
+  6.   -> wait
+  7.   <- stopped: … Stepped { kind: In, …, line: 13 }
+```
+
+the arrows are the point: an ask and the outcome under it, so a landing that does
+not match the line above it is read off two adjacent lines rather than inferred
+
+**the comparison is a function rather than an `assert_eq!` in each test**, and
+that is what makes it a rule instead of a habit. `landed_on` and `landed_as`
+print the trace; a test that compared line numbers itself would print two
+numbers and lose it, and the next test somebody writes would lose it again. a
+step is four entries and not one — the ask, the threads it set stepping, the
+wait, the landing — because which of those four did something unexpected is the
+diagnosis
+
+it refuses the same things `bpd_test::reporting::Unreported` does: a program that
+logs, pauses or starts a child in a test about none of those has done something
+the test is not about. what is different is that the refusal now names the two
+steps it happened between
+
 ## what is not covered yet
 
 **frame address reuse on a free-threaded build.**
