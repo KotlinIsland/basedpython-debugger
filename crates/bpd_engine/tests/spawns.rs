@@ -114,6 +114,11 @@ fn a_python_child_is_reported_and_still_runs_exactly_as_it_would_have() {
         "the report has to say which child it is about, and said {command}"
     );
     assert!(
+        !child.taking_up,
+        "nothing asked for this program's children to be debugged, and the \
+         report said {child}"
+    );
+    assert!(
         child.to_string().contains("not debugging it"),
         "the report has to say what bpd is *not* doing, and said {child}"
     );

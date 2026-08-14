@@ -234,6 +234,16 @@ fn a_child_that_execs_opens_a_session_of_its_own_and_stops_on_a_breakpoint() {
     // claims: one says a process exists, the other says bpd is debugging it
     assert_eq!(seen.started.len(), 1, "{:?}", seen.started);
 
+    // and the first has to agree with the second. a session for this child
+    // joined during the same run, so a report that said bpd was not taking the
+    // child up would be the debugger contradicting itself one line later —
+    // which is the one thing a person has no way to resolve
+    assert!(
+        seen.started[0].taking_up,
+        "a session joined for this child and the report of it said: {}",
+        seen.started[0]
+    );
+
     let stop = match ask(
         &mut debuggee,
         child,

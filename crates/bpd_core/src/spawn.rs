@@ -6,9 +6,10 @@
 //! waits on its exit code, so the process holding the agent never renders a
 //! template
 //!
-//! nothing here debugs the child. what it does is **say the child is there**,
-//! rather than leaving somebody looking at a supervisor and wondering why a
-//! breakpoint in a request handler never fires
+//! this reports. whether the child is **taken up** as a session of its own is a
+//! setting of the debuggee's, and the report carries it — see
+//! [`Spawn::taking_up`], which is deliberately a statement about what will be
+//! attempted rather than about what the child has already done
 //!
 //! ## what is knowable, and what is not
 //!
@@ -50,6 +51,26 @@ pub struct Spawn {
 
     /// what `bpd` can tell about the child being python, and on what evidence
     pub verdict: Verdict,
+
+    /// whether `bpd` will try to take this child up as a session of its own
+    ///
+    /// **what was asked for, and not what happened.** the report is written in
+    /// the parent, at the moment of the `fork` or the `exec`, and at that moment
+    /// the child has done nothing: a forked one has not reconnected yet, and an
+    /// `exec`'d one is not an interpreter yet. so the only thing knowable here
+    /// is whether this debuggee was told to debug its children, which is what
+    /// this carries
+    ///
+    /// a child can still fail to arrive — a fork whose connection is refused, an
+    /// interpreter the staged agent will not import into, a command that turns
+    /// out not to run python at all. a child that got as far as the agent says
+    /// so on its **own** stderr and then runs as it would have without `bpd`;
+    /// one started with `-E`, `-I` or `-S` never gets that far and says nothing,
+    /// which is why the sentence names that case rather than promising a line
+    /// that is not always written
+    ///
+    /// the session that joins is what says one really did arrive
+    pub taking_up: bool,
 }
 
 impl Spawn {
@@ -85,9 +106,13 @@ pub enum Verdict {
     /// it is python by construction, and for the length of the `fork` call it
     /// is more than that: it inherits the agent's `sys.monitoring` state and
     /// the descriptors of the debugger's own control connection, neither of
-    /// which `bpd` gave it. it gives both up before `os.fork()` returns to it,
-    /// which is what makes "bpd is not debugging it" a fact about the process
-    /// rather than a hope
+    /// which `bpd` gave it
+    ///
+    /// it gives this session's descriptors up before `os.fork()` returns to it,
+    /// on every path. what it does with the monitoring state is
+    /// [`Spawn::taking_up`]'s to say: it either takes the tool off itself and
+    /// runs as a bare process would, or keeps it, opens a connection of its own
+    /// and holds where the fork returned
     ThisProcess,
 
     /// the child will run a python interpreter that is not this one
@@ -121,15 +146,77 @@ impl Verdict {
     }
 }
 
+/// what every report of a child `bpd` is taking up says it was told to do
+///
+/// one wording, used by all four verdicts, because the thing that decides them
+/// all is one setting. a front end looking for the claim in the sentence has one
+/// phrase to look for
+const ASKED: &str = "bpd was asked to debug this program's children";
+
+/// what settles a claim this report cannot settle itself
+///
+/// the report is written in the parent, at the moment the child is asked for, so
+/// everything after that moment is the **child's** to do: reach the engine,
+/// import the agent, hold. saying so here is what keeps the sentence a statement
+/// about an attempt rather than about an outcome nobody can know yet
+///
+/// a macro rather than a constant because both tails below open with it and are
+/// built from it — a phrase every taking-up report shares cannot then drift out
+/// of one of them, and a front end looking for that half has one thing to find
+macro_rules! joining_settles_it {
+    () => {
+        "the session that joins is what says it arrived"
+    };
+}
+
+/// what a **forked** child does when it cannot open a session of its own
+///
+/// unconditional, and it can be: the handler that would say so is inherited
+/// memory, so there is no way for a forked child to fail silently
+const AND_THEN: &str = concat!(
+    joining_settles_it!(),
+    ", and a child that cannot reach the debugger says so on its own stderr and \
+     runs as it would have without bpd"
+);
+
+/// the same for an `exec`'d child, where it is **not** unconditional
+///
+/// the channel is `PYTHONPATH` and a `sitecustomize`, so a child that reaches
+/// the agent at all can say what went wrong — and one started with `-E`, `-I` or
+/// `-S` reads neither and never gets that far. that is a silence, so it is named
+/// rather than papered over with the wording the fork gets: a person who expected
+/// a session and got none needs to know which of the two they are looking at
+const OR_NOT_AT_ALL: &str = concat!(
+    joining_settles_it!(),
+    ". a child that reaches the agent and cannot be debugged says so on its own \
+     stderr and runs as it would have without bpd, and one started with `-E`, \
+     `-I` or `-S` reads neither `PYTHONPATH` nor `site` and so never reaches \
+     the agent at all"
+);
+
+/// what an `exec`'d child that is taken up does, which is not what a fork does
+///
+/// a fork inherits memory and holds where it forked; an `exec` is a fresh
+/// interpreter entered from `site`, before `__main__` exists, so there is no
+/// line to name and the report must not invent one
+const AT_STARTUP: &str = "the child is entered at its own interpreter's startup \
+                          and held before it runs a line of its program";
+
 /// the sentence every front end says about a spawn
 ///
 /// written once, here, because the CLI, the DAP adapter and the MCP server all
 /// have to say it and three wordings of the same fact is three descriptions of
 /// the same program
+///
+/// it says what `bpd` **will attempt** rather than what the child has done, and
+/// that is the whole of why [`Spawn::taking_up`] is on the type rather than
+/// being decided by each front end: the two claims a reader has to put together
+/// are this one and the session that joins, and a report that stated an outcome
+/// here would be contradicting the join a line later
 impl fmt::Display for Spawn {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.verdict {
-            Verdict::ThisProcess => write!(
+        match (&self.verdict, self.taking_up) {
+            (Verdict::ThisProcess, false) => write!(
                 out,
                 "the program forked. the child was a copy of this process, agent \
                  and all, and gave the debugger up before it ran a line — it \
@@ -137,22 +224,52 @@ impl fmt::Display for Spawn {
                  descriptor of this session's control connection. bpd is not \
                  debugging it as a session of its own"
             ),
-            Verdict::ThisInterpreter => write!(
+            (Verdict::ThisProcess, true) => write!(
+                out,
+                "the program forked. the child was a copy of this process, agent \
+                 and all, and gives this session up before it runs a line — it \
+                 holds neither descriptor of this session's control connection. \
+                 {ASKED}, so it keeps the agent's monitoring state, opens a \
+                 connection of its own and holds where the fork returned to it. \
+                 {AND_THEN}"
+            ),
+            (Verdict::ThisInterpreter, false) => write!(
                 out,
                 "the program started a python child, running the interpreter \
                  this program is running, and bpd is not debugging it"
             ),
-            Verdict::AnotherInterpreter { named } => write!(
+            (Verdict::ThisInterpreter, true) => write!(
+                out,
+                "the program started a python child, running the interpreter \
+                 this program is running. {ASKED}, so {AT_STARTUP}. \
+                 {OR_NOT_AT_ALL}"
+            ),
+            (Verdict::AnotherInterpreter { named }, false) => write!(
                 out,
                 "the program started a child whose program is called `{named}`, \
                  which is a python interpreter's name and is not the one this \
                  program is running. bpd is not debugging it"
             ),
-            Verdict::Perhaps { named } => write!(
+            (Verdict::AnotherInterpreter { named }, true) => write!(
+                out,
+                "the program started a child whose program is called `{named}`, \
+                 which is a python interpreter's name and is not the one this \
+                 program is running. {ASKED}, so {AT_STARTUP} — for as long as \
+                 it is the same release of python, since the staged agent is \
+                 not abi3 and cannot be imported by another. {OR_NOT_AT_ALL}"
+            ),
+            (Verdict::Perhaps { named }, false) => write!(
                 out,
                 "the program started a child whose command names `{named}`, and \
                  bpd cannot tell from the command whether the child will run \
                  python. if it does, bpd is not debugging it"
+            ),
+            (Verdict::Perhaps { named }, true) => write!(
+                out,
+                "the program started a child whose command names `{named}`, and \
+                 bpd cannot tell from the command whether the child will run \
+                 python. {ASKED}, so if it does, {AT_STARTUP}. \
+                 {OR_NOT_AT_ALL}"
             ),
         }?;
 
@@ -214,7 +331,31 @@ mod tests {
             executable: Some("/usr/bin/python3.14".to_string()),
             arguments: vec!["/usr/bin/python3.14".to_string(), "worker.py".to_string()],
             verdict,
+            taking_up: false,
         }
+    }
+
+    /// one report of every kind, both ways round
+    fn every_report() -> Vec<Spawn> {
+        let verdicts = [
+            Verdict::ThisProcess,
+            Verdict::ThisInterpreter,
+            Verdict::AnotherInterpreter {
+                named: "python3.13".to_string(),
+            },
+            Verdict::Perhaps {
+                named: "python".to_string(),
+            },
+        ];
+        verdicts
+            .into_iter()
+            .flat_map(|verdict| {
+                [false, true].map(|taking_up| Spawn {
+                    taking_up,
+                    ..started(verdict.clone())
+                })
+            })
+            .collect()
     }
 
     #[test]
@@ -257,25 +398,112 @@ mod tests {
     }
 
     #[test]
+    fn no_report_says_bpd_is_not_debugging_a_child_it_is_taking_up() {
+        // the defect this field exists for. the report is made in the parent and
+        // a session that joins is made later, and a run where the first says the
+        // child is not being debugged and the second says it is leaves a reader
+        // deciding which half of the debugger's own output to believe
+        for child in every_report() {
+            let said = child.to_string();
+            if child.taking_up {
+                assert!(
+                    !said.contains("not debugging"),
+                    "bpd is taking this child up and the report said {said}"
+                );
+                assert!(
+                    said.contains(ASKED),
+                    "a report of a child being taken up has to say so in the \
+                     words every front end looks for, and it said {said}"
+                );
+                assert!(
+                    said.contains(joining_settles_it!()),
+                    "the report is written before the child has done anything, \
+                     so it has to name what settles it, and it said {said}"
+                );
+            } else {
+                assert!(
+                    said.contains("not debugging"),
+                    "nothing is taking this child up, and a report that did not \
+                     say so leaves a person waiting for a stop that cannot \
+                     come. it said {said}"
+                );
+                assert!(
+                    !said.contains(ASKED),
+                    "child debugging is off and the report said {said}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_report_of_a_child_being_taken_up_claims_an_attempt_and_not_an_outcome() {
+        // the honest limit. `bpd` knows what it was asked for at the moment of
+        // the fork or the exec, and it does not know that the child arrived —
+        // so the sentence names the two things that settle it rather than
+        // asserting one of them
+        for tail in [AND_THEN, OR_NOT_AT_ALL] {
+            assert!(
+                tail.contains("says so on its own stderr"),
+                "a child that could not be debugged says so where it can, and a \
+                 report that did not mention it would leave that line looking \
+                 like the program's: {tail}"
+            );
+        }
+
+        // and the two are not interchangeable. a forked child cannot fail
+        // silently — the handler that would say so is inherited memory — where
+        // an `exec`'d one started with `-E`, `-I` or `-S` reads neither
+        // `PYTHONPATH` nor `site`, arrives nowhere, and says nothing at all
+        let forked = Spawn {
+            event: "os.fork".to_string(),
+            executable: None,
+            arguments: Vec::new(),
+            verdict: Verdict::ThisProcess,
+            taking_up: true,
+        };
+        assert!(!forked.to_string().contains("-S"), "{forked}");
+
+        let execd = Spawn {
+            taking_up: true,
+            ..started(Verdict::ThisInterpreter)
+        };
+        let said = execd.to_string();
+        assert!(
+            said.contains("`-E`, `-I` or `-S`"),
+            "a child that runs undebugged **and says nothing** is the one \
+             outcome a person cannot diagnose from the output, so the report \
+             names it. it said {said}"
+        );
+    }
+
+    #[test]
     fn a_fork_is_reported_as_the_shared_process_it_is() {
         let forked = Spawn {
             event: "os.fork".to_string(),
             executable: None,
             arguments: Vec::new(),
             verdict: Verdict::ThisProcess,
+            taking_up: false,
         };
 
         assert!(forked.verdict.certain());
         assert_eq!(forked.command(), None);
 
-        let said = forked.to_string();
-        assert!(
-            said.contains("control connection"),
-            "a fork inherits the debugger's own socket, and a report that did \
-             not say what became of it leaves a reader with no way to tell this \
-             from the case where two processes really are writing into one. it \
-             said {said}"
-        );
+        // both ways round. a fork inherits the debugger's own socket whether or
+        // not the child is taken up, so a report that did not say what became of
+        // it leaves a reader with no way to tell either case from the one where
+        // two processes really are writing into one
+        for taking_up in [false, true] {
+            let said = Spawn {
+                taking_up,
+                ..forked.clone()
+            }
+            .to_string();
+            assert!(
+                said.contains("control connection"),
+                "a fork with taking_up {taking_up} said {said}"
+            );
+        }
     }
 
     #[test]

@@ -414,6 +414,22 @@ fn a_child_the_program_started_reaches_the_client_as_the_debuggers_own_words() {
             event["body"]["source"].is_null() && event["body"]["line"].is_null(),
             "the notice claimed a place in the program: {event}"
         );
+        // the child in this conversation is one bpd was told to take up, and a
+        // client told otherwise reads `bpd is not debugging it` and then gets a
+        // `startDebugging` for the same child. DAP has one place to put it —
+        // the sentence — so that is where it is looked for
+        let output = event["body"]["output"]
+            .as_str()
+            .unwrap_or_else(|| unreachable!("the events were filtered on this string"));
+        assert!(
+            output.contains(mark::TAKING_UP),
+            "the child is being taken up as a session of its own and the \
+             console said: {output}"
+        );
+        assert!(
+            !output.contains("not debugging"),
+            "the same fact, from the other side: {output}"
+        );
     }
 }
 

@@ -277,10 +277,21 @@ logpoint on a hot line produces
 a python **child** the program started rides on the same answer, under
 `spawned`, and is bounded at fifty for the same reason a logpoint is. it is its
 own key rather than part of `logged`, because an agent that found it there would
-reasonably read it as a logpoint having fired. every entry carries
-`debugged: false`, since an agent that assumed otherwise would set breakpoints in
-the child and wait for stops that never come — see
-[child processes](subprocesses.md)
+reasonably read it as a logpoint having fired
+
+every entry carries `taking_up`: whether `bpd` was asked to take that child up as
+a session of its own. an agent that read it wrongly either sets breakpoints in a
+child nothing will ever stop, or declines to set them in one that is **held**
+waiting for exactly that. it is a claim about an **attempt** — the report is made
+in the parent at the instant the child is asked for — and `attached.sessions` is
+what says a child really arrived. see
+[child processes](subprocesses.md#what-a-report-claims-about-a-child-being-debugged)
+
+it **replaced a `debugged` key**, which was a constant `false`. that was true
+only while nothing could debug a child, and `debug_children` made it a wrong
+answer rather than a stale one. the key is gone rather than reused: an agent
+written against `debugged` would read a `true` there as "this child is already
+being debugged", which is the thing no report at that moment can know
 
 ## what a failure looks like
 

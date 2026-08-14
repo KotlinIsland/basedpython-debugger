@@ -742,17 +742,34 @@ fn a_child_the_program_started_is_carried_on_the_answer_that_saw_it() {
     // boolean — bpd reads an argument vector, so it can be sure a child runs
     // this interpreter and cannot be sure what a launcher will do
     assert_eq!(started["certain"], true);
+
+    // and whether a session is going to be opened on it. this child is one bpd
+    // was told to take up, so an agent told otherwise would decline to set the
+    // breakpoints that are the only reason the child is held — and would then
+    // be handed the child under `attached` anyway
     assert_eq!(
-        started["debugged"], false,
-        "an agent that assumed the child was being debugged would set \
-         breakpoints in it and wait for stops that never come"
+        started["taking_up"], true,
+        "the child is being taken up as a session of its own: {started}"
     );
     assert!(
-        started["says"]
-            .as_str()
-            .is_some_and(|says| says.contains("not debugging it")),
-        "the sentence a person is shown has to be here too, or an agent and a \
-         human reading the same session read different things: {started}"
+        started["debugged"].is_null(),
+        "`debugged` was a constant `false` and is gone. a key that kept the \
+         name and changed its meaning would be read by every agent written \
+         against the old one: {started}"
+    );
+
+    let says = started["says"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the sentence a person is shown is missing: {started}"));
+    assert!(
+        says.contains(mark::TAKING_UP),
+        "the sentence a person is shown has to be here too, and has to agree \
+         with the field beside it, or an agent and a human reading the same \
+         session read different things: {says}"
+    );
+    assert!(
+        !says.contains("not debugging"),
+        "the session that joins is in the same answer: {says}"
     );
 }
 

@@ -936,6 +936,16 @@ fn a_forked_child_opens_a_session_of_its_own_and_is_held_where_it_forked() {
     assert_eq!(seen.started.len(), 1, "{:?}", seen.started);
     assert_eq!(seen.started[0].verdict, Verdict::ThisProcess);
 
+    // and the first has to agree with the second. the child's session joined
+    // during the same run, so a report that said bpd was not taking the child
+    // up would be the debugger contradicting itself one line later — which is
+    // the one thing a person has no way to resolve
+    assert!(
+        seen.started[0].taking_up,
+        "a session joined for this fork and the report of it said: {}",
+        seen.started[0]
+    );
+
     // now the thing this feature is: the child is **held**, at the line that
     // forked, before it has run anything of its own
     let stop = match ask(
