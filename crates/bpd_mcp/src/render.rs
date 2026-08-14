@@ -651,6 +651,12 @@ pub fn difference(difference: &Difference) -> serde_json::Value {
 /// boolean: `bpd` reads an argument vector, so it can be sure a child runs this
 /// interpreter and it cannot be sure what `/usr/bin/env python3` will do. an
 /// agent that treated the two the same would act on a guess
+///
+/// `taking_up` is the second one, and it replaced a constant `debugged: false`
+/// that became wrong the moment `debug_children` existed. it is deliberately not
+/// spelled `debugged`: the report is made in the parent at the instant the child
+/// is asked for, so what is knowable is the **attempt**, and `attached.sessions`
+/// is what says a child really arrived
 pub fn spawned(child: &bpd_core::Spawn) -> serde_json::Value {
     serde_json::json!({
         "says": child.to_string(),
@@ -659,7 +665,7 @@ pub fn spawned(child: &bpd_core::Spawn) -> serde_json::Value {
         "arguments": child.arguments,
         "verdict": child.verdict,
         "certain": child.verdict.certain(),
-        "debugged": false,
+        "taking_up": child.taking_up,
     })
 }
 

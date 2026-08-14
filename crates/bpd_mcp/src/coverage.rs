@@ -165,7 +165,8 @@ pub const fn carriage_of(told: Told) -> Carried {
         Told::Spawned => Carried::Pulled(
             "`spawned.started` on the answer to the call the program was running \
              during, one entry per child, each saying what bpd can tell about it \
-             being python and that bpd is not debugging it",
+             being python and, under `taking_up`, whether bpd was asked to take \
+             it up as a session of its own",
         ),
 
         Told::BlindSpot => Carried::Pulled(

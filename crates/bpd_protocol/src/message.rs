@@ -774,6 +774,10 @@ mod tests {
                 verdict: bpd_core::Verdict::Perhaps {
                     named: "python3.14".to_string(),
                 },
+                // the agent is the only thing that knows this, so it is on the
+                // wire rather than reconstructed by the engine from a setting it
+                // asked for and cannot know took
+                taking_up: true,
             },
         };
 

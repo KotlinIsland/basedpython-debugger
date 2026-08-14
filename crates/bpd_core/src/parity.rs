@@ -333,6 +333,15 @@ pub mod mark {
     /// the file the child [`super::say`] makes is about to run
     pub const CHILD: &str = "worker.py";
 
+    /// what a report of a child bpd is **taking up** says, whatever renders it
+    ///
+    /// the child [`super::say`] makes is one this session was told to debug, so
+    /// a front end that dropped that half of the report would be one whose user
+    /// reads `bpd is not debugging it` and then watches a session join. it is
+    /// the wording rather than a field because the CLI and DAP carry the report
+    /// as a sentence and have nowhere else to put it
+    pub const TAKING_UP: &str = "bpd was asked to debug this program's children";
+
     /// the sentence every blind spot ends up saying, whatever renders it
     pub const BLIND_TO: &str = "silence here does not mean";
 
@@ -376,7 +385,10 @@ impl Reporting for Naming {
     }
 
     fn spawned(&mut self, child: Spawn) {
-        self.heard.push((Told::Spawned, child.arguments.join(" ")));
+        // the whole sentence rather than the vector, because the vector is the
+        // half of the report a front end cannot get wrong. what it can get wrong
+        // is whether the child is being taken up — see [`mark::TAKING_UP`]
+        self.heard.push((Told::Spawned, child.to_string()));
     }
 
     fn blind_to(&mut self, blindspot: Blindspot) {
@@ -409,11 +421,15 @@ pub fn say(to: &mut dyn Reporting) {
         message: mark::LOGGED.to_string(),
     });
     to.pausing(vec![mark::RUNNING]);
+    // taken up, because that is the half a front end can drop without anything
+    // failing: the child is reported either way, and only a report that carries
+    // the setting can avoid contradicting the session that then joins
     to.spawned(Spawn {
         event: "_posixsubprocess.fork_exec".to_string(),
         executable: Some("/usr/bin/python3.14".to_string()),
         arguments: vec!["/usr/bin/python3.14".to_string(), mark::CHILD.to_string()],
         verdict: Verdict::ThisInterpreter,
+        taking_up: true,
     });
     to.blind_to(Blindspot::MultiprocessingSpawn {
         interpreter: "3.13".to_string(),
@@ -670,6 +686,40 @@ mod tests {
         for told in outcomes {
             assert_eq!(Told::of(&ran_as(told)), told);
         }
+    }
+
+    #[test]
+    fn the_marks_a_report_carries_are_the_words_the_reports_really_use() {
+        // a mark is what each front end's coverage test goes looking for, so one
+        // that had drifted from the wording would be a test that passes while
+        // the front end says something else entirely
+        let mut naming = Naming::default();
+        say(&mut naming);
+
+        let (_, spawned) = naming
+            .heard
+            .iter()
+            .find(|(told, _)| *told == Told::Spawned)
+            .unwrap_or_else(|| unreachable!("`say` makes one report of every kind"));
+        assert!(
+            spawned.contains(mark::CHILD),
+            "the child report said {spawned}"
+        );
+        assert!(
+            spawned.contains(mark::TAKING_UP),
+            "`say` makes a child bpd is taking up, and the sentence it renders \
+             to does not say so: {spawned}"
+        );
+
+        let (_, blind) = naming
+            .heard
+            .iter()
+            .find(|(told, _)| *told == Told::BlindSpot)
+            .unwrap_or_else(|| unreachable!("`say` makes one report of every kind"));
+        assert!(
+            blind.contains(mark::BLIND_TO),
+            "the blind spot said {blind}"
+        );
     }
 
     #[test]

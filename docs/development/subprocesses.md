@@ -195,6 +195,41 @@ and splitting it to hunt for a word would report a python child for
 so a command handed to a shell is not examined, and a python grandchild reached
 that way is missed. that is a stated limit rather than a silence
 
+### what a report claims about a child being debugged
+
+the verdict is one half of what a report says. the other half is whether `bpd` is
+going to **take the child up** as a session of its own, and it is carried on the
+report as `taking_up` — set by the agent, which is the only thing that knows,
+from the same setting the fork handler reads and the environment is written from
+
+**it is a claim about an attempt and never about an outcome.** the report is made
+in the *parent*, at the instant of the `fork` or the `exec`, and at that instant
+the child has done nothing: a forked one has not reconnected, and an `exec`'d one
+is not an interpreter yet. so the sentence says what `bpd` was asked to do and
+then names the two things that settle it —
+
+- **the session that joins** is what says a child really arrived. it is a
+    separate report, `attached`, made by a different process at a later moment
+- a child that **reached the agent and could not be debugged** says so on its
+    own stderr and runs as it would have without `bpd`.
+    [if it cannot reconnect](#if-it-cannot-reconnect) is that path for a fork,
+    and [a child that is `exec`'d](#a-child-that-is-execd) is it for the other
+
+the two tails are not the same sentence, and the difference is a real one. a
+forked child cannot fail *silently* — the handler that would say so is inherited
+memory — where an `exec`'d one started with `-E`, `-I` or `-S` reads neither
+`PYTHONPATH` nor `site`, never reaches the agent, and runs undebugged without a
+word. that is the one outcome a person cannot diagnose from the output, so the
+`exec` wording names it rather than promising a line that is not always written
+
+stating an outcome here is exactly the bug this replaced. the sentence used to
+end `bpd is not debugging it` unconditionally, so a run with `--debug-children`
+printed that and then printed a session joining one line later — a debugger
+contradicting itself, with nothing a reader could use to decide which half was
+true. `what_is_said_when_a_program_forks_agrees_with_the_session_that_joins` in
+`crates/bpd/tests/spawns.rs` is what stops it coming back, and it asserts on the
+**pair** rather than on either wording
+
 ## a fork is a different thing, and is reported as one
 
 `fork` copies the process and keeps **only the calling thread**. what the child
@@ -221,9 +256,13 @@ can never be answered:
     resume that no process is able to send. its own thread would be held for ever
     inside a callback
 
-so a fork gets its own report, saying that the child was a copy of this process,
-that it gave the agent's monitoring state and this session's connection up
-before it ran a line, and that `bpd` is not debugging it as a session of its own
+so a fork gets its own report, saying that the child was a copy of this process
+and what became of the two things it inherited. with `debugChildren` **off** —
+the default — that is: it gave the agent's monitoring state and this session's
+connection up before it ran a line, and `bpd` is not debugging it as a session of
+its own. with it **on** the second half is different, and
+[the report carries which](#what-a-report-claims-about-a-child-being-debugged) so
+that the sentence and the session that joins cannot contradict each other
 
 ### the child stops being a debuggee
 
@@ -529,9 +568,10 @@ the same words:
     separate claim: `spawned` says a child exists, and `attached` says one is
     **held** and waiting to be told what to do. this server writes nothing that is not an answer, so there is no
     event to correlate. beside the sentence it carries the event, the executable,
-    the arguments, the verdict, `certain`, and `debugged: false` — an agent that
-    assumed the child was being debugged would set breakpoints in it and wait for
-    stops that never come
+    the arguments, the verdict, `certain`, and `taking_up` — an agent that
+    assumed the wrong one of those would either set breakpoints in a child
+    nothing will stop, or decline to set them in one that is held waiting for
+    them
 
 ## what a program can still not tell
 
@@ -593,18 +633,17 @@ otherwise be waited on for ever while the child waits to be let go — the two
 deadlocks meeting in the middle. what a person sees is three lines:
 
 ```text
-bpd: the program started a python child, running the interpreter this program is running, and bpd is not debugging it (_posixsubprocess.fork_exec: …)
+bpd: the program started a python child, running the interpreter this program is running. bpd was asked to debug this program's children, so the child is entered at its own interpreter's startup and held before it runs a line of its program. the session that joins is what says it arrived. a child that reaches the agent and cannot be debugged says so on its own stderr and runs as it would have without bpd, and one started with `-E`, `-I` or `-S` reads neither `PYTHONPATH` nor `site` and so never reaches the agent at all (_posixsubprocess.fork_exec: …)
 bpd: session 2 joined — a child of this program is being debugged, and is held before it has run anything
 bpd: session 2 is held — started by pid 2306, at its own interpreter startup — none of its program has been compiled yet, so it has no line and no stack. `bpd launch` has nothing to hold a program in, so it is let go
 ```
 
-the first of those three contradicts the other two, and it is **wrong** rather
-than a wording preference: `bpd is not debugging it` is `bpd_core::Spawn`'s
-sentence, written for the default, and it is unconditional — so DAP prints it on
-its `console` and MCP puts `debugged: false` beside it while the child is being
-debugged. it is not this command's to fix on its own, because the whole point of
-the sentence living in `bpd_core` is that all three front ends say the same
-words. it is [what is not built](#what-is-not-built) below
+the three agree, and that is the point of the first one carrying `taking_up`
+rather than each front end patching the words on the way out. it used to end
+`bpd is not debugging it` whatever the setting was, so this same run printed a
+denial and then printed the session joining a line later — see
+[what a report claims about a child being debugged](#what-a-report-claims-about-a-child-being-debugged)
+for what the sentence claims now and what it deliberately does not
 
 **it returns when every session has ended**, not when the launched program has,
 and it exits with the launched program's code. leaving earlier would close the
@@ -876,16 +915,6 @@ turning it **off** puts all of it back, exactly: `PYTHONPATH` as it was, absent
 if it was absent, which is not the same as set and empty
 
 ## what is not built
-
-**a child report that knows children are being debugged.** `bpd_core::Spawn`'s
-sentence ends `bpd is not debugging it`, and it says that whether or not
-`debugChildren` is on. with it on the fork case is flatly false — the child does
-**not** give the debugger up, it opens a session of its own — and the `exec`
-case is true only of the instant the child was asked for. all three front ends
-carry it: the CLI on stderr, DAP on `console`, and MCP as `says` beside a
-`debugged: false` that is wrong the same way. the fix is for the report to carry
-the setting from the agent, which knows it, rather than for each front end to
-patch the words on the way out
 
 **a token per child.** see above: the environment block is fixed before bpd is
 told a child is coming, and the only mechanism that could rewrite it is the one

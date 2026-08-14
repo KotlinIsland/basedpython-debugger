@@ -220,9 +220,11 @@ pub const fn carriage_of(told: Told) -> Carried {
         // and a client that filed it among the program's own output would be
         // putting words in the debuggee's mouth
         Told::Spawned => Carried::Pushed(
-            "an `output` event on the `console` category, with no `source` and no \
-             `line`: the audit hook sees what the program asked the operating \
-             system for and not where it was asked",
+            "an `output` event on the `console` category, carrying the core's \
+             whole sentence — what bpd can tell about the child being python, \
+             and whether bpd was asked to take it up as a session of its own — \
+             with no `source` and no `line`: the audit hook sees what the \
+             program asked the operating system for and not where it was asked",
         ),
 
         // DAP has a category for exactly this — something a user should see with

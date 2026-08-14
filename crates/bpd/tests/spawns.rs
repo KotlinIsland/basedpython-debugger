@@ -215,6 +215,91 @@ fn a_forked_child_that_is_debugged_is_reported_at_the_line_that_forked() {
     assert_eq!(run.exit_code, Some(0));
 }
 
+/// the two things `bpd` says about one child, and whether they can disagree
+///
+/// a child produces two reports, made at different moments by different
+/// processes: the parent says a child exists, at the instant of the `fork` or
+/// the `exec`, and the child's own session says it joined once it has. they are
+/// the only account a person running `bpd launch` gets, and a run where the
+/// first says the child is not being debugged while the second says it is
+/// leaves that person deciding which half of the debugger to believe — with no
+/// third thing to settle it
+///
+/// so this asserts on the pair rather than on either wording. it is driven both
+/// ways round, because a report that simply never denied anything would pass
+/// half of it while saying nothing a person can act on
+fn the_two_reports_agree(said: &str, debugging_children: bool) {
+    let joined = said.contains("joined");
+    let denied = said.contains("not debugging");
+
+    assert_eq!(
+        joined, debugging_children,
+        "with child debugging {debugging_children}, a session joining is what \
+         says a child was really taken up. stderr was:\n{said}"
+    );
+    assert_eq!(
+        denied, !debugging_children,
+        "the report made when the child was started and the session that \
+         joined are the same debugger talking about the same process, and they \
+         contradict each other. stderr was:\n{said}"
+    );
+}
+
+/// the defect this pair exists to catch, over a program that `exec`s
+#[test]
+fn what_is_said_when_a_child_starts_agrees_with_the_session_that_joins() {
+    assert!(SUPERVISOR_WITH_A_WATCHDOG.contains(WATCHDOG));
+    let fixture = Fixture::new("supervisor", SUPERVISOR_WITH_A_WATCHDOG);
+
+    let debugged = run_with(&fixture, &["--debug-children"]);
+    the_two_reports_agree(&debugged.stderr, true);
+    assert_eq!(debugged.stdout, "the child did the work\n");
+    assert_eq!(debugged.exit_code, Some(0));
+
+    let bare = launched(&fixture);
+    the_two_reports_agree(&bare.stderr, false);
+    assert_eq!(bare.stdout, "the child did the work\n");
+    assert_eq!(bare.exit_code, Some(0));
+}
+
+/// and over a program that forks, which is the other mechanism and the one the
+/// old wording was furthest from
+///
+/// a forked child really does give the session up before it runs a line — that
+/// half was never wrong. what was wrong is what came after it: with
+/// `--debug-children` the child then opens a session of **its own**, so a report
+/// that stopped at "gave the debugger up" told a true half of a false story
+#[test]
+fn what_is_said_when_a_program_forks_agrees_with_the_session_that_joins() {
+    assert!(A_FORK_TO_DEBUG.contains(WATCHDOG));
+    let fixture = Fixture::new("forker", A_FORK_TO_DEBUG);
+
+    let debugged = run_with(&fixture, &["--debug-children"]);
+    the_two_reports_agree(&debugged.stderr, true);
+    assert!(
+        debugged.stderr.contains("control connection"),
+        "a fork inherits this session's own socket either way, and a report \
+         that did not say what became of it leaves a reader unable to tell this \
+         from two processes writing into one. stderr was:\n{}",
+        debugged.stderr
+    );
+    assert!(
+        debugged.stdout.contains("the child ran on"),
+        "stdout was:\n{}",
+        debugged.stdout
+    );
+    assert_eq!(debugged.exit_code, Some(0));
+
+    let bare = launched(&fixture);
+    the_two_reports_agree(&bare.stderr, false);
+    assert!(
+        bare.stdout.contains("the child ran on"),
+        "stdout was:\n{}",
+        bare.stdout
+    );
+    assert_eq!(bare.exit_code, Some(0));
+}
+
 /// off is the default, and it stays off
 ///
 /// a flag that was on unless asked for would be a debugger that stops processes

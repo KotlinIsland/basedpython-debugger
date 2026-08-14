@@ -7,8 +7,10 @@
 //! template. this module is what stands between that and somebody staring at a
 //! breakpoint that never fires
 //!
-//! it **reports**. the child is not blocked, not rewritten and not debugged,
-//! and it runs exactly as it would have without any of this
+//! it **reports**, and nothing here blocks a child or rewrites one. whether the
+//! child is *debugged* is a setting of the debuggee's, held by [`crate::forks`]
+//! and written into the environment by [`crate::children`] — this reads it, so
+//! that the report says which, rather than claiming the default
 //!
 //! ## why an audit hook, and why a native one
 //!
@@ -456,6 +458,7 @@ fn describe(event: &str, arguments: Option<&Bound<'_, PyAny>>) -> Option<Spawn> 
             executable: None,
             arguments: Vec::new(),
             verdict: Verdict::ThisProcess,
+            taking_up: taking_children_up(),
         });
     }
 
@@ -480,7 +483,31 @@ fn describe(event: &str, arguments: Option<&Bound<'_, PyAny>>) -> Option<Spawn> 
         executable: candidates.first().cloned(),
         verdict: verdict(&candidates, &vector)?,
         arguments: vector,
+        taking_up: taking_children_up(),
     })
+}
+
+/// whether a child made now would be taken up as a session of its own
+///
+/// the setting this debuggee holds, read at the moment the report is made,
+/// which is the only thing about a child's future that is knowable here — see
+/// [`Spawn::taking_up`]. one answer covers both mechanisms because the two
+/// halves are set together and never apart: [`crate::forks`] holds it for a
+/// fork, [`crate::children`] writes the environment for an `exec`, and
+/// `session::debug_children` moves them as one
+#[cfg(unix)]
+fn taking_children_up() -> bool {
+    crate::forks::debugging_children()
+}
+
+/// the same where there is no `fork`
+///
+/// not a stand-in for unwritten work: `Request::DebugChildren` is **refused** on
+/// a platform with no `fork`, so no child of a debuggee here is ever taken up
+/// and `false` is the whole truth about one
+#[cfg(not(unix))]
+const fn taking_children_up() -> bool {
+    false
 }
 
 /// the program a windows command line names, by the rule that applies to it
