@@ -486,3 +486,90 @@ fn proving_facts_runs_none_of_the_programs_own_code() {
          request promises it does not do"
     );
 }
+
+/// the wire shape a client parses, pinned against a real interpreter's facts
+///
+/// `basedpython-pycharm` reads this json field by field — it has no rust types to share — so every
+/// tag and key below is a contract with a program in another language that cannot fail loudly when
+/// it changes. a rename here makes that plugin quietly find nothing, which is the failure this
+/// exists to turn into a red test
+///
+/// it asserts the *strings*, not a snapshot, because what the other side hard-codes is strings
+#[test]
+fn the_json_a_client_parses_is_the_json_this_produces() {
+    let fixture = Fixture::new("provable", PROVABLE);
+    let mut debuggee = stopped(&fixture);
+    let facts = prove(
+        &mut debuggee,
+        &["small", "growing", "plain", "colour", "never_assigned"],
+    );
+
+    let json = serde_json::to_value(&facts).expect("facts serialise");
+
+    // the two lists a client reads, by the names it reads them by
+    let proved = json["proved"].as_array().expect("`proved` is an array");
+    let silent = json["silent"].as_array().expect("`silent` is an array");
+    assert!(!proved.is_empty(), "nothing was proved: {json}");
+    assert_eq!(
+        silent.len(),
+        1,
+        "`never_assigned` is the only name with nothing to say: {json}"
+    );
+    assert_eq!(silent[0]["name"], "never_assigned");
+    assert_eq!(silent[0]["why"]["silence"], "unbound");
+
+    // one fact's whole shape, spelled out. a client reads `name`, then `observed.observed` to
+    // learn which kind it is, then that kind's own fields
+    let small = proved
+        .iter()
+        .find(|fact| fact["name"] == "small" && fact["observed"]["observed"] == "is_int")
+        .unwrap_or_else(|| panic!("no `is_int` fact for `small`: {json}"));
+    assert_eq!(small["observed"]["text"], "5");
+    assert_eq!(small["scope"], "local");
+    assert_eq!(small["stability"]["stability"], "permanent");
+
+    // the tag every kind goes across as, which is what a client matches on
+    let kinds: Vec<&str> = proved
+        .iter()
+        .filter_map(|fact| fact["observed"]["observed"].as_str())
+        .collect();
+    for expected in [
+        "is_int",
+        "is_exactly",
+        "has_length",
+        "is_truthy",
+        "is_enum_member",
+    ] {
+        assert!(
+            kinds.contains(&expected),
+            "`{expected}` is a tag a client matches on and it is not in {kinds:?}"
+        );
+    }
+
+    // a class is two fields, because a client resolves it against source it is reading
+    let class = proved
+        .iter()
+        .find(|fact| fact["name"] == "plain" && fact["observed"]["observed"] == "is_exactly")
+        .unwrap_or_else(|| panic!("no class fact for `plain`: {json}"));
+    assert_eq!(class["observed"]["class"]["module"], "__main__");
+    assert_eq!(class["observed"]["class"]["qualname"], "Plain");
+    // a heap type's instance can be given another class, and a client that carried this reading
+    // past a `__class__` assignment would be wrong. the mutation is named so it can decide
+    assert_eq!(class["stability"]["stability"], "until");
+    assert_eq!(class["stability"]["mutation"], "class");
+
+    // the one a client must *drop*: true now, false after the next `append`
+    let length = proved
+        .iter()
+        .find(|fact| fact["name"] == "growing" && fact["observed"]["observed"] == "has_length")
+        .unwrap_or_else(|| panic!("no length fact for `growing`: {json}"));
+    assert_eq!(length["stability"]["mutation"], "contents");
+
+    // an enum member carries both halves, because `Colour.RED` is what the source spells
+    let member = proved
+        .iter()
+        .find(|fact| fact["observed"]["observed"] == "is_enum_member")
+        .unwrap_or_else(|| panic!("no enum fact: {json}"));
+    assert_eq!(member["observed"]["class"]["qualname"], "Colour");
+    assert_eq!(member["observed"]["member"], "RED");
+}
