@@ -152,6 +152,24 @@ non-stop read another thread can have appended to it since, which is why the
 answer carries the mode it was taken in — the same rule everything else here
 follows, in [threads](threads.md)
 
+## asking about a `.by` name
+
+the client that reads a `.by` file asks about the names *that file* spells, and
+the debugger looks each one up literally in the frame — which holds the
+**generated** python's names. basedpython renames some things on the way out:
+`private def helper` is `_helper` in the output
+
+so a renamed name is reported `unbound` and the client is one fact short. that
+is the right way round: what it loses is information, not correctness, and
+`a_name_that_is_not_bound_is_named_rather_than_left_out` is the test that keeps
+it there. the reverse — a name resolving to the *wrong* object — would need one
+generated name to stand for two `.by` names, which is a program that does not
+run
+
+recovering those facts is a name table beside the line table in
+`_by_sourcemap.py`, and it is upstream work rather than `bpd`'s. it is worth
+having and nothing here is waiting on it
+
 ## what this is for
 
 the client this was built for is a data flow analysis in an editor: seed a type
