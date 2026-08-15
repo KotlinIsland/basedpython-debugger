@@ -27,9 +27,12 @@ a debugger for python and [basedpython](https://github.com/KotlinIsland/basedpyt
     a protocol genuinely cannot, that is a written entry naming which and why,
     because the gap this rule is about is the silent one
 - **django templates** — breakpoints in template files, template frames in the
-    stack. under `runserver` the reloader serves from a **child** process the
-    debugger is not in, so that wants `--noreload` until `bpd` follows a child;
-    it says so rather than leaving a breakpoint looking broken
+    stack, and `runserver` **without `--noreload`**: the reloader serves from a
+    child process, so `bpd` debugs that child as a session of its own and a
+    template breakpoint binds and fires there. asked for rather than assumed — a
+    debugged child stops, so nothing turns it on for you — and with it off the
+    child is still *reported*, which is what turns an unbound breakpoint into a
+    reason
 - **basedpython aware — not built yet.** it is the thing this project is named
     for and it is the one bullet here describing something that does not exist:
     `.by` breakpoints and `.by` frames need the transpiler to emit a source map
@@ -50,15 +53,18 @@ what exists today:
 ```sh
 cargo run --bin bpd -- doctor
 cargo run --bin bpd -- launch --python python3.14 script.py
+cargo run --bin bpd -- launch --debug-children manage.py runserver
 cargo run --bin bpd -- cache
 ```
 
 `doctor` reports whether an interpreter can be debugged and refuses loudly when
 it cannot. `launch` runs a program with the agent attached, holds it before its
 first statement, and lets it go — producing a run indistinguishable from a bare
-one, which is checked rather than claimed. `cache` says what the two staging
-caches are holding and clears them when asked — nothing prunes either on its
-own, and [the staging caches](docs/development/caches.md) says why
+one, which is checked rather than claimed. `--debug-children` makes each child a
+session of its own, held before it runs anything, which is what a `runserver`
+needs. `cache` says what the two staging caches are holding and clears them when
+asked — nothing prunes either on its own, and
+[the staging caches](docs/development/caches.md) says why
 
 ## documentation
 
