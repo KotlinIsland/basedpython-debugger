@@ -929,11 +929,28 @@ presenting it above the frames that are actually running
     for a fire-and-forget task, which is exactly the one whose exception is lost
 
 what is left is for bpd to record the stack itself, natively, at the moment a
-task is created. PEP 669's `CALL` looks like the way in — it fires for a call to
-a C callable, so `create_task` is reachable, and the per-location `DISABLE` this
-project is built on means only the call sites that really make tasks stay live.
-the piece that still needs designing is getting from the call to the `Task` it
-returned, which is a `C_RETURN` away
+task is created — **and the way in is measured and works.** `asyncio.create_task`
+is a python function, so its own code object takes local `PY_RETURN` events, and
+the callback is handed the return value:
+
+on 3.13, 3.14 and 3.15 alike, a `PY_RETURN` on `asyncio.create_task.__code__`
+gives back a `Task` and a stack of `create_task <- g <- Handle._run <- …`. that
+is the creation stack and the object to hang it on, together, in one event
+
+it costs nothing anywhere else: local events on one code object, which is what
+this project's whole performance model is built on. it needs no debug mode and
+changes nothing a program can read about itself
+
+what is left to design is the rest of the surface — `loop.create_task`,
+`ensure_future`, `TaskGroup.create_task` are the other routes and are python
+functions too, so the same technique reaches them — and the presentation. the
+stitched frames **scheduled** the running ones rather than calling them, so the
+join has to be a thing the stack itself shows. `FrameKind` already exists for
+exactly this reason, because a django template frame is not a python one
+
+one trap found while measuring: returning `DISABLE` from that callback turns it
+off after the **first** task. the whole point is every task, so this is one of
+the few places the answer is not `DISABLE`
 
 the rule that matters: the stitched frames **did not call** the running ones,
 they scheduled them. presenting one seamless stack would be a fabricated call
