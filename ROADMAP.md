@@ -952,6 +952,19 @@ one trap found while measuring: returning `DISABLE` from that callback turns it
 off after the **first** task. the whole point is every task, so this is one of
 the few places the answer is not `DISABLE`
 
+**what to key the recorded stack on.** the obvious answer is the coroutine's
+frame — measured, `task.get_coro().cr_frame` is the same object at creation as
+the one running later, on 3.13, 3.14, 3.15 and 3.14t. it is still the wrong key:
+a frame **address** is not an identity here, which this project already knows
+from `the_interpreter_hands_a_freed_frames_address_to_the_next_one`, and holding
+the frame alive to keep the address meaningful would mean holding every task the
+program ever made
+
+so the key is the **task**, held weakly, and the stop finds its own with
+`asyncio.current_task()` — a read, on a path that is already allowed to run
+python because a stop evaluates conditions. a weak key also answers what happens
+to the record when the task is collected: it goes with it, which is the truth
+
 the rule that matters: the stitched frames **did not call** the running ones,
 they scheduled them. presenting one seamless stack would be a fabricated call
 chain, which is the exact lie this project exists to avoid. the join has to be
