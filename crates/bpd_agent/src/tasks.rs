@@ -8,10 +8,14 @@
 //!
 //! ## how the stack is caught, and why this way
 //!
-//! `asyncio.create_task` is a **python** function, so its own code object takes
-//! local `PY_RETURN` events and the callback is handed what it returned — the
-//! `Task` — with the stack that made it still on the thread. one event gives
+//! `BaseEventLoop.create_task` is a **python** function, so its own code object
+//! takes local `PY_RETURN` events and the callback is handed what it returned —
+//! the `Task` — with the stack that made it still on the thread. one event gives
 //! both halves
+//!
+//! it is the loop's method rather than `asyncio.create_task` because **every**
+//! route reaches it — measured, against `create_task`, `ensure_future`,
+//! `loop.create_task` and a task group's own. see [`notice`]
 //!
 //! the routes that do not work were measured before this one was built:
 //!
@@ -46,7 +50,7 @@ use crate::events;
 /// what this module remembers
 #[derive(Default)]
 struct State {
-    /// `asyncio.create_task`'s code object, once asyncio has been imported
+    /// `BaseEventLoop.create_task`'s code object, once asyncio has been imported
     hook: Option<Py<PyAny>>,
     /// the stack each live task was created on, by the task's address
     ///
