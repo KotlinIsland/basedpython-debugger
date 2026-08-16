@@ -885,7 +885,7 @@ permanent, whether a sequence is per thread or per process, and whether the hit
 counter of a later breakpoint starts before or after it arms. a chain answers
 those differently from a DAG, and picking a chain first is likely right
 
-### async causal stacks
+### async causal stacks · done
 
 `await` preserves a stack. `create_task`, `ensure_future`, callbacks and
 executors sever it, and what is left does not say who is responsible:
@@ -928,8 +928,23 @@ presenting it above the frames that are actually running
     case is a task nobody ever awaits. measured: `_asyncio_awaited_by` is `None`
     for a fire-and-forget task, which is exactly the one whose exception is lost
 
-what is left is for bpd to record the stack itself, natively, at the moment a
-task is created — **and the way in is measured and works.** `asyncio.create_task`
+**built.** a stop inside a task carries `Stack::scheduled_by` — where that task
+was created — as a **separate list**, never spliced into the frames, and as
+`Scheduling` rather than `Frame` because those frames have usually returned and
+have no locals left to read. DAP says it on the console rather than among
+`stackFrames`, because a client draws that as a call chain
+
+one hook covers it: measured, `create_task`, `ensure_future`, `loop.create_task`
+and a task group's own all reach `BaseEventLoop.create_task`. leading asyncio
+frames are dropped so a record begins at the program's own frame, which is a
+positional rule rather than a list of names
+
+`in_a_task` sits beside the record so an empty one cannot mean both "not in a
+task" and "in one bpd did not see made". see
+[async stacks](docs/development/async-stacks.md)
+
+what it took to get there, and the original note follows: it is for bpd to record
+the stack itself, natively, at the moment a task is created — **and the way in is measured and works.** `asyncio.create_task`
 is a python function, so its own code object takes local `PY_RETURN` events, and
 the callback is handed the return value:
 
