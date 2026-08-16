@@ -457,6 +457,28 @@ logs, pauses or starts a child in a test about none of those has done something
 the test is not about. what is different is that the refusal now names the two
 steps it happened between
 
+## a page that cites a test by name has to be right about it
+
+the docs cite tests as evidence — "`a_child_started_the_posix_spawn_way_is_reported_once`
+is what proves it" — and a citation is only worth having if the thing exists. three
+times in one session a page went on naming something after the code moved, and
+nothing failed
+
+`scripts/check_docs_nav.py` now refuses that. a test in this project is named as
+a **sentence** — `a_...`, `the_...`, `every_...`, `nothing_...` — so a backticked
+name of that shape in a page is a claim, and the check reads every function and
+enum variant the crates define and requires the name to be one of them
+
+the shape is what makes it usable. the first version checked every long
+snake_case name and produced eighteen false alarms — `set_local_events`,
+`render_annotated`, `restart_with_reloader` and the rest are cpython's and
+django's, not this project's. restricting it to the sentence form leaves fifty
+citations and no false alarms, because nothing outside this project's own tests
+is named that way
+
+variants count too, in their serde spelling: a page quoting `no_such_breakpoint`
+is naming a value the protocol really carries, and that is as checkable as a test
+
 ## what is not covered yet
 
 **frame address reuse on a free-threaded build.**
