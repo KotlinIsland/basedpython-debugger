@@ -271,7 +271,8 @@ pub(crate) fn scheduled_by(python: Python<'_>) -> (bool, Vec<Scheduling>) {
     // stack walk in a synchronous program left `asyncio` in `sys.modules`
     //
     // the hook is the evidence that asyncio is already there: it is a constant
-    // of `asyncio/tasks.py`, so having one means that module has run. without
+    // nested in `asyncio/base_events.py`, so having one means that module has
+    // run. without
     // it there is no task to be in, and nothing to ask
     if read().hook.is_none() {
         return (false, Vec::new());
