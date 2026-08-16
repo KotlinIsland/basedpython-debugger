@@ -125,11 +125,12 @@ fn a_stop_inside_a_task_says_where_the_task_was_created() {
     );
 }
 
-/// a task made by a route bpd does not watch
+/// the same task, reached by every other route there is
 ///
-/// `ensure_future` reaches the same `Task` without going through
-/// `asyncio.create_task`, so nothing records where it was made
-const UNWATCHED: &str = r"import asyncio
+/// `ensure_future`, the loop's own method and a task group all make a `Task`
+/// without going through `asyncio.create_task`. measured: all four go through
+/// `BaseEventLoop.create_task`, which is why that is the one thing watched
+const OTHER_ROUTES: &str = r"import asyncio
 
 
 async def work():
@@ -146,25 +147,50 @@ asyncio.run(main())
 ";
 
 #[test]
-fn a_task_bpd_did_not_see_created_says_so_rather_than_looking_like_no_task() {
-    // the silence this feature could otherwise have. an empty record means two
-    // different things — "not in a task" and "in one bpd did not see made" — and
-    // a client shown the same answer for both reads a limit of the debugger as a
-    // fact about the program. that is the blind spot rule, applied here
-    let fixture = Fixture::new("unwatched", UNWATCHED);
-    let here = line_of(UNWATCHED, "here = 1");
+fn a_task_made_by_another_route_is_recorded_the_same_way() {
+    // one hook covers all of them, because every route reaches the loop's own
+    // `create_task`. what this proves is the other half of that: the record
+    // starts at the **program's** frame, with asyncio's own frames dropped —
+    // `ensure_future` sits between the program and the loop, and a record that
+    // began there would say the scheduler was asyncio
+    let fixture = Fixture::new("routes", OTHER_ROUTES);
+    let here = line_of(OTHER_ROUTES, "here = 1");
+    let making = line_of(OTHER_ROUTES, "task = asyncio.ensure_future(work())");
     let mut debuggee = launch(&fixture);
 
     let stack = stack_at_the_stop(&mut debuggee, here, &fixture.path());
+    assert!(stack.in_a_task, "the stop really is inside a task");
+    assert_eq!(
+        stack
+            .scheduled_by
+            .first()
+            .map(|frame| frame.function.as_str()),
+        Some("main"),
+        "the innermost frame of the record is the program's own, not \
+         `ensure_future`: {:#?}",
+        stack.scheduled_by
+    );
+    assert_eq!(
+        stack.scheduled_by[0].line, making,
+        "and it is the line the program made it on: {:#?}",
+        stack.scheduled_by
+    );
+    // only the **leading** ones are dropped. what sits below the program's own
+    // frame is the event loop that was running it, and that is a true part of
+    // the stack the task was made on — dropping it would be bpd truncating a
+    // real stack because it found it uninteresting
     assert!(
-        stack.in_a_task,
-        "the stop really is inside a task, and saying otherwise would be the \
-         debugger reporting a synchronous stack for an async one"
+        !stack.scheduled_by[0].file.contains("/asyncio/"),
+        "the record still begins in asyncio: {:#?}",
+        stack.scheduled_by
     );
     assert!(
-        stack.scheduled_by.is_empty(),
-        "`ensure_future` is not watched, so there is nothing to report — and a \
-         record here would mean this test is about the wrong route: {:#?}",
+        stack
+            .scheduled_by
+            .iter()
+            .any(|frame| frame.file.contains("/asyncio/")),
+        "the event loop really was under `main`, and a record without it would \
+         be a stack bpd had edited: {:#?}",
         stack.scheduled_by
     );
 }
