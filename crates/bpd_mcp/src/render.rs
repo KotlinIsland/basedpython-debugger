@@ -770,6 +770,39 @@ pub fn logged(record: &LogRecord) -> serde_json::Value {
     })
 }
 
+/// what is holding an object, and what the walk could not see
+///
+/// `coverage` is rendered on **every** answer rather than only when something
+/// is missing, because an agent cannot tell "nothing was hidden" from "this
+/// server does not say" — the same reason `output_complete` is always present
+/// on an exit
+pub fn retainers(found: &bpd_core::Retainers) -> serde_json::Value {
+    serde_json::json!({
+        "of": found.of,
+        "held_by": found
+            .found
+            .iter()
+            .map(|retainer| serde_json::json!({
+                "kind": retainer.kind,
+                "is": retainer.described,
+                // absent rather than null when it could not be read: `through`
+                // saying nothing is different from a retainer that holds it
+                // nowhere, and nowhere is not a thing that happens
+                "through": retainer.through,
+            }))
+            .collect::<Vec<_>>(),
+        "coverage": {
+            "untracked": found.coverage.untracked,
+            "not_python": found.coverage.not_python,
+            "mode": found.coverage.mode.to_string(),
+        },
+        "says": "what holds this object, as the collector's referent graph has \
+                 it. `coverage` is not a footnote: a walk of this kind is blind \
+                 to whole categories of holder, and a list without it answers a \
+                 narrower question than the one asked",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

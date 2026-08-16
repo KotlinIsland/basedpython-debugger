@@ -1065,6 +1065,23 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
     // DAP's own way of reading state is the tree walk above, and it keeps it —
     // this is the same capability an agent's front end has, which is what the
     // parity rule requires
+    // why an object is still alive — a custom request, because DAP's model of
+    // state is a tree walked downwards from a frame and this is asked upwards
+    // from an object
+    let holding = answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/retainers",
+        serde_json::json!({ "frameId": frame, "expression": "total" }),
+    );
+    assert!(
+        holding["body"]["coverage"]["not_python"]
+            .as_str()
+            .is_some_and(|said| said.contains("bpd's own")),
+        "the answer has to say the debugger is among what the walk cannot see: \
+         {holding}"
+    );
+
     let described = answer(
         &mut client_writes,
         &mut reader,
@@ -1741,6 +1758,22 @@ impl Session for FakeSession {
             // adapter has to hand the whole of it over. that a real interpreter
             // really replaces code is
             // `crates/bpd_engine/tests/replacement.rs`
+            Request::Retainers { .. } => Response::Retainers(bpd_core::Retainers {
+                of: "a list holding 1".to_string(),
+                found: vec![bpd_core::Retainer {
+                    kind: "dict".to_string(),
+                    described: "a dict holding 3".to_string(),
+                    through: Some("the value under `session`".to_string()),
+                }],
+                // always carried, because a front end that dropped it would
+                // turn this into a narrower question's answer without failing
+                coverage: bpd_core::Coverage {
+                    untracked: "objects the collector does not track never appear here".to_string(),
+                    not_python: "a reference held by C or rust cannot be found, bpd's own included"
+                        .to_string(),
+                    mode: Mode::NonStop,
+                },
+            }),
             Request::ReplaceCode {
                 file,
                 even_under_a_live_frame,

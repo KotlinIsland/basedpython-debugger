@@ -27,7 +27,8 @@ use std::io::{Read, Write};
 
 use bpd_core::{
     ContextLayer, Detail, Entry, Evaluated, Fact, Frame, FrameId, Limit, LogRecord, Mode, Omitted,
-    Refusal, Reported, Resolved, Scope, Silent, SourceBreakpoint, StepKind, ThreadState, Which,
+    Refusal, Reported, Resolved, Retainers, Scope, Silent, SourceBreakpoint, StepKind, ThreadState,
+    Which,
 };
 
 use crate::frame::{self, Result};
@@ -237,6 +238,13 @@ pub enum FromAgent {
     },
 
     /// what is provable about some of a frame's names, and for how long
+    /// what is holding an object, and what the walk could not see
+    Retaining {
+        /// the answer, whole
+        retainers: Retainers,
+    },
+
+    /// what could be proved about a frame's names
     Facts {
         /// which frame they were read from
         frame: FrameId,
@@ -573,6 +581,17 @@ pub enum FromEngine {
         /// the only thing that can see the frames — see
         /// `bpd_core::Request::ReplaceCode`
         even_under_a_live_frame: bool,
+    },
+
+    /// what is holding an object, and how
+    ///
+    /// the walk is the debuggee's to do: the referent graph is only in there,
+    /// and reaching it from outside would mean reading another process's heap
+    Retainers {
+        /// which frame the expression is evaluated in
+        frame: FrameId,
+        /// the expression naming the object
+        expression: String,
     },
 
     /// write a variable of a frame

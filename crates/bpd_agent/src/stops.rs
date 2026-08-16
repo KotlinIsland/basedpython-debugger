@@ -258,6 +258,7 @@ pub(crate) fn route(request: FromEngine) {
         | FromEngine::Facts { frame, .. }
         | FromEngine::TemplateContext { frame, .. }
         | FromEngine::Evaluate { frame, .. }
+        | FromEngine::Retainers { frame, .. }
         | FromEngine::Source { frame, .. }
         | FromEngine::SetVariable { frame, .. }
         | FromEngine::SetNextStatement { frame, .. }

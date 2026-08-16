@@ -551,6 +551,25 @@ impl<'a> Server<'a> {
                     other => unreachable!("a restart was answered with {other:?}"),
                 }
             }
+            "retainers" => {
+                let args: RetainersArgs = parse(name, arguments)?;
+                let frame = self.frame_of(
+                    args.stop,
+                    args.session,
+                    args.frame,
+                    "what is holding an object",
+                )?;
+                match self.ask_in(
+                    args.session,
+                    Request::Retainers {
+                        frame,
+                        expression: args.expression,
+                    },
+                )? {
+                    Response::Retainers(retainers) => Ok(render::retainers(&retainers)),
+                    other => unreachable!("a retainer walk was answered with {other:?}"),
+                }
+            }
             "replace_code" => {
                 let args: ReplaceCodeArgs = parse(name, arguments)?;
                 match self.ask_in(
@@ -1669,6 +1688,18 @@ struct RestartFrameArgs {
 /// one held thread, and it names the file the same way a breakpoint does
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RetainersArgs {
+    #[serde(default)]
+    session: Option<u64>,
+    #[serde(default)]
+    stop: Option<u64>,
+    #[serde(default)]
+    frame: u32,
+    expression: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReplaceCodeArgs {
     #[serde(default)]
     session: Option<u64>,
@@ -1944,6 +1975,7 @@ mod tests {
         "set_variable" => SetVariableArgs,
         "set_next_statement" => SetNextStatementArgs,
         "restart_frame" => RestartFrameArgs,
+        "retainers" => RetainersArgs,
         "replace_code" => ReplaceCodeArgs,
         "threads" => ThreadsArgs,
         "stop_the_world" => WorldArgs,

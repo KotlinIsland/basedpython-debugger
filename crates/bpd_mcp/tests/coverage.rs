@@ -457,6 +457,12 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
     client.call("threads", &serde_json::json!({ "settle_ms": 10 }));
     client.call("stop_the_world", &serde_json::json!({}));
     client.call("stack", &serde_json::json!({}));
+    // why an object is still alive, which is the question asked upwards from an
+    // object rather than downwards from a frame
+    client.call(
+        "retainers",
+        &serde_json::json!({ "frame": 0, "expression": "total" }),
+    );
     client.call(
         "variables",
         &serde_json::json!({ "scope": "local", "detail": { "children": 7 } }),
@@ -720,6 +726,7 @@ fn tool_order() -> Vec<&'static str> {
         "threads",
         "stop_the_world",
         "stack",
+        "retainers",
         "variables",
         "facts",
         "template_context",
@@ -1334,6 +1341,22 @@ impl Session for FakeSession {
             // bound again. the refused shape is what the DAP coverage drives, and
             // that a real interpreter really replaces code is
             // `crates/bpd_engine/tests/replacement.rs`
+            Request::Retainers { .. } => Response::Retainers(bpd_core::Retainers {
+                of: "a list holding 1".to_string(),
+                found: vec![bpd_core::Retainer {
+                    kind: "dict".to_string(),
+                    described: "a dict holding 3".to_string(),
+                    through: Some("the value under `session`".to_string()),
+                }],
+                // always carried, because a front end that dropped it would
+                // turn this into a narrower question's answer without failing
+                coverage: bpd_core::Coverage {
+                    untracked: "objects the collector does not track never appear here".to_string(),
+                    not_python: "a reference held by C or rust cannot be found, bpd's own included"
+                        .to_string(),
+                    mode: Mode::NonStop,
+                },
+            }),
             Request::ReplaceCode {
                 file,
                 even_under_a_live_frame,

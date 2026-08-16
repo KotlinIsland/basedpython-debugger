@@ -383,6 +383,51 @@ impl Debuggee {
             .unwrap_or_else(|| unreachable!("{id} was resolved against the open sessions"))
     }
 
+    /// the requests that read state without moving the program
+    ///
+    /// lifted out of [`Self::dispatch`] as a group rather than one at a time,
+    /// because what they share is the reason they can be: none of them resumes
+    /// anything, so none of them can produce a stop the caller has to handle
+    fn reading(
+        &mut self,
+        at: usize,
+        request: Request,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Response> {
+        match request {
+            Request::RunScript { stop, script } => Ok(Response::Transcript(
+                self.execute(at, stop, &script, reporting)?,
+            )),
+            Request::Query { stop, query } => Ok(Response::State(
+                self.attached[at].describe(stop, &query, reporting)?,
+            )),
+            // nothing of the program is touched: both states were read when
+            // they were read, and the difference between them is data over data
+            Request::Diff { before, after } => Ok(Response::Difference(
+                self.attached[at].compare(&before, &after)?,
+            )),
+            other => {
+                unreachable!("`reading` is only ever handed one of its three, and got {other:?}")
+            }
+        }
+    }
+
+    /// what is holding an object, and answer with it
+    ///
+    /// lifted out of [`Self::dispatch`] for the reason the replacement arm was:
+    /// the match is already at the length where one more request stops being
+    /// readable
+    fn holds(
+        &mut self,
+        at: usize,
+        frame: FrameId,
+        expression: String,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Response> {
+        let found = self.attached[at].what_holds(frame, expression, reporting)?;
+        Ok(Response::Retainers(found))
+    }
+
     /// replace a file's code, and answer with what became of it
     ///
     /// lifted out of [`Self::dispatch`] rather than written inline: the arm
@@ -523,17 +568,15 @@ impl Debuggee {
                 file,
                 even_under_a_live_frame,
             } => self.answer_a_replacement(at, file, even_under_a_live_frame, reporting),
-            Request::RunScript { stop, script } => Ok(Response::Transcript(
-                self.execute(at, stop, &script, reporting)?,
-            )),
-            Request::Query { stop, query } => Ok(Response::State(
-                self.attached[at].describe(stop, &query, reporting)?,
-            )),
-            // nothing of the program is touched: both states were read when
-            // they were read, and the difference between them is data over data
-            Request::Diff { before, after } => Ok(Response::Difference(
-                self.attached[at].compare(&before, &after)?,
-            )),
+            Request::Retainers { frame, expression } => {
+                self.holds(at, frame, expression, reporting)
+            }
+            // the three that read state rather than moving the program, lifted
+            // out together: this match is at the length where one more arm stops
+            // being readable, and these three share a shape
+            Request::RunScript { .. } | Request::Query { .. } | Request::Diff { .. } => {
+                self.reading(at, request, reporting)
+            }
         }
     }
 
@@ -855,6 +898,32 @@ impl Debuggee {
     /// nothing is applied unless all of it can be. what came back says which
     /// functions now run different code and which breakpoints moved with them,
     /// or every reason it was refused — see [`bpd_core::Replaced`]
+    /// what is holding the object an expression names, and how
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached, or the frame is not a python one
+    pub fn what_holds(
+        &mut self,
+        frame: FrameId,
+        expression: impl Into<String>,
+    ) -> Result<bpd_core::Retainers> {
+        match self.ask_for(Request::Retainers {
+            frame,
+            expression: expression.into(),
+        })? {
+            Response::Retainers(found) => Ok(found),
+            other => unreachable!("a retainer walk was answered with {other:?}"),
+        }
+    }
+
+    /// replace the code the process is running for one file with what is on
+    /// disk, refusing under a live frame
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached, or the agent answers with something
+    /// else
     pub fn replace_code(&mut self, file: impl Into<PathBuf>) -> Result<Replaced> {
         self.replacing(file, false)
     }
@@ -1499,6 +1568,32 @@ impl Attached {
             reporting,
         )? {
             FromAgent::Replaced { replaced } => Ok(replaced),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// what is holding the object an expression names
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached, or the agent answers with something
+    /// else
+    fn what_holds(
+        &mut self,
+        frame: FrameId,
+        expression: String,
+        reporting: &mut dyn Reporting,
+    ) -> Result<bpd_core::Retainers> {
+        const EXPECTED: &str = "what is holding an object";
+
+        match self.ask(
+            &FromEngine::Retainers { frame, expression },
+            EXPECTED,
+            reporting,
+        )? {
+            FromAgent::Retaining { retainers } => Ok(retainers),
+            // a refusal never reaches here: `ask` turns one into an error for
+            // every request, so a template frame is refused by name there
             other => Err(unexpected(&other, EXPECTED)),
         }
     }
