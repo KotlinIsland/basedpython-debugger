@@ -57,10 +57,26 @@ nothing and a variables request that answers about the wrong frame
 
 ## how it is captured, and the three routes that do not work
 
-`asyncio.create_task` is a **python** function, so its own code object takes
-local `PY_RETURN` events and the callback is handed what it returned — the
+`BaseEventLoop.create_task` is a **python** function, so its own code object
+takes local `PY_RETURN` events and the callback is handed what it returned — the
 `Task` — with the stack that made it still on the thread. one event gives both
 halves, and it costs nothing anywhere else
+
+**that one function is on every route to a task**, which was measured rather than
+assumed. `asyncio.create_task`, `asyncio.ensure_future`, `loop.create_task` and
+a task group's own `create_task` were each driven with `PY_RETURN` armed on all
+of them:
+
+| route                   | what it reached                              |
+| ----------------------- | -------------------------------------------- |
+| `asyncio.create_task`   | `BaseEventLoop.create_task`, `create_task`   |
+| `asyncio.ensure_future` | `BaseEventLoop.create_task`, `ensure_future` |
+| `loop.create_task`      | `BaseEventLoop.create_task`                  |
+| `TaskGroup.create_task` | `BaseEventLoop.create_task`                  |
+
+so one hook covers all four. watching the outer functions as well would record a
+stack per route and leave the innermost frame being whichever asyncio function
+was used — a fact about asyncio rather than about the program
 
 the routes that were measured and rejected, before this one was built:
 
@@ -113,13 +129,28 @@ the guard is the hook itself: it is a constant of `asyncio/tasks.py`, so having
 one is evidence that module has already run. without one there is no task to be
 in and nothing to ask
 
+## where a record starts
+
+at the program's own frame. every **leading** asyncio frame is dropped, which is
+what makes one hook enough: `ensure_future` sits between the program and the
+loop, and a task group puts two more there, so a record that began wherever the
+callback fired would say the scheduler was asyncio
+
+only the leading ones. what sits *below* the program's frame is the event loop
+that was running it, and that is a true part of the stack the task was made on —
+dropping it would be bpd editing a real stack because it found part of it
+uninteresting
+
+the rule is positional rather than a list of function names, so a route nobody
+has thought of yet gets the same answer
+
 ## what is not covered
 
-`ensure_future`, `loop.create_task` and `TaskGroup.create_task` are the other
-routes to a task. they are python functions too, so the same technique reaches
-them, and it is not built yet
+nothing is left of the creation routes — all four reach the watched function. the
+case that still carries no record is a task made **before bpd was watching**,
+which is a task created while `asyncio/base_events.py` was still being imported
 
-**that gap is announced rather than left silent**, which is why `Stack` carries
+**that is announced rather than left silent**, which is why `Stack` carries
 `in_a_task` beside the record. an empty `scheduled_by` would otherwise mean two
 different things:
 

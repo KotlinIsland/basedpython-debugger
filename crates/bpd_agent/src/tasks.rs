@@ -97,7 +97,18 @@ impl Forget {
     }
 }
 
-/// notice `asyncio.create_task` as its module is registered
+/// notice the one function every task is made in, as its module is registered
+///
+/// **`BaseEventLoop.create_task` rather than `asyncio.create_task`**, and that
+/// was measured rather than guessed: every route to a task goes through it.
+/// `asyncio.create_task`, `asyncio.ensure_future`, `loop.create_task` and a task
+/// group's own `create_task` were each driven with `PY_RETURN` armed on all of
+/// them, and the loop's method is the only one all four reach
+///
+/// one hook is not merely tidier. watching the outer functions too would record
+/// a stack per route and leave the innermost frame being whichever asyncio
+/// function was used, which is a fact about asyncio rather than about the
+/// program — the leading frames are dropped instead, by [`record`]
 ///
 /// **nothing here imports anything**, and that is not a preference. the first
 /// version asked `sys.modules` and reached for the attribute, which meant
@@ -107,9 +118,8 @@ impl Forget {
 /// worse thing than one that never had this feature
 ///
 /// so the code object is taken from the one place it can be had for free: it is
-/// a constant of `asyncio/tasks.py`'s own module code object, which the agent is
-/// handed when that module runs. that is *before* any task exists, which is the
-/// other half of what this needs
+/// nested in `asyncio/base_events.py`'s own module code object, which the agent
+/// is handed when that module runs — before any task exists
 ///
 /// answers whether it found one, which is what tells the caller the
 /// instrumentation has to be refreshed
@@ -117,28 +127,42 @@ pub(crate) fn notice(code: &Bound<'_, PyAny>) -> PyResult<bool> {
     if read().hook.is_some() {
         return Ok(false);
     }
-    // the module body, and the one file `create_task` is defined in. checked
-    // before `co_consts` is walked, because that walk is not free and every
-    // module in the program would otherwise pay for it
+    // the module body, and the one file the loop's method is defined in. both
+    // are checked before anything is walked, because every module in the
+    // program would otherwise pay for the search
     if code.getattr("co_qualname")?.extract::<String>()? != "<module>" {
         return Ok(false);
     }
     let filename: String = code.getattr("co_filename")?.extract()?;
-    if !filename.ends_with("asyncio/tasks.py") {
+    if !filename.ends_with("asyncio/base_events.py") {
         return Ok(false);
     }
 
+    let Some(found) = nested(code, "BaseEventLoop.create_task")? else {
+        return Ok(false);
+    };
+    write().hook = Some(found.unbind());
+    Ok(true)
+}
+
+/// the code object of that qualified name, anywhere under this one
+///
+/// a method is nested twice — the module holds the class body and the class body
+/// holds the method — so this recurses rather than looking at one level
+fn nested<'py>(code: &Bound<'py, PyAny>, wanted: &str) -> PyResult<Option<Bound<'py, PyAny>>> {
     for constant in code.getattr("co_consts")?.try_iter()? {
         let constant = constant?;
         let Ok(qualname) = constant.getattr("co_qualname") else {
             continue;
         };
-        if qualname.extract::<String>()? == "create_task" {
-            write().hook = Some(constant.unbind());
-            return Ok(true);
+        if qualname.extract::<String>()? == wanted {
+            return Ok(Some(constant));
+        }
+        if let Some(deeper) = nested(&constant, wanted)? {
+            return Ok(Some(deeper));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 /// the code object tasks are made in, once there is one
@@ -173,10 +197,14 @@ const KEEP: usize = 32;
 
 /// remember the stack this task was created on
 ///
-/// called from the `PY_RETURN` of `asyncio.create_task`, so the frame that made
-/// it is this one's caller. the `create_task` frame itself is skipped: it is
-/// asyncio's, not the program's, and a record that began there would say the
-/// scheduler was asyncio
+/// called from the `PY_RETURN` of the loop's `create_task`, so the frames that
+/// made it are above this one
+///
+/// **every leading asyncio frame is dropped**, not just the one this fired in.
+/// a task reached through `ensure_future` has that function between the program
+/// and the loop, and one through a task group has two more — a record that began
+/// at whichever asyncio function was used would be saying the scheduler was
+/// asyncio. what a reader wants is the first frame that is the program's own
 pub(crate) fn record(python: Python<'_>, returned: &Bound<'_, PyAny>) -> PyResult<()> {
     let at = returned.as_ptr() as usize;
 
@@ -191,8 +219,17 @@ pub(crate) fn record(python: Python<'_>, returned: &Bound<'_, PyAny>) -> PyResul
             break;
         }
         let code = one.getattr("f_code")?;
+        let file: String = code.getattr("co_filename")?.extract()?;
+        // asyncio's own frames, on the way out to the program's. dropped only
+        // while they are *leading*: a program with a file of its own under an
+        // `asyncio/` directory keeps every frame once the first one has been
+        // taken, because by then the record has reached the program
+        if frames.is_empty() && file.contains("/asyncio/") {
+            frame = one.getattr("f_back").ok().filter(|back| !back.is_none());
+            continue;
+        }
         frames.push(Scheduling {
-            file: code.getattr("co_filename")?.extract()?,
+            file,
             line: one.getattr("f_lineno")?.extract()?,
             function: code.getattr("co_qualname")?.extract()?,
         });
