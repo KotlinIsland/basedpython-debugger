@@ -897,6 +897,37 @@ pub fn tools() -> Vec<Tool> {
             ),
         },
         Tool {
+            name: "retainers",
+            title: "what is holding an object",
+            description: "why an object is still alive. name it with an \
+                expression in a frame, the way `evaluate` does — an object has \
+                no id of its own that outlives being asked about.\n\n\
+                the answer says what holds it and, where the shape can be read, \
+                **where inside** each holder it sits: the value under a dict \
+                key, an index of a list, an attribute of an object. `through` \
+                being absent means the holder's shape could not be read, not \
+                that it holds it nowhere.\n\n\
+                `coverage` is on every answer and is not a footnote. this walk \
+                is the collector's referent graph, which is blind to untracked \
+                objects — an int, a str — and to holders that are not python \
+                objects at all, **bpd's own included**. a list of holders \
+                without that answers a narrower question than the one you asked."
+                .to_string(),
+            schema: object(
+                serde_json::json!({
+                    "session": integer(SESSION),
+                    "stop": integer(STOP),
+                    "frame": integer("which frame of the stack to evaluate in, \
+                                      counting from 0 at the top"),
+                    "expression": { "type": "string", "description":
+                        "a python expression naming the object to ask about, \
+                         evaluated in that frame. it runs the program's own \
+                         code exactly as `evaluate` does" },
+                }),
+                &["expression"],
+            ),
+        },
+        Tool {
             name: "replace_code",
             title: "make the running process run the code on disk",
             description: "you edited a file and the process is still running \

@@ -195,3 +195,67 @@ pub struct Scheduling {
     /// `co_qualname` of the code it was running
     pub function: String,
 }
+
+use crate::stop::Mode;
+
+/// what is holding an object, and how
+///
+/// the answer to "why is this still alive". it is a **python** answer and says
+/// so: [`Retainers::coverage`] is the whole of what a walk over the interpreter's
+/// referent graph can and cannot see
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Retainers {
+    /// the object that was asked about, as the interpreter renders it
+    pub of: String,
+    /// what holds it, in no particular order
+    pub found: Vec<Retainer>,
+    /// what a walk of this kind cannot see, always said
+    ///
+    /// not a footnote. a report that listed holders without saying which kinds
+    /// of holder it is blind to would be answering "what is holding this" with
+    /// "what is holding this **that the collector tracks**", and those are
+    /// different questions
+    pub coverage: Coverage,
+}
+
+/// one thing that holds an object
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Retainer {
+    /// the retainer's type, by name
+    pub kind: String,
+    /// the retainer itself, as the interpreter renders it, bounded
+    pub described: String,
+    /// where inside the retainer the object sits, when that is knowable
+    ///
+    /// `None` is not "nowhere". it is a retainer whose shape this cannot read —
+    /// a C type with its own traversal, a container bpd does not know the
+    /// insides of — and saying `None` rather than guessing is the difference
+    /// between a debugger that does not know and one that invents
+    pub through: Option<String>,
+}
+
+/// what a retainer walk is blind to
+///
+/// every one of these is a real hole and none of them is fixable from inside a
+/// python-level walk, so the answer carries them rather than a page carrying them
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Coverage {
+    /// objects the collector does not track never appear
+    ///
+    /// an `int`, a `str`, a `float` — anything without GC support — is invisible
+    /// to the referent graph. a container of them is visible; they are not
+    pub untracked: String,
+    /// holders that are not python objects never appear
+    ///
+    /// a reference held by C or rust is a refcount rather than something the
+    /// collector walks, so it cannot be found. **bpd's own are among them** —
+    /// the agent holds handles to code objects and to recorded task stacks, and
+    /// a report that did not say so would be answering "what is holding this"
+    /// while holding it
+    pub not_python: String,
+    /// whether the world was stopped while this was read
+    ///
+    /// a heap read while other threads run is a heap that changed underneath the
+    /// read. this says which it was rather than implying the stronger one
+    pub mode: Mode,
+}

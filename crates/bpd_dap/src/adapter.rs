@@ -462,6 +462,7 @@ impl Adapter {
             // of this. an editor is where the file gets edited, so an editor is
             // where a replacement is worth offering — and the parity rule does
             // not let it be an agent's alone
+            Some("bpd/retainers") => self.retainers(message),
             Some("bpd/replaceCode") => self.replace_code(message),
             Some(command) => Err(Aborted::Refuse(format!(
                 "bpd's DAP adapter does not implement `{command}`, and does not \
@@ -1166,6 +1167,66 @@ impl Adapter {
         };
         let body = serde_json::to_value(&difference)
             .expect("a difference is built from types whose serde is derived");
+        self.respond(message, Some(body))?;
+        Ok(())
+    }
+
+    /// what is holding an object, and how
+    ///
+    /// a custom request because DAP has none and will not grow one: its model of
+    /// state is a tree walked **downwards** from a frame, and this is the
+    /// question asked upwards from an object. `variablesReference` cannot
+    /// express it — there is no handle for "the things that point at this"
+    fn retainers(&mut self, message: &Incoming) -> Answered {
+        let reference = message.arguments["frameId"]
+            .as_i64()
+            .ok_or("a `bpd/retainers` needs `frameId`, the frame to evaluate in")?;
+        let expression = message.arguments["expression"].as_str().ok_or(
+            "a `bpd/retainers` needs `expression`, naming the object to ask \
+             about. an object has no id of its own that outlives being asked \
+             about, so an expression is the only way to point at one",
+        )?;
+
+        // a python frame only. a template frame resolves its syntax to a **new**
+        // value — `{{ user.name }}` builds a string — so a walk would find what
+        // the resolution just made, which is the agent's refusal to give
+        let frame = match self.handles.get(reference) {
+            Some(Handle::Frame(frame)) => *frame,
+            Some(other) => {
+                return Err(Aborted::Refuse(format!(
+                    "{reference} names {other:?}, not a python frame"
+                )));
+            }
+            None => return Err(stale(reference)),
+        };
+
+        let found = match self.ask(Request::Retainers {
+            frame,
+            expression: expression.to_string(),
+        })? {
+            Response::Retainers(found) => found,
+            other => unreachable!("a retainer walk was answered with {other:?}"),
+        };
+
+        // on the console as well as in the body, because the coverage is the
+        // half a person acts on and a debug console is where they are looking.
+        // a list of holders read without it answers a narrower question than the
+        // one that was asked
+        self.event(
+            "output",
+            &serde_json::json!({
+                "category": "console",
+                "output": format!(
+                    "what holds {}: {} found. {}\n",
+                    found.of,
+                    found.found.len(),
+                    found.coverage.not_python
+                ),
+            }),
+        )?;
+
+        let body = serde_json::to_value(&found)
+            .expect("a retainer answer is built from types whose serde is derived");
         self.respond(message, Some(body))?;
         Ok(())
     }

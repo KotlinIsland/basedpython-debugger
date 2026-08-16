@@ -142,6 +142,9 @@ fn answer(
             let answer = stopped.variables(frame, scope, detail)?;
             attach::send(&answer);
         }
+        FromEngine::Retainers { frame, expression } => {
+            attach::send(&stopped.retainers(frame, &expression)?);
+        }
         FromEngine::Facts {
             frame,
             names,

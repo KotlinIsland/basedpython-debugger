@@ -122,6 +122,10 @@ pub const fn reach_of(request: &Request) -> Reach {
         // is an extension, for the reason a script is: the capability is the
         // core's, and an editor is where somebody edits the file that makes it
         // worth having
+        // DAP has no request for this and will not grow one: its model of state
+        // is a tree walked downwards from a frame, and this is the question
+        // asked upwards from an object
+        Request::Retainers { .. } => Reach::Direct("bpd/retainers, a custom request"),
         Request::ReplaceCode { .. } => Reach::Direct("bpd/replaceCode, a custom request"),
     }
 }

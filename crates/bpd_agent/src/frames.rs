@@ -629,6 +629,50 @@ impl<'py> Stopped<'py> {
         })
     }
 
+    /// what is holding the object an expression names
+    ///
+    /// the expression is evaluated exactly as [`Self::evaluate`] evaluates one —
+    /// there is no other way for a client to point at an object, since an object
+    /// has no name of its own that outlives being asked about. what is different
+    /// is that the **object** is what the walk needs, not a rendering of it
+    ///
+    /// a template frame is refused rather than answered against the python
+    /// underneath it. django resolves template syntax to a *new* value — a
+    /// `{{ user.name }}` is a lookup that builds a string — so what a walk would
+    /// find is what the resolution just made, which is a true answer to a
+    /// question nobody asked
+    pub(crate) fn retainers(&mut self, id: FrameId, expression: &str) -> PyResult<FromAgent> {
+        if let Ok(Slot::Template { python, .. }) = self.slot(id)? {
+            let beneath = FrameId {
+                stop: id.stop,
+                depth: *python,
+            };
+            return Ok(FromAgent::Refused {
+                reason: Refusal::NotAPythonFrame {
+                    frame: id,
+                    wanted: "what is holding an object".to_string(),
+                    python: beneath,
+                },
+            });
+        }
+        let frame = match self.frame(id, "asking what holds an object")? {
+            Ok(frame) => frame,
+            Err(reason) => return Ok(FromAgent::Refused { reason }),
+        };
+        let place = Place::of(&frame)?;
+        match place.evaluate(self.python, expression) {
+            Ok(target) => Ok(FromAgent::Retaining {
+                retainers: crate::retainers::holding(self.python, &target, world::mode())?,
+            }),
+            Err(error) => Ok(FromAgent::Evaluated {
+                result: Evaluated::Raised {
+                    error: capture(self.python, &error),
+                },
+                mode: world::mode(),
+            }),
+        }
+    }
+
     /// move the executing frame to another line of the code it is running
     pub(crate) fn set_next_statement(&mut self, id: FrameId, line: u32) -> PyResult<FromAgent> {
         self.jump(id, Wanted::Line(line), "setting the next statement")

@@ -344,6 +344,24 @@ pub enum Request {
         detail: Detail,
     },
 
+    /// what is holding an object, and how
+    ///
+    /// "why is this still alive". the object is named by an expression, in a
+    /// frame, the way [`Self::Evaluate`] names one — there is nothing else a
+    /// client could point at, since an object has no id of its own that survives
+    /// being asked about
+    ///
+    /// the answer carries what the walk **cannot** see, always. a walk over the
+    /// collector's referent graph is blind to untracked objects and to holders
+    /// that are not python objects at all — bpd's own among them — and a list of
+    /// holders without that is a different question's answer
+    Retainers {
+        /// which frame the expression is evaluated in
+        frame: FrameId,
+        /// the expression naming the object, as the client wrote it
+        expression: String,
+    },
+
     /// run a whole investigation against a session, and return what happened
     ///
     /// a tree of debugger steps with its own branching, executed **here** —
@@ -550,6 +568,7 @@ impl Request {
             Self::Diff { .. } => "the difference between two states",
             Self::SetVariable { .. } => "writing a variable",
             Self::Facts { .. } => "what is provable about a frame's names",
+            Self::Retainers { .. } => "what is holding an object",
             Self::ReplaceCode { .. } => "replacing a file's code",
             Self::SetNextStatement { .. } => "setting the next statement",
             Self::RestartFrame { .. } => "restarting a frame",
@@ -597,6 +616,7 @@ impl Request {
             | Self::SetVariable { frame, .. }
             | Self::SetNextStatement { frame, .. }
             | Self::Facts { frame, .. }
+            | Self::Retainers { frame, .. }
             | Self::RestartFrame { frame } => Some(frame.stop),
         }
     }
@@ -741,6 +761,9 @@ pub enum Response {
 
     /// a stop's state, at the level of detail the query asked for
     State(Snapshot),
+
+    /// what is holding an object, and what the walk could not see
+    Retainers(crate::frame::Retainers),
 
     /// what changed between two of them
     Difference(Difference),
