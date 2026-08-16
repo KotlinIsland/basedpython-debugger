@@ -985,7 +985,13 @@ they scheduled them. presenting one seamless stack would be a fabricated call
 chain, which is the exact lie this project exists to avoid. the join has to be
 visible in the stack itself, not explained in a tooltip
 
-### live heaps and retainers
+### live heaps and retainers · done
+
+**built**, and every premise below turned out to be wrong in a way that made it
+simpler — each measured before anything was written. `bpd/retainers` and the
+`retainers` tool answer what holds an object and **where inside** each holder it
+sits, with `coverage` on every answer saying what the walk cannot see. see
+[what is holding an object](docs/development/retainers.md)
 
 "what is holding this object" — the question `gc.get_referrers` answers badly
 and slowly. done natively the walk builds a reverse index from the GC's own
