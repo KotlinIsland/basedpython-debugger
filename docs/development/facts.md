@@ -12,39 +12,39 @@ a **fact** is that pair. `bpd/facts` over DAP and the `facts` tool over MCP
 
 ```json
 {
-    "frameId": 3,
-    "names": ["limit", "items", "self.mode"],
-    "limit": { "text": 1024, "depth": 4 }
+  "frameId": 3,
+  "names": ["limit", "items", "self.mode"],
+  "limit": { "text": 1024, "depth": 4 }
 }
 ```
 
 ```json
 {
-    "proved": [
-        {
-            "name": "limit",
-            "scope": "local",
-            "observed": { "observed": "is_int", "text": "5" },
-            "stability": { "stability": "permanent" }
-        },
-        {
-            "name": "items",
-            "scope": "local",
-            "observed": { "observed": "has_length", "length": 3 },
-            "stability": { "stability": "until", "mutation": "contents" }
-        }
-    ],
-    "silent": [
-        {
-            "name": "self.mode",
-            "why": {
-                "silence": "would_run",
-                "member": "mode",
-                "owner": { "module": "myapp", "qualname": "Runner" }
-            }
-        }
-    ],
-    "mode": "non-stop"
+  "proved": [
+    {
+      "name": "limit",
+      "scope": "local",
+      "observed": { "observed": "is_int", "text": "5" },
+      "stability": { "stability": "permanent" }
+    },
+    {
+      "name": "items",
+      "scope": "local",
+      "observed": { "observed": "has_length", "length": 3 },
+      "stability": { "stability": "until", "mutation": "contents" }
+    }
+  ],
+  "silent": [
+    {
+      "name": "self.mode",
+      "why": {
+        "silence": "would_run",
+        "member": "mode",
+        "owner": { "module": "myapp", "qualname": "Runner" }
+      }
+    }
+  ],
+  "mode": "non-stop"
 }
 ```
 
@@ -60,11 +60,11 @@ source says which** — it depends on the object
 so the judgement is made here, from cpython itself, and all three inputs are slot
 reads:
 
-| what is read | what it decides |
-| --- | --- |
-| `Py_TPFLAGS_HEAPTYPE` | a heap type is what a `class` statement makes, and `__class__` can be assigned on one. cpython refuses it for a static type, so `type(x) is int` is permanent and `type(x) is User` is not |
-| `tp_dictoffset` | non-zero means instances keep a dictionary, so any attribute of one can be assigned |
-| the type object itself | against the table of builtins whose storage *is* their value. a `tuple`'s length cannot change and a `list`'s can |
+| what is read           | what it decides                                                                                                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Py_TPFLAGS_HEAPTYPE`  | a heap type is what a `class` statement makes, and `__class__` can be assigned on one. cpython refuses it for a static type, so `type(x) is int` is permanent and `type(x) is User` is not |
+| `tp_dictoffset`        | non-zero means instances keep a dictionary, so any attribute of one can be assigned                                                                                                        |
+| the type object itself | against the table of builtins whose storage *is* their value. a `tuple`'s length cannot change and a `list`'s can                                                                          |
 
 a fact is therefore `permanent` or `until` something named. what `until` names is
 a thing the client can look for in the source it is reading — an assignment, an
@@ -120,12 +120,12 @@ every name asked about comes back in exactly one of `proved` and `silent`. a
 name missing from both would be indistinguishable from one bound to something
 uninteresting
 
-| why | what it means |
-| --- | --- |
-| `unbound` | no scope the frame can see has it. a local before its first assignment reads the same way, because from here it is the same situation |
-| `missing` | a segment of a path is not in the object's own storage. reaching it would mean `__getattr__` |
-| `would_run` | the type puts a data descriptor in the way, named with the class that defines it |
-| `too_deep` | the path has more segments than the request's `depth`. a refusal rather than a truncation: answering about the fourth segment of a five segment path is a fact about a different thing |
+| why         | what it means                                                                                                                                                                          |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unbound`   | no scope the frame can see has it. a local before its first assignment reads the same way, because from here it is the same situation                                                  |
+| `missing`   | a segment of a path is not in the object's own storage. reaching it would mean `__getattr__`                                                                                           |
+| `would_run` | the type puts a data descriptor in the way, named with the class that defines it                                                                                                       |
+| `too_deep`  | the path has more segments than the request's `depth`. a refusal rather than a truncation: answering about the fourth segment of a five segment path is a fact about a different thing |
 
 ## the bounds
 
