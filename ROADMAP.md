@@ -1055,6 +1055,30 @@ model is `DISABLE` on everything uninteresting; recording wants everything, and
 the two cannot both be on. it is a mode, scoped to a region of a run rather than
 a whole session
 
+**measured, and the conflict is smaller than it reads.** a loop of 300,000
+iterations over three lines, on 3.14:
+
+| what                               | time    | callbacks delivered |
+| ---------------------------------- | ------- | ------------------- |
+| no monitoring at all               | 7.6 ms  | 0                   |
+| `LINE` on, `DISABLE` on every line | 11.1 ms | **6**               |
+| `LINE` on, never disabled          | 33.9 ms | **900,003**         |
+
+the middle row is the whole architecture in one number: six callbacks for
+900,000 line executions, because each location is disabled the first time it is
+seen. and recording — the bottom row — is **4×** a bare run rather than the order
+of magnitude the framing suggests
+
+two things that number is not. it is a **python** callback that does nothing but
+count; bpd's is native, so the floor is lower. and it is the cost of *delivering*
+the events, with nothing captured — whatever a recorder stores is on top, and
+that is the part with no bound yet
+
+so the question this item turns on is not "can the events be afforded" but "what
+is worth storing per line, and what does the window cost". the trap stands
+either way: a recorder that interpolates state it did not capture is a debugger
+inventing history
+
 the trap is the obvious one: a recorder that interpolates state it did not
 capture is a debugger inventing history. it reports what it has and refuses what
 it does not
