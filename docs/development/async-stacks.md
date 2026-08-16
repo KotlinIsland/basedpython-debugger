@@ -94,9 +94,10 @@ the routes that were measured and rejected, before this one was built:
     way through `import asyncio`, taking the program down with it — a debugger
     that breaks every asyncio program is worse than one without this feature
 
-so the code object is taken from the one place it can be had for free: it is a
-constant of `asyncio/tasks.py`'s own module code object, which the agent is
-handed when that module runs — *before* any task exists
+so the code object is taken from the one place it can be had for free: it is
+nested inside `asyncio/base_events.py`'s own module code object, which the agent
+is handed when that module runs — *before* any task exists. it is a **method**,
+so it sits two levels down, under the class body
 
 ## what the record is keyed on
 
@@ -125,9 +126,9 @@ program write out what it saw after the stack was walked. bpd adding a module to
 a program, running its body, is the launch parity rule broken well after the
 launch
 
-the guard is the hook itself: it is a constant of `asyncio/tasks.py`, so having
-one is evidence that module has already run. without one there is no task to be
-in and nothing to ask
+the guard is the hook itself: it is nested in `asyncio/base_events.py`, so
+having one is evidence that module has already run. without one there is no task
+to be in and nothing to ask
 
 ## where a record starts
 
