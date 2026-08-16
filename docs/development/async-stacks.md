@@ -34,6 +34,11 @@ that is the whole design constraint. the frames that scheduled the work
 **did not call** it, so putting them in the stack would be a call chain that
 never happened
 
+`a_stop_inside_a_task_says_where_the_task_was_created` in
+`crates/bpd_engine/tests/async_stacks.rs` asserts both halves against a real
+interpreter: that the record names the scheduler, and that the scheduler is
+**not** among the frames
+
 ## so it is a separate list, and a different type
 
 `Stack::scheduled_by` is its own field and is never spliced into `frames`. it

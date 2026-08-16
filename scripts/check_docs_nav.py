@@ -30,6 +30,51 @@ def nav_paths(nav: object) -> list[str]:
     return []
 
 
+# a test in this project is named as a sentence — `a_...`, `the_...`,
+# `every_...` — so a backticked name of that shape in the docs is a claim that
+# such a thing exists in the tree. three times in one session a page went on
+# naming something after the code moved, which is the failure this catches
+SENTENCE = re.compile(r"^(a|an|the|every|nothing|no|what|which|only|both)_[a-z0-9_]+$")
+
+
+def _snake(name: str) -> str:
+    """the serde `snake_case` spelling of a variant, which docs quote as a value"""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def _known_names() -> set[str]:
+    """every function and variant the crates define, in the spelling docs use"""
+    source = "\n".join(
+        path.read_text(encoding="utf-8") for path in (ROOT / "crates").rglob("*.rs")
+    )
+    names = set(re.findall(r"\bfn ([a-z_][a-z0-9_]*)", source))
+    names |= {
+        _snake(variant)
+        for variant in re.findall(r"^\s{4}([A-Z][A-Za-z0-9]+)\s*[{,(]", source, re.M)
+    }
+    return names
+
+
+def vanished_names() -> list[str]:
+    """sentence-shaped names the docs cite that no longer exist in the crates"""
+    known = _known_names()
+    pages = list(DOCS.rglob("*.md")) + [ROOT / "README.md", ROOT / "ROADMAP.md"]
+    gone: dict[str, set[str]] = {}
+    for page in pages:
+        if not page.is_file():
+            continue
+        for found in re.finditer(
+            r"`([a-z][a-z0-9_]{15,})`", page.read_text(encoding="utf-8")
+        ):
+            name = found.group(1)
+            if SENTENCE.match(name) and name not in known:
+                gone.setdefault(name, set()).add(str(page.relative_to(ROOT)))
+    return [
+        f"{name} — cited by {', '.join(sorted(where))}"
+        for name, where in sorted(gone.items())
+    ]
+
+
 def escaping_links() -> list[str]:
     """every relative link that leaves `docs/`
 
@@ -77,6 +122,11 @@ def main() -> int:
         "linking out of docs/, which the site cannot resolve — quote the file "
         "or say its name instead of linking to it",
         escaping_links(),
+    )
+    report(
+        "named as evidence in the docs and gone from the crates — a page that "
+        "cites a test by a name nothing has is a page nobody can check",
+        vanished_names(),
     )
 
     if problems:
