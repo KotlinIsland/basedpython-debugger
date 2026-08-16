@@ -173,6 +173,31 @@ fn every_capability_carried_inside_a_request_is_reached_or_says_why_not() {
     // asking for one changes what a launch **is**, so it is a different launch
     // rather than another request in this one
 
+    // where the task was created, read off the console rather than the table
+    // that claims it. an editor that walked the frames and dropped this would
+    // show a stack that is true and says nothing about who scheduled it
+    let scheduled: Vec<&serde_json::Value> = client
+        .events("output")
+        .into_iter()
+        .filter(|event| {
+            event["body"]["output"]
+                .as_str()
+                .is_some_and(|text| text.contains("inside an asyncio task, scheduled at"))
+        })
+        .collect();
+    assert!(
+        !scheduled.is_empty(),
+        "`{}` is said to reach a client and the console never said it",
+        Facet::Scheduling.name()
+    );
+    for event in scheduled {
+        let said = event["body"]["output"].as_str().unwrap_or_default();
+        assert!(
+            said.contains("schedule"),
+            "the line has to name the frame that scheduled it, and said {said}"
+        );
+    }
+
     // the sequence, read off what really arrived at the session. the adapter
     // resolves `after: {path, line}` to whatever id that breakpoint holds now,
     // and one that parsed the field and dropped it would send an ordinary
@@ -1556,6 +1581,18 @@ impl Session for FakeSession {
             // over a django template node, and the only place that shows is a
             // stack with both in it
             Request::Stack { stop, .. } => Response::Stack(Stack {
+                // the fake's stack is inside a task, because an empty
+                // `scheduled_by` is the half a front end can drop with nothing
+                // failing — every ordinary stack has one
+                in_a_task: true,
+                // the fake's stack is inside a task, because an empty
+                // `scheduled_by` is the half a front end can drop with nothing
+                // failing — every ordinary stack has one
+                scheduled_by: vec![bpd_core::Scheduling {
+                    file: "/src/app.py".to_string(),
+                    line: 42,
+                    function: "schedule".to_string(),
+                }],
                 frames: vec![
                     Frame {
                         id: FrameId { stop, depth: 0 },

@@ -96,7 +96,10 @@ pub(crate) fn refresh_code(python: Python<'_>, code: &Bound<'_, PyAny>) -> PyRes
     events::watch_locally(
         python,
         code,
-        breakpoints::local(address) | steps::local(address) | templates::local(address),
+        breakpoints::local(address)
+            | steps::local(address)
+            | templates::local(address)
+            | crate::tasks::local(address),
     )
 }
 

@@ -980,6 +980,40 @@ impl Adapter {
             })
             .collect();
 
+        // said on the console rather than among the frames. DAP's `stackFrames`
+        // is a call chain and nothing else — a client draws it as one — so a
+        // scheduling frame put in there would be an editor showing a call that
+        // never happened. the console is where bpd's own words go
+        if stack.in_a_task && stack.scheduled_by.is_empty() {
+            self.event(
+                "output",
+                &serde_json::json!({
+                    "category": "console",
+                    "output": "this stack is inside an asyncio task and bpd did not see \
+                               that task created, so it cannot say what scheduled it. \
+                               `asyncio.create_task` is watched; `ensure_future`, \
+                               `loop.create_task` and a task group's own are not yet\n",
+                }),
+            )?;
+        }
+        for (at, scheduled) in stack.scheduled_by.iter().enumerate() {
+            let lead = if at == 0 {
+                "this stack is inside an asyncio task, scheduled at"
+            } else {
+                "                                     called from"
+            };
+            self.event(
+                "output",
+                &serde_json::json!({
+                    "category": "console",
+                    "output": format!(
+                        "{lead} {}:{} in {}\n",
+                        scheduled.file, scheduled.line, scheduled.function
+                    ),
+                }),
+            )?;
+        }
+
         self.respond(
             message,
             Some(serde_json::json!({

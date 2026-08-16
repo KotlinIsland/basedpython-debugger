@@ -174,3 +174,24 @@ impl std::fmt::Display for Scope {
         })
     }
 }
+
+/// one frame of the stack a task was created on
+///
+/// **deliberately not a [`Frame`].** a [`Frame`] is something the interpreter
+/// has right now: it carries a [`FrameId`], and every scope of it can be read
+/// and written. these are a *record*, taken when the task was made — the frames
+/// they describe have usually returned by the time anyone looks, and their
+/// locals are gone with them
+///
+/// giving them the same type would offer a client a frame id that resolves to
+/// nothing, and a variables request that answers about the wrong frame. so they
+/// carry what a record can honestly carry: where it was
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Scheduling {
+    /// the file the frame was in
+    pub file: String,
+    /// the line it was on **when the task was created**, not now
+    pub line: u32,
+    /// `co_qualname` of the code it was running
+    pub function: String,
+}

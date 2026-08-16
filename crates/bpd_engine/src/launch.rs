@@ -1345,10 +1345,14 @@ impl Attached {
         match self.ask(&FromEngine::Stack { stop, top }, EXPECTED, reporting)? {
             FromAgent::Stack {
                 frames,
+                scheduled_by,
+                in_a_task,
                 depth,
                 mode,
             } => Ok(Stack {
                 frames,
+                scheduled_by,
+                in_a_task,
                 depth,
                 mode,
             }),

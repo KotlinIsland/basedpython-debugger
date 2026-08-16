@@ -38,6 +38,7 @@ mod sources;
 mod spawns;
 mod steps;
 mod stops;
+mod tasks;
 mod templates;
 mod threads;
 mod values;
@@ -415,6 +416,16 @@ fn on_py_start<'py>(
         session::announce_rebinding(breakpoints::rebind(python, &loaded)?);
     }
 
+    // `asyncio/tasks.py`'s module body is where `create_task` comes from, and
+    // this is the moment it runs — before any task exists, and without asking
+    // the import machinery anything
+    if !conditions::evaluating()
+        && tasks::notice(code)?
+        && let Some(hook) = tasks::hook(python)
+    {
+        session::refresh_code(python, hook.bind(python))?;
+    }
+
     // this is one of the three ways a frame is entered, and a step in follows
     // the frame the thread has just entered
     if steps::armed_here() {
@@ -688,10 +699,16 @@ fn on_py_return<'py>(
     python: Python<'py>,
     code: &Bound<'py, PyAny>,
     _offset: i32,
-    _returned: &Bound<'py, PyAny>,
+    returned: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
     if steps::armed_here() {
         steps::left_frame(python)?;
+    }
+
+    // a task made while a condition of ours is running was made by bpd rather
+    // than by the program, and recording it would file a stack of ours under it
+    if !conditions::evaluating() && tasks::is_hook(code.as_ptr() as usize) {
+        tasks::record(python, returned)?;
     }
 
     // a template parsed while a condition of ours is running is not one the

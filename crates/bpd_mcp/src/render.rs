@@ -129,6 +129,22 @@ pub fn stack(walked: &Stack) -> serde_json::Value {
         "depth": walked.depth,
         "mode": walked.mode.to_string(),
     });
+    // a **separate** key, never merged into `frames`. these frames scheduled the
+    // ones above rather than calling them, and an agent handed one seamless list
+    // would reason about a call chain that never happened
+    // in a task, and nothing recorded how it was made. that is a route bpd does
+    // not watch yet, and an agent shown the same empty answer as a synchronous
+    // stack would read a gap in the debugger as a fact about the program
+    if walked.in_a_task && walked.scheduled_by.is_empty() {
+        rendered["scheduled_by"] = serde_json::json!([]);
+        rendered["scheduled_note"] = "this stack is inside an asyncio task and              bpd did not see that task created, so it cannot say what scheduled              it. that is a limit of bpd rather than a fact about the program:              `asyncio.create_task` is watched, and `ensure_future`,              `loop.create_task` and a task group's own `create_task` are not yet"
+            .into();
+    }
+    if !walked.scheduled_by.is_empty() {
+        rendered["scheduled_by"] = serde_json::json!(walked.scheduled_by);
+        rendered["scheduled_note"] = "this stack is inside an asyncio task.              `scheduled_by` is where that task was created, innermost first —              those frames **scheduled** these rather than calling them, and the              real caller of the outermost frame above is the event loop. it is a              record taken when the task was made, so its lines are where things              were then and its frames cannot be read for variables"
+            .into();
+    }
     if walked.frames.len() < walked.depth {
         rendered["frames_omitted"] = serde_json::json!({
             "count": walked.depth - walked.frames.len(),
@@ -817,6 +833,8 @@ mod tests {
     #[test]
     fn a_stack_that_was_cut_says_how_much_of_it_is_missing() {
         let whole = stack(&Stack {
+            in_a_task: false,
+            scheduled_by: Vec::new(),
             frames: vec![frame(0)],
             depth: 1,
             mode: Mode::NonStop,
@@ -827,6 +845,8 @@ mod tests {
         );
 
         let cut = stack(&Stack {
+            in_a_task: false,
+            scheduled_by: Vec::new(),
             frames: vec![frame(0)],
             depth: 9,
             mode: Mode::NonStop,

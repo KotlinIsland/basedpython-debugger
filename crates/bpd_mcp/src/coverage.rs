@@ -86,6 +86,11 @@ pub const fn reach_of(request: &Request) -> Reach {
 /// exhaustive, for the reason [`reach_of`] is
 pub const fn reach_of_facet(facet: Facet) -> Reach {
     match facet {
+        // its own key on the stack answer, never merged into `frames`: an agent
+        // handed one seamless list would reason about a call chain that never
+        // happened
+        Facet::Scheduling => Reach::Direct("`scheduled_by` on the `stack` answer"),
+
         // `after` on a breakpoint of `set_breakpoints`, naming a **position** in
         // the same list: this server numbers breakpoints by where they appear,
         // so a position is the only thing an agent can name. the answer carries

@@ -48,7 +48,7 @@ pub use breakpoint::{
 pub use error::{Error, Result};
 pub use exception::{PythonError, TracebackFrame};
 pub use fact::{Class, Fact, Facts, Limit, Mutation, Observed, Silence, Silent, Stability};
-pub use frame::{Frame, FrameId, FrameKind, Scope};
+pub use frame::{Frame, FrameId, FrameKind, Scheduling, Scope};
 pub use jump::{Jump, Jumped, Suspendable, Unrestartable};
 pub use parity::{Carried, Facet, Naming, Reach, Told, ran, ran_as, say, surface};
 pub use query::{

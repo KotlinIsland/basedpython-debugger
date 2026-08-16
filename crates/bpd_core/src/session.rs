@@ -18,7 +18,7 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use crate::breakpoint::{LogRecord, Resolved, SourceBreakpoint};
-use crate::frame::{Frame, FrameId, Scope};
+use crate::frame::{Frame, FrameId, Scheduling, Scope};
 use crate::jump::Jumped;
 use crate::query::{Difference, Snapshot, SnapshotId, StateQuery};
 use crate::replace::Replaced;
@@ -994,6 +994,30 @@ pub fn only_session(
 pub struct Stack {
     /// the frames, the one that stopped first
     pub frames: Vec<Frame>,
+    /// where the task this stack is inside was created, innermost first
+    ///
+    /// **a separate list, and never spliced into [`Self::frames`].** the frames
+    /// here did not call the ones above — they *scheduled* them, and the real
+    /// caller of the running frame is the event loop. presenting one seamless
+    /// stack would be a call chain that never happened, which is the exact lie
+    /// this project exists not to tell
+    ///
+    /// empty when the stop is not inside a task, when nothing recorded how that
+    /// task was made, or when the program is not running asyncio at all. it is
+    /// a record rather than live frames — see [`Scheduling`]
+    pub scheduled_by: Vec<Scheduling>,
+
+    /// whether this stack is inside an asyncio task at all
+    ///
+    /// what stops an empty [`Self::scheduled_by`] meaning two different things.
+    /// a stack that is not in a task has nothing to say; a stack that **is** in
+    /// one and carries no record is a task bpd did not see created — a route it
+    /// does not watch yet — and a client shown the same empty list for both
+    /// would read the second as the first
+    ///
+    /// this is the same rule the blind spot on 3.13 follows: the silence is
+    /// announced rather than left to be interpreted
+    pub in_a_task: bool,
     /// how deep the stack is, which is more than `frames` when fewer were asked
     /// for
     pub depth: usize,

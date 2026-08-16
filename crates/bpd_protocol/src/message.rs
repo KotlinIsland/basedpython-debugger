@@ -185,6 +185,14 @@ pub enum FromAgent {
     Stack {
         /// the frames, the one that stopped first
         frames: Vec<Frame>,
+        /// where the task this stack is inside was created, innermost first
+        ///
+        /// carried beside the frames and never among them — see
+        /// `bpd_core::Stack::scheduled_by`
+        scheduled_by: Vec<bpd_core::Scheduling>,
+        /// whether this stack is inside a task at all — see
+        /// `bpd_core::Stack::in_a_task`
+        in_a_task: bool,
         /// how deep the stack is, which is more than `frames` when the request
         /// asked for fewer
         depth: usize,

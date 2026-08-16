@@ -131,6 +131,14 @@ pub const fn reach_of(request: &Request) -> Reach {
 /// exhaustive, for the reason [`reach_of`] is
 pub const fn reach_of_facet(facet: Facet) -> Reach {
     match facet {
+        // on the console rather than among the frames. DAP's `stackFrames` is a
+        // call chain and a client draws it as one, so a scheduling frame put
+        // there would be an editor showing a call that never happened
+        Facet::Scheduling => Reach::Direct(
+            "console `output` events beside the `stackTrace` response, one per \
+             frame the task was scheduled from",
+        ),
+
         // `after` on a breakpoint, naming the **file and line** of the one it
         // waits for rather than an id: this adapter mints breakpoint ids and
         // re-mints them on every `setBreakpoints`, so an id a client read off an
