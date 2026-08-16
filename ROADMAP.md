@@ -992,6 +992,23 @@ and slowly. done natively the walk builds a reverse index from the GC's own
 referent graph without allocating millions of python objects to do it, which
 matters because the usual tools perturb the heap they are measuring
 
+**measured, before any of it was built.** the assumption was that this needs a
+native walk over the GC's referent graph, which would mean `tp_traverse` and
+therefore `unsafe` — and `unsafe_code = "deny"` is a workspace rule with no
+opt-outs. it does not: `gc.get_referents` is C-implemented and reaches the same
+graph from safe code
+
+on a 55,285-object heap, asking it per object and building the reverse index in
+rust walked **172,855 edges in 5 ms**, and the heap was **exactly the size it
+started** once the per-object lists were dropped. the naive version — keeping the
+index in python — grew the heap from 55,285 objects to 167,213, which is the
+"perturbs the heap it is measuring" problem in numbers
+
+so the shape is: `gc.get_objects()` once, `gc.get_referents` per object with the
+list dropped at once, and the index on the rust side. what still has to be
+decided is what the walk *holds* while it runs — `get_objects` is a strong
+reference to everything, for as long as the walk takes
+
 three honesty constraints decide the design:
 
 - the debugger's own frames and temporaries are retainers, and have to be
