@@ -637,6 +637,42 @@ response body
 nothing advertises any of the four. DAP has no capability flag for a custom
 request, and a client that does not know about one never sends it
 
+### and two extra fields, on requests DAP does have
+
+`evenUnderALiveFrame` on `bpd/replaceCode` is one — it trades the guarantee that
+the process never runs two versions of one function for a report of every frame
+that will, so it is asked for by name and a value that is not a boolean is
+refused rather than read as truthy
+
+the other is `after` on a `setBreakpoints` breakpoint —
+[a breakpoint that waits for another one](breakpoints.md#a-breakpoint-that-waits-for-another-one):
+
+```json
+{
+  "command": "setBreakpoints",
+  "arguments": {
+    "source": { "path": "/srv/app/handlers.py" },
+    "breakpoints": [
+      { "line": 12 },
+      { "line": 88, "after": { "path": "/srv/app/handlers.py", "line": 12 } }
+    ]
+  }
+}
+```
+
+**it names a file and a line rather than an id**, and that is not a style choice.
+this adapter mints breakpoint ids and re-mints them on every `setBreakpoints` for
+that file, so an id a client read off an earlier response has already gone stale.
+a file and a line are what the client actually knows, and they are resolved to
+whatever id the predecessor holds at the moment the request is built
+
+a predecessor nothing matches is left unset rather than invented, so the
+breakpoint is armed immediately — which is what it would have been had the client
+not asked. and because a waiting breakpoint really is bound, it comes back
+`verified` with the waiting said in its `message`: an editor that showed it as an
+ordinary breakpoint would leave somebody at a line the interpreter is not
+watching, having been told it was set
+
 ## what is not built
 
 - **`attach`**, which is PEP 768 and needs 3.14

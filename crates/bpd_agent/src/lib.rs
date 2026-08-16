@@ -475,6 +475,11 @@ fn on_line<'py>(
     let thread = events::thread_ident(python)?;
 
     let mut stopping = Vec::new();
+    // the breakpoints that **acted** here, which is what arms anything waiting
+    // for them. a condition that was false, and a hit the count has not reached
+    // yet, are not acts: "after the request came through" means the breakpoint
+    // did its thing, not that the interpreter passed the line
+    let mut acted: Vec<u32> = Vec::new();
     let mut failure = None;
     if let Some(plans) = plans {
         let at = conditions::Location {
@@ -491,8 +496,14 @@ fn on_line<'py>(
         for plan in &plans {
             match plan.fire(python, &mut place, &at)? {
                 conditions::Fired::Nothing => {}
-                conditions::Fired::Stop => stopping.push(plan.id),
-                conditions::Fired::Logged(record) => session::log(record),
+                conditions::Fired::Stop => {
+                    acted.push(plan.id);
+                    stopping.push(plan.id);
+                }
+                conditions::Fired::Logged(record) => {
+                    acted.push(plan.id);
+                    session::log(record);
+                }
                 // the remaining breakpoints on this line are left alone: the
                 // program is about to be held here anyway, and a log record
                 // produced during a hit the client is being told is broken
@@ -504,6 +515,11 @@ fn on_line<'py>(
             }
         }
     }
+
+    // before the stop is reported, so a client told the program stopped can
+    // already see that the breakpoint waiting on this one is armed. the other
+    // order reports a stop whose consequence arrives after it
+    session::announce_rebinding(breakpoints::arm_after(python, &acted)?);
 
     // asked whatever the breakpoints decided, because a step that landed here
     // has to be taken off either way — one left armed would go on watching for
@@ -594,6 +610,11 @@ fn rendering_a_template_node(python: Python<'_>) -> PyResult<()> {
     };
 
     let mut stopping = Vec::new();
+    // the breakpoints that **acted** here, which is what arms anything waiting
+    // for them. a condition that was false, and a hit the count has not reached
+    // yet, are not acts: "after the request came through" means the breakpoint
+    // did its thing, not that the interpreter passed the line
+    let mut acted: Vec<u32> = Vec::new();
     let mut failure = None;
     {
         let _suppressed = conditions::suppress();
@@ -601,8 +622,14 @@ fn rendering_a_template_node(python: Python<'_>) -> PyResult<()> {
         for plan in &hit.plans {
             match plan.fire(python, &mut place, &at)? {
                 conditions::Fired::Nothing => {}
-                conditions::Fired::Stop => stopping.push(plan.id),
-                conditions::Fired::Logged(record) => session::log(record),
+                conditions::Fired::Stop => {
+                    acted.push(plan.id);
+                    stopping.push(plan.id);
+                }
+                conditions::Fired::Logged(record) => {
+                    acted.push(plan.id);
+                    session::log(record);
+                }
                 conditions::Fired::Failed(raised) => {
                     failure = Some((plan.id, raised));
                     break;
@@ -610,6 +637,10 @@ fn rendering_a_template_node(python: Python<'_>) -> PyResult<()> {
             }
         }
     }
+
+    // the same rule as a python line: a template breakpoint that acted arms
+    // whatever was waiting for it. it is not a different kind of hit
+    session::announce_rebinding(breakpoints::arm_after(python, &acted)?);
 
     if let Some((breakpoint, raised)) = failure {
         return session::stop(

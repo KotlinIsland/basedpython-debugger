@@ -433,6 +433,20 @@ pub fn tools() -> Vec<Tool> {
                                      the frame and converted with `str()`; `{{` \
                                      and `}}` are a literal brace. the records \
                                      come back on the next control tool's answer" },
+                                "after": integer(
+                                    "arm this breakpoint only once another one \
+                                     has been hit — the **position** of that one \
+                                     in this same list, counting from 1. until \
+                                     then it is bound and not armed: its line \
+                                     carries no events at all, so waiting costs \
+                                     nothing where a condition costs an \
+                                     expression on every pass. the answer says \
+                                     `armed: false` and `waiting_for` while it \
+                                     waits. what arms it is the earlier \
+                                     breakpoint **acting** — stopping or logging \
+                                     — rather than merely being passed, and it \
+                                     is permanent and per process",
+                                ),
                             }),
                             &["file", "line"],
                         ),

@@ -30,8 +30,8 @@ use bpd_core::parity::mark;
 use bpd_core::{
     Addressed, At, Binding, Carried, Content, Did, Entry, Evaluated, Evaluation, Facet, Frame,
     FrameId, Mode, Outcome, Reach, Record, Reported, Reporting, Request, Resolved, Response,
-    Running, SessionId, Site, Stack, Stop, StopReason, Threads, Told, Value, Variables,
-    WorldStopped, ran_as, say,
+    Running, SessionId, Site, SourceBreakpoint, Stack, Stop, StopReason, Threads, Told, Value,
+    Variables, WorldStopped, ran_as, say,
 };
 use bpd_dap::{
     Configuration, Failed, Interrupt, Launcher, ProgramOutput, Session, Started, carriage_of,
@@ -77,6 +77,12 @@ fn session() -> SessionId {
 #[derive(Debug, Default)]
 struct Recorder {
     requests: Vec<&'static str>,
+    /// the breakpoint set as it really arrived
+    ///
+    /// a capability carried *inside* a request needs the payload to be checked:
+    /// the names alone say a `setBreakpoints` happened, not that the `after` on
+    /// one of them survived the translation
+    breakpoints: Vec<SourceBreakpoint>,
     details: Vec<bpd_core::Detail>,
     /// what every request was addressed to, beside what it asked for
     ///
@@ -166,6 +172,33 @@ fn every_capability_carried_inside_a_request_is_reached_or_says_why_not() {
     // in `a_client_that_owns_a_terminal_is_asked_to_start_the_program_in_it`:
     // asking for one changes what a launch **is**, so it is a different launch
     // rather than another request in this one
+
+    // the sequence, read off what really arrived at the session. the adapter
+    // resolves `after: {path, line}` to whatever id that breakpoint holds now,
+    // and one that parsed the field and dropped it would send an ordinary
+    // breakpoint and look identical here without this
+    let sequenced: Vec<Option<u32>> = recorded
+        .breakpoints
+        .iter()
+        .map(|breakpoint| breakpoint.after)
+        .collect();
+    assert!(
+        sequenced.iter().any(Option::is_some),
+        "`{}` never reached the session: {sequenced:?}",
+        Facet::Sequenced.name()
+    );
+    // and it named the breakpoint on line 3, which is the one the conversation
+    // pointed at — an `after` resolved to the wrong id is worse than none
+    let gate = recorded
+        .breakpoints
+        .iter()
+        .find(|breakpoint| breakpoint.line == 3)
+        .map(|breakpoint| breakpoint.id);
+    assert_eq!(
+        sequenced.iter().flatten().copied().next(),
+        gate,
+        "`after` resolved to an id that is not the breakpoint on line 3"
+    );
 
     // the claim under test: DAP has nowhere on a request to put the bounds on a
     // value read, so the launch configuration is the route — and the
@@ -804,7 +837,14 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
         "setBreakpoints",
         serde_json::json!({
             "source": { "path": "/tmp/fake.py" },
-            "breakpoints": [ { "line": 3, "condition": "total > 1" } ],
+            "breakpoints": [
+                { "line": 3, "condition": "total > 1" },
+                // and one that waits for the first, named by **file and line**
+                // rather than by id: this adapter re-mints breakpoint ids on
+                // every `setBreakpoints`, so an id from an earlier response is
+                // already stale
+                { "line": 9, "after": { "path": "/tmp/fake.py", "line": 3 } },
+            ],
         }),
     );
     answer(
@@ -1433,6 +1473,9 @@ impl Session for FakeSession {
             let mut recorder = self.asked.lock().expect("the recorder is not poisoned");
             recorder.requests.push(request.name());
             recorder.addressed.push((request.name(), session));
+            if let Request::SetBreakpoints { breakpoints } = &request {
+                recorder.breakpoints.clone_from(breakpoints);
+            }
             match &request {
                 Request::Variables { detail, .. }
                 | Request::Evaluate { detail, .. }
@@ -1447,6 +1490,11 @@ impl Session for FakeSession {
                 resolved: breakpoints
                     .iter()
                     .map(|breakpoint| Resolved {
+                        // the answer says what the request asked for, so a
+                        // sequenced breakpoint comes back waiting — an adapter
+                        // that dropped that half would show a solid breakpoint
+                        // on a line the interpreter is not watching
+                        waiting_for: breakpoint.after,
                         id: breakpoint.id,
                         binding: Binding::Bound {
                             line: breakpoint.line,

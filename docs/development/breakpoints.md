@@ -256,6 +256,87 @@ one that does. rebuilding it whenever any *other* breakpoint in the set moved
 would make "the third time this line runs" quietly mean something else, and the
 engine sends the whole set every time
 
+## a breakpoint that waits for another one
+
+"stop in the handler, but only after the request that set this flag came
+through". `after` names another breakpoint **in the same set**, and until that
+one has acted this one is bound and **not armed**
+
+it is not a condition with extra steps, and the difference is the whole reason
+it exists. a condition is evaluated on every pass over the line; a waiting
+breakpoint has no `LINE` events on its location at all, so the line runs at the
+speed of a line nobody is watching. it costs nothing until the one before it
+fires
+
+### what "hit" means here, and the three questions it settles
+
+arming happens when the earlier breakpoint **acts** — stops, or writes a log
+record. a pass whose condition was false is not an act, and neither is one the
+hit count has not reached: "after the request came through" means the breakpoint
+did its thing, not that the interpreter went past the line
+
+the other two answers are forced rather than chosen:
+
+- **it is per process, not per thread.** the interpreter's local events are per
+    code object, so a per-thread sequence would mean watching the location on
+    every thread and discarding what the other threads saw — which is exactly the
+    cost this feature exists not to have. a per-thread version that quietly paid
+    it would be a performance claim that is false
+- **a hit count starts at arming.** before arming, the location has no events, so
+    the interpreter never reported those passes and the agent cannot count what
+    it did not see. this is not a policy; it is what the mechanism can know
+
+arming is **permanent**: the chain is one-way, and a sequence that re-arms is a
+different feature rather than a setting on this one
+
+### it is a chain, and a chain that cannot arm is refused
+
+a breakpoint names one predecessor. what makes that safe to report is that the
+impossible cases are refused **at set time**, the way a condition that does not
+compile is — a breakpoint that can never arm can never fire, and reporting it
+bound would be the debugger saying it is set when nothing will ever watch it:
+
+| what was asked for                               | what comes back                                       |
+| ------------------------------------------------ | ----------------------------------------------------- |
+| `after` names an id no breakpoint in the set has | `NeverArms`, `no_such_breakpoint`                     |
+| `after` names the breakpoint itself              | `NeverArms`, `itself`                                 |
+| the chain comes back to itself                   | `NeverArms`, `cycle`, naming every id it runs through |
+
+a cycle refuses **every** breakpoint in it rather than the one that closed the
+loop. each link alone looks like it is merely waiting, and that is true of each
+one and false of the set
+
+### a waiting breakpoint is bound, and says so
+
+this is the part a front end can get wrong without anything failing. a waiting
+breakpoint **did** bind — the interpreter has somewhere to stop — so the answer
+carries `waiting_for` beside the binding rather than pretending it is unbound. an
+editor that showed it as an ordinary breakpoint would leave a user sitting at a
+line nothing is watching, having been told it was set
+
+- **DAP** — `after: {path, line}` on the breakpoint, and the waiting is said in
+    the breakpoint's own `message`. it names a file and a line rather than an id
+    because this adapter mints breakpoint ids and re-mints them on every
+    `setBreakpoints`, so an id a client read off an earlier response is already
+    stale
+- **MCP** — `after` is the **position** of a breakpoint in the same list, since
+    the server numbers them by where they appear, and the answer carries
+    `armed: false` and `waiting_for`
+
+### arming from inside a callback, which was measured
+
+when the earlier breakpoint acts, the later one has to start being watched *from
+that moment* — a logpoint that armed nothing until the next stop would arm
+nothing at all. so the arming happens inside the `LINE` callback, and that it is
+allowed was measured rather than assumed: on 3.13, 3.14, 3.15 and 3.14t,
+`set_local_events` from inside a callback takes effect both on **another** code
+object and on the one the callback is running in, and `restart_events` from
+there is what undoes a per-location `DISABLE` the line had already returned
+
+resolving the whole set again is not free, so it happens only when an act is the
+**first** for that breakpoint and something is actually waiting on it — once per
+link of a chain, rather than once per hit
+
 ## re-entrancy, and what the interpreter already does
 
 evaluating a condition runs arbitrary user python **inside a `LINE` callback**.

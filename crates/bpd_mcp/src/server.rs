@@ -723,6 +723,7 @@ impl<'a> Server<'a> {
                     condition: wanted.condition,
                     hits: wanted.hits,
                     log: wanted.log,
+                    after: wanted.after,
                 }
             })
             .collect();
@@ -1494,6 +1495,13 @@ struct Wanted {
     hits: Option<HitCondition>,
     #[serde(default)]
     log: Option<String>,
+    /// the breakpoint that has to be hit before this one is armed
+    ///
+    /// **the position of one in this same list, counting from 1.** an agent
+    /// does not choose breakpoint ids here — the server numbers them by where
+    /// they appear — so the thing to name is where the earlier one is
+    #[serde(default)]
+    after: Option<u32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1980,6 +1988,33 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(declared, fields_of::<Detail>());
+    }
+
+    #[test]
+    fn a_breakpoint_is_offered_exactly_as_the_server_reads_one() {
+        // the breakpoint object is nested inside `set_breakpoints` rather than
+        // being a tool's own arguments, so the check above never reaches it —
+        // the same hole `detail` has its own test for. measured: with `after`
+        // taken out of the schema and left in the struct, every other test in
+        // this file still passed
+        let breakpoints = tools()
+            .into_iter()
+            .find(|tool| tool.name == "set_breakpoints")
+            .expect("`set_breakpoints` is a tool");
+        let declared: BTreeSet<String> =
+            breakpoints.schema["properties"]["breakpoints"]["items"]["properties"]
+                .as_object()
+                .expect("the breakpoint schema declares its properties")
+                .keys()
+                .cloned()
+                .collect();
+        assert_eq!(
+            declared,
+            fields_of::<Wanted>(),
+            "a breakpoint field the server reads and the schema omits is one no \
+             agent can find, and one the schema names and the server does not \
+             read is a setting asked for and never applied"
+        );
     }
 
     /// the field names a `Deserialize` implementation reads

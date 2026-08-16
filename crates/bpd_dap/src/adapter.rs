@@ -805,14 +805,34 @@ impl Adapter {
                 .as_u64()
                 .and_then(|line| u32::try_from(line).ok())
                 .ok_or("a breakpoint arrived with no line")?;
+            // `after` names a file and a line rather than an id, because the
+            // adapter's ids are re-minted on every `setBreakpoints` and one a
+            // client read off an earlier response is already stale
+            let after = match &requested["after"] {
+                serde_json::Value::Null => None,
+                after => {
+                    let path = after["path"].as_str().ok_or(
+                        "a breakpoint's `after` needs `path`, the file of the \
+                         breakpoint it waits for. it is a file and a line rather \
+                         than an id because this adapter re-mints breakpoint ids \
+                         on every `setBreakpoints`",
+                    )?;
+                    let line = after["line"]
+                        .as_u64()
+                        .and_then(|line| u32::try_from(line).ok())
+                        .ok_or("a breakpoint's `after` needs `line`, a number")?;
+                    Some((PathBuf::from(path), line))
+                }
+            };
             wanted.push(Wanted {
                 line,
                 condition: requested["condition"].as_str().map(ToString::to_string),
                 log: requested["logMessage"].as_str().map(ToString::to_string),
+                after,
             });
         }
 
-        let mine = self.breakpoints.replace(file, &wanted);
+        let mine = self.breakpoints.replace(&file, &wanted);
         let whole = self.breakpoints.all();
         let resolved = match self.ask(Request::SetBreakpoints { breakpoints: whole })? {
             Response::BreakpointsResolved { resolved } => resolved,
@@ -2550,6 +2570,25 @@ fn stopped_for(reason: &StopReason) -> (&'static str, String, Vec<u32>) {
 
 /// how a resolved breakpoint is reported back
 fn rendered_breakpoint(resolved: &Resolved, requested: &SourceBreakpoint) -> serde_json::Value {
+    let mut body = rendered_binding(resolved, requested);
+    // a waiting breakpoint is `verified` — it really did bind — so without this
+    // an editor shows a solid red dot on a line the interpreter is not watching,
+    // and the user waits at it. DAP's `message` is the field for exactly this
+    if let Some(after) = resolved.waiting_for {
+        let saying = format!(
+            "this is bound and not armed yet: it is watched only once breakpoint \
+             {after} has been hit"
+        );
+        body["message"] = match body["message"].as_str() {
+            Some(already) => format!("{already}. {saying}").into(),
+            None => saying.into(),
+        };
+    }
+    body
+}
+
+/// the same, before the arming is added to it
+fn rendered_binding(resolved: &Resolved, requested: &SourceBreakpoint) -> serde_json::Value {
     match &resolved.binding {
         Binding::Bound { line, sites, .. } => {
             let mut body = serde_json::json!({
@@ -2828,6 +2867,14 @@ struct Wanted {
     line: u32,
     condition: Option<String>,
     log: Option<String>,
+    /// the file and line of the breakpoint this one waits for
+    ///
+    /// **not an id.** the adapter mints breakpoint ids and re-mints them on
+    /// every `setBreakpoints` for that file, so an id a client read off an
+    /// earlier response has already gone stale. a file and a line are what the
+    /// client actually knows, and they are resolved to whatever id the
+    /// predecessor holds *now*, when the request is built
+    after: Option<(PathBuf, u32)>,
 }
 
 /// the breakpoints each file last asked for
@@ -2844,19 +2891,56 @@ struct FileBreakpoints {
 
 impl FileBreakpoints {
     /// replace one file's breakpoints, and return the file's new set
-    fn replace(&mut self, file: PathBuf, wanted: &[Wanted]) -> Vec<SourceBreakpoint> {
+    fn replace(&mut self, file: &Path, wanted: &[Wanted]) -> Vec<SourceBreakpoint> {
         let mine: Vec<SourceBreakpoint> = wanted
             .iter()
             .map(|wanted| {
                 self.next += 1;
-                let mut breakpoint = SourceBreakpoint::at(self.next, file.clone(), wanted.line);
+                let mut breakpoint =
+                    SourceBreakpoint::at(self.next, file.to_path_buf(), wanted.line);
                 breakpoint.condition.clone_from(&wanted.condition);
                 breakpoint.log.clone_from(&wanted.log);
+                breakpoint.after.clone_from(&None);
                 breakpoint
             })
             .collect();
-        self.by_file.insert(file, mine.clone());
-        mine
+        self.by_file.insert(file.to_path_buf(), mine);
+
+        // the `after` links are resolved **after** the insert, over the whole
+        // union, because a breakpoint may wait for one in a file this call did
+        // not touch — and because the ids of this file's own breakpoints only
+        // exist once they have been minted above
+        self.link(file, wanted);
+        self.by_file
+            .get(file)
+            .cloned()
+            .unwrap_or_else(|| unreachable!("the file was just inserted"))
+    }
+
+    /// turn each `after` file and line into the id that breakpoint holds now
+    ///
+    /// a predecessor nothing matches is left as `None` rather than invented,
+    /// and the core then reports the successor as armed immediately. that is
+    /// the one place this could lie, so it does not guess: a client naming a
+    /// line with no breakpoint on it gets a breakpoint that is armed, which is
+    /// what it would have got had it not asked at all
+    fn link(&mut self, file: &Path, wanted: &[Wanted]) {
+        let ids: Vec<Option<u32>> = wanted
+            .iter()
+            .map(|wanted| {
+                let (after_file, after_line) = wanted.after.as_ref()?;
+                self.by_file
+                    .get(after_file)?
+                    .iter()
+                    .find(|breakpoint| breakpoint.line == *after_line)
+                    .map(|breakpoint| breakpoint.id)
+            })
+            .collect();
+        if let Some(mine) = self.by_file.get_mut(file) {
+            for (breakpoint, after) in mine.iter_mut().zip(ids) {
+                breakpoint.after = after;
+            }
+        }
     }
 
     /// every breakpoint that should be armed now
@@ -2928,16 +3012,18 @@ mod tests {
         // because a debugger that accumulates edits has two ideas of what is set
         let mut breakpoints = FileBreakpoints::default();
         breakpoints.replace(
-            PathBuf::from("/a.py"),
+            Path::new("/a.py"),
             &[Wanted {
+                after: None,
                 line: 1,
                 condition: None,
                 log: None,
             }],
         );
         breakpoints.replace(
-            PathBuf::from("/b.py"),
+            Path::new("/b.py"),
             &[Wanted {
+                after: None,
                 line: 2,
                 condition: Some("x > 1".to_string()),
                 log: None,
@@ -2949,7 +3035,7 @@ mod tests {
 
         // replacing one file leaves the other alone, and every id is still
         // distinct — an id names one breakpoint in every report about it
-        breakpoints.replace(PathBuf::from("/a.py"), &[]);
+        breakpoints.replace(Path::new("/a.py"), &[]);
         let whole = breakpoints.all();
         assert_eq!(whole.len(), 1);
         assert_eq!(whole[0].file, PathBuf::from("/b.py"));
@@ -2977,6 +3063,7 @@ mod tests {
         let requested = SourceBreakpoint::at(4, "/tmp/app.py", 7);
         let moved = rendered_breakpoint(
             &Resolved {
+                waiting_for: None,
                 id: 4,
                 binding: Binding::Bound {
                     line: 9,
@@ -3002,6 +3089,7 @@ mod tests {
 
         let pending = rendered_breakpoint(
             &Resolved {
+                waiting_for: None,
                 id: 4,
                 binding: Binding::Unbound {
                     reason: Unbound::NotLoaded {
@@ -3039,6 +3127,7 @@ mod tests {
         let requested = SourceBreakpoint::at(4, "/src/app.by", 7);
         let rendered = rendered_breakpoint(
             &Resolved {
+                waiting_for: None,
                 id: 4,
                 binding: Binding::BoundInSource {
                     line: 7,

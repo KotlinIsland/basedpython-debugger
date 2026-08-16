@@ -406,6 +406,9 @@ impl Run<'_> {
             condition: condition.map(ToString::to_string),
             hits,
             log: None,
+            // a `run_to` arms its own breakpoint and waits for it. one that
+            // waited for another breakpoint would be a step that never returns
+            after: None,
         });
 
         let resolved =

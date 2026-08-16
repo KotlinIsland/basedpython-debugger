@@ -148,17 +148,28 @@ pub enum Facet {
     /// the trade, and one that took the flag and dropped the report would be
     /// making the trade **for** its user without saying so
     LiveReplacement,
+
+    /// the breakpoint a breakpoint waits for — [`SourceBreakpoint::after`]
+    ///
+    /// a field of a breakpoint, like a hit condition, and a capability all the
+    /// same: without it a front end can set every breakpoint and offer no
+    /// sequence at all. the **report** is the half that is easy to drop — a
+    /// waiting breakpoint is bound, so a front end that carried the request and
+    /// not the answer would show a breakpoint as set on a line the interpreter
+    /// is not watching, which is the one thing a debugger must not do
+    Sequenced,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
         Self::GeneratedLocation,
         Self::Terminal,
         Self::LiveReplacement,
+        Self::Sequenced,
     ];
 
     /// what to call this capability in a message about it
@@ -170,6 +181,7 @@ impl Facet {
             Self::GeneratedLocation => "the generated python behind a `.by` frame",
             Self::Terminal => "running the debuggee on a terminal the client owns",
             Self::LiveReplacement => "replacing code under a frame that is running it",
+            Self::Sequenced => "a breakpoint that waits for another one to be hit",
         }
     }
 }
