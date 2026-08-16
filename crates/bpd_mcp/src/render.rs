@@ -448,6 +448,18 @@ pub fn breakpoints(
         .map(|entry| {
             let asked = requested.iter().find(|wanted| wanted.id == entry.id);
             let mut rendered = serde_json::json!({ "id": entry.id });
+            // beside `bound` rather than instead of it, because both are true:
+            // the interpreter has somewhere to stop and is not watching it yet.
+            // an agent that read `bound` alone would wait at a line nothing is
+            // going to offer, and conclude the debugger is broken
+            if let Some(after) = entry.waiting_for {
+                rendered["armed"] = false.into();
+                rendered["waiting_for"] = after.into();
+                rendered["note"] = format!(
+                    "bound, and not armed yet: it is watched only once breakpoint                      {after} has been hit. until then its location has no line                      events at all, which is what makes waiting free"
+                )
+                .into();
+            }
             if let Some(asked) = asked {
                 rendered["file"] = asked.file.display().to_string().into();
                 rendered["requested_line"] = asked.line.into();
@@ -769,6 +781,7 @@ mod tests {
         // what makes the code objects beside it mean anything
         let rendered = breakpoints(
             &[Resolved {
+                waiting_for: None,
                 id: 1,
                 binding: Binding::BoundInSource {
                     line: 7,
@@ -837,6 +850,7 @@ mod tests {
         let rendered = breakpoints(
             &[
                 Resolved {
+                    waiting_for: None,
                     id: 1,
                     binding: Binding::Bound {
                         line: 9,
@@ -849,6 +863,7 @@ mod tests {
                     },
                 },
                 Resolved {
+                    waiting_for: None,
                     id: 2,
                     binding: Binding::Unbound {
                         reason: Unbound::NotLoaded {

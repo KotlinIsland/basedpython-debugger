@@ -131,6 +131,17 @@ pub const fn reach_of(request: &Request) -> Reach {
 /// exhaustive, for the reason [`reach_of`] is
 pub const fn reach_of_facet(facet: Facet) -> Reach {
     match facet {
+        // `after` on a breakpoint, naming the **file and line** of the one it
+        // waits for rather than an id: this adapter mints breakpoint ids and
+        // re-mints them on every `setBreakpoints`, so an id a client read off an
+        // earlier response is already stale. the answer comes back as DAP's own
+        // `message` on a `verified` breakpoint, which is the field for a
+        // breakpoint that is real and not doing what a user expects yet
+        Facet::Sequenced => Reach::Direct(
+            "`after: {path, line}` on a `setBreakpoints` breakpoint, with the \
+             waiting said in the breakpoint's `message`",
+        ),
+
         // a boolean on the custom request that carries the replacement itself,
         // and the report comes back two ways: in the body, whole, and as a
         // console line per frame — the same place a refusal's reason goes,

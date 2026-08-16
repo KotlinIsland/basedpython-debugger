@@ -171,6 +171,20 @@ fn every_capability_carried_inside_a_request_reaches_the_session() {
         Facet::LiveReplacement.name()
     );
 
+    // the sequence, read off what really arrived. a server that parsed `after`
+    // and dropped it would set an ordinary breakpoint and look identical here
+    // without this
+    let sequenced: Vec<Option<u32>> = recorded
+        .breakpoints
+        .iter()
+        .map(|breakpoint| breakpoint.after)
+        .collect();
+    assert!(
+        sequenced.contains(&Some(1)),
+        "`{}` never reached the session: {sequenced:?}",
+        Facet::Sequenced.name()
+    );
+
     // the capability DAP has no route for at all. the conversation asked for
     // every third qualifying hit, and a session that was handed `None` would
     // mean the tool parsed it and dropped it
@@ -407,6 +421,13 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
                 "condition": "total > 1",
                 // the capability DAP has no route for
                 "hits": { "hits": "every", "count": 3 },
+            }, {
+                // and one that waits for the first, by its **position** in this
+                // list: the server numbers breakpoints by where they appear, so
+                // that is the only thing an agent can name
+                "file": "/tmp/fake.py",
+                "line": 9,
+                "after": 1,
             } ],
         }),
     );
@@ -1187,6 +1208,7 @@ impl Session for FakeSession {
                 resolved: breakpoints
                     .iter()
                     .map(|breakpoint| Resolved {
+                        waiting_for: None,
                         id: breakpoint.id,
                         binding: Binding::Bound {
                             line: breakpoint.line,
@@ -1344,6 +1366,7 @@ impl Session for FakeSession {
                     }],
                     unchanged: vec!["<module>".to_string()],
                     rebound: vec![Resolved {
+                        waiting_for: None,
                         id: 1,
                         binding: Binding::Bound {
                             line: 6,

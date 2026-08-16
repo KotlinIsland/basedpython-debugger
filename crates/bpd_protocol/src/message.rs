@@ -709,6 +709,7 @@ mod tests {
         let answer = FromAgent::BreakpointsResolved {
             resolved: vec![
                 Resolved {
+                    waiting_for: None,
                     id: 7,
                     binding: Binding::Bound {
                         line: 4,
@@ -721,6 +722,7 @@ mod tests {
                     },
                 },
                 Resolved {
+                    waiting_for: None,
                     id: 8,
                     binding: Binding::Unbound {
                         reason: Unbound::NotLoaded {
@@ -1086,6 +1088,7 @@ mod tests {
                     }],
                     unchanged: vec!["<module>".to_string()],
                     rebound: vec![Resolved {
+                        waiting_for: None,
                         id: 1,
                         binding: Binding::Bound {
                             line: 6,

@@ -41,6 +41,27 @@ pub struct SourceBreakpoint {
     /// `}}` are a literal brace
     #[serde(default)]
     pub log: Option<String>,
+    /// the breakpoint that has to be hit before this one is armed at all
+    ///
+    /// "stop in the handler, but only after the request that set this flag came
+    /// through". the id of another breakpoint in the **same set** — the set is
+    /// replaced whole on every request, so there is nothing else it could name
+    ///
+    /// until that one has a qualifying hit, this one is bound and **not armed**:
+    /// its location has no `LINE` events at all, so it costs nothing rather than
+    /// being watched and ignored. what that means for what it can count is in
+    /// [`HitCondition`] — a hit before arming is one the interpreter never
+    /// reported, so it cannot be counted
+    ///
+    /// arming is **per process and permanent**. per process because the
+    /// interpreter's local events are per code object rather than per thread, so
+    /// a per-thread sequence would mean watching the location on every thread
+    /// and discarding what the others saw — the cost this is supposed not to
+    /// have. permanent because the case it is for is a flag being set once, and
+    /// a sequence that re-arms is a different feature rather than a setting on
+    /// this one
+    #[serde(default)]
+    pub after: Option<u32>,
 }
 
 impl SourceBreakpoint {
@@ -53,7 +74,15 @@ impl SourceBreakpoint {
             condition: None,
             hits: None,
             log: None,
+            after: None,
         }
+    }
+
+    /// the same, armed only once the breakpoint `after` has been hit
+    #[must_use]
+    pub fn after(mut self, after: u32) -> Self {
+        self.after = Some(after);
+        self
     }
 
     /// stop only when `condition` is true
@@ -127,6 +156,19 @@ pub struct Resolved {
     pub id: u32,
     /// whether there is a code object behind it, and where
     pub binding: Binding,
+    /// the breakpoint this one is still waiting for, if it is waiting
+    ///
+    /// beside the binding rather than inside it, because it is a different
+    /// question. [`Binding`] says whether the interpreter **has** somewhere to
+    /// stop; this says whether it is watching it yet, and a breakpoint can be
+    /// bound to a real line and not armed
+    ///
+    /// `None` is the ordinary breakpoint, armed the moment it binds. `Some` is
+    /// one that named [`SourceBreakpoint::after`], and reporting it as plainly
+    /// bound would leave a user waiting at a line the interpreter is not
+    /// watching, with the debugger having said it was
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<u32>,
 }
 
 /// whether a breakpoint has a code object and an offset behind it
@@ -212,6 +254,60 @@ pub enum Binding {
         /// what stood in the way
         reason: Unbound,
     },
+}
+
+/// why a breakpoint's `after` can never arm it
+///
+/// three ways, and they are told apart because the thing to do about each is
+/// different: a typo'd id is fixed by naming a breakpoint that exists, and a
+/// cycle is fixed by breaking it somewhere the client has to choose
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "no_arming", rename_all = "snake_case")]
+pub enum NoArming {
+    /// no breakpoint in the set has that id
+    ///
+    /// the set is replaced whole on every request, so there is nowhere else it
+    /// could have meant — a breakpoint that was in the *previous* set is not in
+    /// this program's any more
+    NoSuchBreakpoint,
+
+    /// it named itself, so it would have to be hit before it could be hit
+    Itself,
+
+    /// the chain it is in comes back to it
+    Cycle {
+        /// the ids the chain runs through, starting and ending at this one
+        through: Vec<u32>,
+    },
+}
+
+impl std::fmt::Display for NoArming {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSuchBreakpoint => formatter.write_str(
+                "no breakpoint in this set has that id. the set is replaced \
+                 whole on every request, so one that was in an earlier set is \
+                 not in this program's any more",
+            ),
+            Self::Itself => formatter.write_str(
+                "it named itself, so it would have to be hit before it could be \
+                 hit",
+            ),
+            Self::Cycle { through } => {
+                formatter.write_str("the chain comes back to it: ")?;
+                for (at, id) in through.iter().enumerate() {
+                    if at > 0 {
+                        formatter.write_str(" after ")?;
+                    }
+                    write!(formatter, "{id}")?;
+                }
+                formatter.write_str(
+                    ". nothing in a cycle is ever armed, because every link is \
+                     waiting for one behind it",
+                )
+            }
+        }
+    }
 }
 
 /// how a breakpoint's condition is answered
@@ -336,6 +432,21 @@ pub enum Unbound {
         condition: String,
         /// what the interpreter said about it
         error: PythonError,
+    },
+
+    /// it waits for a breakpoint that can never hit it
+    ///
+    /// nothing about the file is wrong. the same rule
+    /// [`Self::ConditionInvalid`] follows: a breakpoint that can never fire is
+    /// refused **now**, rather than at a line somebody sits waiting on. a
+    /// sequence whose first link is missing never arms anything after it, so
+    /// every breakpoint in the chain is refused rather than the one that named
+    /// it
+    NeverArms {
+        /// the breakpoint id it named
+        after: u32,
+        /// why that one can never arm it
+        why: NoArming,
     },
 
     /// the file is basedpython and bpd was given no source map for this program
@@ -489,6 +600,12 @@ fn in_generated_python(
 impl std::fmt::Display for Unbound {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NeverArms { after, why } => write!(
+                formatter,
+                "it is armed only once breakpoint {after} has been hit, and \
+                 {why}. a breakpoint that can never arm can never fire, so it \
+                 is refused now rather than at a line somebody is waiting on"
+            ),
             Self::Unresolvable {
                 file,
                 reason,

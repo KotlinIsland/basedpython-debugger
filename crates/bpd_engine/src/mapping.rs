@@ -172,6 +172,10 @@ pub(crate) fn restore(
             Resolved {
                 id: answer.id,
                 binding: back(map, went, answer.binding),
+                // carried through the translation rather than rebuilt. mapping
+                // changes which file and line a binding is reported in and
+                // nothing about whether the interpreter is watching it yet
+                waiting_for: answer.waiting_for,
             }
         })
         .collect()
@@ -235,6 +239,9 @@ fn unbound(id: u32, reason: Unbound) -> Resolved {
     Resolved {
         id,
         binding: unbound_binding(reason),
+        // a breakpoint that did not bind is not waiting for one either: there
+        // is nothing for the arming to arm
+        waiting_for: None,
     }
 }
 

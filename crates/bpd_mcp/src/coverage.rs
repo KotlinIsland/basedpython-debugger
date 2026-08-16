@@ -86,6 +86,15 @@ pub const fn reach_of(request: &Request) -> Reach {
 /// exhaustive, for the reason [`reach_of`] is
 pub const fn reach_of_facet(facet: Facet) -> Reach {
     match facet {
+        // `after` on a breakpoint of `set_breakpoints`, naming a **position** in
+        // the same list: this server numbers breakpoints by where they appear,
+        // so a position is the only thing an agent can name. the answer carries
+        // `armed: false` and `waiting_for` beside `bound`
+        Facet::Sequenced => Reach::Direct(
+            "`after` on a `set_breakpoints` breakpoint, with `armed` and \
+             `waiting_for` on the answer",
+        ),
+
         // an argument of the tool that carries the replacement itself. the
         // report comes back in the answer's notes and **above** the changes,
         // because it is what the changes have to be read against

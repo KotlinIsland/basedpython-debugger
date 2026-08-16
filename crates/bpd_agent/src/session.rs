@@ -100,6 +100,106 @@ pub(crate) fn refresh_code(python: Python<'_>, code: &Bound<'_, PyAny>) -> PyRes
     )
 }
 
+/// answer one request from the engine, on the thread that is held
+///
+/// lifted out of [`stop`] because the list only ever grows: every capability
+/// the agent gains is one more arm, and the loop that holds a thread is not the
+/// place to read them
+fn answer(
+    python: Python<'_>,
+    stopped: &mut frames::Stopped<'_>,
+    ticket: &stops::Ticket,
+    thread: u64,
+    request: FromEngine,
+) -> PyResult<()> {
+    match request {
+        FromEngine::SetBreakpoints { breakpoints } => {
+            let resolved = breakpoints::apply(python, breakpoints)?;
+            attach::send(&FromAgent::BreakpointsResolved { resolved });
+        }
+        FromEngine::MapSources { files } => {
+            let files = sources::install(files);
+            attach::send(&FromAgent::SourcesMapped { files });
+        }
+        FromEngine::SetExceptionBreakpoints { raised, uncaught } => {
+            exceptions::watch(raised, uncaught);
+            refresh_events(python)?;
+            attach::send(&FromAgent::ExceptionBreakpointsSet { raised, uncaught });
+        }
+        FromEngine::DebugChildren { on } => debug_children(python, on)?,
+        FromEngine::Stack { top, .. } => {
+            let answer = stopped.stack(top)?;
+            attach::send(&answer);
+        }
+        FromEngine::Variables {
+            frame,
+            scope,
+            detail,
+        } => {
+            let answer = stopped.variables(frame, scope, detail)?;
+            attach::send(&answer);
+        }
+        FromEngine::Facts {
+            frame,
+            names,
+            limit,
+        } => attach::send(&stopped.facts(frame, names, limit)?),
+        FromEngine::TemplateContext { frame, detail } => {
+            attach::send(&stopped.template_context(frame, detail)?);
+        }
+        FromEngine::Source { frame, around } => {
+            let answer = stopped.source(frame, around)?;
+            attach::send(&answer);
+        }
+        FromEngine::Evaluate {
+            frame,
+            expression,
+            detail,
+        } => {
+            let answer = stopped.evaluate(frame, &expression, detail)?;
+            attach::send(&answer);
+        }
+        FromEngine::SetVariable {
+            frame,
+            scope,
+            name,
+            value,
+            detail,
+        } => {
+            let answer = stopped.set_variable(frame, scope, &name, &value, detail)?;
+            attach::send(&answer);
+        }
+        FromEngine::SetNextStatement { frame, line } => {
+            let answer = stopped.set_next_statement(frame, line)?;
+            attach::send(&answer);
+        }
+        FromEngine::RestartFrame { frame } => {
+            let answer = stopped.restart_frame(frame)?;
+            attach::send(&answer);
+        }
+        FromEngine::ReplaceCode {
+            file,
+            even_under_a_live_frame,
+        } => {
+            let replaced = replace::replace(python, &file, even_under_a_live_frame)?;
+            attach::send(&FromAgent::Replaced { replaced });
+        }
+        FromEngine::Threads { settle_ms } => {
+            let answer = threads::census(python, Duration::from_millis(settle_ms.into()))?;
+            attach::send(&answer);
+        }
+        FromEngine::StopTheWorld { settle_ms, .. } => {
+            let answer = stop_the_world(python, thread, ticket.stop, settle_ms)?;
+            attach::send(&answer);
+        }
+        // the router only ever sends what a held thread can answer, so
+        // anything else is a bug in the routing rather than in the engine
+        other => unreachable!("a held thread was handed {other:?} to answer"),
+    }
+
+    Ok(())
+}
+
 /// report a stop and hold this thread until the engine resumes it
 ///
 /// on return, the interpreter's instrumentation matches whatever breakpoint set
@@ -122,90 +222,7 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
             stops::Command::Answer(request) => request,
         };
 
-        match request {
-            FromEngine::SetBreakpoints { breakpoints } => {
-                let resolved = breakpoints::apply(python, breakpoints)?;
-                attach::send(&FromAgent::BreakpointsResolved { resolved });
-            }
-            FromEngine::MapSources { files } => {
-                let files = sources::install(files);
-                attach::send(&FromAgent::SourcesMapped { files });
-            }
-            FromEngine::SetExceptionBreakpoints { raised, uncaught } => {
-                exceptions::watch(raised, uncaught);
-                refresh_events(python)?;
-                attach::send(&FromAgent::ExceptionBreakpointsSet { raised, uncaught });
-            }
-            FromEngine::DebugChildren { on } => debug_children(python, on)?,
-            FromEngine::Stack { top, .. } => {
-                let answer = stopped.stack(top)?;
-                attach::send(&answer);
-            }
-            FromEngine::Variables {
-                frame,
-                scope,
-                detail,
-            } => {
-                let answer = stopped.variables(frame, scope, detail)?;
-                attach::send(&answer);
-            }
-            FromEngine::Facts {
-                frame,
-                names,
-                limit,
-            } => attach::send(&stopped.facts(frame, names, limit)?),
-            FromEngine::TemplateContext { frame, detail } => {
-                attach::send(&stopped.template_context(frame, detail)?);
-            }
-            FromEngine::Source { frame, around } => {
-                let answer = stopped.source(frame, around)?;
-                attach::send(&answer);
-            }
-            FromEngine::Evaluate {
-                frame,
-                expression,
-                detail,
-            } => {
-                let answer = stopped.evaluate(frame, &expression, detail)?;
-                attach::send(&answer);
-            }
-            FromEngine::SetVariable {
-                frame,
-                scope,
-                name,
-                value,
-                detail,
-            } => {
-                let answer = stopped.set_variable(frame, scope, &name, &value, detail)?;
-                attach::send(&answer);
-            }
-            FromEngine::SetNextStatement { frame, line } => {
-                let answer = stopped.set_next_statement(frame, line)?;
-                attach::send(&answer);
-            }
-            FromEngine::RestartFrame { frame } => {
-                let answer = stopped.restart_frame(frame)?;
-                attach::send(&answer);
-            }
-            FromEngine::ReplaceCode {
-                file,
-                even_under_a_live_frame,
-            } => {
-                let replaced = replace::replace(python, &file, even_under_a_live_frame)?;
-                attach::send(&FromAgent::Replaced { replaced });
-            }
-            FromEngine::Threads { settle_ms } => {
-                let answer = threads::census(python, Duration::from_millis(settle_ms.into()))?;
-                attach::send(&answer);
-            }
-            FromEngine::StopTheWorld { settle_ms, .. } => {
-                let answer = stop_the_world(python, thread, ticket.stop, settle_ms)?;
-                attach::send(&answer);
-            }
-            // the router only ever sends what a held thread can answer, so
-            // anything else is a bug in the routing rather than in the engine
-            other => unreachable!("a held thread was handed {other:?} to answer"),
-        }
+        answer(python, &mut stopped, &ticket, thread, request)?;
     }
 
     // the world goes when the last stop that asked for it does, and putting the

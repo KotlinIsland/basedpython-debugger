@@ -383,6 +383,23 @@ impl Debuggee {
             .unwrap_or_else(|| unreachable!("{id} was resolved against the open sessions"))
     }
 
+    /// replace a file's code, and answer with what became of it
+    ///
+    /// lifted out of [`Self::dispatch`] rather than written inline: the arm
+    /// carries two things a client asked for and the match is already at the
+    /// length where one more of those stops being readable
+    fn answer_a_replacement(
+        &mut self,
+        at: usize,
+        file: PathBuf,
+        even_under_a_live_frame: bool,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Response> {
+        let replaced =
+            self.attached[at].replace_the_code(file, even_under_a_live_frame, reporting)?;
+        Ok(Response::Replaced(replaced))
+    }
+
     /// answer one [`Request`] against this debuggee
     ///
     /// the capability surface is the enum, and this is the one place it is
@@ -505,11 +522,7 @@ impl Debuggee {
             Request::ReplaceCode {
                 file,
                 even_under_a_live_frame,
-            } => Ok(Response::Replaced(self.attached[at].replace_the_code(
-                file,
-                even_under_a_live_frame,
-                reporting,
-            )?)),
+            } => self.answer_a_replacement(at, file, even_under_a_live_frame, reporting),
             Request::RunScript { stop, script } => Ok(Response::Transcript(
                 self.execute(at, stop, &script, reporting)?,
             )),

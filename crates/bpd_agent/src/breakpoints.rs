@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
-use bpd_core::{Binding, Resolved, Site, SourceBreakpoint, Unbound};
+use bpd_core::{Binding, NoArming, Resolved, Site, SourceBreakpoint, Unbound};
 use pyo3::prelude::*;
 
 use crate::conditions::Plan;
@@ -52,6 +52,17 @@ struct State {
     reported: BTreeMap<u32, Binding>,
     /// by code object address, which is sound because `Armed` holds the object
     armed: BTreeMap<usize, Armed>,
+    /// the breakpoints that have acted at least once since this set was set
+    ///
+    /// what arms a breakpoint that named [`SourceBreakpoint::after`]. it is the
+    /// **process's** memory rather than a thread's, because the interpreter's
+    /// local events are per code object: a per-thread sequence would mean
+    /// watching the location on every thread and throwing away what the others
+    /// saw, which is the cost this feature is supposed not to have
+    ///
+    /// cleared with the set, because the ids are the client's and a new set
+    /// gives them to different breakpoints
+    fired: BTreeSet<u32>,
 }
 
 impl State {
@@ -60,6 +71,7 @@ impl State {
             pending: Vec::new(),
             reported: BTreeMap::new(),
             armed: BTreeMap::new(),
+            fired: BTreeSet::new(),
         }
     }
 }
@@ -200,6 +212,27 @@ pub(crate) fn rebind(python: Python<'_>, loaded: &FileId) -> PyResult<Vec<Resolv
 /// resolved again against the tree that is running now. a breakpoint left
 /// pointing at dead code would be one the client can see is set and that never
 /// fires, which is the thing this module exists to prevent
+/// arm whatever was waiting for the breakpoints that have just acted
+///
+/// called from the event path, which is why [`acted`] answers first: it takes
+/// the lock briefly and says whether anything is waiting at all, so a program
+/// whose breakpoints are not in a sequence pays a set insert per hit and nothing
+/// else. only when the answer changes is the whole set resolved again, and that
+/// happens once per link of a chain rather than once per hit
+///
+/// resolving from inside a `LINE` callback is safe, and that was measured
+/// rather than assumed: on 3.13, 3.14, 3.15 and 3.14t, `set_local_events` on
+/// another code object — and on the one the callback is running in — takes
+/// effect, and `restart_events` from there is what makes a location that had
+/// already returned `DISABLE` be offered again
+pub(crate) fn arm_after(python: Python<'_>, acted_ids: &[u32]) -> PyResult<Vec<Resolved>> {
+    if !acted(acted_ids) {
+        return Ok(Vec::new());
+    }
+    let (_all, changed) = resolve_all(python)?;
+    Ok(changed)
+}
+
 pub(crate) fn reresolve(python: Python<'_>) -> PyResult<Vec<Resolved>> {
     let (_all, changed) = resolve_all(python)?;
     Ok(changed)
@@ -241,18 +274,54 @@ fn resolve_all(python: Python<'_>) -> PyResult<(Vec<Resolved>, Vec<Resolved>)> {
     let mut armed: BTreeMap<usize, Armed> = BTreeMap::new();
     let mut in_templates: BTreeMap<(FileId, u32), Vec<Arc<Plan>>> = BTreeMap::new();
 
+    let decided = arming(
+        &pending
+            .iter()
+            .map(|(request, _, _)| request.clone())
+            .collect::<Vec<_>>(),
+        &read().fired,
+    );
+
     for (request, identity, plan) in pending {
-        let binding = resolve(
-            python,
-            &request,
-            identity.as_ref(),
-            &plan,
-            &mut armed,
-            &mut in_templates,
-        )?;
+        let waiting = match decided.get(&request.id) {
+            Some(Ok(waiting)) => *waiting,
+            Some(Err(why)) => {
+                // a chain that can never arm is refused **now**, the way a
+                // condition that does not compile is: the alternative is a
+                // breakpoint reported bound at a line nothing will ever watch
+                all.push(Resolved {
+                    id: request.id,
+                    binding: Binding::Unbound {
+                        reason: Unbound::NeverArms {
+                            after: request.after.unwrap_or_else(|| {
+                                unreachable!("only a breakpoint that named one can fail to arm")
+                            }),
+                            why: why.clone(),
+                        },
+                    },
+                    waiting_for: None,
+                });
+                continue;
+            }
+            None => unreachable!("`arming` decides every breakpoint of the set"),
+        };
+
+        // a waiting breakpoint is resolved exactly as any other — the client is
+        // told where it bound, because it did bind — and then its arming is
+        // thrown away into a map nothing reads. that is what leaves its location
+        // with no `LINE` events at all rather than watched and ignored
+        let mut unarmed = BTreeMap::new();
+        let mut unarmed_templates = BTreeMap::new();
+        let (into, templates) = if waiting.is_some() {
+            (&mut unarmed, &mut unarmed_templates)
+        } else {
+            (&mut armed, &mut in_templates)
+        };
+        let binding = resolve(python, &request, identity.as_ref(), &plan, into, templates)?;
         all.push(Resolved {
             id: request.id,
             binding,
+            waiting_for: waiting,
         });
     }
 
@@ -292,6 +361,98 @@ fn resolve_all(python: Python<'_>) -> PyResult<(Vec<Resolved>, Vec<Resolved>)> {
 }
 
 /// bind one breakpoint, adding it to `armed` for every code object that holds it
+/// what each breakpoint's `after` comes to, over the whole set at once
+///
+/// a chain is only decidable against every breakpoint in the set, which is why
+/// this is one pass over all of them rather than a question asked while each is
+/// resolved. `Ok(None)` is armed now — either it named nothing or the one it
+/// named has already acted; `Ok(Some(id))` is waiting for `id`; `Err` is a
+/// chain that can never arm anything
+fn arming(
+    pending: &[SourceBreakpoint],
+    fired: &BTreeSet<u32>,
+) -> BTreeMap<u32, Result<Option<u32>, NoArming>> {
+    let ids: BTreeSet<u32> = pending.iter().map(|request| request.id).collect();
+    let after: BTreeMap<u32, u32> = pending
+        .iter()
+        .filter_map(|request| request.after.map(|after| (request.id, after)))
+        .collect();
+
+    let mut decided = BTreeMap::new();
+    for request in pending {
+        let Some(names) = request.after else {
+            decided.insert(request.id, Ok(None));
+            continue;
+        };
+        if names == request.id {
+            decided.insert(request.id, Err(NoArming::Itself));
+            continue;
+        }
+        if !ids.contains(&names) {
+            decided.insert(request.id, Err(NoArming::NoSuchBreakpoint));
+            continue;
+        }
+
+        // walk the chain back. a cycle is every link waiting for one behind it,
+        // so none of them is ever armed and every one of them is refused —
+        // reporting only the breakpoint that closed the loop would leave the
+        // others looking like they were merely waiting
+        let mut through = vec![request.id];
+        let mut seen: BTreeSet<u32> = BTreeSet::from([request.id]);
+        let mut at = names;
+        let cycle = loop {
+            through.push(at);
+            if !seen.insert(at) {
+                break true;
+            }
+            match after.get(&at) {
+                Some(next) => at = *next,
+                None => break false,
+            }
+        };
+        decided.insert(
+            request.id,
+            if cycle {
+                Err(NoArming::Cycle { through })
+            } else if fired.contains(&names) {
+                Ok(None)
+            } else {
+                Ok(Some(names))
+            },
+        );
+    }
+    decided
+}
+
+/// remember that these breakpoints acted, and say whether that arms anything
+///
+/// called from the event path, so it takes the lock for as little as it can and
+/// decides nothing about the interpreter. re-arming is the caller's, because
+/// doing it here would be doing it under this lock
+pub(crate) fn acted(ids: &[u32]) -> bool {
+    if ids.is_empty() {
+        return false;
+    }
+    let mut state = write();
+    // every id inserted, and **then** the verdict. `any` short-circuits, so the
+    // first id that was new would leave the rest unrecorded — and an act nobody
+    // wrote down is one nothing ever waits on again
+    let inserted: Vec<bool> = ids.iter().map(|id| state.fired.insert(*id)).collect();
+    let fresh = inserted.into_iter().any(|fresh| fresh);
+    if !fresh {
+        return false;
+    }
+    // something acted for the first time. whether anything was **waiting** for
+    // it is the question worth answering, because re-resolving the whole set is
+    // not free and a breakpoint nothing waits for must not pay for it
+    state.pending.iter().any(|pending| {
+        pending
+            .request
+            .after
+            .is_some_and(|after| ids.contains(&after))
+    })
+}
+
 fn resolve(
     python: Python<'_>,
     request: &SourceBreakpoint,

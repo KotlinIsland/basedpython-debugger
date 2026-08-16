@@ -849,10 +849,30 @@ these are not ordered against each other, and none of them is scheduled. what
 each entry records is the reason it is worth doing and the part that is hard,
 so that whoever picks one up starts from the obstacle rather than finding it
 
-### breakpoint sequences
+### breakpoint sequences · done
 
 a breakpoint that does not arm until another one has been hit. "stop in the
 handler, but only after the request that set this flag came through"
+
+**built.** `after` names another breakpoint in the same set, and until that one
+acts the later one is bound and **not armed** — its location carries no `LINE`
+events, so waiting is free. the three design questions below were answered by
+the mechanism rather than by preference: per **process**, because the
+interpreter's local events are per code object and a per-thread sequence would
+have to watch every thread and discard what the others saw; a hit count that
+starts **at arming**, because there were no events to count before it; and a
+one-way chain, because a sequence that re-arms is a different feature
+
+what had to be measured first: arming from inside a `LINE` callback. on 3.13,
+3.14, 3.15 and 3.14t, `set_local_events` there takes effect on another code
+object *and* on the one the callback is running in, and `restart_events` undoes
+the per-location `DISABLE`. without that a logpoint could arm nothing until the
+next stop, which is to say nothing at all
+
+a chain that can never arm — a missing id, a self-reference, a cycle — is
+refused at set time the way a condition that does not compile is, and a cycle
+refuses every link rather than the one that closed it. see
+[breakpoints](docs/development/breakpoints.md)
 
 this is the cheapest item here and it fits what M2 already built: breakpoints
 carry conditions and hit counts evaluated in the agent, and a sequence is one
