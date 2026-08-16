@@ -1075,9 +1075,27 @@ the events, with nothing captured — whatever a recorder stores is on top, and
 that is the part with no bound yet
 
 so the question this item turns on is not "can the events be afforded" but "what
-is worth storing per line, and what does the window cost". the trap stands
-either way: a recorder that interpolates state it did not capture is a debugger
-inventing history
+is worth storing per line". **measured, same loop, against a bounded window of
+100,000 entries:**
+
+| what is stored per line               | time     | against bare |
+| ------------------------------------- | -------- | ------------ |
+| nothing                               | 13.1 ms  | —            |
+| the location — code object, line      | 75.1 ms  | 6×           |
+| the location and a copy of the locals | 390.8 ms | 30×          |
+
+so the two halves of "step back" have very different prices. **where the program
+went** is affordable and bounded — a fixed-size ring of small tuples. **what a
+variable was** costs five times that again in time and is unbounded in memory,
+because it is a copy of live objects per line, which also perturbs the heap it
+is copying from
+
+that splits the item in two, and the first half is honest on its own: a trail
+that says where the program went and **refuses** to say what anything was is a
+debugger reporting what it has. the trap is the other half — a recorder that
+interpolates state it did not capture is a debugger inventing history, and the
+numbers say that state is exactly the part nobody can afford to capture
+everywhere
 
 the trap is the obvious one: a recorder that interpolates state it did not
 capture is a debugger inventing history. it reports what it has and refuses what
