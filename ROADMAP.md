@@ -1011,8 +1011,20 @@ reference to everything, for as long as the walk takes
 
 three honesty constraints decide the design:
 
-- the debugger's own frames and temporaries are retainers, and have to be
-    excluded **and** said to be excluded
+- ~~the debugger's own frames and temporaries are retainers, and have to be
+    excluded **and** said to be excluded~~ — **measured, and it is the other way
+    round.** on 3.13, 3.14 and 3.15 a frame does not appear as a retainer of its
+    own local even when it has been materialised with `sys._getframe` and its
+    `f_locals` read, which is exactly the state every frame bpd holds is in. PEP
+    667 made `f_locals` a snapshot rather than a live dict, so a debugger reading
+    one leaves nothing behind
+
+    the real constraint is the inverse and it is worse: bpd's **rust-side**
+    references — the code registry, a recorded task stack — are `Py<PyAny>`
+    handles, which are refcounts rather than tracked python objects. a walk over
+    the referent graph cannot see them at all. so the debugger is invisible in
+    its own answer rather than noisy in it, and a report that did not say so
+    would answer "what is holding this" while holding it
 - objects the GC does not track — ints, strs, anything without GC support —
     never appear in the walk. a retainer report that omits them silently is
     wrong; it has to state its coverage
