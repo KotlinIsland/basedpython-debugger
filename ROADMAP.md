@@ -905,9 +905,35 @@ a handler rather than raised. a debugger that says nothing here is agreeing that
 the program succeeded
 
 stitching means recording the stack at the moment a task is created and
-presenting it above the frames that are actually running. cpython 3.14 added
-external asyncio introspection (`python -m asyncio ps`), which is the supported
-way into the task tree and fits the 3.14 line this project already draws
+presenting it above the frames that are actually running
+
+**measured, before any of it was built**, on 3.13, 3.14 and 3.15:
+
+- the motivating claim is exact. that program's traceback is **one frame** and
+    the process exits **0**
+- at a stop inside the scheduled task, the stack is `h` on top of
+    `Handle._run <- BaseEventLoop._run_once <- … <- <module>`, and the stack at
+    the scheduling is `g` on top of **the same frames**. so the two differ only
+    in their top frame, and `g` is nowhere in the stack the debugger would show.
+    the running frame's real caller is the event loop, which is why presenting
+    `g` above it would be a fabricated call chain
+- **`Task._source_traceback` is the creation stack, and it is `None` unless
+    asyncio debug mode is on.** bpd cannot turn that on: `loop.get_debug()` is
+    something the program can read, and debug mode changes what the program does
+    — slow-callback warnings, extra checks. that is the launch parity rule, so
+    this route is closed
+- **cpython 3.14's introspection does not answer this question.**
+    `Task._asyncio_awaited_by` and `asyncio.tools.get_all_awaited_by` are the
+    **await** tree — who is waiting on a task *right now* — and the motivating
+    case is a task nobody ever awaits. measured: `_asyncio_awaited_by` is `None`
+    for a fire-and-forget task, which is exactly the one whose exception is lost
+
+what is left is for bpd to record the stack itself, natively, at the moment a
+task is created. PEP 669's `CALL` looks like the way in — it fires for a call to
+a C callable, so `create_task` is reachable, and the per-location `DISABLE` this
+project is built on means only the call sites that really make tasks stay live.
+the piece that still needs designing is getting from the call to the `Task` it
+returned, which is a `C_RETURN` away
 
 the rule that matters: the stitched frames **did not call** the running ones,
 they scheduled them. presenting one seamless stack would be a fabricated call
