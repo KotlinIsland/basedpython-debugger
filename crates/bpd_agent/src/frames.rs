@@ -234,8 +234,14 @@ impl<'py> Stopped<'py> {
                 },
             )?);
         }
+        let scheduled = crate::tasks::scheduled_by(self.python);
         Ok(FromAgent::Stack {
             frames: described,
+            // asked once per stack rather than per frame: it is a property of
+            // the task the thread is in, and every frame of this stack is in
+            // the same one
+            scheduled_by: scheduled.1,
+            in_a_task: scheduled.0,
             depth,
             mode: world::mode(),
         })

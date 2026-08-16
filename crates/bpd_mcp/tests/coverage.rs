@@ -171,6 +171,15 @@ fn every_capability_carried_inside_a_request_reaches_the_session() {
         Facet::LiveReplacement.name()
     );
 
+    // where the task was created, read off the answer. a server that walked the
+    // frames and dropped this would show a stack that is true and says nothing
+    // about who scheduled it — which is the whole of what a severed chain costs
+    assert!(
+        client.answered(&["\"scheduled_by\"", "\"schedule\""]),
+        "`{}` is said to reach an agent and the stack answer never carried it",
+        Facet::Scheduling.name()
+    );
+
     // the sequence, read off what really arrived. a server that parsed `after`
     // and dropped it would set an ordinary breakpoint and look identical here
     // without this
@@ -1399,6 +1408,16 @@ impl Session for FakeSession {
 /// it shows that it can
 fn stack(stop: u64) -> Stack {
     Stack {
+        // inside a task, because an empty `scheduled_by` is the half a server
+        // can drop with nothing failing — every ordinary stack has one
+        in_a_task: true,
+        // inside a task, because an empty `scheduled_by` is the half a server
+        // can drop with nothing failing — every ordinary stack has one
+        scheduled_by: vec![bpd_core::Scheduling {
+            file: "/src/app.py".to_string(),
+            line: 42,
+            function: "schedule".to_string(),
+        }],
         frames: vec![
             Frame {
                 id: FrameId { stop, depth: 0 },

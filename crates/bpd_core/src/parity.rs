@@ -158,11 +158,20 @@ pub enum Facet {
     /// not the answer would show a breakpoint as set on a line the interpreter
     /// is not watching, which is the one thing a debugger must not do
     Sequenced,
+
+    /// where the task a stack is inside was created — [`crate::Stack`]
+    ///
+    /// carried on the **answer** to a stack, which is what makes it a facet
+    /// rather than a request: a front end can implement every variant, show the
+    /// frames, and drop the one thing that says who scheduled them. the running
+    /// frames are all a severed chain leaves behind, so a front end without this
+    /// shows a stack that is true and says nothing about who is responsible
+    Scheduling,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
@@ -170,6 +179,7 @@ impl Facet {
         Self::Terminal,
         Self::LiveReplacement,
         Self::Sequenced,
+        Self::Scheduling,
     ];
 
     /// what to call this capability in a message about it
@@ -182,6 +192,7 @@ impl Facet {
             Self::Terminal => "running the debuggee on a terminal the client owns",
             Self::LiveReplacement => "replacing code under a frame that is running it",
             Self::Sequenced => "a breakpoint that waits for another one to be hit",
+            Self::Scheduling => "where the task a stack is inside was created",
         }
     }
 }
