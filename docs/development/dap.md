@@ -385,6 +385,39 @@ the core owns instead of asking for it
 `Unmappable` inside the same wrapper stays `failed`, because the map could not
 place the line at all and nothing arriving later changes that
 
+### a refused `launch` ends the session
+
+every exit from this adapter sends `terminated`, and for a while one did not:
+a `launch` bpd refused answered the request and then went on serving the
+connection. no `terminated`, no `exited`, the socket open — measured twenty
+seconds after bpd had decided it would not debug anything
+
+so a client that does not tear a failed launch down itself was left holding a
+live debug session over a program that was never started, which is not a message
+anybody sees. it presents as an editor that hangs
+
+`launch` and `attach` are the two requests a session's **existence** depends on,
+and they are scoped to deliberately. refusing `variables` leaves a session that
+still stands; refusing `launch` leaves one that never began. terminating on every
+refusal would end a session because one `evaluate` was malformed — and the suite
+says so, since four other tests fail if the rule is widened that far
+
+three things about how it is said:
+
+- the **error response goes first**, always. it carries the only account of why,
+    and a bare `terminated` would be a session that ended for no stated reason —
+    the same failure one layer along
+- it is `terminated` and not `exited`. no process was ever started, so there is
+    no exit code, and reporting one would be inventing it
+- then bpd goes away without being asked to, because under `by run` bpd **is**
+    `$PYTHON` — an adapter that lingers is a whole run that lingers, and the
+    temporary build tree lingering with it
+
+it waits two seconds first. a client that answers a failed launch by
+disconnecting gets its `disconnect` answered, which is one round trip on a
+connection already open; a client that says nothing costs that wait rather than
+the rest of the run
+
 ### a session is the connection
 
 a `bpd_core::Request` may name the session it is for, and a DAP request has no
