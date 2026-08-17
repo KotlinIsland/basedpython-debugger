@@ -529,6 +529,7 @@ impl Adapter {
             Some("stepOut") => self.step(message, StepKind::Out),
             Some("gotoTargets") => self.goto_targets(message),
             Some("goto") => self.goto(message),
+            Some("bpd/understands") => self.understands(message),
             Some("restartFrame") => self.restart_frame(message),
             Some("exceptionInfo") => self.exception_info(message),
             // DAP has no request for a debug script and never will, so this is
@@ -603,6 +604,10 @@ impl Adapter {
                 == serde_json::Value::Bool(true),
             run_in_terminal: message.arguments["supportsRunInTerminalRequest"]
                 == serde_json::Value::Bool(true),
+            // carried across rather than reset. `bpd/understands` is its own
+            // request precisely so it does not have to be part of this one, and
+            // nothing says a client must send them in one order
+            understands: std::mem::take(&mut self.client.understands),
         };
 
         self.respond(message, Some(capabilities()))?;
@@ -2072,6 +2077,33 @@ impl Adapter {
         self.moved(stop, &jumped, "goto")
     }
 
+    /// which of bpd's own events this client reads
+    ///
+    /// bpd narrates what it noticed on the console — the locals a jump bound to
+    /// `None`, the breakpoints a destination line will not fire for this pass —
+    /// because for most clients that is the only channel those facts have. The
+    /// same facts also go out as data on `bpd/moved`, and a client that reads
+    /// them there and *also* shows the narration shows everything twice.
+    ///
+    /// so a client says what it reads and bpd stops saying it in prose. it is a
+    /// request rather than a client capability in `initialize` because a client
+    /// does not always own that message — an editor whose debug support builds
+    /// `initialize` itself has nowhere to put a field, and can still send this.
+    ///
+    /// unknown names are kept rather than refused: they name events a later bpd
+    /// may send, and refusing would make a client that is ahead unusable
+    /// against a bpd that is behind
+    fn understands(&mut self, message: &Incoming) -> Answered {
+        let events = message.arguments["events"]
+            .as_array()
+            .ok_or("a `bpd/understands` request needs an `events` array")?;
+        self.client.understands = events
+            .iter()
+            .filter_map(|event| event.as_str().map(str::to_owned))
+            .collect();
+        self.respond(message, None)
+    }
+
     /// re-enter a frame from the top
     ///
     /// DAP's own wording for this request has it discard the frames above the
@@ -2152,7 +2184,8 @@ impl Adapter {
                 bound_to_none,
                 unannounced,
             } => {
-                if !unannounced.is_empty() {
+                let narrate = !self.client.understands.contains(MOVED_EVENT);
+                if narrate && !unannounced.is_empty() {
                     self.say(&format!(
                         "stop {stop}: breakpoint(s) {unannounced:?} are on line \
                          {} and will not fire for this pass — no line event is \
@@ -2161,7 +2194,7 @@ impl Adapter {
                         jumped.at.line
                     ))?;
                 }
-                if !bound_to_none.is_empty() {
+                if narrate && !bound_to_none.is_empty() {
                     self.say(&format!(
                         "stop {stop}: {bound_to_none:?} held nothing before the \
                          move and hold `None` now — cpython binds every unbound \
@@ -2176,13 +2209,40 @@ impl Adapter {
                 )
             }
             bpd_core::Jump::Refused { wanted, error } => {
-                self.say(&format!(
-                    "stop {stop}: cpython refused the move to line {wanted} — \
-                     {error}\n"
-                ))?;
+                if !self.client.understands.contains(MOVED_EVENT) {
+                    self.say(&format!(
+                        "stop {stop}: cpython refused the move to line {wanted} — \
+                         {error}\n"
+                    ))?;
+                }
                 format!("still at {}: {error}", jumped.at)
             }
         };
+
+        // the same facts as data, for a client that can act on them
+        //
+        // the console lines above stay, and that is an addition rather than
+        // duplication left in by accident: they are what a client which has
+        // never heard of this event still shows a person, and every front end
+        // other than one taught this is such a client. both are written from the
+        // same values in the same function, so neither can drift from the other
+        //
+        // a custom **event** rather than a request a client would have to send:
+        // these are things bpd noticed while doing what it was asked, and a fact
+        // that has to be asked for is a fact a client which does not ask never
+        // learns. `jumped` is serialised whole rather than picked apart, so a
+        // reader gets `bound_to_none` and `unannounced` under `moved`, or
+        // `wanted` and cpython's own `error` under `refused`, without this
+        // having to know which. the name is namespaced for the reason
+        // `bpd/facts` is
+        self.event(
+            MOVED_EVENT,
+            &serde_json::json!({
+                "stop": stop,
+                "threadId": thread,
+                "jumped": jumped,
+            }),
+        )?;
 
         self.event(
             "stopped",
@@ -2696,13 +2756,26 @@ impl Adapter {
 /// each is checked at `launch`, before anything has started — the alternative
 /// to refusing there is discovering it when a child is already held, or when a
 /// session is already waiting for an agent nobody was asked to start
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct ClientCan {
     /// `supportsStartDebuggingRequest` — a session for a debugged child
     start_debugging: bool,
     /// `supportsRunInTerminalRequest` — a command line, in a terminal it owns
     run_in_terminal: bool,
+    /// the custom events this client says it reads, from `bpd/understands`
+    ///
+    /// empty until a client says otherwise, which is every client that has
+    /// never heard of the request — so the default is the narration, and being
+    /// quiet is the thing that has to be asked for
+    understands: std::collections::BTreeSet<String>,
 }
+
+/// the event carrying what a jump or a frame restart really did
+///
+/// named once, because the narration it replaces is switched off by a client
+/// naming it back in `bpd/understands` — two spellings of it would mean a client
+/// that asked for quiet and did not get it
+const MOVED_EVENT: &str = "bpd/moved";
 
 /// what a handler returns: nothing, or the reason it got no further
 type Answered = Result<(), Aborted>;
