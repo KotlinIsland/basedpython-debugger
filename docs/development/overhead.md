@@ -190,13 +190,14 @@ that directory, is in [launching](launching.md)
 56× end to end: 230 ms against 12 984 ms, same program, same interpreter, same
 breakpoint, both hit fifty times. it was narrower before the agent was cached,
 and the gap widened for two reasons rather than one: `bpd`'s fixed cost fell, and
-the busy machine charges debugpy's eleven seconds about 15% more than the idle
-one did
+the busy machine charges debugpy more than the idle one did
 
 the before-caching pair that used to be quoted here — 361 against 11 319 — is
-**withdrawn**: neither number appears on any table on this page or anywhere in
-the tree, so nothing on the page derives it and nobody can check it. every other
-ratio here does check out against the tables above
+**withdrawn**, and so is the 15% that was computed from it: neither number
+appears on any table on this page or anywhere in the tree, so nothing derives
+them and nobody can check them. withdrawing a pair and keeping a percentage
+taken from it is the same fault one step along. every other ratio here does
+check out against the tables above
 
 the never-hit row says where that comes from. with a breakpoint on a line the
 program **never reaches**, debugpy's run is 10 285 ms against 164 ms bare —

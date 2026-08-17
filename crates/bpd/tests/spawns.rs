@@ -10,6 +10,12 @@
 //! command has no ui to hold one in and a child nothing resumes is a hung
 //! program
 
+// **the whole file is unix.** its fixtures call `os.fork()`, which does not
+// exist on windows — so without this the windows leg of the matrix compiles it,
+// runs it, and fails on an `AttributeError` that has nothing to do with the
+// debugger
+#![cfg(unix)]
+
 use std::process::Command;
 
 use bpd_core::python::Capabilities;

@@ -316,10 +316,16 @@ pub(crate) fn scheduled_by(python: Python<'_>) -> (bool, Vec<Scheduling>, bool) 
         .get(&(task.as_ptr() as usize))
         .map(|made| (made.frames.clone(), made.cut))
         .unwrap_or_default();
-    // in a task either way. an empty list here is a task made by a route this
-    // does not watch — `ensure_future`, `loop.create_task`, a task group — and
-    // saying "in a task, and bpd did not see it made" is a different fact from
-    // "not in a task"
+    // in a task either way. an empty list is a task this did not see made — one
+    // created before the hook was armed, one whose stack could not be read, or
+    // one made by something that never reaches `BaseEventLoop.create_task`:
+    // `asyncio.Task(coro)` built directly, or a third-party loop. the four
+    // stdlib routes all reach it, which the header records — the version of
+    // this comment that named three of them as unwatched said the opposite of
+    // that, in the function that produces the fact
+    //
+    // "in a task, and bpd did not see it made" is a different fact from "not in
+    // a task", which is what `in_a_task` carries
     (true, frames, cut)
 }
 

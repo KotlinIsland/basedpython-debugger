@@ -98,10 +98,8 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // enum so an agent is offered them rather than having to know them
         Facet::RecordingDepth => Reach::Direct("`depth` on the `record` tool"),
 
-        // beside it rather than inside it, so an agent reading the frames meets
-        // the caveat about them in the same object
-        // an argument of the same tool that starts one, with the depths as an
-        // enum so an agent is offered them rather than having to know them
+        // beside the frames rather than inside them, so an agent reading the
+        // record meets the caveat about it in the same object
         Facet::SchedulingCut => Reach::Direct(
             "`scheduled_by_cut` and `scheduled_by_cut_says` on the `stack` \
              answer",

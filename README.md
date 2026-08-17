@@ -44,15 +44,20 @@ a debugger for python and [basedpython](https://github.com/KotlinIsland/basedpyt
 
 ## status
 
-early. nothing is installable yet. see [ROADMAP.md](ROADMAP.md) for what is
-being built and in what order, and `docs/development/` for the design
+early, and **nothing is published** — `bpd-release` assembles a layout and
+writes it out as a wheel `pip install` accepts, and CI drives both on every push,
+but nothing uploads, signs or tags, so there is nowhere to install it *from*. see
+[ROADMAP.md](ROADMAP.md) for what is being built and in what order, and
+`docs/development/` for the design
 
-what exists today:
+what exists today — five subcommands:
 
 ```sh
 cargo run --bin bpd -- doctor
 cargo run --bin bpd -- launch --python python3.14 script.py
 cargo run --bin bpd -- launch --debug-children manage.py runserver
+cargo run --bin bpd -- dap
+cargo run --bin bpd -- mcp
 cargo run --bin bpd -- cache
 ```
 
@@ -125,10 +130,16 @@ what was supposed to hold. never `let _ =` on a `Result`; never a bare
 `unwrap()`. `expect()` is allowed and its message justifies why the invariant
 holds
 
-**and a bound that bit is reported, never silent.** anything truncated,
-capped or discarded carries the count of what went — `bpd_core::Kept` exists so
-that is a type rather than a convention, because it was got wrong four separate
-times before it was one
+**and a bound that bit is reported, never silent.** anything truncated, capped or
+discarded carries the count of what went. `bpd_core::Kept` is the type for it —
+a list whose `dropped` travels with its `kept`, so a front end cannot render one
+without the other — and it exists because the convention was got wrong four
+separate times before it was a type
+
+it is not yet everywhere. the scheduling record carries a `cut` flag rather than
+a count, deliberately, because counting the rest means walking the rest and it is
+paid per task created. a bound that reports a flag instead of a count is holding
+the rule; one that reports nothing is not
 
 ### no special casing
 

@@ -337,3 +337,78 @@ fn asking_what_holds_an_object_runs_none_of_the_program_to_answer() {
         found.found
     );
 }
+
+/// a program holding one object in containers that lie when asked to iterate
+///
+/// a list subclass with an `__iter__` of its own is ordinary in framework code,
+/// and it is the case that tells "read the storage" apart from "ask the object"
+const LYING: &str = r"class Registry(list):
+    def __iter__(self):
+        return iter(['nothing', 'here'])
+
+
+class Watchful(set):
+    def __iter__(self):
+        raise AssertionError('the walk asked a set to iterate itself')
+
+
+def main():
+    target = ['the object being asked about']
+    registry = Registry([1, target, 3])
+    here = 1              # the breakpoint
+    return registry
+
+
+main()
+";
+
+#[test]
+fn a_container_that_lies_about_its_contents_is_read_through_its_storage() {
+    // the rule this is an instance of: a question about the program is answered
+    // from what the interpreter itself indexes, never by asking the object. a
+    // subclass with its own `__iter__` would otherwise decide what the debugger
+    // reports about it — and an earlier fix for that used an exact type check,
+    // which stopped running the program's code by refusing to answer at all
+    let fixture = Fixture::new("program", LYING);
+    let here = line_of(LYING, "here = 1");
+    let mut debuggee = launch(&fixture);
+
+    debuggee
+        .set_breakpoints(vec![SourceBreakpoint::at(1, fixture.path(), here)])
+        .expect("the breakpoint was answered");
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
+        Running::Stopped { .. } => {}
+        other => panic!("the breakpoint never stopped it: {other:?}"),
+    }
+    let frame = debuggee
+        .the_stack(Some(1))
+        .expect("the stack was answered")
+        .frames[0]
+        .id;
+    let found = debuggee
+        .what_holds(frame, "target")
+        .expect("the retainer walk was answered");
+
+    let registry = found
+        .found
+        .iter()
+        .find(|retainer| retainer.kind == "Registry")
+        .unwrap_or_else(|| {
+            panic!(
+                "the subclass holds it and was not found: {:#?}",
+                found.found
+            )
+        });
+
+    // the real position, out of the storage. the object's own iterator yields
+    // two strings and would have said the target is not in it at all
+    assert_eq!(
+        registry.through.as_deref(),
+        Some("index 1"),
+        "a list subclass is answered from `PyList_GET_ITEM`, which is where the \
+         interpreter itself looks: {registry:#?}"
+    );
+}
