@@ -696,13 +696,13 @@ pub fn tools() -> Vec<Tool> {
         Tool {
             name: "facts",
             title: "what is provable about a frame's names, and for how long",
-            description: "`variables` says what a scope holds **right now**.                 this says what is true of a name *and* how far past this line                 that can be carried — which is the half you need to reason                 about code that has not run yet, and the half you cannot work                 out from a value.
+            description: "`variables` says what a scope holds **right now**. this says what is true of a name *and* how far past this line that can be carried — which is the half you need to reason about code that has not run yet, and the half you cannot work out from a value.
 
-                every fact carries a `stability`. `permanent` means nothing the                 program can do makes it false, short of rebinding the name —                 which is in the source you are reading, not in the object.                 `until` names what would have to happen: the object's contents                 changing, its attributes being assigned, or its `__class__`                 being reassigned. the judgement comes from cpython itself —                 whether the type is a heap type, whether instances keep a                 dictionary, and whether the type is one whose storage is its                 value — so `x == 3` on an `int` is permanent and the same                 reading of an `int` subclass is not.
+                every fact carries a `stability`. `permanent` means nothing the program can do makes it false, short of rebinding the name —                 which is in the source you are reading, not in the object. `until` names what would have to happen: the object's contents changing, its attributes being assigned, or its `__class__`                 being reassigned. the judgement comes from cpython itself —                 whether the type is a heap type, whether instances keep a dictionary, and whether the type is one whose storage is its value — so `x == 3` on an `int` is permanent and the same reading of an `int` subclass is not.
 
-                **it runs none of the program.** a reading that would need                 `__bool__`, `__len__`, a property or a `__getattr__` is not                 taken and not guessed at: that name comes back in `silent`                 naming what would have run. use `evaluate` when you want the                 program's own answer and are willing to pay for it.
+                **it runs none of the program.** a reading that would need `__bool__`, `__len__`, a property or a `__getattr__` is not taken and not guessed at: that name comes back in `silent`                 naming what would have run. use `evaluate` when you want the program's own answer and are willing to pay for it.
 
-                a name may be a dotted path — `self.limit` — and every segment                 is read out of an object's own storage. every name asked about                 comes back in exactly one of `proved` and `silent`."
+                a name may be a dotted path — `self.limit` — and every segment is read out of an object's own storage. every name asked about comes back in exactly one of `proved` and `silent`."
                 .to_string(),
             schema: {
                 // not `frame_properties`: those carry a `detail`, which bounds
@@ -718,18 +718,22 @@ pub fn tools() -> Vec<Tool> {
                 properties["names"] = serde_json::json!({
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "the names to prove things about, each a                                     name or a dotted path. named rather than                                     the whole scope because you are the one                                     reading the source that mentions them",
+                    "description": "the names to prove things about, each a name or a dotted path. \
+                                    named rather than the whole scope because you are the one \
+                                    reading the source that mentions them",
                 });
                 properties["limit"] = serde_json::json!({
                     "type": "object",
                     "properties": {
                         "text": { "type": "integer",
-                            "description": "how many characters of a value one                                             fact may carry. a longer value                                             produces no fact rather than a cut                                             one, because a cut value is a                                             different claim" },
+                            "description": "how many characters of a value one fact may carry. a \
+                                            longer value produces no fact rather than a cut one, \
+                                            because a cut value is a different claim" },
                         "depth": { "type": "integer",
-                            "description": "how many segments of a dotted path                                             to follow" },
+                            "description": "how many segments of a dotted path to follow" },
                     },
                     "additionalProperties": false,
-                    "description": "how much one fact may cost. omit for the                                     defaults",
+                    "description": "how much one fact may cost. omit for the defaults",
                 });
                 object(properties, &["names"])
             },

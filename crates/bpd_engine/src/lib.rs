@@ -139,7 +139,9 @@ pub enum Error {
     /// answers about one breakpoint standing, this refuses — install the map
     /// before the first set, which is what `bpd by` does at launch
     #[error(
-        "a basedpython source map was installed after {resolved} breakpoints          had already been resolved. those were resolved without it, so they          would disagree with everything resolved after — install the map before          the first breakpoint set"
+        "a basedpython source map was installed after {resolved} breakpoints had already been \
+         resolved. those were resolved without it, so they would disagree with everything resolved \
+         after — install the map before the first breakpoint set"
     )]
     MapAfterBreakpoints {
         /// how many breakpoints had already been answered

@@ -189,7 +189,8 @@ mod bpd_agent {
     fn required_env(name: &str) -> PyResult<String> {
         std::env::var(name).map_err(|_| {
             PySystemExit::new_err(format!(
-                "bpd: `{name}` is not set. `bpd_agent.main()` is the entry point                  the launcher uses and is not meant to be called by hand"
+                "bpd: `{name}` is not set. `bpd_agent.main()` is the entry point the launcher uses \
+                 and is not meant to be called by hand"
             ))
         })
     }

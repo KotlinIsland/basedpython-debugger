@@ -137,12 +137,23 @@ pub fn stack(walked: &Stack) -> serde_json::Value {
     // stack would read a gap in the debugger as a fact about the program
     if walked.in_a_task && walked.scheduled_by.is_empty() {
         rendered["scheduled_by"] = serde_json::json!([]);
-        rendered["scheduled_note"] = "this stack is inside an asyncio task and              bpd did not see that task created, so it cannot say what scheduled              it. that is a limit of bpd rather than a fact about the program:              `asyncio.create_task` is watched, and `ensure_future`,              `loop.create_task` and a task group's own `create_task` are not yet"
+        rendered["scheduled_note"] = "this stack is inside an asyncio task and bpd did not see \
+                                      that task created, so it cannot say what scheduled it. that \
+                                      is a limit of bpd rather than a fact about the program: \
+                                      `asyncio.create_task` is watched, and `ensure_future`, \
+                                      `loop.create_task` and a task group's own `create_task` are \
+                                      not yet"
             .into();
     }
     if !walked.scheduled_by.is_empty() {
         rendered["scheduled_by"] = serde_json::json!(walked.scheduled_by);
-        rendered["scheduled_note"] = "this stack is inside an asyncio task.              `scheduled_by` is where that task was created, innermost first —              those frames **scheduled** these rather than calling them, and the              real caller of the outermost frame above is the event loop. it is a              record taken when the task was made, so its lines are where things              were then and its frames cannot be read for variables"
+        rendered["scheduled_note"] = "this stack is inside an asyncio task. `scheduled_by` is \
+                                      where that task was created, innermost first — those frames \
+                                      **scheduled** these rather than calling them, and the real \
+                                      caller of the outermost frame above is the event loop. it is \
+                                      a record taken when the task was made, so its lines are \
+                                      where things were then and its frames cannot be read for \
+                                      variables"
             .into();
     }
     // and whether that record reaches the program's own entry. the frames a
@@ -483,7 +494,9 @@ pub fn breakpoints(
                 rendered["armed"] = false.into();
                 rendered["waiting_for"] = after.into();
                 rendered["note"] = format!(
-                    "bound, and not armed yet: it is watched only once breakpoint                      {after} has been hit. until then its location has no line                      events at all, which is what makes waiting free"
+                    "bound, and not armed yet: it is watched only once breakpoint {after} has been \
+                     hit. until then its location has no line events at all, which is what makes \
+                     waiting free"
                 )
                 .into();
             }
@@ -553,7 +566,8 @@ pub fn breakpoints(
                     rendered["generated"] = serde_json::json!(generated);
                     if asked.is_some_and(|asked| asked.line != *line) {
                         rendered["moved"] = format!(
-                            "line {} generated nothing bpd can stop on, so this                              moved to line {line}, which did",
+                            "line {} generated nothing bpd can stop on, so this moved to line \
+                             {line}, which did",
                             asked.map_or(0, |asked| asked.line)
                         )
                         .into();
