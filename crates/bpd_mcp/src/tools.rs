@@ -910,10 +910,15 @@ pub fn tools() -> Vec<Tool> {
                 every one of them. measured at about 4x a bare run. it is off by \
                 default and worth turning on for a region of a run, not a \
                 session.\n\n\
-                it records **where** and never what. a copy of the values per \
-                line costs five times as much again, is unbounded, and perturbs \
-                the heap it copies from — and a recorder that filled them in \
-                afterwards would be inventing history.\n\n\
+                `depth` decides whether it records **where** only or what the \
+                frame held as well. the prices are very different and measured \
+                — see the trail documentation — so the cheap one is the \
+                default and the expensive one is asked for.\n\n\
+                what it keeps of a value is **text**, read without running any \
+                of the program: no `repr`, no `__len__`, no `__str__`. that is \
+                a weaker answer than a repr and it is one that cannot be wrong, \
+                and it is what keeps the window bounded — a reference would \
+                keep alive objects the program had finished with.\n\n\
                 stopping keeps the trail, because stopping is what you do in \
                 order to read it."
                 .to_string(),
@@ -924,6 +929,17 @@ pub fn tools() -> Vec<Tool> {
                         "whether to record. starting clears any earlier trail, \
                          because one spanning two recordings has a gap in it \
                          that nothing marks" },
+                    "depth": {
+                        "type": "string",
+                        "enum": ["where", "frame", "locals", "values"],
+                        "description":
+                            "how much of each step to keep. `where` is the \
+                             location and is the default. `values` also keeps \
+                             what the frame held, rendered as text, and costs \
+                             several times as much again. `frame` and `locals` \
+                             keep neither and exist so the cost of the other \
+                             two can be told apart",
+                    },
                 }),
                 &["on"],
             ),

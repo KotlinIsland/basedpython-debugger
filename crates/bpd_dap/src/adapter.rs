@@ -1298,10 +1298,23 @@ impl Adapter {
             }
         };
 
-        let answer = match self.ask(Request::Record {
-            on,
-            depth: bpd_core::Depth::default(),
-        })? {
+        // how much of each step to keep. absent is the cheap one, because the
+        // depths differ by hundreds of times a bare run and a client that said
+        // nothing has not asked to pay for the expensive one
+        let depth = match message.arguments.get("depth") {
+            None => bpd_core::Depth::default(),
+            Some(named) => serde_json::from_value(named.clone()).map_err(|error| {
+                Aborted::Refuse(format!(
+                    "this is not a recording depth: {error}. it takes `where`, \
+                     which keeps the location, `values`, which also keeps what \
+                     the frame held, and `frame` and `locals`, which keep \
+                     neither and exist so the cost of the other two can be \
+                     told apart"
+                ))
+            })?,
+        };
+
+        let answer = match self.ask(Request::Record { on, depth })? {
             Response::Recording { on, held, dropped } => {
                 serde_json::json!({ "recording": on, "held": held, "dropped": dropped })
             }
@@ -1314,9 +1327,12 @@ impl Adapter {
                 "output",
                 &serde_json::json!({
                     "category": "important",
-                    "output": "bpd is recording where the program goes. every line is \
-                               watched while this is on, which costs about four times a \
-                               bare run — it records where, never what\n",
+                    "output": format!(
+                        "bpd is recording at depth `{depth}`. every line is watched \
+                         while this is on, and what that costs depends on the depth \
+                         — see the trail documentation, which carries the measured \
+                         figures\n"
+                    ),
                 }),
             )?;
         }
