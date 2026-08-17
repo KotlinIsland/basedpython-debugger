@@ -316,18 +316,38 @@ fn capture(
 
     // read whole and then bounded, so what the cap left out is counted rather
     // than walked away from. `Kept::of` is what makes that impossible to forget
+    // **everything not kept is counted**, and that is the whole point of the
+    // type: a name skipped because it could not be read looks exactly like a
+    // frame that never bound it. the first cut of this counted only what the cap
+    // cut and let the three failure arms drop names silently — which is the
+    // defect the type was introduced to make impossible, still in its only
+    // caller
+    //
+    // and only the kept ones are rendered. rendering the whole of `f_locals`
+    // and then truncating means a module-level line pays a render per global,
+    // every step, to throw all but sixteen away
     let mut held = Vec::new();
+    let mut lost = 0_u64;
     for name in items {
-        let Ok(name) = name else { break };
+        let Ok(name) = name else {
+            lost += 1;
+            break;
+        };
         let Ok(text) = name.extract::<String>() else {
+            lost += 1;
             continue;
         };
         let Ok(value) = locals.get_item(&name) else {
+            lost += 1;
             continue;
         };
-        held.push((text, rendered(&value)));
+        if held.len() < NAMES {
+            held.push((text, rendered(&value)));
+        } else {
+            lost += 1;
+        }
     }
-    bpd_core::Kept::of(held, NAMES)
+    bpd_core::Kept::counted(held, lost)
 }
 
 /// one value as text, **without running any of the program**
