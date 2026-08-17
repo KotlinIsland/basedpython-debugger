@@ -49,7 +49,8 @@ pub use error::{Error, Result};
 pub use exception::{PythonError, TracebackFrame};
 pub use fact::{Class, Fact, Facts, Limit, Mutation, Observed, Silence, Silent, Stability};
 pub use frame::{
-    Coverage, Frame, FrameId, FrameKind, Retainer, Retainers, Scheduling, Scope, Trail, Visited,
+    Coverage, Depth, Frame, FrameId, FrameKind, Retainer, Retainers, Scheduling, Scope, Trail,
+    Visited,
 };
 pub use jump::{Jump, Jumped, Suspendable, Unrestartable};
 pub use parity::{Carried, Facet, Naming, Reach, Told, ran, ran_as, say, surface};

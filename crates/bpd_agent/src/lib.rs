@@ -475,7 +475,7 @@ fn on_line<'py>(
     // the one mode that turns off the `DISABLE` this whole design rests on, so
     // it is asked for rather than assumed — see `crate::trail`
     if trail::recording() {
-        trail::went(code, line, events::thread_ident(python)?);
+        trail::went(python, code, line, events::thread_ident(python)?);
     }
 
     let plans = breakpoints::hit(code.as_ptr() as usize, line);

@@ -260,6 +260,44 @@ pub struct Coverage {
     pub mode: Mode,
 }
 
+/// how much of each step a recording keeps
+///
+/// **an experiment.** the trail's committed shape is [`Self::Where`], and every
+/// deeper setting exists to find out where the cost of "what was this variable"
+/// actually lives — measured at 30× a bare run when it was first tried, against
+/// 6× for the location alone, and never decomposed. each adds one step of the
+/// work to the one above it
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Depth {
+    /// the location only — code object and line
+    #[default]
+    Where,
+
+    /// and reach the running frame, keeping nothing from it
+    ///
+    /// a PEP 669 `LINE` event is handed a code object and a line and **not** a
+    /// frame, so anything about the state costs a `sys._getframe` per line.
+    /// this isolates that call from what is done with what it returns
+    Frame,
+
+    /// and materialise `f_locals`, keeping nothing from it
+    ///
+    /// PEP 667 made `f_locals` a write-through proxy, and asking for it builds
+    /// a mapping over the frame's fast locals. nothing so far has separated
+    /// this from the two steps around it
+    Locals,
+
+    /// and render every local to bounded text
+    ///
+    /// **text rather than a reference**, which is the design question. a
+    /// reference is cheap to take, makes the window unbounded in memory, and
+    /// keeps alive objects the program has finished with — which is bpd
+    /// perturbing the heap it is describing. rendering costs per line and
+    /// bounds both
+    Values,
+}
+
 /// where the program went, over a bounded window
 ///
 /// deliberately **only** where. what a variable was at each step costs five
@@ -296,4 +334,10 @@ pub struct Visited {
     pub function: String,
     /// which thread was there
     pub thread: u64,
+    /// what the frame held, rendered, when the recording was deep enough
+    ///
+    /// **an experiment**, and empty at the depth the trail ships as. text
+    /// rather than references: a reference would make the window unbounded in
+    /// memory and would keep alive objects the program had finished with
+    pub held: Vec<(String, String)>,
 }

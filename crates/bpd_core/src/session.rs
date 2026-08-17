@@ -358,6 +358,8 @@ pub enum Request {
     Record {
         /// whether to record
         on: bool,
+        /// how much of each step to keep — an experiment, see [`Depth`]
+        depth: crate::Depth,
     },
 
     /// the window of where the program has been

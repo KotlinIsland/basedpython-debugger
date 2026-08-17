@@ -553,7 +553,13 @@ impl<'a> Server<'a> {
             }
             "record" => {
                 let args: RecordArgs = parse(name, arguments)?;
-                match self.ask_in(args.session, Request::Record { on: args.on })? {
+                match self.ask_in(
+                    args.session,
+                    Request::Record {
+                        on: args.on,
+                        depth: bpd_core::Depth::default(),
+                    },
+                )? {
                     Response::Recording { on, held, dropped } => {
                         Ok(render::recording(on, held, dropped))
                     }
