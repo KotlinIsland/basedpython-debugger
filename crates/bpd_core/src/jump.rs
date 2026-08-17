@@ -219,4 +219,75 @@ mod tests {
             "ValueError: can't jump into the body of a for loop"
         );
     }
+
+    /// the json a client reads a refusal out of, pinned
+    ///
+    /// `Jumped` goes out whole on `bpd/moved`, so this shape *is* the wire. it is
+    /// pinned because getting it wrong on the reading side is silent: an `error`
+    /// read as a string rather than as the object it is yields nothing, which
+    /// turns a refusal into a move that disturbed nothing and reports it as
+    /// nothing at all — and a client that asked bpd to stop narrating has no
+    /// other channel for it. the intellij plugin did exactly that
+    #[test]
+    fn a_refusal_serialises_as_a_tagged_outcome_and_an_error_object() {
+        let jumped = Jumped {
+            at: Where {
+                file: "/tmp/p/bain.by".to_string(),
+                line: 2,
+                function: "work".to_string(),
+            },
+            outcome: Jump::Refused {
+                wanted: 4,
+                error: bpd_core_error(),
+            },
+            mode: Mode::NonStop,
+        };
+
+        let json = serde_json::to_value(&jumped).expect("Jumped serialises");
+        let outcome = &json["outcome"];
+
+        // the tag is what says which case this is. a reader that infers it from
+        // whether some other key parsed has no way to tell a refusal it cannot
+        // read from a move
+        assert_eq!(outcome["jumped"], "refused");
+        assert_eq!(outcome["wanted"], 4);
+        // an object, never a string
+        assert!(outcome["error"].is_object(), "was {}", outcome["error"]);
+        assert_eq!(outcome["error"]["kind"], "ValueError");
+        assert_eq!(
+            outcome["error"]["message"],
+            "can't jump into the body of a for loop"
+        );
+    }
+
+    /// and the other case, so the two are pinned against each other
+    #[test]
+    fn a_move_serialises_with_the_lists_a_client_acts_on() {
+        let jumped = Jumped {
+            at: Where {
+                file: "/tmp/p/bain.by".to_string(),
+                line: 1,
+                function: "work".to_string(),
+            },
+            outcome: Jump::Moved {
+                from: 3,
+                bound_to_none: vec!["later".to_string()],
+                unannounced: vec![7],
+            },
+            mode: Mode::NonStop,
+        };
+
+        let json = serde_json::to_value(&jumped).expect("Jumped serialises");
+        assert_eq!(json["outcome"]["jumped"], "moved");
+        assert_eq!(json["outcome"]["bound_to_none"][0], "later");
+        assert_eq!(json["outcome"]["unannounced"][0], 7);
+    }
+
+    fn bpd_core_error() -> crate::PythonError {
+        crate::PythonError {
+            kind: "ValueError".to_string(),
+            message: "can't jump into the body of a for loop".to_string(),
+            traceback: Vec::new(),
+        }
+    }
 }
