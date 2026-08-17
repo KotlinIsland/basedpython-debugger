@@ -40,6 +40,38 @@ enum Command {
         /// the layout's root
         layout: PathBuf,
     },
+
+    /// write a verified layout out as a wheel, so pip can deliver it
+    ///
+    /// one wheel per **platform**, tagged `py3-none-<platform>`, carrying every
+    /// agent the layout holds. the binary is not a python extension and the
+    /// agents are loaded by the debuggee, so nothing here is tied to the
+    /// interpreter that installs it
+    Wheel {
+        /// the layout's root, as `assemble` built it
+        #[arg(long)]
+        layout: PathBuf,
+
+        /// the distribution name pip will know it by
+        #[arg(long, default_value = "basedpythondebugger")]
+        distribution: String,
+
+        /// the version to ship it as
+        #[arg(long)]
+        version: String,
+
+        /// the platform tag, written the way pip writes one
+        ///
+        /// `macosx_11_0_arm64`, `manylinux_2_17_x86_64`, `win_amd64`. it is
+        /// taken rather than detected because what manylinux level a binary
+        /// satisfies is a fact about the toolchain that built it
+        #[arg(long)]
+        platform: String,
+
+        /// the directory to write the wheel into
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[expect(
@@ -79,6 +111,21 @@ fn run(command: Command) -> Result<String, bpd_release::Refused> {
                 manifest.files.len(),
                 out.display(),
                 tags.join(", ")
+            ))
+        }
+        Command::Wheel {
+            layout,
+            distribution,
+            version,
+            platform,
+            out,
+        } => {
+            let built = bpd_release::wheel(&layout, &distribution, &version, &platform, &out)?;
+            Ok(format!(
+                "wrote {}, carrying {} file(s) as {}",
+                built.path.display(),
+                built.contents.len(),
+                built.tag
             ))
         }
         Command::Verify { layout } => {
