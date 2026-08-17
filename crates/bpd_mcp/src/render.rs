@@ -134,18 +134,13 @@ pub fn stack(walked: &Stack) -> serde_json::Value {
     // would reason about a call chain that never happened
 
     // an empty list when the stack **is** in a task, and nothing recorded how it
-    // was made. that is a route bpd does not watch yet, and an agent shown the
-    // same empty answer as a synchronous stack would read a gap in the debugger
-    // as a fact about the program
+    // was made — a task made before the hook was armed, or one whose creating
+    // stack could not be read. an agent shown the same empty answer as a
+    // synchronous stack would read a gap in the debugger as a fact about the
+    // program, so the two are told apart by `in_a_task` and by the sentence
     if walked.in_a_task && walked.scheduled_by.is_empty() {
         rendered["scheduled_by"] = serde_json::json!([]);
-        rendered["scheduled_note"] = "this stack is inside an asyncio task and bpd did not see \
-                                      that task created, so it cannot say what scheduled it. that \
-                                      is a limit of bpd rather than a fact about the program: \
-                                      `asyncio.create_task` is watched, and `ensure_future`, \
-                                      `loop.create_task` and a task group's own `create_task` are \
-                                      not yet"
-            .into();
+        rendered["scheduled_note"] = bpd_core::TASK_NOT_SEEN.into();
     }
     if !walked.scheduled_by.is_empty() {
         rendered["scheduled_by"] = serde_json::json!(walked.scheduled_by);

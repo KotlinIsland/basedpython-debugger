@@ -17,6 +17,14 @@
 //! what is under test is what cpython does across `fork`, and no amount of rust
 //! proves that
 
+// **the whole file is unix.** every fixture here calls `os.fork()`, which does
+// not exist on windows — so without this the windows leg of the matrix compiles
+// this, runs it, and fails on an `AttributeError` that has nothing to do with
+// the debugger. `execs.rs` and `breakpoints.rs` already gate their fork cases
+// this way; this file was the one that did not, and the matrix has never run,
+// so nobody had found out
+#![cfg(unix)]
+
 use std::time::Duration;
 
 use bpd_core::python::Capabilities;

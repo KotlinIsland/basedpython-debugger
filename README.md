@@ -33,13 +33,12 @@ a debugger for python and [basedpython](https://github.com/KotlinIsland/basedpyt
     debugged child stops, so nothing turns it on for you — and with it off the
     child is still *reported*, which is what turns an unbound breakpoint into a
     reason
-- **basedpython aware — not built yet.** it is the thing this project is named
-    for and it is the one bullet here describing something that does not exist:
-    `.by` breakpoints and `.by` frames need the transpiler to emit a source map
-    with provenance and a hash of both artefacts, and that work is upstream. the
-    rule this project holds itself to is that a feature is built or it does not
-    exist, and a list that quietly mixed the two would break it on the first
-    line
+- **basedpython aware** — `.by` breakpoints bind to the generated line and
+    report both locations, and a `.by` frame carries where the interpreter really
+    is. the map is verified against a hash of **both** artefacts before it
+    resolves anything, and a line it cannot place is an error rather than a
+    fallback to the raw number. the bullet this replaces said the feature did not
+    exist, which stopped being true when `by run` began emitting the map
 - **cpython 3.13+, no compromises** — no `sys.settrace` path, no compatibility
     shims, no capability fallbacks
 
@@ -75,3 +74,102 @@ no part of MCP, so copy or symlink it where yours looks for one. what it says is
 not load bearing: a client without skills gets everything that matters from the
 tool descriptions and the errors, which is where
 [the MCP adapter](docs/development/mcp.md) keeps the semantics
+
+## contributing
+
+`ROADMAP.md` says a milestone is finished when the standard in this section
+holds for it. that sentence pointed at a section which did not exist, so the
+standard a contributor is held to had no committed statement at all — this is it
+
+### a debugger is a measuring instrument
+
+everything a person or an agent believes about a running program comes through
+it. a type checker that is wrong produces a diagnostic somebody can argue with;
+a debugger that is wrong produces a false **belief** about reality, and they act
+on it. there is no downstream check that catches it
+
+so the bar is not "works on the happy path". it is: **if `bpd` reports it, it is
+true, and if it cannot know, it says so.** a wrong answer is worse than an error
+
+this project will not ship a value that is probably right, a breakpoint that
+silently did not bind, a step that silently landed elsewhere, or a line number
+from a source map nobody verified
+
+### no placeholders
+
+a feature is fully implemented, tested and documented — or it does not exist.
+there is no third state. `todo!` and `unimplemented!` are denied at clippy
+level, and so are a function returning a default to stand in for work not done,
+a match arm added to quiet the compiler, a parameter accepted and ignored, and
+an option parsed and never read
+
+if you need the shape of something before the body exists, leave the type out of
+the tree and write the design in `scratch.<topic>.md`. an absent feature is
+honest; a hollow one is a lie that compiles
+
+### fail loudly
+
+when the debugger cannot do what was asked it says so immediately, with the
+reason and the thing that caused it. it never degrades quietly
+
+| situation                  | response                                             |
+| -------------------------- | ---------------------------------------------------- |
+| the interpreter is too old | refuse at launch, naming the version and the minimum |
+| a breakpoint cannot bind   | report it unbound, with why — never as set           |
+| a source map has no entry  | error naming the file and line — never the raw line  |
+| an expression fails        | return the exception, not `None`                     |
+| an invariant is violated   | panic with a message naming the invariant            |
+
+`assert!`, `unreachable!` and `panic!` are encouraged, with a message saying
+what was supposed to hold. never `let _ =` on a `Result`; never a bare
+`unwrap()`. `expect()` is allowed and its message justifies why the invariant
+holds
+
+**and a bound that bit is reported, never silent.** anything truncated,
+capped or discarded carries the count of what went — `bpd_core::Kept` exists so
+that is a type rather than a convention, because it was got wrong four separate
+times before it was one
+
+### no special casing
+
+a fix that handles the reported input and nothing else is not a fix. find the
+rule the input is an instance of, implement the rule, and test the rule. if the
+rule genuinely has an exception, the exception gets a comment naming the cpython
+behaviour that forces it and a test that fails if cpython changes
+
+### correctness is not negotiable for speed
+
+this project is fast because of its architecture — native PEP 669 callbacks,
+`DISABLE` on locations that will never be interesting — not because it skips
+checks. an optimisation that changes an observable answer is a bug, not a
+trade-off, and every fast path needs a test pinning it to the slow path's answer
+
+### tests
+
+a bug fix starts with a failing test. anything touching interpreter behaviour
+needs an integration test that spawns a real interpreter and asserts on real
+state — unit tests over mocked frames prove nothing about cpython. performance
+claims need a benchmark in the tree, not a number in a commit message
+
+a test whose name promises more than its body checks is worse than no test
+
+### the build
+
+```sh
+cargo test
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fmt --all
+prek run --all-files
+```
+
+the agent is a cpython extension and is not abi3, so every build compiles it
+against one interpreter. `.cargo/config.toml` sets a default; override it with
+`PYO3_PYTHON=python3.13 cargo build -p bpd_agent`
+
+### text style
+
+all english is lowercase, with exceptions for proper nouns, acronyms and PEP
+numbers, and trailing periods are dropped — in code comments, commit messages
+and documentation alike. comment when the implementation looks out of place: a
+cpython quirk, an ordering constraint, a deliberate non-obvious choice. do not
+narrate what the code already says

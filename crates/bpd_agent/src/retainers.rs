@@ -146,9 +146,24 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
     }
 
     // a sequence, where the position is the answer
-    if retainer.is_instance_of::<PyList>() || retainer.is_instance_of::<PyTuple>() {
-        for (at, item) in retainer.try_iter()?.enumerate() {
-            if item?.is(target) {
+    //
+    // read through the concrete storage and matched by **exact** type, for the
+    // reason `described` is: `try_iter` is `PyObject_GetIter`, which is
+    // `type(obj).__iter__` — the program's own code — and `is_instance_of`
+    // takes subclasses, so a `class Registry(list)` with an iterator of its own
+    // would be asked to run it to answer a question about the program. what it
+    // yielded would then decide the index reported
+    if let Ok(items) = retainer.cast_exact::<PyList>() {
+        for (at, item) in items.iter().enumerate() {
+            if item.is(target) {
+                return Ok(Some(format!("index {at}")));
+            }
+        }
+        return Ok(None);
+    }
+    if let Ok(items) = retainer.cast_exact::<PyTuple>() {
+        for (at, item) in items.iter().enumerate() {
+            if item.is(target) {
                 return Ok(Some(format!("index {at}")));
             }
         }
@@ -160,9 +175,17 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
     // table is resized, so the position it is reached at is not a place the
     // object is — read as a sequence's index it says the program holds it
     // somewhere it does not, and it is not stable enough to be true twice
-    if retainer.is_instance_of::<PySet>() || retainer.is_instance_of::<PyFrozenSet>() {
-        for item in retainer.try_iter()? {
-            if item?.is(target) {
+    if let Ok(items) = retainer.cast_exact::<PySet>() {
+        for item in items.iter() {
+            if item.is(target) {
+                return Ok(Some("an element of it".to_string()));
+            }
+        }
+        return Ok(None);
+    }
+    if let Ok(items) = retainer.cast_exact::<PyFrozenSet>() {
+        for item in items.iter() {
+            if item.is(target) {
                 return Ok(Some("an element of it".to_string()));
             }
         }

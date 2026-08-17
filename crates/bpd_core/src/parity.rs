@@ -689,6 +689,36 @@ pub fn surface() -> Vec<Request> {
             },
         },
     ]
+    .into_iter()
+    .chain(asked_about_a_program(frame))
+    .collect()
+}
+
+/// the four that ask a question about a running program rather than steer it
+///
+/// lifted out because `surface` is at clippy's line bound, and grouped because
+/// they are the four that were **missing** from it. every parity assertion
+/// iterates that list, so while they were absent `Facts`, `Record`, `Trail` and
+/// `Retainers` sat outside the comparison between the two front ends, outside
+/// the `JUSTIFIED` check, and outside the one that makes a gap say what stands
+/// in the way — with all of it passing green
+fn asked_about_a_program(frame: FrameId) -> Vec<Request> {
+    vec![
+        Request::Facts {
+            frame,
+            names: vec!["x".to_string()],
+            limit: crate::fact::Limit::default(),
+        },
+        Request::Record {
+            on: true,
+            depth: crate::Depth::default(),
+        },
+        Request::Trail,
+        Request::Retainers {
+            frame,
+            expression: "x".to_string(),
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -698,13 +728,41 @@ mod tests {
 
     #[test]
     fn the_surface_holds_one_request_of_every_kind_and_no_kind_twice() {
-        let names: Vec<&str> = surface().iter().map(Request::name).collect();
-        let distinct: BTreeSet<&str> = names.iter().copied().collect();
+        // this used to test only the second half of its own name. the surface
+        // was missing four variants — `Facts`, `Record`, `Trail`, `Retainers` —
+        // and since every parity assertion iterates it, all four were outside
+        // the comparison between the front ends, outside the `JUSTIFIED` check
+        // and outside the "says what stands in the way" check. a test whose
+        // name promises more than its body checks is worse than no test, and it
+        // sat inside the mechanism that enforces this project's central rule
+        let mut held: Vec<Option<&str>> = vec![None; Request::KINDS];
+        for request in surface() {
+            let at = request.ordinal();
+            assert!(
+                at < Request::KINDS,
+                "`{}` has ordinal {at} and `Request::KINDS` is {}. a variant was \
+                 given an ordinal and the count was not raised with it",
+                request.name(),
+                Request::KINDS
+            );
+            assert!(
+                held[at].is_none(),
+                "the surface names `{}` twice",
+                request.name()
+            );
+            held[at] = Some(request.name());
+        }
 
-        assert_eq!(
-            names.len(),
-            distinct.len(),
-            "the surface names a capability twice: {names:?}"
+        let missing: Vec<usize> = held
+            .iter()
+            .enumerate()
+            .filter_map(|(at, held)| held.is_none().then_some(at))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the surface is missing the variants with ordinals {missing:?}, so \
+             every parity assertion that iterates it skips them silently. add \
+             one of each to `surface`"
         );
     }
 
