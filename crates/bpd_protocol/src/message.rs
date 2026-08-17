@@ -606,6 +606,8 @@ pub enum FromEngine {
     Record {
         /// whether to record
         on: bool,
+        /// how much of each step to keep — see `bpd_core::Depth`
+        depth: bpd_core::Depth,
     },
 
     /// the window of where the program has been

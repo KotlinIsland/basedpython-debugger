@@ -417,9 +417,10 @@ impl Debuggee {
         &mut self,
         at: usize,
         on: bool,
+        depth: bpd_core::Depth,
         reporting: &mut dyn Reporting,
     ) -> Result<Response> {
-        let (on, held, dropped) = self.attached[at].record_trail(on, reporting)?;
+        let (on, held, dropped) = self.attached[at].record_trail(on, depth, reporting)?;
         Ok(Response::Recording { on, held, dropped })
     }
 
@@ -584,7 +585,7 @@ impl Debuggee {
                 file,
                 even_under_a_live_frame,
             } => self.answer_a_replacement(at, file, even_under_a_live_frame, reporting),
-            Request::Record { on } => self.recording(at, on, reporting),
+            Request::Record { on, depth } => self.recording(at, on, depth, reporting),
             Request::Trail => self.taken(at, reporting),
             Request::Retainers { frame, expression } => {
                 self.holds(at, frame, expression, reporting)
@@ -920,8 +921,8 @@ impl Debuggee {
     /// # errors
     ///
     /// when the session cannot be reached
-    pub fn record(&mut self, on: bool) -> Result<(bool, u64, u64)> {
-        match self.ask_for(Request::Record { on })? {
+    pub fn record(&mut self, on: bool, depth: bpd_core::Depth) -> Result<(bool, u64, u64)> {
+        match self.ask_for(Request::Record { on, depth })? {
             Response::Recording { on, held, dropped } => Ok((on, held, dropped)),
             other => unreachable!("a recording was answered with {other:?}"),
         }
@@ -1624,11 +1625,12 @@ impl Attached {
     fn record_trail(
         &mut self,
         on: bool,
+        depth: bpd_core::Depth,
         reporting: &mut dyn Reporting,
     ) -> Result<(bool, u64, u64)> {
         const EXPECTED: &str = "whether recording is on";
 
-        match self.ask(&FromEngine::Record { on }, EXPECTED, reporting)? {
+        match self.ask(&FromEngine::Record { on, depth }, EXPECTED, reporting)? {
             FromAgent::Recording { on, held, dropped } => Ok((on, held, dropped)),
             other => Err(unexpected(&other, EXPECTED)),
         }

@@ -142,8 +142,8 @@ fn answer(
             let answer = stopped.variables(frame, scope, detail)?;
             attach::send(&answer);
         }
-        FromEngine::Record { on } => {
-            let (held, dropped) = crate::trail::record(on);
+        FromEngine::Record { on, depth } => {
+            let (held, dropped) = crate::trail::record(python, on, depth)?;
             // the instrumentation follows the mode: recording arms `LINE` for
             // the whole program, and stopping takes it off again
             refresh_events(python)?;

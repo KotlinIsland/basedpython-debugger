@@ -59,7 +59,9 @@ fn a_trail_says_where_the_program_really_went_and_not_where_it_did_not() {
     let never = line_of(PROGRAM, "never = n");
     let mut debuggee = launch(&fixture);
 
-    let (on, held, dropped) = debuggee.record(true).expect("recording was answered");
+    let (on, held, dropped) = debuggee
+        .record(true, bpd_core::Depth::Where)
+        .expect("recording was answered");
     assert!(on, "it was asked to record and said it was not");
     assert_eq!((held, dropped), (0, 0), "a fresh recording holds nothing");
 
@@ -144,7 +146,9 @@ fn stopping_a_recording_keeps_what_it_recorded() {
     let done = line_of(PROGRAM, "done = value");
     let mut debuggee = launch(&fixture);
 
-    debuggee.record(true).expect("recording was answered");
+    debuggee
+        .record(true, bpd_core::Depth::Where)
+        .expect("recording was answered");
     debuggee
         .set_breakpoints(vec![SourceBreakpoint::at(1, fixture.path(), done)])
         .expect("the breakpoint was answered");
@@ -156,7 +160,9 @@ fn stopping_a_recording_keeps_what_it_recorded() {
         other => panic!("the breakpoint never stopped it: {other:?}"),
     }
 
-    let (on, held, _) = debuggee.record(false).expect("recording was stopped");
+    let (on, held, _) = debuggee
+        .record(false, bpd_core::Depth::Where)
+        .expect("recording was stopped");
     assert!(!on, "it was asked to stop and said it had not");
     assert!(held > 0, "it recorded something before being stopped");
 
@@ -209,7 +215,9 @@ fn the_window_lets_go_of_a_code_object_no_step_in_it_still_names() {
     let done = line_of(WATCHES_ITS_OWN_REFCOUNT, "done = answer");
     let mut debuggee = launch(&fixture);
 
-    debuggee.record(true).expect("recording was answered");
+    debuggee
+        .record(true, bpd_core::Depth::Where)
+        .expect("recording was answered");
     debuggee
         .set_breakpoints(vec![SourceBreakpoint::at(1, fixture.path(), done)])
         .expect("the breakpoint was answered");

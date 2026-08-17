@@ -1298,7 +1298,10 @@ impl Adapter {
             }
         };
 
-        let answer = match self.ask(Request::Record { on })? {
+        let answer = match self.ask(Request::Record {
+            on,
+            depth: bpd_core::Depth::default(),
+        })? {
             Response::Recording { on, held, dropped } => {
                 serde_json::json!({ "recording": on, "held": held, "dropped": dropped })
             }

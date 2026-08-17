@@ -1354,7 +1354,7 @@ impl Session for FakeSession {
             // bound again. the refused shape is what the DAP coverage drives, and
             // that a real interpreter really replaces code is
             // `crates/bpd_engine/tests/replacement.rs`
-            Request::Record { on } => Response::Recording {
+            Request::Record { on, .. } => Response::Recording {
                 on,
                 held: 3,
                 // a window that has dropped entries, because that is the half a
@@ -1368,6 +1368,7 @@ impl Session for FakeSession {
                     line: 12,
                     function: "handle".to_string(),
                     thread: THREAD,
+                    held: Vec::new(),
                 }],
                 dropped: 12,
                 recording: true,
