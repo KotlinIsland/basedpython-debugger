@@ -43,9 +43,7 @@ pub(crate) fn run(args: &Args) -> ExitCode {
     // `bpd attach` yet, so an interpreter with the api reaches nothing. saying
     // "attaching is available" on the strength of the interpreter having it
     // named a command that does not exist, which sent a reader to run it
-    println!(
-        "attaching to a running process is not built yet — see PEP 768 above for whether this interpreter could carry it"
-    );
+    println!("attaching to a running process is not built yet — see `PEP 768` above");
 
     ExitCode::SUCCESS
 }
