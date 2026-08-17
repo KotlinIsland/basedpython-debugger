@@ -82,6 +82,7 @@ over_each_transport!(
     a_client_is_refused_the_same_interpreter_the_command_line_is,
     a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds,
     everything_a_program_printed_is_on_the_wire_before_it_is_reported_over,
+    a_refused_launch_ends_the_session_instead_of_leaving_it_open,
 );
 
 /// a program with a local worth writing to, and a marker after the breakpoint
@@ -1385,6 +1386,41 @@ impl Client {
         }
     }
 
+    /// whether an event of this name has already arrived
+    ///
+    /// asked of what has been read rather than by waiting, because the question
+    /// is whether something was sent — and waiting for an event that must not
+    /// come would only ever be answered by a timeout
+    fn seen_event(&self, event: &str) -> bool {
+        self.seen
+            .iter()
+            .any(|message| message["type"] == "event" && message["event"] == event)
+    }
+
+    /// whether the adapter ends without being told to
+    ///
+    /// no `disconnect` is sent. what is under test is an adapter that has
+    /// nothing left to do and knows it — the client in the failure this comes
+    /// from never says anything again, and bpd waiting for one to speak is the
+    /// hang itself
+    fn exits_on_its_own(&mut self) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let ended = self
+                .adapter
+                .lock()
+                .expect("nothing panics holding the adapter")
+                .try_wait()
+                .expect("the adapter is a child of this process");
+            if ended.is_some() {
+                self.finished.store(true, Ordering::Relaxed);
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
     /// the next reverse request of this name the adapter has sent
     ///
     /// DAP is not one-directional, and `startDebugging` is the one this adapter
@@ -2229,4 +2265,64 @@ fn a_connection_that_presents_nothing_is_dropped_rather_than_holding_the_listene
     client.request("disconnect", &serde_json::json!({}));
     client.finish();
     drop(silent);
+}
+
+fn a_refused_launch_ends_the_session_instead_of_leaving_it_open(transport: Transport) {
+    // the failure this is written against, measured before it was fixed: bpd
+    // answered the refusal and then sat on the connection. no `terminated`, no
+    // `exited`, the socket open twenty seconds later — so a client that does
+    // not tear a failed launch down itself has a live debug session over a
+    // program that was never started, which presents as an IDE hanging with no
+    // message at all
+    //
+    // every other exit from this adapter sends `terminated`. the refused launch
+    // was the one that did not, and it is the one where the client has least
+    // else to go on
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    let refused = client.request(
+        "launch",
+        &serde_json::json!({
+            "program": "/tmp/a-program-that-is-never-reached.py",
+            "python": "/nonexistent/python",
+        }),
+    );
+
+    // the error response still goes out, and goes out first. it carries the
+    // only account of why, and a bare `terminated` would be a session that
+    // ended for no stated reason — the same failure one layer along
+    assert_eq!(
+        refused["success"], false,
+        "an interpreter that is not there cannot be launched: {refused}"
+    );
+    let said = refused["message"]
+        .as_str()
+        .or_else(|| refused["body"]["error"]["format"].as_str())
+        .unwrap_or_default();
+    assert!(
+        said.contains("/nonexistent/python"),
+        "the refusal names what it could not run: {refused}"
+    );
+
+    // and then the session is over, said in the word DAP has for it
+    let ended = client.event("terminated");
+    assert_eq!(ended["event"], "terminated");
+
+    // `terminated` and not `exited`: no process was ever started, so there is
+    // no exit code to report and reporting one would be inventing it
+    assert!(
+        !client.seen_event("exited"),
+        "nothing ran, so there is no exit status to give: {:#?}",
+        client.seen
+    );
+
+    // and bpd goes away without being asked to. under `by run` bpd *is*
+    // `$PYTHON`, so an adapter that lingers is a whole run that lingers — the
+    // client is never sent `disconnect` here, which is the point
+    assert!(
+        client.exits_on_its_own(),
+        "a session that never began has nothing left to wait for, and this one \
+         was still running"
+    );
 }

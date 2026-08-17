@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bpd_core::{
     Addressed, Binding, Detail, Evaluated, Forwarded, FrameId, LogRecord, Reporting, Request,
@@ -59,11 +60,48 @@ type Output = Arc<Mutex<Writer<Box<dyn Write + Send>>>>;
 /// the handle the reader thread uses to reach a running program
 type Held = Arc<Mutex<Option<Box<dyn Interrupt>>>>;
 
+/// how long a refused launch waits for a client to say goodbye
+///
+/// long enough for a client that answers a failed launch by disconnecting —
+/// which is one round trip on a connection that is already open — and short
+/// enough that a client which never answers is not what the run is waiting on
+const FAREWELL: Duration = Duration::from_secs(2);
+
+/// how often that wait looks
+const FAREWELL_POLL: Duration = Duration::from_millis(10);
+
+/// how the adapter's loop ended, which decides whether to wait for the client
+///
+/// the difference is whether there is anything left to hear. a session that ran
+/// ends when the client hangs up, and joining the reader is what puts the answer
+/// to its `disconnect` on the wire before this process goes away — but a session
+/// that never began ends with a client which may say nothing ever again, and
+/// waiting on one is the hang this distinction exists to remove
+enum Ended {
+    /// the client went away, asked to disconnect, or the program finished
+    WithTheClient,
+    /// `launch` or `attach` was refused, and there was never a session
+    NothingToDebug,
+}
+
+/// whether this request is one a session's existence depends on
+///
+/// the two that bring a session into being. every other request is asked *of* a
+/// session and refusing one leaves it standing
+fn begins_a_session(message: &Incoming) -> bool {
+    matches!(message.command.as_deref(), Some("launch" | "attach"))
+}
+
 /// serve one DAP client over `input` and `output`
 ///
-/// returns when the client hangs up or disconnects. the debuggee never outlives
-/// it: a client that vanishes leaves a program running with nothing watching
-/// it, which is the state the agent itself refuses to be in
+/// returns when the client hangs up or disconnects, or when a `launch` this
+/// adapter refused leaves no session to serve. the debuggee never outlives it:
+/// a client that vanishes leaves a program running with nothing watching it,
+/// which is the state the agent itself refuses to be in
+///
+/// # errors
+///
+/// when the connection to the client fails
 pub fn serve(
     launcher: &dyn Launcher,
     input: Box<dyn Read + Send>,
@@ -91,6 +129,27 @@ pub fn serve(
     // the reader owns the client's input and ends when the client hangs up.
     // joining it means the answer to a `disconnect` is written before this
     // process goes away
+    //
+    // **except when the session never began.** a refused `launch` has already
+    // had its error response and its `terminated` written — every send flushes,
+    // so nothing of ours is outstanding — and what is left is a client that has
+    // been told everything and may never speak again. waiting for one to hang
+    // up is precisely the hang this avoids: under `by run` bpd *is* `$PYTHON`,
+    // so bpd lingering is the whole run lingering, and the temporary build tree
+    // lingering with it
+    if matches!(served, Ok(Ended::NothingToDebug)) {
+        // a client that tears a failed launch down itself is answered: its
+        // `disconnect` is handled by the reader thread, which ends once it has.
+        // so the wait is for that and nothing else, and it is **bounded** —
+        // a client that says nothing costs this and not the rest of the run,
+        // which is the whole failure being fixed
+        let deadline = Instant::now() + FAREWELL;
+        while !reader.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(FAREWELL_POLL);
+        }
+        return Ok(());
+    }
+
     let read = reader.join();
     served?;
     match read {
@@ -216,7 +275,7 @@ fn end_debuggee(interrupt: &Held) -> Result<(), String> {
 /// to be the answer to, and the loop simply waits again. the engine already
 /// polls its listener inside a wait, so this changes what is held rather than
 /// what is done
-const WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis(25);
+const WAIT_SLICE: Duration = Duration::from_millis(25);
 
 /// how long the adapter waits for a client to answer a `runInTerminal`
 ///
@@ -225,7 +284,7 @@ const WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis(25);
 /// waiting for the answer is that a client which cannot start the program says
 /// so, and a wait with no end would turn one that says nothing into a session
 /// that hangs with no cause
-const TERMINAL_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+const TERMINAL_PATIENCE: Duration = Duration::from_secs(30);
 
 /// the field a `startDebugging` configuration names the session in
 ///
@@ -319,10 +378,10 @@ impl Adapter {
         &mut self,
         launcher: &dyn Launcher,
         commands: &Receiver<Incoming>,
-    ) -> Result<(), crate::wire::Error> {
+    ) -> Result<Ended, crate::wire::Error> {
         loop {
             if self.stopping.load(Ordering::Relaxed) {
-                return Ok(());
+                return Ok(Ended::WithTheClient);
             }
 
             if self.waiting() {
@@ -349,7 +408,7 @@ impl Adapter {
                     (Ok(other), Ok(_)) => unreachable!("a wait was answered with {other:?}"),
                     (Err(error), Ok(_)) => {
                         if self.stopping.load(Ordering::Relaxed) {
-                            return Ok(());
+                            return Ok(Ended::WithTheClient);
                         }
                         // there is no request outstanding, so there is nothing
                         // to refuse. the program is gone and the client is told
@@ -371,7 +430,7 @@ impl Adapter {
             // because a message that arrived first is answered first
             let message = if self.deferred.is_empty() {
                 let Ok(message) = commands.recv() else {
-                    return Ok(());
+                    return Ok(Ended::WithTheClient);
                 };
                 message
             } else {
@@ -380,7 +439,38 @@ impl Adapter {
             let handled = self.handle(launcher, &message, commands);
             match handled {
                 Ok(()) => {}
-                Err(Aborted::Refuse(reason)) => self.refuse(&message, &reason)?,
+                Err(Aborted::Refuse(reason)) => {
+                    // the refusal goes out **first**, always. it carries the
+                    // only account of why, and it is the string the client puts
+                    // in front of a person
+                    self.refuse(&message, &reason)?;
+
+                    // and then, for the two requests a session's existence
+                    // depends on, the session is over. refusing `variables`
+                    // leaves a session that still exists; refusing `launch`
+                    // leaves one that never began, and every other exit from
+                    // this adapter sends `terminated` while that one did not —
+                    // so a client with nothing to react to sat on a live
+                    // connection to a program that was never started
+                    //
+                    // scoped to these two rather than to `Aborted::Refuse`,
+                    // which every refused request in a live session goes
+                    // through: terminating on those would end a session because
+                    // one `evaluate` was malformed
+                    if begins_a_session(&message) {
+                        // `terminated`, and not `exited`. no process was ever
+                        // started, so there is no exit code and `exited` would
+                        // be inventing one
+                        self.event("terminated", &serde_json::json!({}))
+                            .map_err(|aborted| match aborted {
+                                Aborted::Wire(error) => error,
+                                Aborted::Refuse(reason) => {
+                                    unreachable!("an event cannot be refused, and was: {reason}")
+                                }
+                            })?;
+                        return Ok(Ended::NothingToDebug);
+                    }
+                }
                 Err(Aborted::Wire(error)) => return Err(error),
             }
         }
@@ -703,9 +793,9 @@ impl Adapter {
                     Failed::from(said)
                 })?;
 
-            let deadline = std::time::Instant::now() + TERMINAL_PATIENCE;
+            let deadline = Instant::now() + TERMINAL_PATIENCE;
             loop {
-                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                let left = deadline.saturating_duration_since(Instant::now());
                 // the two ways there is no answer are not the same thing, and a
                 // client reading the wrong one goes looking for the wrong
                 // problem: one is a client that is still there
