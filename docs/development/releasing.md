@@ -25,7 +25,7 @@ reads each directory name as an interpreter tag, and joins **exactly**
 rather than guessed at, because reading one loosely hands a release an agent
 built for another interpreter — which imports and then reads the wrong offsets
 
-## the two commands, and what neither of them does
+## the three commands, and what none of them does
 
 ```sh
 bpd-release assemble --binary target/release/bpd \
@@ -33,6 +33,8 @@ bpd-release assemble --binary target/release/bpd \
   --agent 3.14=.../libbpd_agent.so \
   --out dist/bpd
 bpd-release verify dist/bpd
+bpd-release wheel --layout dist/bpd \
+  --version 0.1.0 --platform macosx_11_0_arm64 --out dist/
 ```
 
 **nothing publishes.** there is no upload, no tag, no signature and no network
@@ -90,6 +92,78 @@ whose contents are an assertion
 never checked says nothing at all. a file that changed is named with both
 digests, and a file the manifest names and the layout does not hold is named too
 
+## the wheel is the same layout, delivered by pip
+
+`pip install` is how python developers find python tooling, and it is where an
+editor looks: the vs code extension resolves `bpd` off `PATH`, which a venv puts
+it on. so a layout can also be written out as a wheel
+
+### it is tagged for a **platform**, not for an interpreter
+
+```text
+basedpythondebugger-0.1.0-py3-none-macosx_11_0_arm64.whl
+```
+
+the `bpd` binary is not a python extension. it links nothing of cpython —
+`otool -L` names no libpython — and it drives interpreters it is handed rather
+than the one it lives inside. only the **agent** is version specific, and the
+agent is loaded by the *debuggee*, which is very often not the interpreter
+anybody ran `pip install` in
+
+so tagging the wheel `cp313-cp313-…` would tie it to the wrong thing. it would
+ship one copy of the same binary per python version, and leave each install able
+to debug exactly the interpreter it was installed into — a tool made smaller by
+its packaging:
+
+|                             | wheels, over 5 platforms | copies of the binary |
+| --------------------------- | ------------------------ | -------------------- |
+| per interpreter (`cp313-…`) | 15                       | 15                   |
+| per platform (`py3-none-…`) | **5**                    | **5**                |
+
+three agents rather than four, because `3.13t` cannot be built at all — pyo3
+refuses the free-threaded build of any cpython below 3.14, which
+[python support](python-support.md) records
+
+this is the shape `ruff` and `uv` ship in, and for the same reason: a native
+binary that pip is only the delivery mechanism for
+
+### the wheel layout **is** the install layout
+
+no engine code knows a wheel exists, and that is not a coincidence.
+`bpd_engine::agent` looks for `agents/<tag>/` in the directory holding the
+running binary **and the one above it** — which for an installed binary is
+`<prefix>/bin` and `<prefix>`. a wheel's `.data` directory installs into the
+environment's own scheme directories, where `scripts` is the first of those and
+`data` is the second:
+
+```text
+basedpythondebugger-0.1.0.data/scripts/bpd            ->  <venv>/bin/bpd
+basedpythondebugger-0.1.0.data/data/agents/3.13/…     ->  <venv>/agents/3.13/…
+basedpythondebugger-0.1.0.data/data/agents/3.14/…     ->  <venv>/agents/3.14/…
+basedpythondebugger-0.1.0.data/data/agents/3.14t/…    ->  <venv>/agents/3.14t/…
+```
+
+`Root-Is-Purelib: false` is the field with teeth. true would have pip put the
+payload in `site-packages`, and nothing looks for an agent there
+
+### the platform tag is taken, not detected
+
+what manylinux level a linux binary satisfies is a fact about the **toolchain
+that built it**, which this program cannot see. guessing produces a wheel pip
+installs happily on a machine whose libc is too old, and the failure lands at
+the first launch rather than at install time. so it is an argument, and a tag
+with a `-` in it is refused by name — a wheel filename joins its fields with
+dashes, so one inside a field makes a name pip reads as a different distribution
+entirely
+
+### there is no sdist
+
+and there will not be one. building this from source needs cargo **and one
+interpreter per agent**. an sdist pip could not actually build is a package that
+installs by appearing to and then fails at the first launch, which is the same
+class of lie as a layout that verifies and cannot run. what ships is what was
+built and verified
+
 ## it is driven on every push
 
 the `agents` CI job builds an agent for 3.13 and 3.14, assembles a layout out of
@@ -97,3 +171,8 @@ them, verifies it, and **launches a program through it on both interpreters**.
 that last step is what makes the rest of it worth having: a layout that
 assembles and verifies and cannot launch is precisely the failure above, and
 only running it finds one
+
+the same job then writes that layout out as a wheel, installs it into a **3.14**
+venv with a real `pip`, and debugs **3.13** through it. the interpreter mismatch
+is the assertion: it is what a per-interpreter wheel would fail, and no
+assertion about the contents of a zip can stand in for it

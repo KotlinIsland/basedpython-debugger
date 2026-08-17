@@ -38,6 +38,10 @@ use sha2::{Digest as _, Sha256};
 /// the directory: an executable cannot carry the digest of itself
 pub const MANIFEST: &str = "MANIFEST";
 
+pub mod wheel;
+
+pub use wheel::{Wheel, wheel};
+
 /// what `bpd` is called in a layout
 pub const BINARY: &str = "bpd";
 
@@ -66,6 +70,30 @@ pub fn agent_at(tag: InterpreterTag) -> PathBuf {
 /// file and what was wrong with it
 #[derive(Debug, thiserror::Error)]
 pub enum Refused {
+    /// the platform tag is not one pip could read
+    ///
+    /// a wheel's filename joins its fields with dashes, so a dash inside one
+    /// makes a name pip parses as different fields entirely — and what installs
+    /// is some other version of something else
+    #[error(
+        "`{tag}` is not a platform tag a wheel filename can carry. it joins its \
+         fields with `-`, so a tag with one in it becomes two fields — write it \
+         the way pip does, `macosx_11_0_arm64` rather than `macosx-11-0-arm64`"
+    )]
+    PlatformTag {
+        /// the tag as it was given
+        tag: String,
+    },
+
+    /// the zip underneath the wheel refused something
+    #[error("the wheel could not be written: {what}: {said}")]
+    Zip {
+        /// what was being done
+        what: &'static str,
+        /// what the zip writer said
+        said: String,
+    },
+
     /// the binary to ship is not there
     #[error(
         "the binary to ship is `{path}`, and there is no file there. a release \

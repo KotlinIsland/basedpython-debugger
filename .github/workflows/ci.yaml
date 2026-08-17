@@ -142,6 +142,35 @@ jobs:
             test "$ran" = "the-program-ran"
           done
 
+      # and the same layout delivered by pip, which is the other way it reaches
+      # a machine. the wheel is `py3-none-<platform>`: the binary links nothing
+      # of cpython and the agents are loaded by the debuggee, so one wheel
+      # carries every agent and installs into any supported interpreter
+      #
+      # the assertion is the one that matters and cannot be made against a zip:
+      # a wheel installed into a **3.14** venv still debugs 3.13, because the
+      # payload lands where agent resolution already looks — `scripts` becomes
+      # `<prefix>/bin` and `data` becomes `<prefix>`, which are the two roots it
+      # walks. a per-interpreter wheel would fail exactly this line
+      #
+      # **nothing is uploaded.** it builds a file, installs it, and debugs
+      # through it
+      - name: the layout is delivered as a wheel, installed, and debugged through
+        run: |
+          set -euo pipefail
+          ./target/debug/bpd-release wheel \
+            --layout target/release-layout \
+            --version 0.0.0 \
+            --platform linux_x86_64 \
+            --out target/dist
+          python3.14 -m venv target/wheel-venv
+          ./target/wheel-venv/bin/pip install target/dist/*.whl
+          test -x target/wheel-venv/bin/bpd
+          for python in python3.13 python3.14; do
+            ran=$(./target/wheel-venv/bin/bpd launch --python "$python" -c 'print("the-program-ran")')
+            test "$ran" = "the-program-ran"
+          done
+
   cross:
     name: cross-compile ${{ matrix.target }}
     runs-on: ubuntu-latest
