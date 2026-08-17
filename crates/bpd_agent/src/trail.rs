@@ -31,6 +31,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::collections::btree_map::Entry;
 use std::sync::RwLock;
 
 use pyo3::prelude::*;
@@ -67,12 +68,26 @@ struct State {
     /// hundred thousand steps that did not say it had discarded two million is
     /// a trail whose beginning is a fiction
     dropped: u64,
-    /// every code object the trail refers to, held so its address stays its own
+    /// every code object the window still refers to, held so its address stays
+    /// its own, with how many of its steps refer to it
     ///
     /// a code object that was freed would leave an address the interpreter can
     /// hand to the next one, and the trail would then name the wrong file. this
     /// is one insert per code object rather than per line
-    seen: BTreeMap<usize, Py<PyAny>>,
+    ///
+    /// the count is what keeps this **bounded**. holding a code object for as
+    /// long as any step names it is necessary; holding it after the last of
+    /// those steps fell out of the window is a leak, and one with no ceiling in
+    /// a program that compiles code as it runs — a django template engine, an
+    /// ORM, anything built on `exec`. so the last step to go takes it with it,
+    /// and the window bounds the objects held as well as the steps
+    seen: BTreeMap<usize, Held>,
+}
+
+/// a code object the window refers to, and how many of its steps do
+struct Held {
+    code: Py<PyAny>,
+    steps: usize,
 }
 
 static STATE: RwLock<State> = RwLock::new(State {
@@ -109,15 +124,24 @@ pub(crate) fn recording() -> bool {
 /// about to do made impossible. starting clears it, because a trail spanning two
 /// recordings has a gap in it that nothing marks
 pub(crate) fn record(on: bool) -> (u64, u64) {
-    let mut state = write();
-    if on && !state.on {
-        state.went.clear();
-        state.dropped = 0;
-        state.seen.clear();
-    }
-    state.on = on;
-    let held = state.went.len() as u64;
-    (held, state.dropped)
+    // the cleared code objects leave the lock still owned and are released
+    // below, for the reason `went` gives: a python deallocation that reached
+    // back into the recorder would meet a lock this thread already holds
+    let (held, dropped, gone) = {
+        let mut state = write();
+        let gone = if on && !state.on {
+            state.went.clear();
+            state.dropped = 0;
+            std::mem::take(&mut state.seen)
+        } else {
+            BTreeMap::new()
+        };
+        state.on = on;
+        (state.went.len() as u64, state.dropped, gone)
+    };
+
+    drop(gone);
+    (held, dropped)
 }
 
 /// remember that a thread reached this line
@@ -127,24 +151,59 @@ pub(crate) fn record(on: bool) -> (u64, u64) {
 /// not seen, one insert
 pub(crate) fn went(code: &Bound<'_, PyAny>, line: u32, thread: u64) {
     let address = code.as_ptr() as usize;
-    let mut state = write();
-    if !state.on {
-        return;
-    }
-    state
-        .seen
-        .entry(address)
-        .or_insert_with(|| code.clone().unbind());
 
-    if state.went.len() == WINDOW {
-        state.went.pop_front();
-        state.dropped += 1;
+    // whatever the window let go of leaves this scope still owned, and is
+    // released below with the lock given up. dropping a `Py` decrements a
+    // python refcount, which can deallocate — and a deallocation that reached
+    // back into the recorder would meet a lock this thread already holds
+    let gone = {
+        let mut state = write();
+        if !state.on {
+            return;
+        }
+
+        let gone = if state.went.len() == WINDOW {
+            let oldest = state
+                .went
+                .pop_front()
+                .expect("the window is full, so it has a front");
+            state.dropped += 1;
+            forget(&mut state, oldest.code)
+        } else {
+            None
+        };
+
+        match state.seen.entry(address) {
+            Entry::Occupied(mut held) => held.get_mut().steps += 1,
+            Entry::Vacant(slot) => {
+                slot.insert(Held {
+                    code: code.clone().unbind(),
+                    steps: 1,
+                });
+            }
+        }
+        state.went.push_back(Step {
+            code: address,
+            line,
+            thread,
+        });
+        gone
+    };
+
+    drop(gone);
+}
+
+/// one fewer step names this code object, and the last one takes it with it
+fn forget(state: &mut State, address: usize) -> Option<Py<PyAny>> {
+    let Entry::Occupied(mut held) = state.seen.entry(address) else {
+        unreachable!("a step in the window has its code object held")
+    };
+    held.get_mut().steps -= 1;
+    if held.get().steps == 0 {
+        Some(held.remove().code)
+    } else {
+        None
     }
-    state.went.push_back(Step {
-        code: address,
-        line,
-        thread,
-    });
 }
 
 /// the window, resolved into places a person can read
@@ -157,8 +216,8 @@ pub(crate) fn taken(python: Python<'_>) -> PyResult<bpd_core::Trail> {
     let mut went = Vec::with_capacity(state.went.len());
     for step in &state.went {
         let (file, function) = match state.seen.get(&step.code) {
-            Some(code) => {
-                let code = code.bind(python);
+            Some(held) => {
+                let code = held.code.bind(python);
                 (
                     code.getattr("co_filename")?.extract()?,
                     code.getattr("co_qualname")?.extract()?,

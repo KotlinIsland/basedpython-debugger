@@ -84,3 +84,10 @@ object the trail refers to is held for as long as it refers to it — one insert
 per code object, not per line. without that, a freed code object would leave an
 address the interpreter can hand to the next one, and the trail would name the
 wrong file
+
+and it lets go again. each held object counts the steps naming it, and the last
+of those to fall out of the window takes the object with it. holding them all
+instead would have been a window that bounds its steps and not its memory, with
+no ceiling at all in a program that compiles code as it runs — which django's
+template engine does — and it would be `bpd` keeping alive something the program
+had finished with
