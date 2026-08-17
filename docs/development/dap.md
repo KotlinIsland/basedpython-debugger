@@ -361,6 +361,30 @@ parked in a C call has released the GIL and reaches no monitoring event, so
 nothing can hold it; when there is one, the client gets an `output` event naming
 it and `allThreadsStopped` stays false. see [threads](threads.md)
 
+### `pending` and `failed` are the core's distinction, not the adapter's
+
+an unverified breakpoint carries DAP's `reason`, and it is the only thing that
+tells a client whether to keep hoping: `pending` is "not bound yet, may bind
+later", `failed` is "this will not bind". a client is entitled to act on the
+second one — to stop waiting, or to mark it differently
+
+which refusals are temporary is a fact about the refusal, so it is asked of
+`bpd_core::Unbound::will_bind_later` rather than decided here. the adapter used
+to match the one variant it knew about, and that was right for every breakpoint
+the source mapping did not touch. a translated one does not arrive in that
+shape: `Unbound::InGeneratedPython` says **where bpd looked**, with the ordinary
+reason one level down — so a `.by` breakpoint waiting for its module reported
+`failed` while the identical `.py` breakpoint in the same session reported
+`pending`, and both bound on import a moment later
+
+the message beside it was already right, and said so in words — *"it will bind
+if that file is imported later"* — next to a code that said the opposite. that
+is the shape of the bug worth remembering: the adapter reproduced a judgement
+the core owns instead of asking for it
+
+`Unmappable` inside the same wrapper stays `failed`, because the map could not
+place the line at all and nothing arriving later changes that
+
 ### a session is the connection
 
 a `bpd_core::Request` may name the session it is for, and a DAP request has no
