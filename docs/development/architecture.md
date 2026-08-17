@@ -310,20 +310,34 @@ being one implementation
 
 ## attaching
 
+**this is design, not description. there is no `bpd attach` command**, and this
+section says what it will be rather than what it does — the whole of it is M8 in
+`ROADMAP.md`. `bpd doctor` reports whether an interpreter carries the api, which
+is a fact about the interpreter and not an offer
+
 attaching to a running process is PEP 768. cpython 3.14 exposes
 `sys.remote_exec(pid, script)`, and documents the underlying [attachment protocol](https://docs.python.org/3.14/howto/remote_debugging.html) — read the
 target's debug offsets, write a script path into its control section, set the
 pending flag, and the interpreter picks it up at its next safe point
 
-`bpd` implements that protocol directly in rust rather than shelling out to
+it will implement that protocol directly in rust rather than shelling out to
 `sys.remote_exec`. the python level API requires the *calling* interpreter to
 match the target's major and minor version, which would mean shipping or
 locating a matching python just to start a debug session. the wire protocol has
 no such requirement
 
-on 3.13, `bpd attach` refuses. there is no ptrace fallback, no `gdb` injection,
-no signal handler trick. those techniques work until they corrupt a process,
-and a debugger that can corrupt the program it is measuring is not a debugger
+on 3.13 it will refuse. there is no ptrace fallback, no `gdb` injection, no
+signal handler trick, and there will not be. those techniques work until they
+corrupt a process, and a debugger that can corrupt the program it is measuring
+is not a debugger
+
+what holds it up is not the protocol. on macos PEP 768 needs a task port, which
+`sys.remote_exec` cannot get without root or the
+`com.apple.system-task-ports` entitlement — measured, and it refuses the same
+way for a target's own parent, so it is the kernel's restriction rather than
+anything about the caller. writing the protocol in rust does not change it.
+so attach is linux first, and the machine this was developed on cannot watch it
+work
 
 ## threads and free-threading
 

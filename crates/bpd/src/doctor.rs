@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use bpd_core::python::{Capabilities, MINIMUM_SUPPORTED, RemoteDebug};
+use bpd_core::python::{Capabilities, MINIMUM_SUPPORTED};
 
 use crate::report_error;
 
@@ -37,14 +37,16 @@ pub(crate) fn run(args: &Args) -> ExitCode {
     }
 
     println!("this interpreter can be debugged");
-    if capabilities.remote_debug == RemoteDebug::Available {
-        println!("attaching to an already running process is available");
-    } else {
-        println!(
-            "`bpd attach` is not available: {}",
-            capabilities.remote_debug
-        );
-    }
+
+    // what the interpreter supports is the `PEP 768` field above. this line is
+    // about what bpd offers, and those are two different facts: there is no
+    // `bpd attach` yet, so an interpreter with the api reaches nothing. saying
+    // "attaching is available" on the strength of the interpreter having it
+    // named a command that does not exist, which sent a reader to run it
+    println!(
+        "attaching to a running process is not built yet — see PEP 768 above for whether this interpreter could carry it"
+    );
+
     ExitCode::SUCCESS
 }
 
