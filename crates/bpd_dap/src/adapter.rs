@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 use bpd_core::{
     Addressed, Binding, Detail, Evaluated, Forwarded, FrameId, LogRecord, Reporting, Request,
     Resolved, Response, Running, Scope, SessionId, SourceBreakpoint, StepKind, Stop, StopReason,
-    Unbound, Value, Which, exit_code,
+    Value, Which, exit_code,
 };
 
 use crate::capabilities::capabilities;
@@ -2857,8 +2857,13 @@ fn rendered_binding(resolved: &Resolved, requested: &SourceBreakpoint) -> serde_
             "source": source_of(&requested.file.display().to_string()),
             "message": reason.to_string(),
             // a file that is not imported yet binds when it is, and everything
-            // else will not bind at all. the distinction is the core's
-            "reason": if matches!(reason, Unbound::NotLoaded { .. }) { "pending" } else { "failed" },
+            // else will not bind at all. the distinction is the core's, and it
+            // is **asked** rather than reproduced here: a reason can arrive
+            // wrapped — `InGeneratedPython` is an ordinary one a level down —
+            // and matching the variant this adapter happened to know about made
+            // every unbound `.by` breakpoint `failed`, beside a message of its
+            // own saying it would bind on import
+            "reason": if reason.will_bind_later() { "pending" } else { "failed" },
         }),
     }
 }
@@ -3175,6 +3180,8 @@ impl ThreadIds {
 
 #[cfg(test)]
 mod tests {
+    use bpd_core::Unbound;
+
     use super::*;
 
     #[test]
@@ -3297,6 +3304,74 @@ mod tests {
                 .expect("an unbound breakpoint says why")
                 .contains("imported later"),
             "said {pending}"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_reason_decides_the_code_by_what_is_inside_the_wrapper() {
+        use bpd_core::source_map::{Located, Unmapped};
+
+        // a `.by` breakpoint whose module is not imported yet fails for exactly
+        // the reason a `.py` one does — `InGeneratedPython` says where bpd
+        // looked, not what stopped it. deciding the code on the wrapper made
+        // every unbound `.by` breakpoint `failed`, including the most ordinary
+        // one there is, while the message beside it said "it will bind if that
+        // file is imported later"
+        let requested = SourceBreakpoint::at(4, "/src/main.by", 5);
+        let generated = || Located {
+            file: PathBuf::from("/tmp/build/main.py"),
+            line: 86,
+        };
+        let wrapped = |reason: Unbound| {
+            rendered_breakpoint(
+                &Resolved {
+                    waiting_for: None,
+                    id: 4,
+                    binding: Binding::Unbound {
+                        reason: Unbound::InGeneratedPython {
+                            file: PathBuf::from("/src/main.by"),
+                            requested: 5,
+                            generated: generated(),
+                            reason: Box::new(reason),
+                        },
+                    },
+                },
+                &requested,
+            )
+        };
+
+        let pending = wrapped(Unbound::NotLoaded {
+            file: PathBuf::from("/tmp/build/main.py"),
+            templates_available: false,
+        });
+        assert_eq!(
+            pending["reason"], "pending",
+            "a `.by` breakpoint waiting for its module binds when the module is \
+             imported, exactly as the `.py` one does: {pending}"
+        );
+
+        // and the other side, which is what stops an unwrap that answers
+        // `pending` for everything from passing. a line the map cannot place is
+        // not waiting for anything
+        let unmappable = wrapped(Unbound::Unmappable {
+            reason: Unmapped::NotInTheMap {
+                file: PathBuf::from("/src/main.by"),
+            },
+        });
+        assert_eq!(
+            unmappable["reason"], "failed",
+            "the map could not place the line, and nothing arriving later \
+             changes that: {unmappable}"
+        );
+
+        let no_line = wrapped(Unbound::NoExecutableLine {
+            file: PathBuf::from("/tmp/build/main.py"),
+            requested: 86,
+            last_executable: Some(40),
+        });
+        assert_eq!(
+            no_line["reason"], "failed",
+            "the file is loaded and has no line there: {no_line}"
         );
     }
 

@@ -501,6 +501,44 @@ pub enum Unbound {
     },
 }
 
+impl Unbound {
+    /// whether this breakpoint may still bind, or is refused for good
+    ///
+    /// the one question a client acts on differently. DAP has a `reason` on an
+    /// unverified breakpoint that is either `pending` — not bound yet, may bind
+    /// later — or `failed`, and an editor is entitled to stop hoping about the
+    /// second one
+    ///
+    /// it lives here rather than in an adapter because **which refusals are
+    /// temporary is the core's fact**. an adapter that matched the one variant
+    /// it happened to know about got it wrong the moment a reason arrived
+    /// wrapped: [`Self::InGeneratedPython`] is an ordinary reason one level
+    /// down, so a `.by` breakpoint waiting for its module reported `failed`
+    /// where the identical `.py` one reported `pending`, and both bound on
+    /// import
+    ///
+    /// the recursion is the point rather than an implementation detail —
+    /// `InGeneratedPython` is the only variant that wraps another today, and
+    /// the second one to be added is exactly what this is written against
+    #[must_use]
+    pub fn will_bind_later(&self) -> bool {
+        match self {
+            // the file is not loaded, and loading it is a thing that happens
+            Self::NotLoaded { .. } => true,
+
+            // whatever stood in the way in the generated python, asked one
+            // level down. the wrapper says where bpd looked, not what stopped it
+            Self::InGeneratedPython { reason, .. } => reason.will_bind_later(),
+
+            // everything else is settled. a line the map cannot place is not
+            // waiting for anything — `Unmappable` is the map's own answer, and
+            // nothing arriving later changes it — and a condition that does not
+            // compile never will
+            _ => false,
+        }
+    }
+}
+
 /// [`Unbound::NotLoaded`], which has two routes into a file and neither taken
 ///
 /// a `.html` in a process that has django in it is a template that has not been
@@ -840,6 +878,103 @@ mod tests {
             for wanted in expected {
                 assert!(said.contains(wanted), "expected {wanted:?} in {said:?}");
             }
+        }
+    }
+
+    /// every `Unbound` this test knows how to build, so the sweep below is
+    /// about the enum rather than about three variants somebody picked
+    fn every_reason() -> Vec<(Unbound, bool)> {
+        use std::path::PathBuf;
+        vec![
+            (
+                Unbound::NotLoaded {
+                    file: PathBuf::from("/tmp/app.py"),
+                    templates_available: false,
+                },
+                true,
+            ),
+            (
+                Unbound::Unresolvable {
+                    file: PathBuf::from("/tmp/app.py"),
+                    reason: "no such file".to_string(),
+                    loaded_under_that_name: false,
+                },
+                false,
+            ),
+            (
+                Unbound::PartiallyLoaded {
+                    file: PathBuf::from("/tmp/app.py"),
+                },
+                false,
+            ),
+            (
+                Unbound::NoExecutableLine {
+                    file: PathBuf::from("/tmp/app.py"),
+                    requested: 9,
+                    last_executable: Some(4),
+                },
+                false,
+            ),
+            (
+                Unbound::NoSourceMap {
+                    file: PathBuf::from("/src/app.by"),
+                },
+                false,
+            ),
+            (
+                Unbound::Unmappable {
+                    reason: crate::source_map::Unmapped::NotInTheMap {
+                        file: PathBuf::from("/src/app.by"),
+                    },
+                },
+                false,
+            ),
+        ]
+    }
+
+    /// the same reason, wrapped in the one variant that wraps
+    fn in_generated(reason: Unbound) -> Unbound {
+        use std::path::PathBuf;
+        Unbound::InGeneratedPython {
+            file: PathBuf::from("/src/app.by"),
+            requested: 5,
+            generated: crate::source_map::Located {
+                file: PathBuf::from("/tmp/build/app.py"),
+                line: 86,
+            },
+            reason: Box::new(reason),
+        }
+    }
+
+    #[test]
+    fn a_wrapped_reason_is_as_temporary_as_the_reason_inside_it() {
+        // the fact this is about: `InGeneratedPython` says where bpd looked,
+        // not what stopped it. a `.by` breakpoint waiting for its module is
+        // waiting for exactly what the `.py` one is
+        for (reason, temporary) in every_reason() {
+            let bare = reason.will_bind_later();
+            assert_eq!(
+                bare, temporary,
+                "unwrapped, this is the wrong answer: {reason:?}"
+            );
+
+            let wrapped = in_generated(reason.clone());
+            assert_eq!(
+                wrapped.will_bind_later(),
+                bare,
+                "wrapping changed the answer, and the wrapper is not what stood \
+                 in the way: {wrapped:?}"
+            );
+
+            // and again, because one level of unwrapping is the fix somebody
+            // reaches for first and it is not what this says
+            let twice = in_generated(in_generated(reason));
+            assert_eq!(
+                twice.will_bind_later(),
+                bare,
+                "a second wrapper is where an unwrap that only went one deep \
+                 would stop: {twice:?}"
+            );
         }
     }
 }
