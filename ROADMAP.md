@@ -528,7 +528,7 @@ answer
 what is left out is named on that page. the largest is that stepping from a
 template frame steps the python underneath it rather than node to node
 
-### M7a — the process that serves is not the process launched
+### M7a — the process that serves is not the process launched · done
 
 **this is a hole in M7 rather than a milestone after it**, which is why it sits
 here and not at the end
@@ -583,8 +583,8 @@ data**, not merely on stderr, so `warnings.catch_warnings(record=True)` returned
 a different list under `bpd` than without it. the reader now stands down across
 the fork and goes back afterwards
 
-what is left is the propagation. the hook is not the hard part and not the
-answer either: an audit hook *can* rewrite a spawn — appending to the argument
+the propagation was the last of it, and it is built. the hook was not the hard
+part and not the answer either: an audit hook *can* rewrite a spawn — appending to the argument
 list the `subprocess.Popen` event carries puts the argument in the child, on
 every supported release, and the caller's own list is untouched because what is
 audited is already a copy. it is still not the mechanism, because it works by
@@ -593,8 +593,8 @@ documents. so the way into an **exec'd** child remains its environment, which is
 the one channel the parity guarantee keeps clean
 
 a **forked** child needs none of that, because it inherits memory: it already
-holds everything it would need to reconnect. that is the cheapest real
-propagation available and it is the next step
+holds everything it would need to reconnect. that was the cheapest real
+propagation available and it was the one built first
 
 the session id two debuggees require is built, ahead of the propagation rather
 than after it, because nothing above it can be built without one: every id an
@@ -699,6 +699,21 @@ one machine this project has been developed on cannot run it without `sudo`
 what has to come with M8 is therefore a refusal naming the entitlement and the
 remedy, and a decision about whether an unverifiable-on-macOS milestone is
 started before the cross-platform work it depends on
+
+**one thing that was not waiting for any of it has been fixed.** `bpd doctor`
+read `RemoteDebug::Available` — a fact about the **interpreter** — and printed
+"attaching to an already running process is available", then in the other branch
+named `bpd attach` as the thing that was unavailable. there is no such
+subcommand in either case, so a reader was sent to run a command that does not
+exist, on the say-so of the debugger's own report. it now says attaching is not
+built and points at the `PEP 768` field for the interpreter's half. two tests
+hold it: one asserts every command doctor names in backticks is a subcommand
+the binary has, and the other that it offers attaching only when `bpd attach`
+exists — so the day M8 lands, the report follows it without being edited. the
+same present-tense claim was in
+[architecture](docs/development/architecture.md#attaching), which described this
+protocol as implemented, and in
+[python support](docs/development/python-support.md); both now say it is design
 
 ### M9 — reset stack frame to here · done
 
@@ -1061,7 +1076,10 @@ three things the mechanism decided rather than preference. the window holds a
 code object's **address** and resolves filenames only when the trail is read, so
 naming a place is paid once per read rather than once per line. every code
 object referred to is **held**, because an address is an identity only while the
-object is alive and a freed one would let the trail name the wrong file.
+object is alive and a freed one would let the trail name the wrong file — and
+**released** when the last step naming it leaves the window, since one that
+bounded its steps and not its memory has no ceiling at all in a program that
+compiles code as it runs.
 and **stopping keeps the trail**, because stopping is what somebody does in
 order to read it
 

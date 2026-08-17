@@ -7,7 +7,7 @@
 //! everything here drives a real interpreter, because what is under test is
 //! whether the program's real path is what comes back
 
-use bpd_core::{Running, SourceBreakpoint};
+use bpd_core::{Content, Detail, Evaluated, FrameId, Running, SourceBreakpoint};
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
 
@@ -167,4 +167,83 @@ fn stopping_a_recording_keeps_what_it_recorded() {
         "the trail is still there after stopping, and holds what it said it did"
     );
     assert!(!went.recording, "and it says the recording is over");
+}
+
+/// a program that watches the recorder's own grip on a code object
+///
+/// `sys.getrefcount` is the observation. the trail holds a code object so its
+/// address cannot come to name a different one, and the question is whether it
+/// lets go when the last step naming it has fallen out of the window — a count
+/// taken while it is held, and again after 120,000 steps have rolled through a
+/// window of 100,000
+///
+/// both counts include the program's own reference, so the difference between
+/// them is exactly what the recorder was holding
+const WATCHES_ITS_OWN_REFCOUNT: &str = r#"import sys
+
+
+def once():
+    marker = 1
+    return marker
+
+
+once()
+code = once.__code__
+before = sys.getrefcount(code)
+
+for i in range(60000):
+    pass
+
+after = sys.getrefcount(code)
+answer = f"{before} {after}"
+done = answer          # the breakpoint
+"#;
+
+#[test]
+fn the_window_lets_go_of_a_code_object_no_step_in_it_still_names() {
+    // the window bounds the steps, and a code object held for every step that
+    // ever entered it would grow without one — in a program that compiles code
+    // as it runs, which django's template engine does, without any ceiling at
+    // all. it is also bpd keeping alive something the program has finished with
+    let fixture = Fixture::new("program", WATCHES_ITS_OWN_REFCOUNT);
+    let done = line_of(WATCHES_ITS_OWN_REFCOUNT, "done = answer");
+    let mut debuggee = launch(&fixture);
+
+    debuggee.record(true).expect("recording was answered");
+    debuggee
+        .set_breakpoints(vec![SourceBreakpoint::at(1, fixture.path(), done)])
+        .expect("the breakpoint was answered");
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
+        Running::Stopped { .. } => {}
+        other => panic!("the breakpoint never stopped it: {other:?}"),
+    }
+
+    let counted = match debuggee
+        .evaluate(FrameId { stop: 2, depth: 0 }, "answer", Detail::default())
+        .expect("the evaluation was answered")
+    {
+        Evaluated::Value { value } => match value.content {
+            Content::Str { text, .. } => text,
+            other => panic!("the program made a string, and this is {other:?}"),
+        },
+        Evaluated::Raised { error } => panic!("`answer` raised {error:?}"),
+    };
+
+    let mut counts = counted.split_whitespace().map(|count| {
+        count
+            .parse::<i64>()
+            .expect("the program formatted two `sys.getrefcount` results")
+    });
+    let before = counts.next().expect("the first count");
+    let after = counts.next().expect("the second count");
+
+    assert!(
+        after < before,
+        "the recorder still holds a code object no step in the window names: \
+         the count was {before} while it was held and {after} after 120,000 \
+         steps rolled through a window of 100,000"
+    );
 }
