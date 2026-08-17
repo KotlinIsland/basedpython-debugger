@@ -94,6 +94,13 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // happened
         Facet::Scheduling => Reach::Direct("`scheduled_by` on the `stack` answer"),
 
+        // beside it rather than inside it, so an agent reading the frames meets
+        // the caveat about them in the same object
+        Facet::SchedulingCut => Reach::Direct(
+            "`scheduled_by_cut` and `scheduled_by_cut_says` on the `stack` \
+             answer",
+        ),
+
         // `after` on a breakpoint of `set_breakpoints`, naming a **position** in
         // the same list: this server numbers breakpoints by where they appear,
         // so a position is the only thing an agent can name. the answer carries

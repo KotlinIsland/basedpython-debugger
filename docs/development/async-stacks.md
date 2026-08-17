@@ -60,6 +60,35 @@ nothing and a variables request that answers about the wrong frame
 - **MCP** — `scheduled_by` on the `stack` answer, with a note saying what it is,
     beside `frames` rather than merged into them
 
+## the record is bounded, and says when the bound cut it
+
+it keeps the innermost 32 frames. the bound is what stops a deep recursion
+turning one record into a stack nobody can scroll past — and the frames it drops
+are the **outermost**, which is the program's own entry point and everything
+under it
+
+that makes a silent bound a wrong answer rather than a partial one. a record cut
+at 32 reads as a task scheduled from wherever the walk happened to stop, and for
+a framework's own dispatch that is the middle of a call chain nobody recognises.
+a reader has no way to tell it apart from a task really scheduled there
+
+so `Stack::scheduling_cut` is carried whenever the record does not reach the
+program's entry, and both front ends say it — MCP as `scheduled_by_cut` beside
+the frames, DAP as one more console line after the last of them. it is its own
+`Facet` rather than part of the scheduling one, because a front end can carry
+every scheduling frame and drop the one bit saying they are not all of them
+
+it is a flag rather than the real depth, and that is the one place this differs
+from `Stack::depth`, which does carry a count. counting the rest means walking
+the rest, and this is paid on **every task a program creates** rather than when
+a stack is asked for. what a reader needs is to know the beginning is not the
+beginning
+
+`a_scheduling_record_that_stops_short_says_so` drives a task scheduled from 40
+frames down and asserts both halves: that `main` really is gone from the record,
+and that the record says so. its pair asserts the shallow program is **not**
+marked cut, so the flag cannot pass by being always true
+
 ## how it is captured, and the three routes that do not work
 
 `BaseEventLoop.create_task` is a **python** function, so its own code object

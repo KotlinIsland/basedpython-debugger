@@ -263,3 +263,80 @@ fn a_stop_that_is_not_in_a_task_carries_no_record_rather_than_an_empty_claim() {
          is not what the program built"
     );
 }
+
+/// a program that schedules its work from deeper than the record's bound
+///
+/// 40 frames before `create_task`, which is not exotic — a framework's own
+/// dispatch reaches that without recursion at all
+const DEEP: &str = r"import asyncio
+
+
+async def work():
+    here = 1              # the breakpoint
+    return here
+
+
+def descend(depth):
+    if depth == 0:
+        return asyncio.create_task(work())
+    return descend(depth - 1)
+
+
+async def main():
+    task = descend(40)
+    await task
+
+
+asyncio.run(main())
+";
+
+#[test]
+fn a_scheduling_record_that_stops_short_says_so() {
+    // the record is bounded, and the frames a bound drops here are the
+    // **outermost** — the program's entry and everything under it. so a cut
+    // record reads as a task scheduled from wherever the walk stopped, which
+    // for this program is `descend` and for a framework is the middle of its
+    // own dispatch. that is a fact about the bound rather than about the
+    // program, and it is exactly the kind of silence this project counts as a
+    // wrong answer
+    let fixture = Fixture::new("program", DEEP);
+    let here = line_of(DEEP, "here = 1");
+    let mut debuggee = launch(&fixture);
+
+    let stack = stack_at_the_stop(&mut debuggee, here, &fixture.path());
+
+    // the premise: this really did outrun the bound, and `main` really is gone
+    assert!(
+        !stack.scheduled_by.iter().any(|one| one.function == "main"),
+        "this program schedules from deeper than the bound, and the record \
+         reaching `main` would mean it no longer tests anything: {:#?}",
+        stack.scheduled_by
+    );
+
+    assert!(
+        stack.scheduling_cut,
+        "the record stops at {} frames without reaching the program's entry, \
+         and says nothing about having been cut: {:#?}",
+        stack.scheduled_by.len(),
+        stack.scheduled_by
+    );
+}
+
+#[test]
+fn a_scheduling_record_that_reaches_the_program_is_not_marked_cut() {
+    // the other direction, so the flag cannot pass by being always true. this
+    // is the shallow program, whose record reaches `main` and stops because
+    // there is nothing above it
+    let fixture = Fixture::new("program", PROGRAM);
+    let here = line_of(PROGRAM, "here = 1");
+    let mut debuggee = launch(&fixture);
+
+    let stack = stack_at_the_stop(&mut debuggee, here, &fixture.path());
+
+    assert!(
+        !stack.scheduling_cut,
+        "this record reaches the program's entry and was marked cut anyway: \
+         {:#?}",
+        stack.scheduled_by
+    );
+}

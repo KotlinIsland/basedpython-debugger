@@ -59,7 +59,22 @@ struct State {
     /// the weak reference is held **here**, because a weak reference that is
     /// itself collected never calls its callback and the entry would then
     /// outlive its task
-    recorded: BTreeMap<usize, (Py<PyAny>, Vec<Scheduling>)>,
+    recorded: BTreeMap<usize, Made>,
+}
+
+/// what was remembered when one task was created
+struct Made {
+    /// the weak reference whose callback removes this entry
+    ///
+    /// never read, and load-bearing all the same: a weak reference that is
+    /// itself collected never calls its callback, so the entry would outlive its
+    /// task and the address could come to name a different one
+    #[expect(dead_code, reason = "owned to keep the weak reference alive")]
+    reference: Py<PyAny>,
+    /// the creating stack, innermost first, bounded by [`KEEP`]
+    frames: Vec<Scheduling>,
+    /// whether [`KEEP`] cut it short of the program's own entry
+    cut: bool,
 }
 
 static STATE: RwLock<State> = RwLock::new(State {
@@ -213,6 +228,7 @@ pub(crate) fn record(python: Python<'_>, returned: &Bound<'_, PyAny>) -> PyResul
     let at = returned.as_ptr() as usize;
 
     let mut frames = Vec::new();
+    let mut cut = false;
     let mut frame = python
         .import("sys")?
         .getattr("_getframe")?
@@ -237,10 +253,14 @@ pub(crate) fn record(python: Python<'_>, returned: &Bound<'_, PyAny>) -> PyResul
             line: one.getattr("f_lineno")?.extract()?,
             function: code.getattr("co_qualname")?.extract()?,
         });
+        frame = one.getattr("f_back").ok().filter(|back| !back.is_none());
         if frames.len() == KEEP {
+            // and whether there was more above it, which is the difference
+            // between a record that reaches the program's entry and one that
+            // stops in the middle of a call chain looking exactly the same
+            cut = frame.is_some();
             break;
         }
-        frame = one.getattr("f_back").ok().filter(|back| !back.is_none());
     }
 
     // the weak reference is what keeps this from holding the task alive, and
@@ -254,7 +274,14 @@ pub(crate) fn record(python: Python<'_>, returned: &Bound<'_, PyAny>) -> PyResul
     // refcount, which can run the collector, which can call [`Forget`] — and
     // this lock is not reentrant, so doing that under the guard is a deadlock
     // waiting for a program that reuses an address
-    let displaced = write().recorded.insert(at, (reference.unbind(), frames));
+    let displaced = write().recorded.insert(
+        at,
+        Made {
+            reference: reference.unbind(),
+            frames,
+            cut,
+        },
+    );
     drop(displaced);
     Ok(())
 }
@@ -267,7 +294,7 @@ pub(crate) fn record(python: Python<'_>, returned: &Bound<'_, PyAny>) -> PyResul
 ///
 /// empty when the program is not in a task, is not running asyncio at all, or
 /// made this task before bpd was watching
-pub(crate) fn scheduled_by(python: Python<'_>) -> (bool, Vec<Scheduling>) {
+pub(crate) fn scheduled_by(python: Python<'_>) -> (bool, Vec<Scheduling>, bool) {
     // **before anything is asked of asyncio.** finding the current task means
     // reaching for the module, and reaching for a module that is not there
     // *imports* it — bpd adding a module to `sys.modules` and running its body,
@@ -279,21 +306,21 @@ pub(crate) fn scheduled_by(python: Python<'_>) -> (bool, Vec<Scheduling>) {
     // run. without
     // it there is no task to be in, and nothing to ask
     if read().hook.is_none() {
-        return (false, Vec::new());
+        return (false, Vec::new(), false);
     }
     let Some(task) = current(python) else {
-        return (false, Vec::new());
+        return (false, Vec::new(), false);
     };
-    let frames = read()
+    let (frames, cut) = read()
         .recorded
         .get(&(task.as_ptr() as usize))
-        .map(|(_reference, frames)| frames.clone())
+        .map(|made| (made.frames.clone(), made.cut))
         .unwrap_or_default();
     // in a task either way. an empty list here is a task made by a route this
     // does not watch — `ensure_future`, `loop.create_task`, a task group — and
     // saying "in a task, and bpd did not see it made" is a different fact from
     // "not in a task"
-    (true, frames)
+    (true, frames, cut)
 }
 
 /// the task running on this thread, if there is one

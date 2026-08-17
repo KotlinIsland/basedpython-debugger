@@ -242,6 +242,7 @@ impl<'py> Stopped<'py> {
             // the same one
             scheduled_by: scheduled.1,
             in_a_task: scheduled.0,
+            scheduling_cut: scheduled.2,
             depth,
             mode: world::mode(),
         })

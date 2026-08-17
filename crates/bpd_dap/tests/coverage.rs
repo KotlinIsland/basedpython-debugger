@@ -1623,6 +1623,7 @@ impl Session for FakeSession {
                 // `scheduled_by` is the half a front end can drop with nothing
                 // failing — every ordinary stack has one
                 in_a_task: true,
+                scheduling_cut: false,
                 // the fake's stack is inside a task, because an empty
                 // `scheduled_by` is the half a front end can drop with nothing
                 // failing — every ordinary stack has one

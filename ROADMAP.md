@@ -949,6 +949,15 @@ was created — as a **separate list**, never spliced into the frames, and as
 have no locals left to read. DAP says it on the console rather than among
 `stackFrames`, because a client draws that as a call chain
 
+**and the record says when its bound cut it**, which it did not at first. it
+keeps the innermost 32 frames, and the ones a bound drops here are the
+**outermost** — so a cut record read as a whole one says the task was scheduled
+from wherever the walk stopped, which for a framework's dispatch is the middle
+of a call chain. measured on a task scheduled from 40 frames down: 32 kept,
+`main` gone, and nothing said about it. `Stack::scheduling_cut` now carries it,
+both front ends say it, and it is its own `Facet` because a front end can carry
+every scheduling frame and drop the one bit saying they are not all of them
+
 one hook covers it: measured, `create_task`, `ensure_future`, `loop.create_task`
 and a task group's own all reach `BaseEventLoop.create_task`. leading asyncio
 frames are dropped so a record begins at the program's own frame, which is a

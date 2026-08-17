@@ -1078,6 +1078,23 @@ pub struct Stack {
     /// this is the same rule the blind spot on 3.13 follows: the silence is
     /// announced rather than left to be interpreted
     pub in_a_task: bool,
+
+    /// whether [`Self::scheduled_by`] stops short of where the task was really
+    /// created from
+    ///
+    /// the record is bounded, and the frames it drops are the **outermost** —
+    /// the program's entry point and everything under it. so a cut record reads
+    /// as though the task was scheduled from wherever the walk happened to
+    /// stop, which for a framework's own dispatch is some middle of a call
+    /// chain that means nothing to a reader
+    ///
+    /// it is a flag rather than the real depth, and that is the one place this
+    /// differs from [`Self::depth`]: counting the rest means walking the rest,
+    /// and this is paid on **every task a program creates** rather than when a
+    /// stack is asked for. what a reader needs is to know the beginning is not
+    /// the beginning, and a flag carries that
+    pub scheduling_cut: bool,
+
     /// how deep the stack is, which is more than `frames` when fewer were asked
     /// for
     pub depth: usize,
