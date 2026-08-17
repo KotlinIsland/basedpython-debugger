@@ -131,8 +131,12 @@ impl Engine {
     /// other one
     fn ready_for(&self, configuration: &Configuration) -> Result<Capabilities, Failed> {
         if self.debuggee.lock().expect(HOLDING).is_some() {
-            return Err("this adapter already has a program. a second connection to it                         takes up a session of that one, which is what a `startDebugging`                         reverse request asks a client to do"
-                .into());
+            return Err(
+                "this adapter already has a program. a second connection to it takes up a \
+                 session of that one, which is what a `startDebugging` reverse request asks a \
+                 client to do"
+                    .into(),
+            );
         }
         Ok(Capabilities::probe(&configuration.python)?)
     }
@@ -168,7 +172,8 @@ impl Engine {
             .map(Arc::clone)
             .ok_or_else(|| {
                 Failed::from(
-                    "nothing has been launched on this adapter yet, so there is no                      session to take up",
+                    "nothing has been launched on this adapter yet, so there is no session to take \
+                     up",
                 )
             })
     }

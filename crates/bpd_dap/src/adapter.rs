@@ -1024,7 +1024,9 @@ impl Adapter {
                 "output",
                 &serde_json::json!({
                     "category": "console",
-                    "output": "                              and from above that,                                which this record does not reach — it keeps the                                innermost frames only, so the outermost line above                                is not where the task was scheduled from\n",
+                    "output": "and from above that, which this record does not reach — it keeps \
+                               the innermost frames only, so the outermost line above is not where \
+                               the task was scheduled from\n",
                 }),
             )?;
         }
@@ -1125,7 +1127,9 @@ impl Adapter {
         let names: Vec<String> = message.arguments["names"]
             .as_array()
             .ok_or(
-                "a `bpd/facts` request needs `names`, the names to prove things                  about. it is a list rather than a whole scope because the                  client is the one reading the source that mentions them",
+                "a `bpd/facts` request needs `names`, the names to prove things about. it is a \
+                 list rather than a whole scope because the client is the one reading the source \
+                 that mentions them",
             )?
             .iter()
             .filter_map(|name| name.as_str().map(str::to_string))
@@ -1136,7 +1140,8 @@ impl Adapter {
         let limit: bpd_core::Limit = match message.arguments.get("limit") {
             Some(limit) => serde_json::from_value(limit.clone()).map_err(|error| {
                 Aborted::Refuse(format!(
-                    "this is not a fact limit: {error}. it takes `text`, how                      much of a value one fact may carry, and `depth`, how many                      segments of a dotted path to follow"
+                    "this is not a fact limit: {error}. it takes `text`, how much of a value one \
+                     fact may carry, and `depth`, how many segments of a dotted path to follow"
                 ))
             })?,
             None => bpd_core::Limit::default(),
@@ -2826,7 +2831,8 @@ fn rendered_binding(resolved: &Resolved, requested: &SourceBreakpoint) -> serde_
                 String::new()
             } else {
                 format!(
-                    "line {} of that file generated nothing bpd can stop on, so                      this moved to line {line}, which did. ",
+                    "line {} of that file generated nothing bpd can stop on, so this moved to line \
+                     {line}, which did. ",
                     requested.line
                 )
             };
@@ -2836,7 +2842,8 @@ fn rendered_binding(resolved: &Resolved, requested: &SourceBreakpoint) -> serde_
                 "line": line,
                 "source": source_of(&requested.file.display().to_string()),
                 "message": format!(
-                    "{moved}`by` transpiled that to line {} of `{}`, and it is                      armed in {} code object(s) there",
+                    "{moved}`by` transpiled that to line {} of `{}`, and it is armed in {} code \
+                     object(s) there",
                     generated.line,
                     generated.file.display(),
                     sites.len()
