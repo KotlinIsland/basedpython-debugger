@@ -154,7 +154,14 @@ breakpoint is not already solid
         it contradicted, since two of the claims it was written to check turned
         out to be wrong
 - [ ] integration tests that spawn real interpreters across the version and
-        build matrix
+        build matrix. **the tests exist and the macos third of the matrix is
+        green**: 652 tests over 69 binaries, run whole against 3.13, 3.14 and
+        3.14t, each with an agent built for it. what is unticked is the rest of
+        the matrix rather than the tests — linux and windows have never been
+        observed, because this checkout has no remote and
+        `.github/workflows/ci.yaml` has therefore never run. `3.13t` is not part
+        of it at all: pyo3 refuses the free-threaded build of any cpython below
+        3.14, so there is no agent to build
 
 ### explicitly not in the MVP
 
