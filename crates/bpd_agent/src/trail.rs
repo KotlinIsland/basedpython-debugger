@@ -61,7 +61,7 @@ struct Step {
     /// **an experiment.** text rather than references, so the window stays
     /// bounded in memory and nothing the program has finished with is kept
     /// alive by the recorder
-    held: Vec<(String, String)>,
+    held: bpd_core::Kept<(String, String)>,
 }
 
 #[derive(Default)]
@@ -204,7 +204,7 @@ pub(crate) fn went(python: Python<'_>, code: &Bound<'_, PyAny>, line: u32, threa
     // the shipped depth does none of this and pays for none of it: one relaxed
     // load, and then the same single write lock the trail has always taken
     let held = if DEPTH.load(Ordering::Relaxed) == 0 {
-        Vec::new()
+        bpd_core::Kept::whole(Vec::new())
     } else {
         // outside the lock, because it calls into python: `sys._getframe`, then
         // `f_locals`, then a render per name. holding the recorder's lock
@@ -283,41 +283,41 @@ fn capture(
     python: Python<'_>,
     depth: Depth,
     getframe: Option<&Py<PyAny>>,
-) -> Vec<(String, String)> {
+) -> bpd_core::Kept<(String, String)> {
     if depth == Depth::Where {
-        return Vec::new();
+        return bpd_core::Kept::whole(Vec::new());
     }
     let Some(getframe) = getframe else {
         // asked for a depth and given no way to reach a frame. an experiment
         // reports nothing rather than guessing, the same as the rest of this
-        return Vec::new();
+        return bpd_core::Kept::whole(Vec::new());
     };
 
     // `_getframe(0)` from inside a native callback is the **program's** frame:
     // a C function has no python frame of its own, so the innermost one is the
     // one whose line raised this event
     let Ok(frame) = getframe.bind(python).call1((0_u32,)) else {
-        return Vec::new();
+        return bpd_core::Kept::whole(Vec::new());
     };
     if depth == Depth::Frame {
-        return Vec::new();
+        return bpd_core::Kept::whole(Vec::new());
     }
 
     let Ok(locals) = frame.getattr("f_locals") else {
-        return Vec::new();
+        return bpd_core::Kept::whole(Vec::new());
     };
     if depth == Depth::Locals {
-        return Vec::new();
+        return bpd_core::Kept::whole(Vec::new());
     }
 
     let Ok(items) = locals.try_iter() else {
-        return Vec::new();
+        return bpd_core::Kept::whole(Vec::new());
     };
+
+    // read whole and then bounded, so what the cap left out is counted rather
+    // than walked away from. `Kept::of` is what makes that impossible to forget
     let mut held = Vec::new();
     for name in items {
-        if held.len() == NAMES {
-            break;
-        }
         let Ok(name) = name else { break };
         let Ok(text) = name.extract::<String>() else {
             continue;
@@ -327,7 +327,7 @@ fn capture(
         };
         held.push((text, rendered(&value)));
     }
-    held
+    bpd_core::Kept::of(held, NAMES)
 }
 
 /// one value as text, **without running any of the program**

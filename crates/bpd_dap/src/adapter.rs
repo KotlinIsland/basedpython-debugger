@@ -1082,10 +1082,7 @@ impl Adapter {
                 "output",
                 &serde_json::json!({
                     "category": "console",
-                    "output": "this stack is inside an asyncio task and bpd did not see \
-                               that task created, so it cannot say what scheduled it. \
-                               `asyncio.create_task` is watched; `ensure_future`, \
-                               `loop.create_task` and a task group's own are not yet\n",
+                    "output": format!("{}\n", bpd_core::TASK_NOT_SEEN),
                 }),
             )?;
         }

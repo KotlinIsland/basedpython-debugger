@@ -904,14 +904,6 @@ enum Wanted {
     FirstLine,
 }
 
-/// the line a restart moves to, or why the frame cannot be re-entered
-///
-/// the destination is the line of the **first instruction** that carries one,
-/// in offset order, rather than `co_firstlineno`. the two differ: a module's
-/// first instruction is a `RESUME` whose line is `0`, and a function that closes
-/// over a variable begins with `MAKE_CELL` instructions that carry no line at
-/// all. `co_firstlineno` is where the code was written, and what a jump needs is
-/// a position the frame can be put at
 /// the line of the interpreter's own file that a named line means
 ///
 /// a frame of generated python is reported as the `.by` line behind it, so the
@@ -923,6 +915,14 @@ fn translate(code: &Bound<'_, PyAny>, line: u32) -> PyResult<Result<u32, bpd_cor
     Ok(sources::to_generated(&file, line).unwrap_or(Ok(line)))
 }
 
+/// the line a restart moves to, or why the frame cannot be re-entered
+///
+/// the destination is the line of the **first instruction** that carries one,
+/// in offset order, rather than `co_firstlineno`. the two differ: a module's
+/// first instruction is a `RESUME` whose line is `0`, and a function that closes
+/// over a variable begins with `MAKE_CELL` instructions that carry no line at
+/// all. `co_firstlineno` is where the code was written, and what a jump needs is
+/// a position the frame can be put at
 fn restartable(code: &Bound<'_, PyAny>) -> PyResult<Result<u32, Unrestartable>> {
     let flags: u32 = code.getattr("co_flags")?.extract()?;
     for (flag, kind) in [

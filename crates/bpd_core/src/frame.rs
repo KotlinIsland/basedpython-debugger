@@ -262,11 +262,16 @@ pub struct Coverage {
 
 /// how much of each step a recording keeps
 ///
-/// **an experiment.** the trail's committed shape is [`Self::Where`], and every
-/// deeper setting exists to find out where the cost of "what was this variable"
-/// actually lives — measured at 30× a bare run when it was first tried, against
-/// 6× for the location alone, and never decomposed. each adds one step of the
-/// work to the one above it
+/// the trail's committed shape is [`Self::Where`], and every deeper setting
+/// exists to find out where the cost of "what was this variable" actually lives.
+/// each adds one step of the work to the one above it
+///
+/// **no multiple is quoted here on purpose.** the figures this enum used to
+/// carry — 30× against 6× — are a prototype's, from a python callback storing
+/// into a python ring, so they compare two ways of *storing* with none of bpd's
+/// own `LINE` path in either. `crates/bpd_engine/tests/replay_values.rs`
+/// measures the real thing with the depths separated, and
+/// `docs/development/trail.md` records why nothing from it is published yet
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Depth {
@@ -309,6 +314,72 @@ impl std::fmt::Display for Depth {
     }
 }
 
+/// a list that cannot be read without also reading what was left out of it
+///
+/// **a type, because comments did not hold.** this project's rule is that a
+/// bound which bit is reported and never silent, and it has been broken four
+/// separate times by four different bounds — a window that counted its dropped
+/// steps and not its dropped code objects, a scheduling record cut at its
+/// outermost frame, a per-step name cap, a per-answer child cap. each was a
+/// `break` or a `truncate` with nothing beside it, and each read as a complete
+/// answer
+///
+/// serialising as a struct rather than as a bare list is the point: a front end
+/// that renders this gets `dropped` in the same object and cannot show the items
+/// without having been handed the count
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Kept<T> {
+    /// what is here
+    pub kept: Vec<T>,
+    /// how many there were that are not
+    ///
+    /// zero is the ordinary case and means the list is whole
+    pub dropped: u64,
+}
+
+impl<T> Kept<T> {
+    /// keep at most `most`, and count what that left out
+    #[must_use]
+    pub fn of(mut all: Vec<T>, most: usize) -> Self {
+        let dropped = all.len().saturating_sub(most) as u64;
+        all.truncate(most);
+        Self { kept: all, dropped }
+    }
+
+    /// a whole list, nothing left out
+    #[must_use]
+    pub const fn whole(kept: Vec<T>) -> Self {
+        Self { kept, dropped: 0 }
+    }
+
+    /// whether a bound bit
+    #[must_use]
+    pub const fn cut(&self) -> bool {
+        self.dropped > 0
+    }
+}
+
+/// what a front end says when a stack is in a task whose creation was not seen
+///
+/// **here, once, because it was wrong in two places at the same time.** both
+/// front ends used to say `asyncio.create_task` was watched and that
+/// `ensure_future`, `loop.create_task` and a task group's own were not — which
+/// is the opposite of what the agent does. it hooks `BaseEventLoop.create_task`
+/// *precisely because* all four routes reach it, measured. so the one message a
+/// user saw when the answer was incomplete sent them to change their code in a
+/// way that could not have helped
+///
+/// the honest reasons a record is missing are that the task was made before the
+/// hook was armed — a program already running when bpd attached, or a task
+/// created during asyncio's own import — or that its creating stack could not
+/// be read
+pub const TASK_NOT_SEEN: &str = "this stack is inside an asyncio task and bpd did not see \
+                                 that task created. every route to a task — `create_task`, \
+                                 `ensure_future`, `loop.create_task` and a task group's own \
+                                 — goes through the one function bpd watches, so this is a \
+                                 task made before that hook was armed, or one whose creating \
+                                 stack could not be read";
+
 /// where the program went, over a bounded window
 ///
 /// deliberately **only** where. what a variable was at each step costs five
@@ -347,8 +418,12 @@ pub struct Visited {
     pub thread: u64,
     /// what the frame held, rendered, when the recording was deep enough
     ///
-    /// **an experiment**, and empty at the depth the trail ships as. text
-    /// rather than references: a reference would make the window unbounded in
-    /// memory and would keep alive objects the program had finished with
-    pub held: Vec<(String, String)>,
+    /// empty at the depth the trail ships as. text rather than references: a
+    /// reference would make the window unbounded in memory and would keep alive
+    /// objects the program had finished with
+    ///
+    /// a [`Kept`] rather than a `Vec`, because the per-step name cap used to cut
+    /// with a bare `break` — a frame with forty locals read exactly like one
+    /// with sixteen
+    pub held: Kept<(String, String)>,
 }

@@ -562,6 +562,56 @@ pub enum Request {
 }
 
 impl Request {
+    /// how many kinds of request there are
+    ///
+    /// paired with [`Self::ordinal`], and the pair is what makes
+    /// [`crate::parity::surface`] provably complete. adding a variant fails to
+    /// compile until it has an ordinal; giving it the next ordinal fails the
+    /// surface test until this is raised; raising this fails the same test
+    /// until the surface holds one of it
+    ///
+    /// this exists because it once was not enforced: `surface()` was missing
+    /// four variants, and every parity assertion that iterates it — the
+    /// comparison between the two front ends, the `JUSTIFIED` check, the
+    /// "says what stands in the way" check — silently skipped those four
+    pub const KINDS: usize = 25;
+
+    /// where this variant sits in the enumeration
+    ///
+    /// **no catch-all, deliberately.** a `_` arm here would let a new capability
+    /// be added to the core and never be compared across the front ends, which
+    /// is exactly what happened before this existed
+    #[must_use]
+    pub const fn ordinal(&self) -> usize {
+        match self {
+            Self::SetBreakpoints { .. } => 0,
+            Self::SetExceptionBreakpoints { .. } => 1,
+            Self::DebugChildren { .. } => 2,
+            Self::Run { .. } => 3,
+            Self::Wait { .. } => 4,
+            Self::Resume { .. } => 5,
+            Self::Step { .. } => 6,
+            Self::Pause => 7,
+            Self::Threads { .. } => 8,
+            Self::StopTheWorld { .. } => 9,
+            Self::Stack { .. } => 10,
+            Self::Variables { .. } => 11,
+            Self::TemplateContext { .. } => 12,
+            Self::Evaluate { .. } => 13,
+            Self::RunScript { .. } => 14,
+            Self::Query { .. } => 15,
+            Self::Diff { .. } => 16,
+            Self::SetVariable { .. } => 17,
+            Self::Facts { .. } => 18,
+            Self::Record { .. } => 19,
+            Self::Trail => 20,
+            Self::Retainers { .. } => 21,
+            Self::ReplaceCode { .. } => 22,
+            Self::SetNextStatement { .. } => 23,
+            Self::RestartFrame { .. } => 24,
+        }
+    }
+
     /// what to call this request in a message about it
     ///
     /// a front end has to name a capability in an error, and a refusal that
@@ -1245,11 +1295,15 @@ pub struct Threads {
 impl Threads {
     /// how far apart to take the two samples when the client has no way to say
     ///
-    /// DAP's `threads` request carries no interval and neither does anything an
-    /// agent would naturally ask, so a front end has to supply one. it lives
-    /// here rather than in an adapter because [`crate::Progress::Still`] means
-    /// "in the same place, this far apart", and two adapters choosing their own
-    /// interval would make the same word mean two things
+    /// the **default** a front end sends when its client named none — which both
+    /// of them let a client do: MCP takes `settle_ms` on the `threads` and
+    /// `stop_the_world` tools, and DAP takes `threadSettleMs` in the launch
+    /// configuration. this doc used to say clients had no way to name one, which
+    /// stopped being true when they were given it
+    ///
+    /// it lives here rather than in an adapter because [`crate::Progress::Still`]
+    /// means "in the same place, this far apart", and two adapters defaulting to
+    /// their own interval would make the same word mean two things
     ///
     /// long enough that a thread going round an ordinary python loop is seen to
     /// move, and short enough that asking for a thread list does not feel like
@@ -1487,6 +1541,13 @@ mod tests {
                 "restarting a frame",
                 "the state of a stop",
                 "running a debug script",
+                // both of these are about a frame, so both name the stop that
+                // frame belongs to. they appear here only now because they were
+                // missing from `surface()` — this test iterates it, so for as
+                // long as they were absent it was checking a shorter list than
+                // its own name claims
+                "what is provable about a frame's names",
+                "what is holding an object",
             ]
         );
 

@@ -255,3 +255,136 @@ fn the_window_lets_go_of_a_code_object_no_step_in_it_still_names() {
          steps rolled through a window of 100,000"
     );
 }
+
+/// a program that runs far more lines than the window holds
+///
+/// the window is 100,000 steps and this executes well past it, so what falls
+/// out has to be counted rather than quietly forgotten
+const LONGER_THAN_THE_WINDOW: &str = r"def work(rounds):
+    total = 0
+    for index in range(rounds):
+        total = total + index
+    return total
+
+
+work(60000)
+done = 1              # the breakpoint
+";
+
+#[test]
+fn a_window_that_overflowed_says_how_much_it_dropped() {
+    // the counter that makes a bounded window honest rather than a fiction, and
+    // it was asserted **only as zero** anywhere in the tree — so `dropped += 1`
+    // could have been deleted, or the bound removed, and nothing would have
+    // failed. the whole argument for shipping a window at all is that its edge
+    // is stated
+    let fixture = Fixture::new("longer", LONGER_THAN_THE_WINDOW);
+    let done = line_of(LONGER_THAN_THE_WINDOW, "done = 1");
+    let mut debuggee = launch(&fixture);
+
+    debuggee
+        .record(true, bpd_core::Depth::Where)
+        .expect("recording was answered");
+    debuggee
+        .set_breakpoints(vec![SourceBreakpoint::at(1, fixture.path(), done)])
+        .expect("the breakpoint was answered");
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
+        Running::Stopped { .. } => {}
+        other => panic!("the breakpoint never stopped it: {other:?}"),
+    }
+
+    let went = debuggee.trail().expect("the trail was answered");
+    assert_eq!(
+        went.went.len() as u64,
+        went.window,
+        "a window that overflowed holds exactly its bound"
+    );
+    assert!(
+        went.dropped > 0,
+        "this program ran far more lines than the window holds, and the trail \
+         says it dropped none of them — which is a trail claiming to start where \
+         the recording did"
+    );
+
+    // and the two agree: what was kept plus what went is what happened
+    let (_, held, dropped) = debuggee
+        .record(false, bpd_core::Depth::Where)
+        .expect("recording was stopped");
+    assert_eq!(held, went.went.len() as u64);
+    assert_eq!(dropped, went.dropped);
+}
+
+/// a frame with more locals than one step keeps
+const MANY_LOCALS: &str = r"def work():
+    a1 = 1
+    a2 = 2
+    a3 = 3
+    a4 = 4
+    a5 = 5
+    a6 = 6
+    a7 = 7
+    a8 = 8
+    a9 = 9
+    b1 = 1
+    b2 = 2
+    b3 = 3
+    b4 = 4
+    b5 = 5
+    b6 = 6
+    b7 = 7
+    b8 = 8
+    b9 = 9
+    return a1
+
+
+work()
+done = 1              # the breakpoint
+";
+
+#[test]
+fn a_step_that_kept_only_some_of_a_frames_names_says_so() {
+    // the per-step name cap used to cut with a bare `break`: a frame with forty
+    // locals read exactly like one with sixteen. it is a `Kept` now, so the
+    // count travels with the list and a front end cannot render one without the
+    // other
+    let fixture = Fixture::new("many", MANY_LOCALS);
+    let done = line_of(MANY_LOCALS, "done = 1");
+    let mut debuggee = launch(&fixture);
+
+    debuggee
+        .record(true, bpd_core::Depth::Values)
+        .expect("recording was answered");
+    debuggee
+        .set_breakpoints(vec![SourceBreakpoint::at(1, fixture.path(), done)])
+        .expect("the breakpoint was answered");
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
+        Running::Stopped { .. } => {}
+        other => panic!("the breakpoint never stopped it: {other:?}"),
+    }
+
+    let went = debuggee.trail().expect("the trail was answered");
+    let deepest = went
+        .went
+        .iter()
+        .filter(|step| step.function == "work")
+        .max_by_key(|step| step.held.kept.len() as u64 + step.held.dropped)
+        .expect("the recording covered `work`");
+
+    assert!(
+        deepest.held.cut(),
+        "this frame binds eighteen names and a step keeps sixteen, and the \
+         answer says nothing was left out: {:#?}",
+        deepest.held
+    );
+    assert!(
+        deepest.held.dropped > 0 && deepest.held.kept.len() <= 16,
+        "the cap is reported rather than applied silently: {:#?}",
+        deepest.held
+    );
+}

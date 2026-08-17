@@ -27,9 +27,13 @@
 //!   part way down. a client that paged from the middle would be answered from
 //!   a walk that started at the top anyway, which is a claim about cost that is
 //!   not true
-//! - **`supportsTerminateRequest`** — there is no *graceful* end. `disconnect`
-//!   ends the debuggee, and offering a second request that does the same thing
-//!   under a name that promises more would be a promise nothing keeps
+//! - **`supportsTerminateRequest`** — **not advertised, and serviced anyway.**
+//!   the adapter answers `terminate` exactly as it answers `disconnect`, because
+//!   a client that sends one has said the same thing either way and refusing it
+//!   would leave a session open that the client believes it has ended. what is
+//!   withheld is the *promise*: there is no graceful end. `disconnect` ends the
+//!   debuggee, and advertising a second request under a name that promises more
+//!   would be a promise nothing keeps
 
 /// the `initialize` response body
 pub fn capabilities() -> serde_json::Value {

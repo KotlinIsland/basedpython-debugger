@@ -521,6 +521,13 @@ impl Unbound {
     /// `InGeneratedPython` is the only variant that wraps another today, and
     /// the second one to be added is exactly what this is written against
     #[must_use]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "the arms are listed one per variant **because** their bodies \
+                  agree today. collapsing them into a `_` is what let a wrapped \
+                  reason be classified by nobody, and it is what would let the \
+                  next variant be called permanent without a decision"
+    )]
     pub fn will_bind_later(&self) -> bool {
         match self {
             // the file is not loaded, and loading it is a thing that happens
@@ -530,11 +537,31 @@ impl Unbound {
             // level down. the wrapper says where bpd looked, not what stopped it
             Self::InGeneratedPython { reason, .. } => reason.will_bind_later(),
 
-            // everything else is settled. a line the map cannot place is not
-            // waiting for anything — `Unmappable` is the map's own answer, and
-            // nothing arriving later changes it — and a condition that does not
-            // compile never will
-            _ => false,
+            // and everything else is settled. **listed rather than caught**,
+            // because a `_` arm would classify the next variant as permanent
+            // without anybody deciding that — and the cost of being wrong is an
+            // editor that stops hoping about a breakpoint which would have bound
+            //
+            // the file is not there, or is not a file at all
+            Self::Unresolvable { .. } => false,
+            // django has parsed the template already; the line renders nothing
+            Self::NoRenderedNode { .. } => false,
+            // only part of the file is visible, and nothing answers from a
+            // partial view — see the variant's own doc
+            Self::PartiallyLoaded { .. } => false,
+            // the file is loaded and has no such line
+            Self::NoExecutableLine { .. } => false,
+            // a condition that does not compile never will
+            Self::ConditionInvalid { .. } => false,
+            // the breakpoint it waits for can never arm it
+            Self::NeverArms { .. } => false,
+            // no map was given for this program
+            Self::NoSourceMap { .. } => false,
+            // the map is loaded and cannot place the line: its own answer, and
+            // nothing arriving later changes it
+            Self::Unmappable { .. } => false,
+            // the log message is malformed
+            Self::LogMessageInvalid { .. } => false,
         }
     }
 }
@@ -885,6 +912,9 @@ mod tests {
     /// about the enum rather than about three variants somebody picked
     fn every_reason() -> Vec<(Unbound, bool)> {
         use std::path::PathBuf;
+        // every variant, not six of eleven. the comment used to say this and the
+        // list did not do it — and `will_bind_later` had a `_` arm underneath,
+        // so a new variant would have been classified permanent by nobody
         vec![
             (
                 Unbound::NotLoaded {
@@ -926,6 +956,40 @@ mod tests {
                     reason: crate::source_map::Unmapped::NotInTheMap {
                         file: PathBuf::from("/src/app.by"),
                     },
+                },
+                false,
+            ),
+            (
+                Unbound::NoRenderedNode {
+                    file: PathBuf::from("/tmp/index.html"),
+                    requested: 3,
+                    last_rendered: Some(9),
+                },
+                false,
+            ),
+            (
+                Unbound::ConditionInvalid {
+                    condition: "x ==".to_string(),
+                    error: PythonError {
+                        kind: "SyntaxError".to_string(),
+                        message: "invalid syntax".to_string(),
+                        traceback: Vec::new(),
+                    },
+                },
+                false,
+            ),
+            (
+                Unbound::NeverArms {
+                    after: 3,
+                    why: NoArming::NoSuchBreakpoint,
+                },
+                false,
+            ),
+            (
+                Unbound::LogMessageInvalid {
+                    log: "{x".to_string(),
+                    expression: None,
+                    reason: "unbalanced brace".to_string(),
                 },
                 false,
             ),

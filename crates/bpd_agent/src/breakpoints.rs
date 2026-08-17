@@ -204,14 +204,6 @@ pub(crate) fn rebind(python: Python<'_>, loaded: &FileId) -> PyResult<Vec<Resolv
     Ok(changed)
 }
 
-/// re-resolve everything and report what the answer is now, where it moved
-///
-/// what a code replacement is followed by. every breakpoint of the file whose
-/// code was replaced was bound to a code object nothing will execute any more,
-/// and the line it moved to may have changed with the edit — so the whole set is
-/// resolved again against the tree that is running now. a breakpoint left
-/// pointing at dead code would be one the client can see is set and that never
-/// fires, which is the thing this module exists to prevent
 /// arm whatever was waiting for the breakpoints that have just acted
 ///
 /// called from the event path, which is why [`acted`] answers first: it takes
@@ -233,6 +225,14 @@ pub(crate) fn arm_after(python: Python<'_>, acted_ids: &[u32]) -> PyResult<Vec<R
     Ok(changed)
 }
 
+/// re-resolve everything and report what the answer is now, where it moved
+///
+/// what a code replacement is followed by. every breakpoint of the file whose
+/// code was replaced was bound to a code object nothing will execute any more,
+/// and the line it moved to may have changed with the edit — so the whole set is
+/// resolved again against the tree that is running now. a breakpoint left
+/// pointing at dead code would be one the client can see is set and that never
+/// fires, which is the thing this module exists to prevent
 pub(crate) fn reresolve(python: Python<'_>) -> PyResult<Vec<Resolved>> {
     let (_all, changed) = resolve_all(python)?;
     Ok(changed)

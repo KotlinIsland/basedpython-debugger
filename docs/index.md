@@ -16,23 +16,22 @@ compatibility layer holding it back:
     `bpd` is a debug adapter, so an editor needs a launch configuration rather
     than a bespoke plugin. **vs code** is proven, by a test that drives a real
     session through the extension; **neovim** drives it through `nvim-dap`.
-    **pycharm is a hard requirement and is not done** — its own python
-    debugging is pydevd, and DAP reaches it through a plugin rather than
-    natively
+    **pycharm** is proven too, by a test that downloads a real pycharm and stops
+    a program on a breakpoint through the plugin in `editors/intellij/`
 - **and MCP, at parity** — ai agents get the same session through an interface
     shaped for them rather than for a ui. both are thin adapters over the same
-    session core, and a capability exists in both or in neither
+    session core, and a capability is reached by both **wherever the protocol
+    can carry it** — where one genuinely cannot, that is a written entry naming
+    the front end and the reason, rather than a quiet gap
 - **django templates** — breakpoints in template files and template frames in
-    the stack, not the `django/template/base.py` frames underneath them. under
-    `runserver` the reloader serves from a **child** process the debugger is not
-    in, so that wants `--noreload` until `bpd` follows a child — and `bpd` says
-    so rather than leaving a breakpoint looking broken
-- **basedpython aware — not built yet.** the thing this project is named for is
-    the one bullet here that does not exist: `.by` breakpoints and `.by` frames
-    need the transpiler to emit a source map with provenance and a hash of both
-    artefacts, and that work is upstream. this project's rule is that a feature
-    is built or it does not exist, so it is labelled rather than listed beside
-    the ones that are
+    the stack, not the `django/template/base.py` frames underneath them.
+    `runserver` works **without** `--noreload`: the reloader serves from a child
+    process, and with `debugChildren` on, bpd debugs that child as a session of
+    its own and a template breakpoint binds and fires there
+- **basedpython aware** — `.by` breakpoints bind to the generated line and report
+    both locations, and a `.by` frame says where the interpreter really is. the map
+    is verified against a hash of both artefacts before it resolves anything, and a
+    line it cannot place errors rather than falling back to the raw number
 - **cpython 3.13+** — no `sys.settrace` path, no shims, no fallback ladders
 
 ## status
@@ -41,9 +40,10 @@ early. nothing is installable yet. the design lives under
 [development](development/architecture.md), and the order of work is in
 `ROADMAP.md`
 
-what exists today is `bpd doctor`, which reports whether an interpreter can be
-debugged, and `bpd launch`, which runs a program with the agent attached and
-stops it before its first statement:
+what exists today is five subcommands — `bpd doctor`, which reports whether an
+interpreter can be debugged; `bpd launch`, which runs a program with the agent
+attached and stops it before its first statement; `bpd dap` and `bpd mcp`, the
+two front ends; and `bpd cache`, which shows what the agent staging cache holds:
 
 ```sh
 cargo run --bin bpd -- doctor python3.14
