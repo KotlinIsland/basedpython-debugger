@@ -20,13 +20,19 @@ outlives being asked about
 somebody can act on, so `through` carries it wherever the holder's shape can be
 read:
 
-| holder               | what `through` says         |
-| -------------------- | --------------------------- |
-| a dict               | the value under a named key |
-| a dict, as a key     | that it is a key of it      |
-| a list, tuple or set | which index                 |
-| an object            | which attribute             |
-| anything else        | nothing — see below         |
+| holder             | what `through` says         |
+| ------------------ | --------------------------- |
+| a dict             | the value under a named key |
+| a dict, as a key   | that it is a key of it      |
+| a list or tuple    | which index                 |
+| a set or frozenset | that it is an element of it |
+| an object          | which attribute             |
+| anything else      | nothing — see below         |
+
+**a set is not given an index.** its iteration order is its hash table's and
+moves when the table is resized, so the position it happens to be reached at is
+not a place the object is — reported as a sequence's index it says the program
+holds it somewhere it does not, and it is not stable enough to be true twice
 
 **absent is not "nowhere".** it is a holder whose shape could not be read — a C
 type with its own traversal reaches its referents by a route no python-level
@@ -37,6 +43,17 @@ nothing here runs the program's own code. a retainer is described by its type an
 how much it holds rather than by `repr()`, because a repr calls the object's own
 `__repr__`, and `dir()` is avoided for the same reason: both are the program's
 code run to answer a question *about* the program
+
+the rule is wider than those two, and the quiet ones are what break it. `len()`
+is `__len__`, so a count is asked only of the builtin containers, matched by
+**exact** type — a dict subclass can override it. and a dict's entries are read
+straight off the table rather than looked up key by key, because a lookup hashes
+what it is given, which is `__hash__` and `__eq__`
+
+what that costs if it is got wrong is not only tidiness. the program's code run
+during a walk can mutate the heap the walk is describing, which is the one
+property this page measured and kept — and a key whose `__hash__` raises would
+fail a retainer query that had nothing to do with it
 
 ## `coverage` is on every answer and is not a footnote
 

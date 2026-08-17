@@ -33,7 +33,7 @@
 
 use bpd_core::{Coverage, Retainer, Retainers};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PySet, PyTuple};
+use pyo3::types::{PyDict, PyFrozenSet, PyList, PySet, PyTuple};
 
 /// what an untracked object costs the answer
 const UNTRACKED: &str = "objects the collector does not track never appear here. an int, a str, \
@@ -54,6 +54,20 @@ const NOT_PYTHON: &str = "a reference held by C or rust is a refcount rather tha
 /// which is what tells two dicts apart, and everything else says what it is
 fn described(object: &Bound<'_, PyAny>) -> PyResult<String> {
     let kind: String = object.get_type().name()?.extract()?;
+
+    // `len` reaches `__len__`, which is the program's code, so it is asked only
+    // of the builtin containers — whose length is C, and which are the ones a
+    // count tells apart. the type is matched **exactly**: a dict subclass may
+    // override `__len__`, and that is the program's code again
+    let counted = object.is_exact_instance_of::<PyDict>()
+        || object.is_exact_instance_of::<PyList>()
+        || object.is_exact_instance_of::<PyTuple>()
+        || object.is_exact_instance_of::<PySet>()
+        || object.is_exact_instance_of::<PyFrozenSet>();
+    if !counted {
+        return Ok(format!("a {kind}"));
+    }
+
     Ok(match object.len() {
         Ok(held) => format!("a {kind} holding {held}"),
         // no length is not a failure. a plain object has none, and asking is
@@ -114,10 +128,13 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
     // a mapping first, because a dict is both the commonest retainer and the
     // one where *which* entry matters most — a module's globals, an instance's
     // attributes and a cache are all dicts
-    if retainer.is_instance_of::<PyDict>() {
-        for pair in retainer.try_iter()? {
-            let key = pair?;
-            let value = retainer.get_item(&key)?;
+    //
+    // the pairs are read straight off the table rather than looked up per key.
+    // `get_item` hashes what it is given, which is `__hash__` and `__eq__` —
+    // the program's code — and a key whose hash raises would fail a walk that
+    // had nothing to do with it
+    if let Ok(mapping) = retainer.cast::<PyDict>() {
+        for (key, value) in mapping.iter() {
             if value.is(target) {
                 return Ok(Some(format!("the value under {}", short(&key)?)));
             }
@@ -129,13 +146,24 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
     }
 
     // a sequence, where the position is the answer
-    if retainer.is_instance_of::<PyList>()
-        || retainer.is_instance_of::<PyTuple>()
-        || retainer.is_instance_of::<PySet>()
-    {
+    if retainer.is_instance_of::<PyList>() || retainer.is_instance_of::<PyTuple>() {
         for (at, item) in retainer.try_iter()?.enumerate() {
             if item?.is(target) {
                 return Ok(Some(format!("index {at}")));
+            }
+        }
+        return Ok(None);
+    }
+
+    // a collection with no order, which is a different answer rather than the
+    // same one. a set's iteration order is its hash table's and moves when the
+    // table is resized, so the position it is reached at is not a place the
+    // object is — read as a sequence's index it says the program holds it
+    // somewhere it does not, and it is not stable enough to be true twice
+    if retainer.is_instance_of::<PySet>() || retainer.is_instance_of::<PyFrozenSet>() {
+        for item in retainer.try_iter()? {
+            if item?.is(target) {
+                return Ok(Some("an element of it".to_string()));
             }
         }
         return Ok(None);
@@ -145,11 +173,10 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
     // walked with `dir`, because `dir` calls `__getattr__` and that runs the
     // program's own code to answer a question about it
     if let Ok(attributes) = retainer.getattr("__dict__")
-        && attributes.is_instance_of::<PyDict>()
+        && let Ok(attributes) = attributes.cast::<PyDict>()
     {
-        for named in attributes.try_iter()? {
-            let name = named?;
-            if attributes.get_item(&name)?.is(target) {
+        for (name, value) in attributes.iter() {
+            if value.is(target) {
                 return Ok(Some(format!("attribute {}", short(&name)?)));
             }
         }
