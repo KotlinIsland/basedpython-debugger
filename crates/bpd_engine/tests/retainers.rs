@@ -165,3 +165,175 @@ fn an_object_nothing_holds_is_an_empty_answer_rather_than_a_missing_one() {
         "and the answer still has to say what it could not see"
     );
 }
+
+/// a program holding one object in the two shapes that have no position
+///
+/// the target is a plain instance rather than a list, because a set holds only
+/// what it can hash — which is exactly why the existing program never reaches
+/// this path
+const UNORDERED: &str = r"class Thing:
+    pass
+
+
+def main():
+    target = Thing()
+    in_a_set = {target}
+    in_a_frozen = frozenset({target})
+    here = 1              # the breakpoint
+    return in_a_set, in_a_frozen
+
+
+main()
+";
+
+#[test]
+fn a_holder_with_no_order_is_not_given_a_position_it_does_not_have() {
+    // a set's iteration order is its hash table's, and it moves when the table
+    // is resized. "index 3" of a set is a location the program does not have —
+    // read as a list's index it is a false statement about where the object is,
+    // and it is not stable enough to be true twice
+    let fixture = Fixture::new("program", UNORDERED);
+    let here = line_of(UNORDERED, "here = 1");
+    let mut debuggee = launch(&fixture);
+
+    debuggee
+        .set_breakpoints(vec![SourceBreakpoint::at(1, fixture.path(), here)])
+        .expect("the breakpoint was answered");
+    let found = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
+        Running::Stopped { .. } => {
+            let frame = debuggee
+                .the_stack(Some(1))
+                .expect("the stack was answered")
+                .frames[0]
+                .id;
+            debuggee
+                .what_holds(frame, "target")
+                .expect("the retainer walk was answered")
+        }
+        other => panic!("the breakpoint never stopped it: {other:?}"),
+    };
+
+    for retainer in &found.found {
+        if retainer.kind == "set" || retainer.kind == "frozenset" {
+            let inside = retainer.through.as_deref().unwrap_or("");
+            assert!(
+                !inside.starts_with("index"),
+                "a {} was reported as `{inside}`, and a set has no index: {:#?}",
+                retainer.kind,
+                found.found
+            );
+            assert_eq!(
+                inside, "an element of it",
+                "a holder with no order says the object is in it and refuses to \
+                 say where: {:#?}",
+                found.found
+            );
+        }
+    }
+
+    // and the shapes really were reached, so this cannot pass by finding none
+    let unordered = found
+        .found
+        .iter()
+        .filter(|retainer| retainer.kind == "set" || retainer.kind == "frozenset")
+        .count();
+    assert_eq!(
+        unordered, 2,
+        "the program holds it in a set and a frozenset, and the walk found \
+         {unordered} of them: {:#?}",
+        found.found
+    );
+}
+
+/// a program whose holders notice being looked at
+///
+/// `__len__` on the instance and `__hash__` on the dict key are the two hooks a
+/// retainer walk can trip without meaning to. the list records every call, and
+/// is cleared just before the stop so only the walk's own calls are in it
+const WATCHFUL: &str = r"called = []
+
+
+class Watchful:
+    def __init__(self, thing):
+        self.thing = thing
+
+    def __len__(self):
+        called.append('len')
+        return 0
+
+
+class Key:
+    def __hash__(self):
+        called.append('hash')
+        return 1
+
+    def __eq__(self, other):
+        called.append('eq')
+        return self is other
+
+
+def main():
+    target = ['the object being asked about']
+    watchful = Watchful(target)
+    keyed = {Key(): target}
+    called.clear()
+    here = 1              # the breakpoint
+    return watchful, keyed
+
+
+main()
+";
+
+#[test]
+fn asking_what_holds_an_object_runs_none_of_the_program_to_answer() {
+    // the rule the module states about `repr` and `dir`, which `len` and a dict
+    // lookup break just as thoroughly: `__len__`, `__hash__` and `__eq__` are
+    // the program's code, and running them to answer a question about the
+    // program can mutate the heap being asked about — or raise, and fail a walk
+    // for a reason that has nothing to do with what was asked
+    let fixture = Fixture::new("program", WATCHFUL);
+    let here = line_of(WATCHFUL, "here = 1");
+    let mut debuggee = launch(&fixture);
+
+    debuggee
+        .set_breakpoints(vec![SourceBreakpoint::at(1, fixture.path(), here)])
+        .expect("the breakpoint was answered");
+    match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
+        Running::Stopped { .. } => {}
+        other => panic!("the breakpoint never stopped it: {other:?}"),
+    }
+
+    let frame = debuggee
+        .the_stack(Some(1))
+        .expect("the stack was answered")
+        .frames[0]
+        .id;
+    let found = debuggee
+        .what_holds(frame, "target")
+        .expect("the retainer walk was answered");
+
+    let called = match debuggee
+        .evaluate(frame, "repr(called)", bpd_core::Detail::default())
+        .expect("the evaluation was answered")
+    {
+        bpd_core::Evaluated::Value { value } => match value.content {
+            bpd_core::Content::Str { text, .. } => text,
+            other => panic!("`repr` makes a string, and this is {other:?}"),
+        },
+        bpd_core::Evaluated::Raised { error } => panic!("`repr(called)` raised {error:?}"),
+    };
+
+    assert_eq!(
+        called.trim_matches('\''),
+        "[]",
+        "the walk ran the program's own code to describe it — {called} — while \
+         answering: {:#?}",
+        found.found
+    );
+}
