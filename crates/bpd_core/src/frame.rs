@@ -352,6 +352,17 @@ impl<T> Kept<T> {
         Self { kept, dropped: 0 }
     }
 
+    /// what was kept, and a count of everything that was not — including what
+    /// was lost for reasons other than a cap
+    ///
+    /// [`Self::of`] counts only what a bound cut. a caller that also skips
+    /// entries it could not read has to say so, and this is where it does:
+    /// a list of four from a frame of forty reads as a frame that binds four
+    #[must_use]
+    pub const fn counted(kept: Vec<T>, dropped: u64) -> Self {
+        Self { kept, dropped }
+    }
+
     /// whether a bound bit
     #[must_use]
     pub const fn cut(&self) -> bool {

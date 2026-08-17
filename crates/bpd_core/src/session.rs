@@ -564,11 +564,24 @@ pub enum Request {
 impl Request {
     /// how many kinds of request there are
     ///
-    /// paired with [`Self::ordinal`], and the pair is what makes
-    /// [`crate::parity::surface`] provably complete. adding a variant fails to
-    /// compile until it has an ordinal; giving it the next ordinal fails the
-    /// surface test until this is raised; raising this fails the same test
-    /// until the surface holds one of it
+    /// paired with [`Self::ordinal`], and **not fully enforced** — say so here
+    /// rather than let the next reader believe otherwise
+    ///
+    /// what is enforced: [`Self::ordinal`] is exhaustive with no catch-all, so a
+    /// variant added to the enum does not compile until somebody gives it a
+    /// number. and raising this without adding the variant to
+    /// [`crate::parity::surface`] fails that test, because a slot goes unfilled
+    ///
+    /// what is **not**: nothing ties this integer to the enum's arity. a variant
+    /// given ordinal 25 while this stays 25 and the surface is left alone is
+    /// never examined, because the test only indexes with the ordinals of
+    /// requests the surface already holds — so it passes. closing that needs the
+    /// count derived from the enum, which rust cannot do without a derive macro
+    /// or `variant_count`, and neither is in this tree yet
+    ///
+    /// the first version of this doc claimed a three-way trap. it was wrong in
+    /// the middle link, which is the same defect it was written against: a
+    /// guard asserting more than it checks
     ///
     /// this exists because it once was not enforced: `surface()` was missing
     /// four variants, and every parity assertion that iterates it — the
