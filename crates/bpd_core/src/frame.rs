@@ -385,11 +385,14 @@ impl<T> Kept<T> {
 /// created during asyncio's own import — or that its creating stack could not
 /// be read
 pub const TASK_NOT_SEEN: &str = "this stack is inside an asyncio task and bpd did not see \
-                                 that task created. every route to a task — `create_task`, \
+                                 that task created. the four stdlib routes — `create_task`, \
                                  `ensure_future`, `loop.create_task` and a task group's own \
-                                 — goes through the one function bpd watches, so this is a \
-                                 task made before that hook was armed, or one whose creating \
-                                 stack could not be read";
+                                 — all reach the one function bpd watches, so a record is \
+                                 missing when the task was made before that hook was armed, \
+                                 when its creating stack could not be read, or when it was \
+                                 made by something that does not go through that function \
+                                 at all: `asyncio.Task(coro)` built directly, or a loop \
+                                 that is not cpython's own";
 
 /// where the program went, over a bounded window
 ///

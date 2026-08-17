@@ -861,10 +861,23 @@ pub fn trail(went: &bpd_core::Trail) -> serde_json::Value {
                 went.dropped
             )
         },
-        "no_values": "a trail says where the program went and never what \
-                      anything was. capturing the values per line costs five \
-                      times as much again and is unbounded, and a recorder that \
-                      filled them in afterwards would be inventing history",
+        // what each step carries about the frame, which depends on the depth
+        // the recording was started at. this used to say a trail *never* says
+        // what anything was — which stopped being true when `depth` was built,
+        // and was being said in the same object that carried the values
+        "values": if went
+            .went
+            .iter()
+            .any(|step| !step.held.kept.is_empty() || step.held.dropped > 0)
+        {
+            "each step carries what the frame held, rendered as text and read \
+             without running any of the program. `held.dropped` above zero is a \
+             frame with more names than one step keeps"
+        } else {
+            "the steps carry no values: this recording was started at a depth \
+             that keeps only the location. `depth: \"values\"` on `record` keeps \
+             what the frame held as well, and costs more per name"
+        },
     })
 }
 

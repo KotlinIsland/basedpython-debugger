@@ -36,7 +36,9 @@ compatibility layer holding it back:
 
 ## status
 
-early. nothing is installable yet. the design lives under
+early, and **nothing is published**: a layout and a wheel are both built and
+driven in CI, and nothing uploads, signs or tags them, so there is nowhere to
+install it from yet. the design lives under
 [development](development/architecture.md), and the order of work is in
 `ROADMAP.md`
 

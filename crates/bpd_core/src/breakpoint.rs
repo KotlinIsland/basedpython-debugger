@@ -544,8 +544,15 @@ impl Unbound {
             //
             // the file is not there, or is not a file at all
             Self::Unresolvable { .. } => false,
-            // django has parsed the template already; the line renders nothing
-            Self::NoRenderedNode { .. } => false,
+            // django has parsed the template and no node renders at that line —
+            // and it can still bind, which is why this is `true`. the agent
+            // keeps `Template.__init__` armed for exactly this reason
+            // (`templates::watching_parses` lists it beside `NotLoaded`), and a
+            // template re-read after an edit is parsed under a new identity, so
+            // the set is resolved again. the core saying `failed` while the
+            // agent pays to watch for the binding was the two of them
+            // disagreeing about the same fact
+            Self::NoRenderedNode { .. } => true,
             // only part of the file is visible, and nothing answers from a
             // partial view — see the variant's own doc
             Self::PartiallyLoaded { .. } => false,
@@ -965,7 +972,7 @@ mod tests {
                     requested: 3,
                     last_rendered: Some(9),
                 },
-                false,
+                true,
             ),
             (
                 Unbound::ConditionInvalid {

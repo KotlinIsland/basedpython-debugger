@@ -11,6 +11,12 @@
 //! which audit events cpython raises for which way of making a child, and no
 //! amount of rust proves that
 
+// **the whole file is unix.** its fixtures call `os.fork()`, which does not
+// exist on windows — so without this the windows leg of the matrix compiles it,
+// runs it, and fails on an `AttributeError` that has nothing to do with the
+// debugger
+#![cfg(unix)]
+
 use bpd_core::python::Capabilities;
 use bpd_core::{Running, Verdict};
 use bpd_engine::{Debuggee, Launched};

@@ -147,13 +147,15 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
 
     // a sequence, where the position is the answer
     //
-    // read through the concrete storage and matched by **exact** type, for the
-    // reason `described` is: `try_iter` is `PyObject_GetIter`, which is
-    // `type(obj).__iter__` — the program's own code — and `is_instance_of`
-    // takes subclasses, so a `class Registry(list)` with an iterator of its own
-    // would be asked to run it to answer a question about the program. what it
-    // yielded would then decide the index reported
-    if let Ok(items) = retainer.cast_exact::<PyList>() {
+    // **subclasses included, and still without running their code.** pyo3's list
+    // and tuple iterators read `PyList_GET_ITEM` and `PyTuple_GET_ITEM` — the
+    // concrete storage — so a `class Registry(list)` is answered from the same
+    // array cpython itself indexes, and its `__iter__` is never consulted. an
+    // earlier cut of this used an **exact** type check to avoid running that
+    // `__iter__`, which was the right worry applied with the wrong instrument:
+    // it made a subclass holding the target report `None` — "a container whose
+    // shape this cannot read" — when the true answer was there for free
+    if let Ok(items) = retainer.cast::<PyList>() {
         for (at, item) in items.iter().enumerate() {
             if item.is(target) {
                 return Ok(Some(format!("index {at}")));
@@ -161,7 +163,7 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
         }
         return Ok(None);
     }
-    if let Ok(items) = retainer.cast_exact::<PyTuple>() {
+    if let Ok(items) = retainer.cast::<PyTuple>() {
         for (at, item) in items.iter().enumerate() {
             if item.is(target) {
                 return Ok(Some(format!("index {at}")));
@@ -175,17 +177,17 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
     // table is resized, so the position it is reached at is not a place the
     // object is — read as a sequence's index it says the program holds it
     // somewhere it does not, and it is not stable enough to be true twice
-    if let Ok(items) = retainer.cast_exact::<PySet>() {
-        for item in items.iter() {
-            if item.is(target) {
-                return Ok(Some("an element of it".to_string()));
-            }
-        }
-        return Ok(None);
-    }
-    if let Ok(items) = retainer.cast_exact::<PyFrozenSet>() {
-        for item in items.iter() {
-            if item.is(target) {
+    //
+    // a set has **no** storage iterator in pyo3: its `iter` is
+    // `PyObject_GetIter`, so the exact type check is what keeps a subclass's
+    // `__iter__` from running, and it is load bearing here in a way it is not
+    // above. `try_iter` rather than `iter` because the latter's item unwrap
+    // panics if the set is mutated mid-iteration, which a free-threaded build
+    // makes reachable — and a debugger that panics is worse than one that
+    // reports it could not read a container
+    if retainer.is_exact_instance_of::<PySet>() || retainer.is_exact_instance_of::<PyFrozenSet>() {
+        for item in retainer.try_iter()? {
+            if item?.is(target) {
                 return Ok(Some("an element of it".to_string()));
             }
         }
@@ -195,6 +197,16 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
     // and an ordinary object, through its own `__dict__`. asked for rather than
     // walked with `dir`, because `dir` calls `__getattr__` and that runs the
     // program's own code to answer a question about it
+    // and an ordinary object, through its own `__dict__`
+    //
+    // **this one does reach the program**, and saying so is the point:
+    // `getattr` is `type(obj).__getattribute__`, which a class may override. it
+    // is kept because the alternative is reporting `None` for the commonest
+    // retainer there is — an instance holding the target on an attribute — and
+    // a failure here is caught and becomes that same `None` rather than an
+    // error. what it cannot see is a `__slots__` class, which has no `__dict__`,
+    // and a class object, whose `__dict__` is a `mappingproxy` rather than a
+    // dict: both fall through to "shape unreadable", which is true of them
     if let Ok(attributes) = retainer.getattr("__dict__")
         && let Ok(attributes) = attributes.cast::<PyDict>()
     {
