@@ -75,7 +75,7 @@ pub(crate) fn refresh_events(python: Python<'_>) -> PyResult<()> {
         python,
         events::Global {
             py_start: breakpoints::any_set() || entering,
-            line: world::parking() || pause::pausing(),
+            line: world::parking() || pause::pausing() || crate::trail::recording(),
             py_unwind: stepping || exceptions::uncaught(),
             py_throw: entering,
             py_resume: entering,
@@ -141,6 +141,18 @@ fn answer(
         } => {
             let answer = stopped.variables(frame, scope, detail)?;
             attach::send(&answer);
+        }
+        FromEngine::Record { on } => {
+            let (held, dropped) = crate::trail::record(on);
+            // the instrumentation follows the mode: recording arms `LINE` for
+            // the whole program, and stopping takes it off again
+            refresh_events(python)?;
+            attach::send(&FromAgent::Recording { on, held, dropped });
+        }
+        FromEngine::Trail => {
+            attach::send(&FromAgent::Trailed {
+                trail: crate::trail::taken(python)?,
+            });
         }
         FromEngine::Retainers { frame, expression } => {
             attach::send(&stopped.retainers(frame, &expression)?);

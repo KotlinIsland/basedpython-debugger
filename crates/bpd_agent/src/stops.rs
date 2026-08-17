@@ -251,6 +251,9 @@ pub(crate) fn route(request: FromEngine) {
         // code of a file, and which held thread answers makes no difference to
         // what it finds or what it writes
         FromEngine::ReplaceCode { .. } => Address::Any("the code to replace"),
+        // about the whole program, so any held thread answers
+        FromEngine::Record { .. } => Address::Any("whether to record where it goes"),
+        FromEngine::Trail => Address::Any("where the program has been"),
         FromEngine::Stack { stop, .. } | FromEngine::StopTheWorld { stop, .. } => {
             Address::Stop(*stop)
         }

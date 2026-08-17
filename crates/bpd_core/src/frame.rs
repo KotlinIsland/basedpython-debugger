@@ -259,3 +259,41 @@ pub struct Coverage {
     /// read. this says which it was rather than implying the stronger one
     pub mode: Mode,
 }
+
+/// where the program went, over a bounded window
+///
+/// deliberately **only** where. what a variable was at each step costs five
+/// times as much again and is unbounded — it is a copy of live objects per line,
+/// which perturbs the heap it copies from — so a trail says where and refuses to
+/// say what, which is a debugger reporting what it has
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Trail {
+    /// the steps the window still holds, oldest first
+    pub went: Vec<Visited>,
+    /// how many steps fell out of the window before these
+    ///
+    /// the whole of "say plainly where the window ends". a trail of the last
+    /// hundred thousand steps that did not say it had discarded two million is
+    /// one whose beginning is a fiction — a reader would take the oldest entry
+    /// for the start of the recording
+    pub dropped: u64,
+    /// whether it is still recording
+    pub recording: bool,
+    /// how many steps the window holds at most
+    pub window: u64,
+}
+
+/// one place the program was
+///
+/// no values. that is not an omission — see [`Trail`]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Visited {
+    /// the file it was in
+    pub file: String,
+    /// the line it was on
+    pub line: u32,
+    /// `co_qualname` of the code it was running
+    pub function: String,
+    /// which thread was there
+    pub thread: u64,
+}

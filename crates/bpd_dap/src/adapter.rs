@@ -462,6 +462,8 @@ impl Adapter {
             // of this. an editor is where the file gets edited, so an editor is
             // where a replacement is worth offering — and the parity rule does
             // not let it be an agent's alone
+            Some("bpd/record") => self.record(message),
+            Some("bpd/trail") => self.trail(message),
             Some("bpd/retainers") => self.retainers(message),
             Some("bpd/replaceCode") => self.replace_code(message),
             Some(command) => Err(Aborted::Refuse(format!(
@@ -1167,6 +1169,76 @@ impl Adapter {
         };
         let body = serde_json::to_value(&difference)
             .expect("a difference is built from types whose serde is derived");
+        self.respond(message, Some(body))?;
+        Ok(())
+    }
+
+    /// start or stop recording where the program goes
+    ///
+    /// deliberately **not** DAP's `stepBack`. that request means "put the
+    /// program back where it was", and a trail says only where it went — a
+    /// client that drew this as `stepBack` would be offering to undo something
+    /// bpd cannot undo. `supportsStepBack` stays unadvertised for that reason
+    fn record(&mut self, message: &Incoming) -> Answered {
+        let on = match &message.arguments["on"] {
+            serde_json::Value::Bool(on) => *on,
+            other => {
+                return Err(Aborted::Refuse(format!(
+                    "a `bpd/record` needs `on`, a boolean, and this was {other}. \
+                     turning recording on costs about four times a bare run, so \
+                     it is not something to start on a guess"
+                )));
+            }
+        };
+
+        let answer = match self.ask(Request::Record { on })? {
+            Response::Recording { on, held, dropped } => {
+                serde_json::json!({ "recording": on, "held": held, "dropped": dropped })
+            }
+            other => unreachable!("a recording was answered with {other:?}"),
+        };
+        // on the console because it is a mode with a price, and a person who
+        // left it on would otherwise have nothing to remind them
+        if on {
+            self.event(
+                "output",
+                &serde_json::json!({
+                    "category": "important",
+                    "output": "bpd is recording where the program goes. every line is \
+                               watched while this is on, which costs about four times a \
+                               bare run — it records where, never what\n",
+                }),
+            )?;
+        }
+        self.respond(message, Some(answer))?;
+        Ok(())
+    }
+
+    /// the window of where the program has been
+    fn trail(&mut self, message: &Incoming) -> Answered {
+        let went = match self.ask(Request::Trail)? {
+            Response::Trail(went) => went,
+            other => unreachable!("a trail was answered with {other:?}"),
+        };
+        // the window's edge, said where a person is looking. a trail whose start
+        // is not where the recording began reads as the whole run otherwise
+        if went.dropped > 0 {
+            self.event(
+                "output",
+                &serde_json::json!({
+                    "category": "important",
+                    "output": format!(
+                        "the trail holds the last {} steps and {} fell out of the \
+                         window before them, so its oldest entry is not where the \
+                         recording began\n",
+                        went.went.len(),
+                        went.dropped
+                    ),
+                }),
+            )?;
+        }
+        let body = serde_json::to_value(&went)
+            .expect("a trail is built from types whose serde is derived");
         self.respond(message, Some(body))?;
         Ok(())
     }

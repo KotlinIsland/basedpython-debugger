@@ -551,6 +551,22 @@ impl<'a> Server<'a> {
                     other => unreachable!("a restart was answered with {other:?}"),
                 }
             }
+            "record" => {
+                let args: RecordArgs = parse(name, arguments)?;
+                match self.ask_in(args.session, Request::Record { on: args.on })? {
+                    Response::Recording { on, held, dropped } => {
+                        Ok(render::recording(on, held, dropped))
+                    }
+                    other => unreachable!("a recording was answered with {other:?}"),
+                }
+            }
+            "trail" => {
+                let args: SessionOnly = parse(name, arguments)?;
+                match self.ask_in(args.session, Request::Trail)? {
+                    Response::Trail(trail) => Ok(render::trail(&trail)),
+                    other => unreachable!("a trail was answered with {other:?}"),
+                }
+            }
             "retainers" => {
                 let args: RetainersArgs = parse(name, arguments)?;
                 let frame = self.frame_of(
@@ -1688,6 +1704,15 @@ struct RestartFrameArgs {
 /// one held thread, and it names the file the same way a breakpoint does
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RecordArgs {
+    #[serde(default)]
+    session: Option<u64>,
+    /// whether to record
+    on: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RetainersArgs {
     #[serde(default)]
     session: Option<u64>,
@@ -1975,6 +2000,8 @@ mod tests {
         "set_variable" => SetVariableArgs,
         "set_next_statement" => SetNextStatementArgs,
         "restart_frame" => RestartFrameArgs,
+        "record" => RecordArgs,
+        "trail" => SessionOnly,
         "retainers" => RetainersArgs,
         "replace_code" => ReplaceCodeArgs,
         "threads" => ThreadsArgs,

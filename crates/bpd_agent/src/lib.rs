@@ -42,6 +42,7 @@ mod stops;
 mod tasks;
 mod templates;
 mod threads;
+mod trail;
 mod values;
 mod world;
 
@@ -469,8 +470,20 @@ fn on_line<'py>(
         return Ok(python.None().into_bound(python));
     }
 
+    // where the program went, before anything decides whether to stop. it is
+    // the one mode that turns off the `DISABLE` this whole design rests on, so
+    // it is asked for rather than assumed — see `crate::trail`
+    if trail::recording() {
+        trail::went(code, line, events::thread_ident(python)?);
+    }
+
     let plans = breakpoints::hit(code.as_ptr() as usize, line);
-    if plans.is_none() && !steps::armed_anywhere() && !world::parking() && !pause::pausing() {
+    if plans.is_none()
+        && !steps::armed_anywhere()
+        && !world::parking()
+        && !pause::pausing()
+        && !trail::recording()
+    {
         // nothing wants this line now, and nothing in the process could want it
         // again before something arms it. `DISABLE` is process wide, so a line
         // forgotten here is one a step being made on another thread would never

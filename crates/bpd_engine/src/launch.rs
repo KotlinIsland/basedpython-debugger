@@ -412,6 +412,22 @@ impl Debuggee {
         }
     }
 
+    /// start or stop recording where the program goes
+    fn recording(
+        &mut self,
+        at: usize,
+        on: bool,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Response> {
+        let (on, held, dropped) = self.attached[at].record_trail(on, reporting)?;
+        Ok(Response::Recording { on, held, dropped })
+    }
+
+    /// the window of where the program has been
+    fn taken(&mut self, at: usize, reporting: &mut dyn Reporting) -> Result<Response> {
+        Ok(Response::Trail(self.attached[at].taken_trail(reporting)?))
+    }
+
     /// what is holding an object, and answer with it
     ///
     /// lifted out of [`Self::dispatch`] for the reason the replacement arm was:
@@ -568,6 +584,8 @@ impl Debuggee {
                 file,
                 even_under_a_live_frame,
             } => self.answer_a_replacement(at, file, even_under_a_live_frame, reporting),
+            Request::Record { on } => self.recording(at, on, reporting),
+            Request::Trail => self.taken(at, reporting),
             Request::Retainers { frame, expression } => {
                 self.holds(at, frame, expression, reporting)
             }
@@ -893,11 +911,34 @@ impl Debuggee {
         }
     }
 
-    /// replace the code the process is running for one file with what is on disk
+    /// start or stop recording where the program goes
     ///
-    /// nothing is applied unless all of it can be. what came back says which
-    /// functions now run different code and which breakpoints moved with them,
-    /// or every reason it was refused — see [`bpd_core::Replaced`]
+    /// **the one mode that turns off what makes the rest of this fast.** a line
+    /// is normally watched once and disabled; a recorder needs every execution
+    /// of it, which measured at about 4× a bare run
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached
+    pub fn record(&mut self, on: bool) -> Result<(bool, u64, u64)> {
+        match self.ask_for(Request::Record { on })? {
+            Response::Recording { on, held, dropped } => Ok((on, held, dropped)),
+            other => unreachable!("a recording was answered with {other:?}"),
+        }
+    }
+
+    /// where the program has been, over the window
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached
+    pub fn trail(&mut self) -> Result<bpd_core::Trail> {
+        match self.ask_for(Request::Trail)? {
+            Response::Trail(trail) => Ok(trail),
+            other => unreachable!("a trail was answered with {other:?}"),
+        }
+    }
+
     /// what is holding the object an expression names, and how
     ///
     /// # errors
@@ -1568,6 +1609,40 @@ impl Attached {
             reporting,
         )? {
             FromAgent::Replaced { replaced } => Ok(replaced),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// start or stop recording, and say what the window holds
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached, or the agent answers with something
+    /// else
+    fn record_trail(
+        &mut self,
+        on: bool,
+        reporting: &mut dyn Reporting,
+    ) -> Result<(bool, u64, u64)> {
+        const EXPECTED: &str = "whether recording is on";
+
+        match self.ask(&FromEngine::Record { on }, EXPECTED, reporting)? {
+            FromAgent::Recording { on, held, dropped } => Ok((on, held, dropped)),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// the window of where the program has been
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached, or the agent answers with something
+    /// else
+    fn taken_trail(&mut self, reporting: &mut dyn Reporting) -> Result<bpd_core::Trail> {
+        const EXPECTED: &str = "where the program has been";
+
+        match self.ask(&FromEngine::Trail, EXPECTED, reporting)? {
+            FromAgent::Trailed { trail } => Ok(trail),
             other => Err(unexpected(&other, EXPECTED)),
         }
     }
