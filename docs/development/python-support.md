@@ -8,6 +8,11 @@
 | attach         | cpython 3.14 | PEP 768 `sys.remote_exec`                  |
 | implementation | cpython only | PEP 669 and PEP 768 are cpython interfaces |
 
+the attach row is the floor a **future** feature will have, not one bpd offers:
+there is no `bpd attach` command, and `bpd doctor` reports PEP 768 as a property
+of the interpreter rather than as something it can do for you. it is M8 on the
+roadmap
+
 there is no compatibility layer, no capability fallback ladder, and no branch
 anywhere in the tree that keeps an older interpreter partly working. an
 interpreter either has what a feature needs or `bpd` reports that it does not,

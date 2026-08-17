@@ -142,8 +142,11 @@ pub enum RemoteDebug {
     /// `sys.remote_exec` is present and nothing in the environment disables it
     ///
     /// a build configured with `--without-remote-debug` still fails, and can
-    /// only be detected at attach time — `bpd attach` reports that as its own
-    /// failure rather than guessing here
+    /// only be detected at attach time, so it is left for whatever attaches to
+    /// report as its own failure rather than guessed at here
+    ///
+    /// this is a fact about the **interpreter**. nothing in `bpd` attaches yet,
+    /// so it is not an offer — see M8 on the roadmap
     Available,
     /// the interpreter predates PEP 768
     MissingApi,
