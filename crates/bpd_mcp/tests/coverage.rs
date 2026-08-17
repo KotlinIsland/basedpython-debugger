@@ -1583,3 +1583,37 @@ impl FakeSession {
         }
     }
 }
+
+#[test]
+fn the_record_tool_offers_every_depth_and_defaults_to_the_cheap_one() {
+    // the facet says an agent can reach this, and a facet is a claim about the
+    // tool rather than about the core. the depths differ by a large multiple of
+    // a bare run, so a server that hard-coded one would be choosing what its
+    // user pays without saying so
+    let tool = tools()
+        .into_iter()
+        .find(|tool| tool.name == "record")
+        .expect("the record tool is offered");
+
+    let depth = &tool.schema["properties"]["depth"];
+    let offered: Vec<&str> = depth["enum"]
+        .as_array()
+        .expect("the depths are offered as an enum, so an agent need not know them")
+        .iter()
+        .map(|one| one.as_str().expect("each is a string"))
+        .collect();
+    assert_eq!(offered, vec!["where", "frame", "locals", "values"]);
+
+    // and it is **not** required: absent is the cheap depth, because an agent
+    // that said nothing has not asked to pay for the expensive one
+    let required: Vec<&str> = tool.schema["required"]
+        .as_array()
+        .expect("the tool has required arguments")
+        .iter()
+        .map(|one| one.as_str().expect("each is a string"))
+        .collect();
+    assert!(
+        !required.contains(&"depth"),
+        "a depth nobody named is the cheap one: {required:?}"
+    );
+}

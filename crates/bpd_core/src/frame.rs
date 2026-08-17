@@ -298,6 +298,17 @@ pub enum Depth {
     Values,
 }
 
+impl std::fmt::Display for Depth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Where => "where",
+            Self::Frame => "frame",
+            Self::Locals => "locals",
+            Self::Values => "values",
+        })
+    }
+}
+
 /// where the program went, over a bounded window
 ///
 /// deliberately **only** where. what a variable was at each step costs five

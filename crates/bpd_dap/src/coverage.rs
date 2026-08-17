@@ -152,6 +152,11 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
 
         // one more console line, after the last scheduling frame, because that
         // is the line a reader would otherwise take for the beginning
+        // an argument of the same custom request that starts one. absent is
+        // the cheap depth, so a client that says nothing is not charged for
+        // the expensive one
+        Facet::RecordingDepth => Reach::Direct("`depth` on the `bpd/record` request"),
+
         Facet::SchedulingCut => Reach::Direct(
             "a console `output` event after the last scheduling frame, saying \
              the record does not reach the program's entry",

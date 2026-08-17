@@ -557,7 +557,7 @@ impl<'a> Server<'a> {
                     args.session,
                     Request::Record {
                         on: args.on,
-                        depth: bpd_core::Depth::default(),
+                        depth: args.depth,
                     },
                 )? {
                     Response::Recording { on, held, dropped } => {
@@ -1715,6 +1715,13 @@ struct RecordArgs {
     session: Option<u64>,
     /// whether to record
     on: bool,
+    /// how much of each step to keep
+    ///
+    /// absent is the cheap one. the depths differ by hundreds of times a bare
+    /// run, and an agent that said nothing has not asked to pay for the
+    /// expensive one
+    #[serde(default)]
+    depth: bpd_core::Depth,
 }
 
 #[derive(serde::Deserialize)]

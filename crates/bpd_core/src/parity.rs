@@ -179,11 +179,21 @@ pub enum Facet {
     /// from the middle of a call chain, and a reader has no way to tell that
     /// apart from a task really scheduled there
     SchedulingCut,
+
+    /// how much of each step a recording keeps — [`crate::Depth`]
+    ///
+    /// a field of [`Request::Record`], and a capability all the same: without it
+    /// a front end can start a recording and never ask for the half of it that
+    /// says what a variable was. it is also the one field here that a user picks
+    /// on **price** — the depths differ by hundreds of times a bare run — so a
+    /// front end that hard-coded one would be choosing that for its user without
+    /// saying so
+    RecordingDepth,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
@@ -193,6 +203,7 @@ impl Facet {
         Self::Sequenced,
         Self::Scheduling,
         Self::SchedulingCut,
+        Self::RecordingDepth,
     ];
 
     /// what to call this capability in a message about it
@@ -207,6 +218,7 @@ impl Facet {
             Self::Sequenced => "a breakpoint that waits for another one to be hit",
             Self::Scheduling => "where the task a stack is inside was created",
             Self::SchedulingCut => "that a scheduling record does not reach the program's entry",
+            Self::RecordingDepth => "how much of each step a recording keeps",
         }
     }
 }

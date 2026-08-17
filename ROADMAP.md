@@ -1071,19 +1071,33 @@ three honesty constraints decide the design:
 with PEP 768 attach (M8) this becomes a snapshot of a production process that
 was never started under a debugger, which is where it earns most
 
-### record and replay · the trail half is done
+### record and replay · done
 
 stepping backwards, and asking what a variable was rather than what it is
 
-**the first half is built.** `bpd/record` and `bpd/trail`, and the `record` and
+**both halves are built.** `bpd/record` and `bpd/trail`, and the `record` and
 `trail` tools, answer **where the program went** over a window of the last
 100,000 steps — file, line, function, thread, in order. what fell out of the
 window is counted on every answer, because a trail read as a whole run when it
 is the tail of a longer one is a reader concluding the program started somewhere
 it did not. see [where the program went](docs/development/trail.md)
 
-the second half — **what a variable was** — is deliberately not built, and the
-measurements below are the reason rather than a schedule. it is not
+the second half — **what a variable was** — is now built too, as `depth` on the
+same request: `values` keeps what the frame held alongside the location, as
+**text** read without running any of the program, so the window stays bounded and
+nothing the program has finished with is kept alive by the recorder. `frame` and
+`locals` store nothing and exist so the cost of `values` can be attributed, since
+a `LINE` event carries no frame and reaching one, materialising `f_locals` and
+rendering each name are three separate costs
+
+**the figures below are a prototype's**, from the same python harness as the
+callback table above, and they compare two ways of *storing* with none of bpd's
+own `LINE` path in either. `crates/bpd_engine/tests/replay_values.rs` measures
+the real thing with the depths separated; no number from it is quoted anywhere
+yet, because every run so far was taken on a loaded machine and it prints the
+spread beside each row for exactly that reason. what those runs agreed on is that
+**rendering dominates** — which makes *which names* the lever rather than *how
+many lines* it is not
 `supportsStepBack` either: that request means "put the program back where it
 was", and a trail says only where it went, so a client drawing it that way would
 be offering an undo `bpd` does not have
