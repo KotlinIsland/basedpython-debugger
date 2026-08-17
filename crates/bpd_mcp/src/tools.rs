@@ -897,6 +897,51 @@ pub fn tools() -> Vec<Tool> {
             ),
         },
         Tool {
+            name: "record",
+            title: "record where the program goes",
+            description: "start or stop recording the program's path.\n\n\
+                **this is the one mode that turns off what makes bpd fast.** a \
+                line is normally watched once and then disabled — six callbacks \
+                for nine hundred thousand line executions — and a recorder needs \
+                every one of them. measured at about 4x a bare run. it is off by \
+                default and worth turning on for a region of a run, not a \
+                session.\n\n\
+                it records **where** and never what. a copy of the values per \
+                line costs five times as much again, is unbounded, and perturbs \
+                the heap it copies from — and a recorder that filled them in \
+                afterwards would be inventing history.\n\n\
+                stopping keeps the trail, because stopping is what you do in \
+                order to read it."
+                .to_string(),
+            schema: object(
+                serde_json::json!({
+                    "session": integer(SESSION),
+                    "on": { "type": "boolean", "description":
+                        "whether to record. starting clears any earlier trail, \
+                         because one spanning two recordings has a gap in it \
+                         that nothing marks" },
+                }),
+                &["on"],
+            ),
+        },
+        Tool {
+            name: "trail",
+            title: "where the program has been",
+            description: "the window of places the program went while recording, \
+                oldest first, with the thread that was there.\n\n\
+                `dropped` is not decoration: the window holds a fixed number of \
+                steps, and anything that fell out of it is counted. a trail \
+                whose `dropped` is above zero does **not** begin where the \
+                recording did, and reading its oldest entry as the start is the \
+                one mistake this answer exists to prevent.\n\n\
+                there are no values here. see `record`."
+                .to_string(),
+            schema: object(
+                serde_json::json!({ "session": integer(SESSION) }),
+                &[],
+            ),
+        },
+        Tool {
             name: "retainers",
             title: "what is holding an object",
             description: "why an object is still alive. name it with an \

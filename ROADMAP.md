@@ -1040,9 +1040,30 @@ three honesty constraints decide the design:
 with PEP 768 attach (M8) this becomes a snapshot of a production process that
 was never started under a debugger, which is where it earns most
 
-### record and replay
+### record and replay · the trail half is done
 
 stepping backwards, and asking what a variable was rather than what it is
+
+**the first half is built.** `bpd/record` and `bpd/trail`, and the `record` and
+`trail` tools, answer **where the program went** over a window of the last
+100,000 steps — file, line, function, thread, in order. what fell out of the
+window is counted on every answer, because a trail read as a whole run when it
+is the tail of a longer one is a reader concluding the program started somewhere
+it did not. see [where the program went](docs/development/trail.md)
+
+the second half — **what a variable was** — is deliberately not built, and the
+measurements below are the reason rather than a schedule. it is not
+`supportsStepBack` either: that request means "put the program back where it
+was", and a trail says only where it went, so a client drawing it that way would
+be offering an undo `bpd` does not have
+
+three things the mechanism decided rather than preference. the window holds a
+code object's **address** and resolves filenames only when the trail is read, so
+naming a place is paid once per read rather than once per line. every code
+object referred to is **held**, because an address is an identity only while the
+object is alive and a freed one would let the trail name the wrong file.
+and **stopping keeps the trail**, because stopping is what somebody does in
+order to read it
 
 full deterministic replay is not available: it would mean capturing every
 syscall, thread interleaving, clock read and random source that the interpreter

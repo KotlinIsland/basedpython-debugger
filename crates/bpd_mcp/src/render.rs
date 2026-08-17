@@ -803,6 +803,49 @@ pub fn retainers(found: &bpd_core::Retainers) -> serde_json::Value {
     })
 }
 
+/// whether recording is on, and what the window holds
+pub fn recording(on: bool, held: u64, dropped: u64) -> serde_json::Value {
+    serde_json::json!({
+        "recording": on,
+        "held": held,
+        "dropped": dropped,
+        "says": if on {
+            "recording where the program goes. **this is the one mode that turns \
+             off what makes bpd fast**: a line is normally watched once and then \
+             disabled, and a recorder needs every execution of it — measured at \
+             4x a bare run. it records where, never what: a copy of the values \
+             per line costs five times as much again and is unbounded"
+        } else {
+            "not recording. the trail is kept when recording stops, because \
+             stopping is what somebody does in order to read it"
+        },
+    })
+}
+
+/// where the program has been
+pub fn trail(went: &bpd_core::Trail) -> serde_json::Value {
+    serde_json::json!({
+        "went": went.went,
+        "dropped": went.dropped,
+        "window": went.window,
+        "recording": went.recording,
+        "says": if went.dropped == 0 {
+            "every step since recording started".to_string()
+        } else {
+            format!(
+                "the last {} steps. **{} fell out of the window before these**, \
+                 so the oldest entry here is not where the recording began",
+                went.went.len(),
+                went.dropped
+            )
+        },
+        "no_values": "a trail says where the program went and never what \
+                      anything was. capturing the values per line costs five \
+                      times as much again and is unbounded, and a recorder that \
+                      filled them in afterwards would be inventing history",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -344,6 +344,25 @@ pub enum Request {
         detail: Detail,
     },
 
+    /// start or stop recording where the program goes
+    ///
+    /// **the one mode that turns off the property the rest of the design rests
+    /// on.** a location is normally disabled the first time it is seen — six
+    /// callbacks for nine hundred thousand line executions — and a recorder
+    /// needs every one of them, which measured at 4× a bare run for the delivery
+    /// alone. so it is off by default and asked for by somebody who knows
+    ///
+    /// it records **where** and never what: a copy of the locals per line costs
+    /// five times as much again and is unbounded, and a recorder that
+    /// interpolated the values it did not capture would be inventing history
+    Record {
+        /// whether to record
+        on: bool,
+    },
+
+    /// the window of where the program has been
+    Trail,
+
     /// what is holding an object, and how
     ///
     /// "why is this still alive". the object is named by an expression, in a
@@ -568,6 +587,8 @@ impl Request {
             Self::Diff { .. } => "the difference between two states",
             Self::SetVariable { .. } => "writing a variable",
             Self::Facts { .. } => "what is provable about a frame's names",
+            Self::Record { .. } => "recording where the program goes",
+            Self::Trail => "where the program has been",
             Self::Retainers { .. } => "what is holding an object",
             Self::ReplaceCode { .. } => "replacing a file's code",
             Self::SetNextStatement { .. } => "setting the next statement",
@@ -593,6 +614,9 @@ impl Request {
             // about the whole process, and about a process that does not exist
             // yet at that
             | Self::DebugChildren { .. }
+            // about the whole program rather than one held thread
+            | Self::Record { .. }
+            | Self::Trail
             | Self::Run { .. }
             | Self::Wait { .. }
             | Self::Resume { .. }
@@ -761,6 +785,19 @@ pub enum Response {
 
     /// a stop's state, at the level of detail the query asked for
     State(Snapshot),
+
+    /// whether recording is on, and what the window holds
+    Recording {
+        /// whether it is recording now
+        on: bool,
+        /// how many steps the window holds
+        held: u64,
+        /// how many fell out of it
+        dropped: u64,
+    },
+
+    /// where the program has been
+    Trail(crate::frame::Trail),
 
     /// what is holding an object, and what the walk could not see
     Retainers(crate::frame::Retainers),

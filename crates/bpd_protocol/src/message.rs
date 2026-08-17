@@ -28,7 +28,7 @@ use std::io::{Read, Write};
 use bpd_core::{
     ContextLayer, Detail, Entry, Evaluated, Fact, Frame, FrameId, Limit, LogRecord, Mode, Omitted,
     Refusal, Reported, Resolved, Retainers, Scope, Silent, SourceBreakpoint, StepKind, ThreadState,
-    Which,
+    Trail, Which,
 };
 
 use crate::frame::{self, Result};
@@ -238,6 +238,22 @@ pub enum FromAgent {
     },
 
     /// what is provable about some of a frame's names, and for how long
+    /// whether recording is on, and what the window holds
+    Recording {
+        /// whether it is recording now
+        on: bool,
+        /// how many steps the window holds
+        held: u64,
+        /// how many fell out of it
+        dropped: u64,
+    },
+
+    /// where the program has been
+    Trailed {
+        /// the window, whole
+        trail: Trail,
+    },
+
     /// what is holding an object, and what the walk could not see
     Retaining {
         /// the answer, whole
@@ -582,6 +598,15 @@ pub enum FromEngine {
         /// `bpd_core::Request::ReplaceCode`
         even_under_a_live_frame: bool,
     },
+
+    /// start or stop recording where the program goes
+    Record {
+        /// whether to record
+        on: bool,
+    },
+
+    /// the window of where the program has been
+    Trail,
 
     /// what is holding an object, and how
     ///

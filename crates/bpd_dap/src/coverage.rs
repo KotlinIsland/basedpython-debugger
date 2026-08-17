@@ -125,6 +125,13 @@ pub const fn reach_of(request: &Request) -> Reach {
         // DAP has no request for this and will not grow one: its model of state
         // is a tree walked downwards from a frame, and this is the question
         // asked upwards from an object
+        // DAP has `supportsStepBack` and a `stepBack` request, and this is
+        // deliberately **not** mapped onto them: that request means "put the
+        // program back where it was", and a trail says only where it went. a
+        // client that drew this as `stepBack` would offer to undo something bpd
+        // cannot undo
+        Request::Record { .. } => Reach::Direct("bpd/record, a custom request"),
+        Request::Trail => Reach::Direct("bpd/trail, a custom request"),
         Request::Retainers { .. } => Reach::Direct("bpd/retainers, a custom request"),
         Request::ReplaceCode { .. } => Reach::Direct("bpd/replaceCode, a custom request"),
     }

@@ -171,6 +171,14 @@ fn every_capability_carried_inside_a_request_reaches_the_session() {
         Facet::LiveReplacement.name()
     );
 
+    // the window's edge, read off the answer. a trail whose `dropped` a server
+    // left out reads as the whole run, and its oldest entry as where the
+    // recording began — which is the one mistake this answer exists to prevent
+    assert!(
+        client.answered(&["\"dropped\":12", "not where the recording began"]),
+        "the trail dropped entries and the answer never said so"
+    );
+
     // where the task was created, read off the answer. a server that walked the
     // frames and dropped this would show a stack that is true and says nothing
     // about who scheduled it — which is the whole of what a severed chain costs
@@ -457,6 +465,9 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
     client.call("threads", &serde_json::json!({ "settle_ms": 10 }));
     client.call("stop_the_world", &serde_json::json!({}));
     client.call("stack", &serde_json::json!({}));
+    // the one mode that turns off what makes bpd fast, and the window it fills
+    client.call("record", &serde_json::json!({ "on": true }));
+    client.call("trail", &serde_json::json!({}));
     // why an object is still alive, which is the question asked upwards from an
     // object rather than downwards from a frame
     client.call(
@@ -726,6 +737,8 @@ fn tool_order() -> Vec<&'static str> {
         "threads",
         "stop_the_world",
         "stack",
+        "record",
+        "trail",
         "retainers",
         "variables",
         "facts",
@@ -1341,6 +1354,25 @@ impl Session for FakeSession {
             // bound again. the refused shape is what the DAP coverage drives, and
             // that a real interpreter really replaces code is
             // `crates/bpd_engine/tests/replacement.rs`
+            Request::Record { on } => Response::Recording {
+                on,
+                held: 3,
+                // a window that has dropped entries, because that is the half a
+                // front end can leave out with nothing failing — a trail whose
+                // start is not where the recording began reads as the whole run
+                dropped: 12,
+            },
+            Request::Trail => Response::Trail(bpd_core::Trail {
+                went: vec![bpd_core::Visited {
+                    file: "/src/app.py".to_string(),
+                    line: 12,
+                    function: "handle".to_string(),
+                    thread: THREAD,
+                }],
+                dropped: 12,
+                recording: true,
+                window: 100_000,
+            }),
             Request::Retainers { .. } => Response::Retainers(bpd_core::Retainers {
                 of: "a list holding 1".to_string(),
                 found: vec![bpd_core::Retainer {

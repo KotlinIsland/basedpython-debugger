@@ -67,6 +67,7 @@ development = [
     "development/stepping.md",
     "development/jumps.md",
     "development/hot-code-replacement.md",
+    "development/trail.md",
     "development/threads.md",
     "development/sessions.md",
     "development/dap.md",

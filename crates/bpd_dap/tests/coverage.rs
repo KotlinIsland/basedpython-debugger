@@ -1065,6 +1065,27 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
     // DAP's own way of reading state is the tree walk above, and it keeps it —
     // this is the same capability an agent's front end has, which is what the
     // parity rule requires
+    // the one mode that turns off what makes bpd fast, and the window it fills.
+    // deliberately not DAP's `stepBack`, which means "put the program back" —
+    // a trail says only where it went
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/record",
+        serde_json::json!({ "on": true }),
+    );
+    let went = answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/trail",
+        serde_json::json!({}),
+    );
+    assert_eq!(
+        went["body"]["dropped"], 12,
+        "the window's edge has to reach the client, or its oldest entry reads \
+         as where the recording began: {went}"
+    );
+
     // why an object is still alive — a custom request, because DAP's model of
     // state is a tree walked downwards from a frame and this is asked upwards
     // from an object
@@ -1758,6 +1779,25 @@ impl Session for FakeSession {
             // adapter has to hand the whole of it over. that a real interpreter
             // really replaces code is
             // `crates/bpd_engine/tests/replacement.rs`
+            Request::Record { on } => Response::Recording {
+                on,
+                held: 3,
+                // a window that has dropped entries, because that is the half a
+                // front end can leave out with nothing failing — a trail whose
+                // start is not where the recording began reads as the whole run
+                dropped: 12,
+            },
+            Request::Trail => Response::Trail(bpd_core::Trail {
+                went: vec![bpd_core::Visited {
+                    file: "/src/app.py".to_string(),
+                    line: 12,
+                    function: "handle".to_string(),
+                    thread: THREAD,
+                }],
+                dropped: 12,
+                recording: true,
+                window: 100_000,
+            }),
             Request::Retainers { .. } => Response::Retainers(bpd_core::Retainers {
                 of: "a list holding 1".to_string(),
                 found: vec![bpd_core::Retainer {
