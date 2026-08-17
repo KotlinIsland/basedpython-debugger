@@ -361,6 +361,33 @@ parked in a C call has released the GIL and reaches no monitoring event, so
 nothing can hold it; when there is one, the client gets an `output` event naming
 it and `allThreadsStopped` stays false. see [threads](threads.md)
 
+### DAP replaces one file's breakpoints, and the core replaces the set
+
+`setBreakpoints` is about a **file**: it carries every breakpoint that file
+should now have, and says nothing about the others. `Request::SetBreakpoints`
+replaces the whole set at once. so the adapter keeps what each file last asked
+for and sends the union
+
+that bookkeeping was an open question for a while — whether it belonged in
+`bpd_core`, where both front ends could reach it. reading the MCP server settles
+it: **it does not**, and the reason is that MCP needs none of it. its
+`set_breakpoints` replaces the whole set in one call, so there is no union to
+keep; its ids are **positions** in that set, so there is nothing to mint; and its
+`after` names a position too, so there is nothing to resolve
+
+all three pieces of the table are consequences of DAP's own shape:
+
+| what the adapter keeps         | why DAP needs it                                                 | what MCP does          |
+| ------------------------------ | ---------------------------------------------------------------- | ---------------------- |
+| the set per file               | `setBreakpoints` is per file                                     | replaces the whole set |
+| minted ids                     | DAP has no client-supplied id, and they are re-minted every call | the id is the position |
+| `after` as `(file, line)` → id | an id a client read from an earlier response is already stale    | the position again     |
+
+so moving it to the core would put a DAP-shaped table in the crate the
+architecture says knows nothing about DAP, to be used by one front end. it holds
+what the *client* said and nothing about the program — where a breakpoint bound,
+and whether it bound at all, stays the core's answer
+
 ### `pending` and `failed` are the core's distinction, not the adapter's
 
 an unverified breakpoint carries DAP's `reason`, and it is the only thing that
