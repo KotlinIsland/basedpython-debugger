@@ -132,9 +132,11 @@ pub fn stack(walked: &Stack) -> serde_json::Value {
     // a **separate** key, never merged into `frames`. these frames scheduled the
     // ones above rather than calling them, and an agent handed one seamless list
     // would reason about a call chain that never happened
-    // in a task, and nothing recorded how it was made. that is a route bpd does
-    // not watch yet, and an agent shown the same empty answer as a synchronous
-    // stack would read a gap in the debugger as a fact about the program
+
+    // an empty list when the stack **is** in a task, and nothing recorded how it
+    // was made. that is a route bpd does not watch yet, and an agent shown the
+    // same empty answer as a synchronous stack would read a gap in the debugger
+    // as a fact about the program
     if walked.in_a_task && walked.scheduled_by.is_empty() {
         rendered["scheduled_by"] = serde_json::json!([]);
         rendered["scheduled_note"] = "this stack is inside an asyncio task and bpd did not see \
