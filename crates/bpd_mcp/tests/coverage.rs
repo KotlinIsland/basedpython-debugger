@@ -1466,6 +1466,7 @@ fn stack(stop: u64) -> Stack {
         // inside a task, because an empty `scheduled_by` is the half a server
         // can drop with nothing failing — every ordinary stack has one
         in_a_task: true,
+        scheduling_cut: false,
         // inside a task, because an empty `scheduled_by` is the half a server
         // can drop with nothing failing — every ordinary stack has one
         scheduled_by: vec![bpd_core::Scheduling {

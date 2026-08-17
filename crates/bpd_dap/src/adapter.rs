@@ -1016,6 +1016,18 @@ impl Adapter {
                 }),
             )?;
         }
+        // the frames a bounded record drops are the outermost, so a client
+        // shown a cut one reads the last line above as where the task was
+        // scheduled from. it is not, and only bpd knows that
+        if stack.scheduling_cut {
+            self.event(
+                "output",
+                &serde_json::json!({
+                    "category": "console",
+                    "output": "                              and from above that,                                which this record does not reach — it keeps the                                innermost frames only, so the outermost line above                                is not where the task was scheduled from\n",
+                }),
+            )?;
+        }
 
         self.respond(
             message,

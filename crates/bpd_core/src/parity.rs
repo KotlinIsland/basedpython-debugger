@@ -167,11 +167,23 @@ pub enum Facet {
     /// frames are all a severed chain leaves behind, so a front end without this
     /// shows a stack that is true and says nothing about who is responsible
     Scheduling,
+
+    /// that the record of where a task was created **stops short** —
+    /// [`crate::Stack::scheduling_cut`]
+    ///
+    /// its own entry rather than part of [`Self::Scheduling`], because it is
+    /// separately droppable and the argument for that one applies again one
+    /// level down: a front end can carry every scheduling frame and leave out
+    /// the one bit saying they are not all of them. the frames a bounded record
+    /// drops are the **outermost**, so what is left reads as a task scheduled
+    /// from the middle of a call chain, and a reader has no way to tell that
+    /// apart from a task really scheduled there
+    SchedulingCut,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
@@ -180,6 +192,7 @@ impl Facet {
         Self::LiveReplacement,
         Self::Sequenced,
         Self::Scheduling,
+        Self::SchedulingCut,
     ];
 
     /// what to call this capability in a message about it
@@ -193,6 +206,7 @@ impl Facet {
             Self::LiveReplacement => "replacing code under a frame that is running it",
             Self::Sequenced => "a breakpoint that waits for another one to be hit",
             Self::Scheduling => "where the task a stack is inside was created",
+            Self::SchedulingCut => "that a scheduling record does not reach the program's entry",
         }
     }
 }

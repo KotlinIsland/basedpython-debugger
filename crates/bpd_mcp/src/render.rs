@@ -145,6 +145,17 @@ pub fn stack(walked: &Stack) -> serde_json::Value {
         rendered["scheduled_note"] = "this stack is inside an asyncio task.              `scheduled_by` is where that task was created, innermost first —              those frames **scheduled** these rather than calling them, and the              real caller of the outermost frame above is the event loop. it is a              record taken when the task was made, so its lines are where things              were then and its frames cannot be read for variables"
             .into();
     }
+    // and whether that record reaches the program's own entry. the frames a
+    // bounded record drops are the **outermost**, so a cut one reads as a task
+    // scheduled from the middle of a call chain — which is a fact about the
+    // bound rather than about the program
+    if walked.scheduling_cut {
+        rendered["scheduled_by_cut"] = serde_json::json!(true);
+        rendered["scheduled_by_cut_says"] = "this record is the innermost frames \
+             only and does not reach the program's own entry. what was scheduled \
+             from is above the outermost frame shown, and bpd did not keep it"
+            .into();
+    }
     if walked.frames.len() < walked.depth {
         rendered["frames_omitted"] = serde_json::json!({
             "count": walked.depth - walked.frames.len(),
@@ -911,6 +922,7 @@ mod tests {
         let whole = stack(&Stack {
             in_a_task: false,
             scheduled_by: Vec::new(),
+            scheduling_cut: false,
             frames: vec![frame(0)],
             depth: 1,
             mode: Mode::NonStop,
@@ -923,6 +935,7 @@ mod tests {
         let cut = stack(&Stack {
             in_a_task: false,
             scheduled_by: Vec::new(),
+            scheduling_cut: false,
             frames: vec![frame(0)],
             depth: 9,
             mode: Mode::NonStop,

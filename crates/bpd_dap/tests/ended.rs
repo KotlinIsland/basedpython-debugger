@@ -64,6 +64,7 @@ impl Session for NotOurs {
             // of made-up frames would be a second thing to read
             Request::Stack { .. } => Ok(Response::Stack(Stack {
                 in_a_task: false,
+                scheduling_cut: false,
                 scheduled_by: Vec::new(),
                 frames: Vec::new(),
                 depth: 0,

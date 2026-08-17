@@ -194,6 +194,9 @@ pub enum FromAgent {
         /// whether this stack is inside a task at all — see
         /// `bpd_core::Stack::in_a_task`
         in_a_task: bool,
+        /// whether the record above stops short of the program's own entry —
+        /// see `bpd_core::Stack::scheduling_cut`
+        scheduling_cut: bool,
         /// how deep the stack is, which is more than `frames` when the request
         /// asked for fewer
         depth: usize,
