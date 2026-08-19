@@ -283,8 +283,8 @@ mod tests {
         assert_eq!(json["outcome"]["unannounced"][0], 7);
     }
 
-    fn bpd_core_error() -> crate::PythonError {
-        crate::PythonError {
+    fn bpd_core_error() -> PythonError {
+        PythonError {
             kind: "ValueError".to_string(),
             message: "can't jump into the body of a for loop".to_string(),
             traceback: Vec::new(),
