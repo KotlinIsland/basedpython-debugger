@@ -596,16 +596,33 @@ fn a_thread_held_inside_the_import_system_says_which_module_it_is_holding() {
     );
 
     // and the thread behind it is where the report says it would be
+    //
+    // `second_started` is written on the line **before** `import late`, so the
+    // marker proves the thread reached the import and not that it is behind the
+    // module lock — a census taken the moment it appears can still catch the
+    // thread executing the python that writes the marker. so the wait is on the
+    // **state**, the same fix `a_thread_piled_up_behind_a_lock_...` got: waiting
+    // for time makes a test that fails under load, waiting for a condition makes
+    // one that fails only when the condition never comes
     expect(&fixture, "second_started");
     let second = ident(&fixture, "second");
-    let census = debuggee
-        .threads(SETTLE)
-        .expect("the threads were reported on");
-    assert_eq!(
-        census.get(second).map(|state| state.progress),
-        Some(Progress::Still),
-        "the second importer is behind the module lock"
-    );
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let census = debuggee
+            .threads(SETTLE)
+            .expect("the threads were reported on");
+        let progress = census.get(second).map(|state| state.progress);
+        if progress == Some(Progress::Still) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the second importer never settled behind the module lock. it is \
+             blocked importing `late` and nothing can release it while the \
+             first importer is held, so this is the debugger failing to see a \
+             thread that is getting nowhere. the last sample was {progress:?}"
+        );
+    }
 
     to_exit(&mut debuggee);
 }
