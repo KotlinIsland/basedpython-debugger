@@ -9,8 +9,10 @@
 //! through the C interface. calling python from rust is only banned where it
 //! costs something per event
 
+mod armed;
 mod attach;
 mod breakpoints;
+mod bytecode;
 mod cells;
 // the `sitecustomize` a child is entered through is portable, but what decides
 // whether children are debugged at all is `debugChildren` — and that is refused
@@ -31,6 +33,7 @@ mod forks;
 mod frames;
 mod pause;
 mod replace;
+mod restarts;
 mod retainers;
 mod run;
 mod session;
@@ -434,6 +437,10 @@ fn on_py_start<'py>(
     if steps::armed_here() {
         steps::entered_frame(python)?;
     }
+    // and it is the way the frame a restart is waiting for comes into being
+    if restarts::armed_here() {
+        restarts::entered_frame(python)?;
+    }
     Ok(may_forget_a_code_object(python))
 }
 
@@ -444,7 +451,7 @@ fn on_py_start<'py>(
 /// and a step in that was never offered the frame it entered behaves exactly
 /// like a step over, which is a step landing somewhere other than it claimed
 fn may_forget_a_code_object(python: Python<'_>) -> Bound<'_, PyAny> {
-    if steps::entering_anywhere() {
+    if armed::entering_anywhere() {
         python.None().into_bound(python)
     } else {
         events::disable(python)
@@ -478,9 +485,15 @@ fn on_line<'py>(
         trail::went(python, code, line, events::thread_ident(python)?);
     }
 
+    // a restart takes this line before anything else on it decides anything —
+    // see `restart_took_the_line`
+    if restart_took_the_line(python)? {
+        return Ok(python.None().into_bound(python));
+    }
+
     let plans = breakpoints::hit(code.as_ptr() as usize, line);
     if plans.is_none()
-        && !steps::armed_anywhere()
+        && !armed::armed_anywhere()
         && !world::parking()
         && !pause::pausing()
         && !trail::recording()
@@ -500,47 +513,11 @@ fn on_line<'py>(
     let (file, reported) = (at.file, at.line);
     let thread = events::thread_ident(python)?;
 
-    let mut stopping = Vec::new();
-    // the breakpoints that **acted** here, which is what arms anything waiting
-    // for them. a condition that was false, and a hit the count has not reached
-    // yet, are not acts: "after the request came through" means the breakpoint
-    // did its thing, not that the interpreter passed the line
-    let mut acted: Vec<u32> = Vec::new();
-    let mut failure = None;
-    if let Some(plans) = plans {
-        let at = conditions::Location {
-            file: &file,
-            line: reported,
-            thread,
-        };
-        // held across every expression of every breakpoint on this line, so a
-        // condition that calls a function with a breakpoint in it runs to an
-        // answer rather than stopping inside itself
-        let _suppressed = conditions::suppress();
-        let mut place = conditions::Place::unfetched(python);
-
-        for plan in &plans {
-            match plan.fire(python, &mut place, &at)? {
-                conditions::Fired::Nothing => {}
-                conditions::Fired::Stop => {
-                    acted.push(plan.id);
-                    stopping.push(plan.id);
-                }
-                conditions::Fired::Logged(record) => {
-                    acted.push(plan.id);
-                    session::log(record);
-                }
-                // the remaining breakpoints on this line are left alone: the
-                // program is about to be held here anyway, and a log record
-                // produced during a hit the client is being told is broken
-                // would be a record nobody can trust
-                conditions::Fired::Failed(raised) => {
-                    failure = Some((plan.id, raised));
-                    break;
-                }
-            }
-        }
-    }
+    let Fired {
+        stopping,
+        acted,
+        failure,
+    } = fire_the_breakpoints(python, plans, &file, reported, thread)?;
 
     // before the stop is reported, so a client told the program stopped can
     // already see that the breakpoint waiting on this one is armed. the other
@@ -551,9 +528,13 @@ fn on_line<'py>(
     // has to be taken off either way — one left armed would go on watching for
     // a frame the thread is already being held in
     let landed = steps::reached_line(python)?;
+    // the same question for a restart, and asked whatever the breakpoints
+    // decided for the same reason: one left armed would go on watching for a
+    // frame the thread is already being held in
+    let restarted = restarts::reached_line(python)?;
 
     if let Some((breakpoint, raised)) = failure {
-        steps::cancel(python)?;
+        left_armed_here(python)?;
         session::stop(
             python,
             thread,
@@ -567,11 +548,11 @@ fn on_line<'py>(
             },
         )?;
     } else if !stopping.is_empty() {
-        // a breakpoint decides the reason even when a step landed on the same
-        // line: the thread is held exactly where the step was going to put it,
-        // and a breakpoint reported as a step would be one the client never
-        // saw fire
-        steps::cancel(python)?;
+        // a breakpoint decides the reason even when a step or a restart landed
+        // on the same line: the thread is held exactly where either was going
+        // to put it, and a breakpoint reported as one of them would be one the
+        // client never saw fire
+        left_armed_here(python)?;
         session::stop(
             python,
             thread,
@@ -581,6 +562,11 @@ fn on_line<'py>(
                 line: reported,
             },
         )?;
+    } else if let Some(reason) = restarted {
+        // only the step: `restarts::reached_line` has already taken the restart
+        // off, which is how it produced this reason at all
+        steps::cancel(python)?;
+        session::stop(python, thread, reason)?;
     } else if let Some(kind) = landed {
         session::stop(
             python,
@@ -595,9 +581,11 @@ fn on_line<'py>(
         // nothing on this line decided to stop, so a stopped world still has to
         // catch the thread here — otherwise a line that holds a breakpoint
         // whose condition was false would be the one place a thread escapes
+        left_armed_here(python)?;
         world::park(python, thread);
     } else if pause::pausing() && pause::claim() {
         pause::disarm(python)?;
+        left_armed_here(python)?;
         session::stop(
             python,
             thread,
@@ -611,6 +599,103 @@ fn on_line<'py>(
     // deliberately not `DISABLE`: a breakpoint that fired once still exists,
     // and so does one whose condition was false this time
     Ok(python.None().into_bound(python))
+}
+
+/// take off whatever this thread had armed, because something is about to hold it
+///
+/// every path that holds a thread calls this, and none of them may skip it. an
+/// operation left armed goes on watching for a frame the thread is already being
+/// held in — and worse, it keeps `armed::armed_anywhere()` true, which is what
+/// stops the interpreter being told to forget a location. one leaked that way
+/// costs the whole process its `DISABLE` for the rest of the run
+fn left_armed_here(python: Python<'_>) -> PyResult<()> {
+    steps::cancel(python)?;
+    restarts::cancel(python)
+}
+
+/// whether a restart took this line, so that nothing else on it decides anything
+///
+/// asked **before** the breakpoints, and that ordering is the point. a rewind
+/// happens at the line event and the line then does not run at all, so a
+/// breakpoint that fired there would be reporting the program at a line it never
+/// executed. an abandoned restart holds the thread where it is, which is also
+/// the end of this line. either way there is nothing left for it to decide
+fn restart_took_the_line(python: Python<'_>) -> PyResult<bool> {
+    match restarts::rewinding(python)? {
+        restarts::Rewind::NotMine => Ok(false),
+        restarts::Rewind::Rewound => Ok(true),
+        restarts::Rewind::Abandoned(reason) => {
+            session::stop(python, events::thread_ident(python)?, reason)?;
+            Ok(true)
+        }
+    }
+}
+
+/// what the breakpoints bound to one line decided about it
+struct Fired {
+    /// the breakpoints that decided to hold the thread here
+    stopping: Vec<u32>,
+    /// the breakpoints that **acted**, which is what arms anything waiting on
+    /// them
+    ///
+    /// a condition that was false, and a hit the count has not reached yet, are
+    /// not acts: "after the request came through" means the breakpoint did its
+    /// thing, not that the interpreter passed the line
+    acted: Vec<u32>,
+    /// the breakpoint whose expression raised, and what it raised
+    failure: Option<(u32, conditions::Raised)>,
+}
+
+/// run every breakpoint bound to this line, and say what they decided
+fn fire_the_breakpoints(
+    python: Python<'_>,
+    plans: Option<Vec<std::sync::Arc<conditions::Plan>>>,
+    file: &str,
+    reported: u32,
+    thread: u64,
+) -> PyResult<Fired> {
+    let mut fired = Fired {
+        stopping: Vec::new(),
+        acted: Vec::new(),
+        failure: None,
+    };
+    let Some(plans) = plans else {
+        return Ok(fired);
+    };
+
+    let at = conditions::Location {
+        file,
+        line: reported,
+        thread,
+    };
+    // held across every expression of every breakpoint on this line, so a
+    // condition that calls a function with a breakpoint in it runs to an answer
+    // rather than stopping inside itself
+    let _suppressed = conditions::suppress();
+    let mut place = conditions::Place::unfetched(python);
+
+    for plan in &plans {
+        match plan.fire(python, &mut place, &at)? {
+            conditions::Fired::Nothing => {}
+            conditions::Fired::Stop => {
+                fired.acted.push(plan.id);
+                fired.stopping.push(plan.id);
+            }
+            conditions::Fired::Logged(record) => {
+                fired.acted.push(plan.id);
+                session::log(record);
+            }
+            // the remaining breakpoints on this line are left alone: the program
+            // is about to be held here anyway, and a log record produced during
+            // a hit the client is being told is broken would be a record nobody
+            // can trust
+            conditions::Fired::Failed(raised) => {
+                fired.failure = Some((plan.id, raised));
+                break;
+            }
+        }
+    }
+    Ok(fired)
 }
 
 /// hold this thread if a breakpoint is bound to the template line about to render
@@ -669,6 +754,7 @@ fn rendering_a_template_node(python: Python<'_>) -> PyResult<()> {
     session::announce_rebinding(breakpoints::arm_after(python, &acted)?);
 
     if let Some((breakpoint, raised)) = failure {
+        left_armed_here(python)?;
         return session::stop(
             python,
             thread,
@@ -685,6 +771,7 @@ fn rendering_a_template_node(python: Python<'_>) -> PyResult<()> {
     if stopping.is_empty() {
         return Ok(());
     }
+    left_armed_here(python)?;
     session::stop(
         python,
         thread,
@@ -793,6 +880,14 @@ fn on_py_unwind<'py>(
     if steps::armed_here() {
         steps::left_frame(python)?;
     }
+    // a restart whose caller is being left by an exception can never complete,
+    // and the frame it forced out has already gone. the thread is held here
+    // saying so rather than carrying on as though nothing had been asked
+    if restarts::armed_here()
+        && let Some(reason) = restarts::left_frame(python)?
+    {
+        session::stop(python, events::thread_ident(python)?, reason)?;
+    }
 
     if exceptions::uncaught() {
         let frame = events::current_frame(python)?;
@@ -807,6 +902,7 @@ fn on_py_unwind<'py>(
         // raising `SystemExit` out of that frame, and reporting *that* would be
         // bpd stopping the program for a decision bpd had just made
         if !frames::is_bootstrap(&frame) && (caller.is_none() || frames::is_bootstrap(&caller)) {
+            left_armed_here(python)?;
             session::stop(
                 python,
                 events::thread_ident(python)?,
@@ -838,6 +934,7 @@ fn on_raise<'py>(
 
     let frame = events::current_frame(python)?;
     let at = at_of(code, &frame)?;
+    left_armed_here(python)?;
     session::stop(
         python,
         events::thread_ident(python)?,

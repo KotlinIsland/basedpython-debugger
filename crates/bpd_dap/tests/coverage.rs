@@ -976,6 +976,27 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
         "goto",
         serde_json::json!({ "threadId": thread, "targetId": target }),
     );
+    // **twice, and the order matters.** the first is a client that has never
+    // heard of `bpd/restarting`, which is every client by default: it gets the
+    // narration on the console. adding the opt-in below without this one removed
+    // the only exercise the console path had, and deleting that path went
+    // unnoticed
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "restartFrame",
+        serde_json::json!({ "frameId": frame }),
+    );
+    // and then a client that opts in, which is the path the console does **not**
+    // take — the sentence saying the forced return runs no cleanup used to exist
+    // only on the console side, so the clients most likely to act on it were the
+    // ones told least
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/understands",
+        serde_json::json!({ "events": ["bpd/restarting"] }),
+    );
     answer(
         &mut client_writes,
         &mut reader,
@@ -1762,19 +1783,29 @@ impl Session for FakeSession {
                 },
                 mode: Mode::NonStop,
             }),
-            Request::RestartFrame { .. } => Response::Jumped(bpd_core::Jumped {
-                at: bpd_core::Where {
-                    file: "/tmp/fake.py".to_string(),
-                    line: 1,
-                    function: "main".to_string(),
-                },
-                outcome: bpd_core::Jump::Moved {
-                    from: 3,
-                    bound_to_none: Vec::new(),
-                    unannounced: Vec::new(),
-                },
-                mode: Mode::NonStop,
-            }),
+            // arranged rather than refused, because that is the branch that
+            // ends the stop: the adapter has to answer and then **not** send a
+            // `stopped` event, and a fake that only ever refused would let a
+            // build which sent one anyway pass
+            Request::RestartFrame { .. } => {
+                Response::Restarted(bpd_core::Restarted::Arranged(bpd_core::Restarting {
+                    frame: bpd_core::Where {
+                        file: "/tmp/fake.py".to_string(),
+                        line: 3,
+                        function: "work".to_string(),
+                    },
+                    exit_line: 5,
+                    caller: bpd_core::Where {
+                        file: "/tmp/fake.py".to_string(),
+                        line: 1,
+                        function: "main".to_string(),
+                    },
+                    disturbed: vec!["got".to_string()],
+                    bound_to_none: vec!["later".to_string()],
+                    unannounced: vec![1],
+                    mode: Mode::NonStop,
+                }))
+            }
             // the fake refuses, because a refusal is the answer with something
             // in it: it carries *every* reason rather than the first, and the
             // adapter has to hand the whole of it over. that a real interpreter
@@ -1901,4 +1932,66 @@ impl Interrupt for FakeInterrupt {
     fn terminate(&mut self) -> Result<(), Failed> {
         Ok(())
     }
+}
+
+#[test]
+fn a_client_that_opts_into_the_restart_event_is_told_what_the_restart_really_did() {
+    // the event path skips the console, so every sentence the adapter has about
+    // a restart has to be **on** the event. the one saying the forced return
+    // runs no cleanup was console-only, which left the clients most likely to
+    // act on it as the ones told least
+    //
+    // nothing else in this file names `bpd/restarting`, so without this the gap
+    // reopens silently
+    let told = everything_said();
+    let events = told.events("bpd/restarting");
+    assert!(
+        !events.is_empty(),
+        "the conversation opts into the event and restarts a frame"
+    );
+    let event = events[0];
+
+    assert_eq!(
+        event["body"]["restarting"]["restarted"], "arranged",
+        "the tag is what tells an arranged restart from a refused one, and the \
+         two leave the thread in different places: {event}"
+    );
+    let notes = event["body"]["notes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the event carries the notes: {event}"));
+    let said = notes
+        .iter()
+        .filter_map(|note| note.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    for wanted in [
+        // that the thread is gone, which is the whole difference from a `goto`
+        "the thread has been let go",
+        // the **whole** line, not only the call
+        "the **whole** line",
+        // and the one that used to be console-only
+        "no block cleanup",
+        "no `__exit__`",
+        // the cleanup that does run, which the sentence above used to deny
+        "`__del__`",
+    ] {
+        assert!(said.contains(wanted), "expected {wanted:?} in {said:?}");
+    }
+
+    // and the **console** carries the same sentence for the restart made before
+    // the opt-in. both paths, one conversation, so neither can be deleted
+    // without a test going red
+    assert!(
+        told.output("console", "no block cleanup"),
+        "a client that never heard of the event was not narrated at"
+    );
+    assert!(
+        told.output("console", "`__del__`"),
+        "the console path lost the one cleanup that does run"
+    );
+    assert!(
+        told.output("console", "the **whole** line"),
+        "the console narration lost what really runs again"
+    );
 }

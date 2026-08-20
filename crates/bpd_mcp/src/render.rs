@@ -13,7 +13,8 @@
 
 use bpd_core::{
     Binding, Difference, Evaluated, Jump, Jumped, LogRecord, Replaced, Replacement, Resolved,
-    Snapshot, Source, SourceBreakpoint, Stack, Stop, Threads, Transcript, Variables, WorldStopped,
+    Restarted, Snapshot, Source, SourceBreakpoint, Stack, Stop, Threads, Transcript, Variables,
+    WorldStopped,
 };
 
 /// every session this debuggee holds
@@ -343,6 +344,61 @@ pub fn jumped(jump: &Jumped) -> serde_json::Value {
             jump.at
         )),
     }
+    rendered["notes"] = notes.into();
+    rendered
+}
+
+/// what restarting a frame arranged, or cpython's refusal to arrange it
+///
+/// the notes carry what an agent cannot see and would otherwise assume: that
+/// the **thread was let go** and a stop is coming, that the whole caller line
+/// runs again rather than only the call, and that the caller holds a value the
+/// program never computed until the restarted call finishes. an agent told only
+/// "restarted" would ask for the stack of a thread that is running
+pub fn restarted(restarted: &Restarted) -> serde_json::Value {
+    let mut rendered = serde_json::json!({ "outcome": restarted });
+    let mut notes: Vec<String> = Vec::new();
+
+    match restarted {
+        Restarted::Arranged(restarting) => {
+            rendered["mode"] = restarting.mode.to_string().into();
+            // the shared half, so that what DAP says about the program and what
+            // this says about it cannot be two different claims
+            notes.extend(restarting.told());
+            // and the half that is this protocol's: an agent has no `stopped`
+            // event telling it to wait, so it would ask this stop another
+            // question and be answered about a thread that is running
+            notes.push(
+                "wait for the next stop rather than asking this one anything \
+                 more: it has ended. the stop that arrives is `restarted` at the \
+                 first line of the fresh frame, or `restart_abandoned` when the \
+                 restart could not be finished — the frame gone and the call not \
+                 made again. that stop carries **which** of the reasons it was; \
+                 there is more than one and the list grows, so read it rather \
+                 than assuming"
+                    .to_string(),
+            );
+            notes.push(
+                "and a **third** thing can happen, which is a known gap rather \
+                 than an outcome: if a breakpoint, an exception, a pause or a \
+                 stopped world holds this thread before the fresh frame is \
+                 entered, the restart is taken off and **neither** stop arrives. \
+                 you are told about the stop you got and nothing says the restart \
+                 ended — so do not wait indefinitely for one of the two above"
+                    .to_string(),
+            );
+        }
+        Restarted::Refused { tried, error } => {
+            notes.push(format!(
+                "cpython would not move the frame to any of its exit lines \
+                 {tried:?} — `{error}` — so **none of the program's code ran**. \
+                 the frame did not move, no local was bound, and the thread is \
+                 still held exactly where it was"
+            ));
+            notes.push(bpd_core::WHAT_READING_THE_BYTECODE_COSTS.to_string());
+        }
+    }
+
     rendered["notes"] = notes.into();
     rendered
 }

@@ -1,13 +1,18 @@
 # set next statement, and restart frame
 
-two operations that move a frame's instruction pointer. **set next statement**
-moves the frame a thread is executing to another line of the code it is running;
-**restart frame** moves it to the first line of its own code object, so the frame
-runs again from the top
+two operations, and they are **not** the same act any more
 
-they are the same act on the interpreter — an assignment to `frame.f_lineno` —
-and they differ only in where the line comes from. neither resumes anything: the
-thread is still held afterwards, at the line it moved to
+- **set next statement** moves the frame a thread is executing to another line of
+    the code it is running. one assignment to `frame.f_lineno`, and nothing is
+    resumed: the thread is still held afterwards, at the line it moved to
+- **restart frame** runs a frame again. it does that by forcing the frame to
+    **return** and then rewinding its **caller** to the line the call was made
+    from, so the interpreter builds a frame that has never run. it uses the jump
+    primitive twice and it **resumes the thread**, because a caller has to
+    actually execute a call for a frame to exist
+
+everything down to [what a restart really is](#what-a-restart-really-is) is about
+the jump, and is true of both — a restart is made of two of them
 
 ## it works from a `sys.monitoring` callback, with no trace function
 
@@ -86,72 +91,429 @@ and with the frame that can move
 the refusal also answers the question DAP's `restartFrame` implies, because
 somebody will ask it: making a deeper frame the executing one would mean
 discarding the frames above it, and there is no mechanism for that.
-`frame.clear()` answers `RuntimeError: cannot clear an executing frame`, no
-public C API pops a frame, and the only remaining route — making each intervening
-frame return — runs its `finally` and `except` blocks on the way out, which is a
-**different operation** and would have to be described as one. pydevd advertises
-`supportsRestartFrame: false` for the same reason
+`frame.clear()` answers `RuntimeError: cannot clear an executing frame`, and no
+public C API pops a frame
+
+what is left is making each intervening frame **return**, which is a different
+operation and would have to be described as one. [restart frame](#what-a-restart-really-is)
+does the nearest thing for **one** frame — and note that it does not get the
+`finally` and `except` blocks either, because the way it makes a frame return is
+a jump. it is not a way to reach a deeper frame at all: it needs the caller's
+line to be the thing that built the frame. pydevd advertises
+`supportsRestartFrame: false` rather than answering either question
 
 a django template frame cannot be moved either. it is synthesised over the
 `Node.render_annotated` frame that renders it and the interpreter has no frame
 for it, so there is no instruction pointer to move
 
-## what restart frame re-enters with
+## what a restart really is
 
-**what the parameters hold now.** a parameter the frame has already assigned to
-holds the new value, and the original is gone
+**the frame it names does not move.** it is moved to a line of its own code that
+is only loads and a return, so it **returns** — and then the caller is rewound to
+the line the call was made from, so the caller makes the call again and the
+interpreter builds a frame that has never run
 
-that is a decision rather than an oversight, and the alternative was priced:
-capturing a call's arguments would mean materialising a frame and copying every
-argument of **every call in the process**, on the event path, for an operation
-almost nobody makes. `PY_START` is disabled per code object after its first
-sighting precisely so that discovery costs one native call per code object rather
-than one per call — capturing arguments would mean never disabling it. the
-architecture is fast because of what it does not do per event, and this would be
-paid by every program to serve a keystroke
+```
+caller:9  →  f:3 f:4 f:5   the call, and the frame forced out at f:5
+caller:10 →                the caller's next line, where the rewind is made
+caller:9  →  f:3 f:4 f:5 f:6   the call again, into a frame with fresh locals
+caller:10                  and on, with the answer the program would have had
+```
 
-so nothing in `bpd` says restart frame restores the original arguments, because
-it does not. `restarting_a_frame_runs_it_again_with_what_its_parameters_hold_now`
-is the acceptance: a function that adds 100 to its own parameter and is then
-restarted returns the answer for the **new** value
+two things fall out of that, and they are the whole reason it replaced a jump to
+the frame's own first line:
 
-side effects the frame already performed are not undone either. nothing here can
-undo them, and a debugger that implied otherwise would be inviting a belief about
-the program that is false
+- **the locals are the ones a call binds.** a function that adds 100 to its
+    parameter and is restarted gets the parameter the *call* passes, not the
+    value it had already written.
+    `a_restarted_frame_runs_again_with_locals_the_call_bound_and_not_the_ones_it_had`
+    asserts on what the program itself recorded, because bpd reporting a fresh
+    frame and the frame being fresh are different claims
+- and **the cleanup still does not run.** forcing the frame out is an
+    `f_lineno` jump, so [what a jump does not do](#what-a-jump-does-not-do)
+    applies to it unchanged. measured on 3.13 and 3.14 with a plain class
+    context manager: two `__enter__` and **one** `__exit__`; with a bare
+    `try/finally`: the body twice and the `finally` once. so a context manager
+    the frame had open is still open, and the restarted call opens a second one
 
-## where a restart lands
+    this page, the commit that introduced the mechanism, and four other places
+    claimed the opposite, on a measurement that used a
+    `@contextlib.contextmanager` fixture — whose `finally` runs when the
+    generator is **collected** rather than when the block is left, which is not
+    the jump doing it. `a_context_manager_open_across_a_restart_is_not_exited`
+    is the plain class version and pins what the jump really does
 
-the line of the **first instruction of the code object that carries one**, in
-offset order — not `co_firstlineno`, and the two really do differ:
+    but the collection is not unrelated either, and saying so was the next thing
+    to get wrong. the forced-out frame **dies**, and anything it was the last
+    holder of is finalised right then — a `__del__`, or the `GeneratorExit`
+    thrown into a suspended generator, which runs its `finally` and the
+    `__exit__` of any `with` inside it. a `@contextlib.contextmanager` is that
+    shape, so its cleanup does run, at a point the program never reached. the
+    jump runs no **block** cleanup; the death runs whatever a finaliser does,
+    and `Restarting::told()` says so rather than enumerating it
 
-| code object                        | its first instruction              |
-| ---------------------------------- | ---------------------------------- |
-| a module                           | a `RESUME` whose line is `0`       |
-| a function that closes over a name | `MAKE_CELL`, which carries no line |
-| a function with decorators         | the first **decorator** line       |
+it **resumes the thread**. the answer says what was arranged, and where it got to
+arrives as a stop of its own: `restarted` at the first line of the fresh frame,
+or `restart_abandoned` carrying which of its reasons it was. that list is
+`non_exhaustive` and this sentence deliberately does not enumerate it — an
+earlier version named one of three causes, and a client reading it as a complete
+set would be reading a false one. a third thing can also happen: another stop
+takes the restart off, and neither arrives
 
-`co_firstlineno` is where the code was written; what a jump needs is a position
-the frame can be put at. a code object with no such line at all is refused rather
-than moved to a line nothing said was there
+what it still does **not** do is undo anything. side effects the old frame
+performed are performed, and the frames it called are gone
 
-no `LINE` event is delivered for that line either — it is the `def` — so a
-restart is followed by a step landing on the **first statement of the body**,
-which has not run yet. `a_restart_lands_before_the_first_statement_and_a_step_runs_it`
+## what the tail writes where the callee can see it
 
-## the frames restart frame refuses
+`disturbed` and the read guard both reason about names **on the caller's line**.
+Neither sees state the *callee* reads that the tail writes and the line never
+reads back:
 
-a **generator, coroutine or async generator** frame. the first instruction of
-such a code object is the `RESUME` that `send`, `throw` and `await` enter at,
-rather than the top of the body — so moving there is not "run it again".
-measured on 3.13, 3.14 and 3.15: a generator restarted this way is **over**, and
-the very next `next()` raises `StopIteration` without it having yielded anything
+```python
+G = 1
+
+
+def reads_it():
+    return G + 0
+
+
+def caller():
+    global G
+    got, G = reads_it(), 99  # the restarted call reads 99, not 1
+```
+
+so a tail `STORE_GLOBAL` or `STORE_DEREF` is refused as `tail_writes_shared_state`
+— 143 of 7401 permitted call sites on 3.13 and 150 of 7520 on 3.14. bpd would
+have to read the callee's code, and everything it calls, to do better.
+
+### what this costs, and why it is paid
+
+A **module body**'s namespace *is* its globals, so a top-level `kept = f(1)`
+writes a global too, through `STORE_NAME` — and if `f` reads `kept`, the
+restarted call reads what bpd stored. Same hazard, so it is refused the same
+way, which `Namespaces::locals_are_globals` decides: true of a module body and
+of nothing else, because a function's locals are slots and a class body's
+namespace is its own.
+
+| what the tail writes                              | 3.13        | 3.14        |
+| ------------------------------------------------- | ----------- | ----------- |
+| a global or a cell, of all permitted sites        | 143 of 7401 | 150 of 7520 |
+| any name, of permitted sites in a **module body** | 520 of 1128 | 537 of 1156 |
+
+The second row wants the module-body denominator rather than the global one. An
+earlier version of this page used the global one and concluded "very nearly every
+module-level restart" — asserted rather than measured, and wrong by about a
+factor of two: **608 module-level sites on 3.13 and 619 on 3.14 still restart**,
+a majority.
+
+The module-body case is refused rather than excused because the alternative was
+to refuse `got, G = f(), 99` and allow `kept = f(1)` on the grounds that the
+second is *unlikely* to be read — treating the two on likelihood rather than on
+kind, which this project does not take as a justification.
+
+**What still restarts from a module body:** any line that stores nothing *after*
+the call — a bare call statement, one whose result is discarded, a decorator, and
+`f(w := 3)`, whose store lands before the call. Pinned by
+`a_module_body_call_that_stores_nothing_still_restarts`.
+
+**What is not covered, and is a real limit rather than a safe one.** The refusal
+is about *where* the tail writes, not about whether the callee reads it. bpd
+does not read the callee's code, so:
+
+- a restart is refused for a global the callee never touches — an over-refusal,
+    fail-closed, and the message says bpd does not read the callee to find out
+- a class body's `STORE_NAME` is allowed, and it is genuinely not the globals —
+    but a callee reading the *class* namespace through a closure over it is not
+    something this analysis models
+- nothing here reaches state written through an attribute or a subscript;
+    `STORE_ATTR` and `STORE_SUBSCR` are off the allow list entirely, so a line
+    carrying one is refused before this question is asked
+
+Closing the first of those would need the callee's `co_names`, and everything it
+transitively calls, which is why it is not attempted.
+
+## which of the caller's names the forced return lands in
+
+the answer is a **walk**, not a list of the stores after the call. the call
+leaves one value on the stack and the analysis follows the rest of the line to
+see which stores consume that value — because naming every store is right for
+`x = f()` and wrong for ordinary lines beside it:
+
+- `a = f(); b = spare` fuses into `STORE_FAST_LOAD_FAST ('a', 'spare')`, whose
+    two names are different operations: it **writes** `a` and **reads** `spare`
+- `a, b = f(), spare` stores in the opposite order to the one it is written in,
+    so the name that gets the call's value is not the first
+- `box = [f(), spare]` puts the value in a container, and the container is
+    reachable by the name stored right after it
+
+the stack is modelled from the call's own value down. what the caller pushed
+before the call is not modelled and does not need to be — none of it came from
+the call, so a pop reaching past that floor consumes a value the program
+computed itself. the one shape with no answer is a `SWAP` that would put the
+call's value below the floor, and that is `span_not_understood`, which says it
+is a gap in `bpd` rather than something to change about the program. no
+permitted call site in either stdlib has a `SWAP` after the call.
+
+## the exit line and the caller's tail are asked different questions
+
+both are spans of allow-listed instructions, and they do **not** get the same
+answer about a checked load. `frame_lineno_set_impl` walks `co_nlocalsplus` and
+fills every NULL slot with `None`, so a jump to an exit line binds every unbound
+local on the way — `LOAD_FAST_CHECK` cannot raise there. it leaves cells alone,
+which is why an unbound **cell** still can.
+
+the caller's tail is the other way round. it runs *before* anything moves the
+caller: the forced return lands, the rest of the line runs with it, and only then
+does the line event fire that the rewind is made from. so a slot holding nothing
+still holds nothing when `LOAD_FAST_CHECK` reads it, and it raises
+`UnboundLocalError` out of the tail.
+
+`bpd_agent::bytecode::Moved` is that difference, as a type rather than a thing to
+remember at a call site. before it existed, `packed = (f(1), spare)` with `spare`
+bound only on a branch was answered `Arranged` and then abandoned as
+`CallerLeft` — a restart that was never possible, discovered by attempting it.
+
+## the unit is the caller's line, not the call
+
+the rewind sets `f_lineno`, which lands at the **first instruction of the line**.
+so the whole of the caller's line runs a second time, and everything on it besides
+the one call is a thing that would run twice
+
+that is why most of this feature is refusals, and every one of them is decided
+off the bytecode **before the frame is touched**. `bpd` either refused, or it has
+read the instructions and knows what running them again does — there is no case
+where it finds out halfway
+
+| the caller's line      | what is on it | why it is refused                                                                           |
+| ---------------------- | ------------- | ------------------------------------------------------------------------------------------- |
+| `x = f(obj.attr)`      | `LOAD_ATTR`   | a property is code of the program                                                           |
+| `x = f(d[k])`          | `BINARY_OP`   | so is `__getitem__`                                                                         |
+| `x = f(k + 1)`         | `BINARY_OP`   | so is `__add__`                                                                             |
+| `if f(k):`             | `TO_BOOL`     | so is `__bool__`                                                                            |
+| `obj.slot = f(k)`      | `STORE_ATTR`  | a setter, handed the forced return's value                                                  |
+| `[f(), f()]`           | two `CALL`s   | the completed sibling call re-runs                                                          |
+| `[f(n) for n in ns]`   | two `CALL`s   | PEP 709 inlines a comprehension into the caller's own frame, so the whole construct re-runs |
+| `sorted(items, key=f)` | two `CALL`s   | the sort re-runs its key for every element it had already compared                          |
+| `x = f(k)`             | nothing else  | **permitted**                                                                               |
+
+**the unit is a span, not a range and not a line.** `co_lines` yields a range per
+contiguous run of instructions, and neither one range nor all of them is what
+runs again:
+
+- one **range** misses the other branch of a conditional expression, whose
+    ranges each look like a single clean call on their own
+- every **range of the line** over-includes the second copy cpython makes of a
+    `finally` body — which counted one call as two — and *under*-includes a call
+    split over source lines, whose argument is attributed to the **argument's**
+    line rather than the call's, so `got = f(\n    obj.attr\n)` hid its
+    `LOAD_ATTR` entirely
+
+what the interpreter really runs is the span from the **jump destination** to the
+end of the contiguous run the call is in. before the call is what re-executes;
+after it is what runs with the value of a return the program never made, and then
+again after the restart
+
+**the destination is cpython's to choose, and bpd checks it rather than
+predicting it.** `marklines` marks every `co_lines` range start as a candidate,
+and `frame_setlineno` picks the candidate whose stack is compatible with where
+the frame is now — so a jump made from inside a block can land on a later copy.
+measured on 3.13, 3.14 and 3.14t: jumping to `with cm:` from inside its body
+lands at offset 32, while the lowest offset of that line is 2
+
+an earlier version of this page called the lowest offset a measured fact. it was
+measured only from *outside* the blocks, which is the one position where it
+happens to hold. the lowest offset is still what the analysis starts from — it
+has to start somewhere — but it is a guess, and both places it is used check it:
+
+- the **exit line** is not guessed at all: a line is a candidate only when the
+    walk from **every** one of its range starts is clean, so wherever cpython
+    chooses to land is clean. an earlier version jumped speculatively and put the
+    frame back when the landing turned out unusable — and the put-back landed on
+    a *different copy* of the same line, so a frame stopped on the exception copy
+    of a `finally` came back on the normal copy while the answer said
+    `NoCleanExit`, which says nothing moved. the debuggee then died. requiring
+    every range start costs almost nothing: `scripts/restart_shapes.py` measures
+    it at 3 lines on 3.13 and 1 on 3.14, out of 5344 and 5486 code objects that
+    have an exit line at all, and 2 code objects on 3.13 losing their last
+    candidate — every one a `return` inside a `finally`
+- the **caller** cannot be jumped before the callee is forced out, so its guess is
+    carried and compared with the landing at the moment of the rewind. a mismatch
+    abandons the restart, with `restart_abandoned` saying which offset was read
+    and which was reached, rather than resuming into a span nobody checked
+
+the same rule governs the **exit line**, where it is a forward walk: from the
+destination, every instruction up to the first return must be a load. accepting a
+line because *some* range of it was loads and a return let
+`return (side_effect(99) if total else None)` through — the jump landed on the
+call, and the debugger made a call of the program's before restarting anything
+
+that figure, and the one about what lies past the end of a caller's span, come
+from `scripts/restart_shapes.py` — which prints what it counted, whole
+instruction runs rather than first opcodes, against whichever interpreter invokes
+it. a structural claim quoted in a doc and re-derivable by nobody is the thing
+this page has spent several rounds removing, and two sets of figures were wrong
+here before the script existed
+
+the list of what may share the span is an **allow list**, and that is deliberate.
+a list of the dangerous opcodes fails open — an opcode a future interpreter adds
+is one nobody wrote down — and 3.13 and 3.14 already spell half of these
+differently: `LOAD_FAST` became `LOAD_FAST_BORROW`, `BINARY_SUBSCR` was folded
+into `BINARY_OP`, and `RETURN_CONST` became a `LOAD_CONST` and a `RETURN_VALUE`.
+so what is permitted is loads, stack shuffles, `BUILD_TUPLE`/`BUILD_LIST`, and a
+store into the names the caller's line binds — and anything else refuses, naming the opcode
+
+the instructions are read through `dis.get_instructions`, on the request path and
+never on the event path. decoding `co_code` against a table of opcode numbers
+would be one more thing hand-maintained against an interpreter that renumbers
+them every release
+
+## the other three refusals
+
+**no clean exit line.** a frame is forced out by moving it to a line that returns
+and does nothing else. cpython fuses a function's implicit `return None` onto the
+**last statement's** line:
+
+```
+implicit  line 4: [LOAD_GLOBAL, LOAD_FAST_BORROW, CALL, POP_TOP, LOAD_CONST, RETURN_VALUE]
+explicit  line 8: [LOAD_FAST_BORROW, RETURN_VALUE]
+```
+
+so a function with no explicit `return` usually has none, and moving there would
+*execute that statement*. a function with several returns offers all of them:
+cpython accepts a move to some and not others — a `return` inside a `for` body
+answers `can't jump into the body of a for loop` — so they are tried in order.
+a refused assignment moves nothing and binds nothing, measured on 3.13, 3.14 and
+3.14t, so trying costs nothing
+
+**nothing runs after the call.** the rewind can only be made from a `LINE` event:
+cpython answers `can only jump from a 'line' trace event` to anything else, so
+`PY_RETURN` cannot drive it. if the call line's own instruction range holds the
+`RETURN`, execution never enters another line of the caller and there is nowhere
+to move it from
+
+```
+def c(): f()                   no line event follows — refused
+def c(): f(); print(...)       a line event follows
+def c(): r = f(); return r     a line event follows
+```
+
+that restriction also makes the dangerous case **unreachable** rather than
+merely unlikely. with `sorted(items, key=f)` the caller is suspended in a C call
+and no line event fires in it while `sorted` runs, so a rewind cannot happen in
+the middle of one. it is the case that restricts JVMTI's `PopFrame` too
+
+**no caller.** the outermost frame of the program has nothing above it but bpd's
+own bootstrap, and a restart is the caller making the call again
+
+## the three refusals about names rather than shapes
+
+the rules above are about the **shape** of a line. three refusals are about what
+the frame holds, and they are the ones that closed this feature's most subtle
+defects — a forced exit that raises into the program rather than returning is a
+false `Arranged` that looks like a clean one
+
+- **a namespace that is not a plain dict.** `LOAD_GLOBAL`'s fast path needs the
+    globals **and** the builtins to be exact dicts, because a miss in one falls
+    through to the other; off that path it is `PyObject_GetItem`, which runs the
+    mapping's `__getitem__` or `__missing__`. `LOAD_NAME` and `STORE_NAME` are
+    the same question about a module or class body, where `__prepare__` can put
+    any mapping there. `NamespaceIsNotADict`
+- **a read the frame holds nothing for.** `LOAD_DEREF` on an empty cell and
+    `LOAD_GLOBAL` on a name in neither globals nor builtins both **raise**.
+    cpython binds a frame's unbound *locals* to `None` when it moves and leaves
+    both of those alone — measured, and the note here used to say otherwise.
+    `ExitWouldRaise`, naming the name
+- **a caller stopped where its own line table has no line.** there is nothing to
+    rewind to, and picking a nearby line would be picking which statement runs
+    again. `CallerHasNoLine`
+
+the first two are produced **twice** — once about a line the frame would be
+forced out through, once about the caller's call line — and they carry which,
+because for a while they shared one message written for the caller. a user
+refused because of a `LOAD_GLOBAL` on the frame's own `return` was told the
+caller's line stored into a `__prepare__` namespace, which was wrong in every
+particular
+
+## the frames restart frame refuses, and what was measured
+
+a **generator, coroutine or async generator** frame, all three, and for one
+reason rather than three: `f_back` of such a frame is **whoever resumed it**,
+which need not be what produced it — and the whole mechanism is "make the
+caller's line build the frame again". measured on 3.13, 3.14 and 3.14t:
+
+| shape                        | what happened                                                                                                                                              |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a generator forced out       | `next(it)` raised `StopIteration`, which left the caller instead of reaching a line event, and the program died                                            |
+| a coroutine driven by a task | `f_back` was `asyncio.events.Handle._run`, and rewinding *that* answered `InvalidStateError: __step(): already done` — the event loop was what got rewound |
+| a coroutine awaited in place | it restarted correctly                                                                                                                                     |
+
+the third is refused with the other two, and that is the finding worth writing
+down: nothing in the frame distinguishes it from the task case. both are a
+coroutine frame whose `f_back` is a python frame, and a debugger that permitted
+the one it could not tell apart from the other would be guessing
+
+the generator case is the one that makes the refusal load bearing. the caller's
+line `second = next(it)` is `LOAD_GLOBAL, LOAD_FAST, CALL, STORE_FAST` — it passes
+every other test this feature makes, so without the refusal by kind nothing would
+have caught it
 
 set next statement to a line of the body is the operation that works there, and
-it works normally: a backward jump inside a generator body re-executes it and the
-generator goes on yielding. the refusal names that alternative rather than only
-saying no
+the refusal names it. a backward jump inside a generator body re-executes it and
+the generator goes on yielding
+
+## what a restart changes that nothing else would say
+
+the forced return is a **real** return with a real value, so the rest of the
+caller's line runs with it before the rewind. `got = f(x)` really does store it in
+`got`. that is a value the program never computed, sitting in a live frame, and it
+is on the answer as `disturbed` — it is overwritten when the restarted call
+returns for real, and until then it is what the caller holds
+
+the exit jump binds the forced-out frame's unbound locals to `None`, like any
+other jump, and that is `bound_to_none`. it is reported even though the frame is
+about to die, because the frame is live at the moment the answer is made and a
+client reading its locals then reads these
+
+## the half that cannot be decided in advance
+
+whether cpython accepts a move **to** the call line from wherever the caller got
+to. everything else is read off bytecode first; this is cpython's answer and it
+gives it at the time
+
+so it is reported rather than swallowed. the thread is held where the refusal
+happened, with reason `restart_abandoned`, saying that the frame was forced out
+and returned and that the call was **not** made again. another way to reach it is
+an exception leaving the caller before it reaches a line, and a third is the
+rewind landing somewhere other than the line it asked for — `Abandoned` is
+`non_exhaustive`, and this is not a closed set
+
+## and the gap that is known rather than closed
+
+**a restart cancelled by something else is not announced.** the client was told
+the restart was arranged; if a breakpoint, an exception, a pause or a stopped
+world holds the thread before the fresh frame is entered, the restart is taken
+off — it has to be, because an operation left armed keeps the interpreter from
+forgetting a single location for the rest of the run — and the client learns only
+about the stop it got
+
+saying so needs a report the debugger makes without being asked, which is a
+`Told` in `crates/bpd_core/src/parity.rs` and a `carriage_of` arm in both front
+ends. it is written down here rather than left for somebody to find
+
+no ordinary shape reaches either. every block shape was measured on 3.13, 3.14
+and 3.14t — a call in a `for` body, a `while` body, a `try`, a `try/finally`, a
+`with`, an `if`, a nested `for`, and each of those as the **last** statement of
+its block — and cpython accepted the rewind in all of them, including from a loop
+header back into its body. what the report exists for is that half a restart is a
+frame that returned and never came back, and a silence there would be
+indistinguishable from a restart that worked
 
 ## stepping and breakpoints across a jump
+
+these are about **set next statement**. a restart resumes the thread itself, so
+nothing else can be armed on it while one is in flight, and the line the rewind is
+made on does not run at all — a breakpoint there is not passed over, it is a
+breakpoint on a line the program did not execute
 
 - a **step** cannot be armed while a jump is being made: the thread is either
     held, and can be moved, or stepping, and is not held. a step asked for after
@@ -201,8 +563,21 @@ offering a target is not a claim that the move will happen — whether a line ca
 be reached from where the frame is is cpython's answer, given when the move is
 made, and the target's label says so
 
-both requests are answered and then followed by a `stopped` event, with reason
-`goto` or `restart`, because the thread was never resumed and the client has to
-re-read the stack to see where it is. that event repeats what the stop was
-announced with about the other threads rather than recomputing it: nothing about
-them changed, and a second event saying otherwise would contradict the first
+**`goto`** is answered and then followed by a `stopped` event with reason
+`goto`, because the thread was never resumed and the client has to re-read the
+stack to see where it is. that event repeats what the stop was announced with
+about the other threads rather than recomputing it: nothing about them changed,
+and a second event saying otherwise would contradict the first
+
+**`restartFrame`** is answered and then nothing — the thread was let go, and
+sending a `stopped` event from there would have the client read a stack while the
+program ran past it. the `stopped` event arrives when the restart lands, with
+reason `restart`, which is DAP's own name for exactly this. a rewind cpython
+refused arrives as a stop too, deliberately **not** with reason `restart`: a
+client that rendered it as one would say a frame is running again when it
+returned and did not come back
+
+what neither protocol has a field for is what really runs again. DAP gets it on
+the console and, for a client that asked, as a `bpd/restarting` event; MCP gets it
+in the answer's `notes`. both are written from the same values in the same place,
+so neither can drift from the other

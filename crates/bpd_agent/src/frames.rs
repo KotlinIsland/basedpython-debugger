@@ -42,7 +42,7 @@ use std::sync::OnceLock;
 
 use bpd_core::{
     ContextLayer, Detail, Entry, Evaluated, Frame, FrameId, FrameKind, Holding, Jump, Jumped,
-    Omitted, Refusal, Scope, Suspendable, Unrestartable, Where,
+    Omitted, Refusal, Restarted, Restarting, Scope, Suspendable, Unrestartable, Where,
 };
 use bpd_protocol::message::FromAgent;
 use pyo3::exceptions::PyKeyError;
@@ -52,7 +52,7 @@ use pyo3::types::PyDict;
 use crate::conditions::{self, capture};
 use crate::facts::Prover;
 use crate::values::Reader;
-use crate::{events, sources, templates, world};
+use crate::{bytecode, events, sources, templates, world};
 
 /// `CO_OPTIMIZED` — the frame keeps its locals in slots the compiler assigned
 ///
@@ -679,9 +679,154 @@ impl<'py> Stopped<'py> {
         self.jump(id, Wanted::Line(line), "setting the next statement")
     }
 
-    /// re-enter the executing frame from the top
-    pub(crate) fn restart_frame(&mut self, id: FrameId) -> PyResult<FromAgent> {
-        self.jump(id, Wanted::FirstLine, "restarting a frame")
+    /// run the executing frame again, from a call its caller makes a second time
+    ///
+    /// **not a jump**, and the whole answer to why the old restart re-entered a
+    /// frame holding the values it already had: nothing here moves the frame to
+    /// its own top. it is moved to a line that **returns**, and the caller is
+    /// then rewound to the line the call was made from, so the interpreter
+    /// builds a frame that has never run
+    ///
+    /// the move out is an `f_lineno` jump like any other and runs no block's
+    /// cleanup — see [`Restarting`]
+    ///
+    /// every reason it cannot be done is decided here, off the bytecode of the
+    /// frame and of its caller, before the frame is moved. what cannot be
+    /// decided here is whether cpython will accept a move to an exit line, and
+    /// that is asked with the assignment itself — a refused one moves nothing
+    /// and binds nothing, measured on 3.13, 3.14 and 3.14t, so the offers are
+    /// made one at a time until one is taken
+    ///
+    /// the second half of the answer is [`Restarting`]: what the caller will
+    /// run again is a **line**, and what the forced return leaves in it is a
+    /// value the program never computed
+    pub(crate) fn restart_frame(&mut self, id: FrameId) -> PyResult<Restart<'py>> {
+        const WANTED: &str = "restarting a frame";
+
+        let frame = match self.executing(id, WANTED)? {
+            Ok(frame) => frame,
+            Err(reason) => return Ok(Restart::Refused(reason)),
+        };
+        let code = frame.getattr("f_code")?;
+        let function: String = code.getattr("co_qualname")?.extract()?;
+        let refuse = |reason| {
+            Ok(Restart::Refused(Refusal::NotRestartable {
+                frame: id,
+                function: function.clone(),
+                reason,
+            }))
+        };
+
+        // held for the whole of this, and it covers two different things.
+        //
+        // the **analysis** imports `dis` and reads two code objects. it runs
+        // none of the program, but the import compiles and executes a module the
+        // debuggee may not have loaded, and a breakpoint reached inside it would
+        // be a stop whose stack is half debugger.
+        //
+        // the **assignment** runs the warnings machinery, which is replaceable
+        // program code, for the reason [`Stopped::jump`] suppresses it. what
+        // this also swallows is a `__del__` that a refcount dropped by the move
+        // happens to run — same as any other jump, and named here so that it is
+        // a known cost rather than a discovery
+        let _suppressed = conditions::suppress();
+
+        // in order of how fundamental each is, so that a frame with two
+        // reasons is told the one that would still be true if the other were
+        // fixed. a module frame has no clean exit line **and** no caller, and
+        // giving it a `return` would not make it restartable
+        if let Some(kind) = suspendable(&code)? {
+            return refuse(Unrestartable::Suspendable { kind });
+        }
+        let caller = frame.getattr("f_back")?;
+        if caller.is_none() || is_bootstrap(&caller) {
+            return refuse(Unrestartable::NoCaller);
+        }
+        let exits = match bytecode::exit_lines(&code, &namespaces_of(&frame)?)? {
+            Ok(exits) => exits,
+            Err(reason) => return refuse(reason),
+        };
+        if exits.is_empty() {
+            return refuse(Unrestartable::NoCleanExit);
+        }
+        let caller_code = caller.getattr("f_code")?;
+        let call = match bytecode::call_line(
+            &caller_code,
+            caller.getattr("f_lasti")?.extract()?,
+            &namespaces_of(&caller)?,
+        )? {
+            Ok(call) => call,
+            Err(reason) => return refuse(reason),
+        };
+
+        // nothing above this point has touched the program. from here it has
+        let at = describe_where(&frame)?;
+        let unbound = Place::of(&frame)?.unbound()?;
+        let mut refused = None;
+        let mut exit_line = None;
+        for line in &exits {
+            // **the frame is never moved to find out whether it can be.** every
+            // range start of every line offered here walks clean, so wherever
+            // cpython chooses to land is clean — there is nothing to check
+            // afterwards and nothing to undo. an earlier version jumped
+            // speculatively and put the frame back, and the put-back relocated
+            // it onto a different copy of the same line while the answer said
+            // nothing had moved
+            match frame.setattr("f_lineno", *line) {
+                Ok(()) => {
+                    exit_line = Some(*line);
+                    break;
+                }
+                Err(error) => refused = Some(error),
+            }
+        }
+        let Some(exit_line) = exit_line else {
+            let Some(error) = refused else {
+                unreachable!(
+                    "the list is not empty, so either a line was taken or \
+                     cpython refused one"
+                )
+            };
+            return Ok(Restart::Answered(Restarted::Refused {
+                tried: exits,
+                error: capture(self.python, &error),
+            }));
+        };
+
+        Ok(Restart::Arranged {
+            restarting: Restarting {
+                frame: at,
+                exit_line,
+                caller: describe_where(&caller)?,
+                disturbed: call.disturbed,
+                bound_to_none: bound_to_none(&frame, &unbound)?,
+                // **both** lines that will not fire, not only the rewind's
+                // destination. the exit line of the forced-out frame really
+                // executes — its loads and its return run — and no `LINE` event
+                // is delivered for it either, because it is a jump's
+                // destination. a breakpoint there is one the program ran past
+                //
+                // against the lines the interpreter has, which is what the
+                // breakpoint table is keyed by
+                unannounced: {
+                    let mut passed_over =
+                        crate::breakpoints::bound_at(code.as_ptr() as usize, exit_line);
+                    passed_over.extend(crate::breakpoints::bound_at(
+                        caller_code.as_ptr() as usize,
+                        call.line,
+                    ));
+                    passed_over.sort_unstable();
+                    passed_over.dedup();
+                    passed_over
+                },
+                mode: world::mode(),
+            },
+            caller,
+            call_line: call.line,
+            from: call.from,
+            function,
+            code,
+        })
     }
 
     /// the frame an id names, when it is the one its thread is executing
@@ -745,33 +890,14 @@ impl<'py> Stopped<'py> {
         // and for a basedpython build that is the `.by`. translating it here is
         // the other half of reporting one: a debugger that answered in one
         // file's lines and took orders in another's would be two debuggers
-        let asked = match wanted {
-            Wanted::Line(line) => line,
-            Wanted::FirstLine => match restartable(&code)? {
-                Ok(line) => line,
-                Err(reason) => {
-                    return Ok(FromAgent::Refused {
-                        reason: Refusal::NotRestartable {
-                            frame: id,
-                            function: code.getattr("co_qualname")?.extract()?,
-                            reason,
-                        },
-                    });
-                }
-            },
-        };
-        // a restart's destination came out of the code object and is already a
-        // line the interpreter has, so only a line a client named is translated
-        let line = match wanted {
-            Wanted::Line(_) => match translate(&code, asked)? {
-                Ok(line) => line,
-                Err(reason) => {
-                    return Ok(FromAgent::Refused {
-                        reason: Refusal::UnmappableLine { frame: id, reason },
-                    });
-                }
-            },
-            Wanted::FirstLine => asked,
+        let Wanted::Line(asked) = wanted;
+        let line = match translate(&code, asked)? {
+            Ok(line) => line,
+            Err(reason) => {
+                return Ok(FromAgent::Refused {
+                    reason: Refusal::UnmappableLine { frame: id, reason },
+                });
+            }
         };
 
         // where the frame is now, as a client was told it — the same reading
@@ -894,14 +1020,41 @@ impl<'py> Stopped<'py> {
 }
 
 /// where a jump is going, before the code object has been looked at
-///
-/// the two operations differ in exactly this and in nothing else
 #[derive(Debug, Clone, Copy)]
 enum Wanted {
     /// the line the caller named
     Line(u32),
-    /// the line of the code object's first instruction that carries one
-    FirstLine,
+}
+
+/// what a restart request came to, and what the held thread does about it
+///
+/// three outcomes rather than two, because they leave the thread in three
+/// different places: refused and still held, cpython said no and still held, or
+/// arranged and about to be **let go** to finish it. an answer that could not
+/// tell them apart would be one the engine has to guess the held state from
+pub(crate) enum Restart<'py> {
+    /// bpd will not do it, and nothing was touched
+    Refused(Refusal),
+
+    /// there is an answer and the thread stays held
+    Answered(Restarted),
+
+    /// the frame was forced out, and the thread is to be let go to finish it
+    Arranged {
+        /// what to tell the client was arranged
+        restarting: Restarting,
+        /// the frame the rewind will be made in
+        caller: Bound<'py, PyAny>,
+        /// the line of it to rewind to, in the interpreter's own numbering
+        call_line: u32,
+        /// the offset its span was read from, which the rewind is checked
+        /// against
+        from: u32,
+        /// `co_qualname` of what is being restarted
+        function: String,
+        /// the code object the fresh frame will run
+        code: Bound<'py, PyAny>,
+    },
 }
 
 /// the line of the interpreter's own file that a named line means
@@ -915,41 +1068,123 @@ fn translate(code: &Bound<'_, PyAny>, line: u32) -> PyResult<Result<u32, bpd_cor
     Ok(sources::to_generated(&file, line).unwrap_or(Ok(line)))
 }
 
-/// the line a restart moves to, or why the frame cannot be re-entered
+/// what the mappings behind a frame's names really are
 ///
-/// the destination is the line of the **first instruction** that carries one,
-/// in offset order, rather than `co_firstlineno`. the two differ: a module's
-/// first instruction is a `RESUME` whose line is `0`, and a function that closes
-/// over a variable begins with `MAKE_CELL` instructions that carry no line at
-/// all. `co_firstlineno` is where the code was written, and what a jump needs is
-/// a position the frame can be put at
-fn restartable(code: &Bound<'_, PyAny>) -> PyResult<Result<u32, Unrestartable>> {
+/// two opcodes on the analysis's allow lists run nothing **only** when the
+/// mapping behind them is an exact dict, and that is a property of the frame
+/// rather than of the code — so it is read here and carried into the analysis
+fn namespaces_of(frame: &Bound<'_, PyAny>) -> PyResult<bytecode::Namespaces> {
+    let globals = frame.getattr("f_globals")?;
+    let locals = frame.getattr("f_locals")?;
+    // **both**, because a `LOAD_GLOBAL` that misses globals falls through to
+    // builtins, and cpython's fast path needs the pair. reading only globals let
+    // a plain-dict globals with a dict-subclass `__builtins__` through
+    let builtins = frame.getattr("f_builtins")?;
+    let globals_exact =
+        globals.is_exact_instance_of::<PyDict>() && builtins.is_exact_instance_of::<PyDict>();
+    let named = if globals.is_exact_instance_of::<PyDict>() {
+        &builtins
+    } else {
+        &globals
+    };
+    Ok(bytecode::Namespaces {
+        globals_exact,
+        globals: named.get_type().name()?.extract()?,
+        locals_exact: locals.is_exact_instance_of::<PyDict>(),
+        // true when the frame's namespace **is** the global namespace, so a
+        // write through it is a write the callee can read. a module body always
+        // is; so is an `exec` given only a globals mapping, and a class body
+        // whose `__prepare__` hands back `globals()` — measured on 3.13, 3.14
+        // and 3.14t. a function is never one, because its locals are slots
+        locals_are_globals: locals.is(&globals),
+        locals: locals.get_type().name()?.extract()?,
+        // read **before** anything moves, off the mappings the frame really
+        // has. a name in none of them makes `LOAD_GLOBAL` raise `NameError`,
+        // which is a forced exit injecting an exception rather than returning
+        unresolvable: unresolvable_names(frame, &globals, &locals, &builtins)?,
+        // read **before** anything moves. the move binds unbound locals to
+        // `None` and leaves cells alone, so a cell that holds nothing now still
+        // holds nothing after it
+        unbound_cells: unbound_in(frame, &[Scope::Cell, Scope::Free])?,
+        // read **before** anything moves, and only ever asked of the caller.
+        // the move binds these to `None`, so on an exit line they cannot raise
+        // — in the caller's tail, which runs before any move, they can
+        unbound_fasts: unbound_in(frame, &[Scope::Local])?,
+    })
+}
+
+/// the names of this frame's slots in `scopes` that hold nothing right now
+///
+/// one read of the frame per call, which is why the two callers pass a list
+/// rather than filtering the same answer twice
+fn unbound_in(frame: &Bound<'_, PyAny>, scopes: &[Scope]) -> PyResult<Vec<String>> {
+    Ok(Place::of(frame)?
+        .unbound()?
+        .into_iter()
+        .filter(|(scope, _)| scopes.contains(scope))
+        .map(|(_, name)| name)
+        .collect())
+}
+
+/// the names this frame's code looks up globally and its mappings do not hold
+///
+/// every name in `co_names` that is in neither the frame's locals mapping, its
+/// globals, nor its builtins. `LOAD_GLOBAL` and `LOAD_NAME` raise `NameError`
+/// for one of those, and the analysis has to know before it moves anything
+///
+/// `co_names` rather than the instructions, because it is the same list the
+/// instructions index into and it is read once per frame instead of once per
+/// candidate line
+fn unresolvable_names(
+    frame: &Bound<'_, PyAny>,
+    globals: &Bound<'_, PyAny>,
+    locals: &Bound<'_, PyAny>,
+    builtins: &Bound<'_, PyAny>,
+) -> PyResult<Vec<String>> {
+    // **only when they are plain dicts**, and that is not an optimisation.
+    // `contains` runs a mapping's own `__contains__`, which is the program's
+    // code — asking would be running exactly what this exists to avoid. a
+    // mapping that is not a plain dict is refused by the namespace gate anyway,
+    // so there is nothing this answer could add
+    if !globals.is_exact_instance_of::<PyDict>() || !builtins.is_exact_instance_of::<PyDict>() {
+        return Ok(Vec::new());
+    }
+    // `f_locals` is deliberately consulted **only** when it is a plain dict.
+    // every optimized frame's is a `FrameLocalsProxy`, which is not one — and a
+    // function's `LOAD_GLOBAL` does not look at locals anyway. a module body's
+    // locals *is* its globals, and a class body's is the namespace `LOAD_NAME`
+    // reads first
+    let namespace = locals.is_exact_instance_of::<PyDict>().then_some(locals);
+
+    let names: Vec<String> = frame.getattr("f_code")?.getattr("co_names")?.extract()?;
+    let mut unresolvable = Vec::new();
+    for name in names {
+        let mut known = globals.contains(&name)? || builtins.contains(&name)?;
+        if let Some(namespace) = namespace {
+            known = known || namespace.contains(&name)?;
+        }
+        if !known {
+            unresolvable.push(name);
+        }
+    }
+    Ok(unresolvable)
+}
+
+/// which kind of frame its driver sends into, when it is one of the three
+///
+/// all three are refused a restart, and for one reason rather than three:
+/// `f_back` of such a frame is whoever **resumed** it, which need not be what
+/// produced it — see [`Unrestartable::Suspendable`]
+fn suspendable(code: &Bound<'_, PyAny>) -> PyResult<Option<Suspendable>> {
     let flags: u32 = code.getattr("co_flags")?.extract()?;
-    for (flag, kind) in [
+    Ok([
         (CO_GENERATOR, Suspendable::Generator),
         (CO_COROUTINE, Suspendable::Coroutine),
         (CO_ASYNC_GENERATOR, Suspendable::AsyncGenerator),
-    ] {
-        if flags & flag != 0 {
-            return Ok(Err(Unrestartable::Suspendable { kind }));
-        }
-    }
-
-    let mut first: Option<(u32, u32)> = None;
-    for entry in code.call_method0("co_lines")?.try_iter()? {
-        let (start, _end, line): (u32, u32, Option<u32>) = entry?.extract()?;
-        // `0` is what cpython gives a module's own `RESUME`, and `None` is what
-        // it gives an instruction with no source line at all. neither is a line
-        // of the file, and neither can be jumped to
-        let Some(line) = line.filter(|line| *line >= 1) else {
-            continue;
-        };
-        if first.is_none_or(|(earliest, _)| start < earliest) {
-            first = Some((start, line));
-        }
-    }
-
-    Ok(first.map_or(Err(Unrestartable::NoFirstLine), |(_, line)| Ok(line)))
+    ]
+    .into_iter()
+    .find(|(flag, _)| flags & flag != 0)
+    .map(|(_, kind)| kind))
 }
 
 /// which of the names that held nothing before a jump hold `None` after it

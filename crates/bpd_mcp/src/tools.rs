@@ -873,23 +873,54 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "restart_frame",
-            title: "re-enter the held frame from the top",
-            description: "`set_next_statement` to the first line of the frame's \
-                own code object, worked out in the debuggee because the code \
-                object is the only thing that knows it. the same answer, and the \
-                same limits — including that only the frame the thread is \
-                executing can move.\n\n\
-                **it re-enters with what the parameters hold now.** a parameter \
-                the frame has already assigned to holds the new value: nothing \
-                captured what the call was made with, and capturing it would mean \
-                copying every argument of every call in the process. so this is \
-                not `undo` — side effects the frame already performed are not \
-                undone, and the frames it called are gone.\n\n\
-                a generator, a coroutine or an async generator frame is refused: \
-                the first instruction of such a code object is the `RESUME` its \
-                driver sends into rather than the top of the body, and moving \
-                there ends the frame instead of running it again. \
-                `set_next_statement` to a line of the body works there."
+            title: "run the held frame again, with the locals a call binds",
+            description: "**not a jump, and it resumes the thread.** the frame \
+                is forced to *return* — moved to a line of its own code that is \
+                only loads and a return — and its **caller** is then rewound to \
+                the line the call was made from, so the interpreter builds a \
+                frame that has never run. that is what makes the locals \
+                fresh.\n\n\
+                **it runs no block cleanup.** forcing the frame out is an \
+                `f_lineno` jump, so a `with` the frame was inside gets no \
+                `__exit__` and a `try` gets no `finally` — measured with a plain \
+                class context manager: two `__enter__`, one `__exit__`. a \
+                context manager the frame had open is still open, and the \
+                restarted call opens a second one.\n\n\
+                what the jump does not run, the frame **dying** can. anything it \
+                was the last holder of is finalised at that moment — a `__del__`, \
+                or the `GeneratorExit` thrown into a suspended generator, which \
+                runs its `finally` and the `__exit__` of any `with` inside it. a \
+                `@contextlib.contextmanager` is exactly that shape, so its \
+                cleanup **does** run, at a point the program never reached. bpd \
+                does not enumerate what a finaliser will do.\n\n\
+                so **do not ask this stop anything more.** the answer says what \
+                was arranged and the thread is gone; wait for the next stop, \
+                which is `restarted` at the first line of the fresh frame, or \
+                `restart_abandoned` when the restart could not be finished — the \
+                frame gone and the call not made again, with that stop carrying \
+                which of several reasons it was. a **third** thing can happen and is a \
+                known gap: another stop (a breakpoint, an exception, a pause, a \
+                stopped world) reaching this thread first takes the restart off, \
+                and neither of those two arrives.\n\n\
+                **the unit is the caller's line, not the call.** everything on \
+                that line runs a second time, so a line carrying anything besides \
+                the one call is refused by name rather than restarted: an \
+                attribute (a property would run again), a subscript (a \
+                `__getitem__`), an operator (a dunder), a store into an attribute \
+                (a setter, handed a value the program never computed), or a \
+                second call — `[f(), f()]`, a comprehension, `sorted(items, \
+                key=f)`, whose completed sibling calls really do re-run. so are a \
+                frame with no clean exit line (cpython fuses the implicit `return \
+                None` onto the last statement, so a function without an explicit \
+                `return` usually has none), a call the caller has no statement \
+                after (the rewind needs a line event and none follows), and a \
+                generator or coroutine (`f_back` there is whoever *resumed* the \
+                frame, which need not be what produced it).\n\n\
+                every one of those is decided off the bytecode **before anything \
+                is attempted**, and the refusal names what stood in the way and \
+                what would work instead. this is still not `undo`: side effects \
+                the old frame already performed are not undone, and the frames it \
+                called are gone."
                 .to_string(),
             schema: object(
                 serde_json::json!({

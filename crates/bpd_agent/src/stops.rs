@@ -194,6 +194,31 @@ pub(crate) fn held_threads() -> Vec<u64> {
     registry().threads()
 }
 
+/// take a stop out of the registry from the thread it is holding
+///
+/// every other way out of the registry is the connection's reader thread
+/// removing an entry and then waking the thread it belonged to. a **restart**
+/// is the one request whose answer ends the stop that answered it: the thread
+/// has to run for the caller to make the call again, so it lets itself go, and
+/// it deregisters here so nothing routes a later request to a mailbox no thread
+/// is waiting on
+///
+/// no acknowledgement is sent from here. the answer to the restart is what says
+/// the thread was let go, and a second message saying so would be a resume the
+/// client never asked for
+///
+/// an entry that is already gone is **not** an error. the reader thread takes
+/// one out for a resume without waiting for the held thread to notice, so a
+/// resume that arrived while this stop was answering has already done this —
+/// and both of them wanted the same thing. what would be an error is leaving one
+/// behind, which is what this is here to prevent
+pub(crate) fn leave(stop: u64) {
+    let mut registry = registry();
+    if let Some(index) = registry.held.iter().position(|entry| entry.stop == stop) {
+        registry.held.remove(index);
+    }
+}
+
 /// the stop holding a thread, if bpd is holding it
 pub(crate) fn held_for(thread: u64) -> Option<u64> {
     registry()

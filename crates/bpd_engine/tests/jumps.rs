@@ -420,91 +420,6 @@ fn a_frame_that_is_not_the_one_the_thread_is_executing_is_refused_with_the_reaso
 }
 
 #[test]
-fn restarting_a_frame_runs_it_again_with_what_its_parameters_hold_now() {
-    // the milestone's hard question, answered by measurement rather than by
-    // wording: nothing captured what the call was made with, so a parameter the
-    // frame has already assigned to is what the second run sees
-    let fixture = Fixture::new("restarting", PROGRAM);
-    let mut debuggee = launch(&fixture);
-    let total = line_of(PROGRAM, "total = value + 1");
-
-    held_at(&mut debuggee, &fixture.path(), total);
-    assert!(
-        value_of(&mut debuggee, "value").contains("101"),
-        "the fixture reassigns its parameter before the breakpoint, and it had \
-         not"
-    );
-
-    let frame = top(&mut debuggee);
-    let jumped = debuggee
-        .restart_frame(frame)
-        .expect("the frame was asked to restart");
-    let (from, _, _) = moved(&jumped);
-    assert_eq!(from, total);
-    assert_eq!(
-        jumped.at.line,
-        line_of(PROGRAM, "def growing(value):"),
-        "a restart moves to the first line of the code object, and the answer \
-         said {jumped:?}"
-    );
-
-    to_exit(&mut debuggee);
-    let said = recorded(&fixture);
-    // 1 and then 101: the second run is the frame re-entered with what the
-    // parameter holds now, and `bpd` says exactly that rather than claiming the
-    // arguments were restored
-    assert!(
-        said.contains("('growing', 1), ('growing', 101)"),
-        "the frame did not run again with the parameter it now holds: {said}"
-    );
-    assert!(
-        said.contains("grown 202"),
-        "the re-entered frame's own return value has to be the one the program \
-         got: {said}"
-    );
-}
-
-#[test]
-fn a_restart_lands_before_the_first_statement_and_a_step_runs_it() {
-    // a restart moves to the line of the code object's first instruction, which
-    // is the `def`. no line event is delivered for it either, so what proves
-    // the frame is really there is a step: it lands on the first statement of
-    // the body, which has not run yet
-    let fixture = Fixture::new("stepping_after", PROGRAM);
-    let mut debuggee = launch(&fixture);
-    let third = line_of(PROGRAM, "third = 3");
-
-    held_at(&mut debuggee, &fixture.path(), third);
-    let frame = top(&mut debuggee);
-    let jumped = debuggee
-        .restart_frame(frame)
-        .expect("the frame was asked to restart");
-    assert_eq!(jumped.at.line, line_of(PROGRAM, "def straight():"));
-
-    debuggee
-        .the_step(StepKind::Over)
-        .expect("the thread stepped");
-    let stop = match debuggee
-        .wait(&mut bpd_test::reporting::Unreported)
-        .expect("the debuggee was waited on")
-    {
-        Running::Stopped { stop, .. } => stop,
-        other => panic!("expected the step to land, got {other:?}"),
-    };
-    let StopReason::Stepped { line, .. } = &stop.reason else {
-        panic!("expected a step to have landed, got {:?}", stop.reason)
-    };
-    assert_eq!(
-        *line,
-        line_of(PROGRAM, "first = 1"),
-        "a step out of a restarted frame lands on the first statement of the \
-         body"
-    );
-
-    to_exit(&mut debuggee);
-}
-
-#[test]
 fn a_step_after_a_jump_runs_the_destination_and_lands_on_the_line_after_it() {
     let fixture = Fixture::new("stepping_over", PROGRAM);
     let mut debuggee = launch(&fixture);
@@ -572,11 +487,10 @@ fn a_jump_binds_the_frames_unbound_locals_to_none_and_says_which() {
 }
 
 #[test]
-fn a_generator_frame_is_refused_a_restart_and_takes_a_jump_to_a_body_line() {
-    // the first instruction of a generator's code object is the `RESUME` its
-    // driver sends into rather than the top of the body: moving there ends the
-    // generator instead of running it again. the refusal names the operation
-    // that does work, and this checks that one really does
+fn a_generator_body_line_is_an_ordinary_destination_for_a_jump() {
+    // the refusal a generator gets from **restart frame** names this as the
+    // operation that works there, and a refusal naming something that does not
+    // work is worse than no refusal. the restart half is in `restarts.rs`
     let fixture = Fixture::new("generating", PROGRAM);
     let mut debuggee = launch(&fixture);
     let yielded = line_of(PROGRAM, "RAN.append(\"yielded\")");
@@ -588,22 +502,6 @@ fn a_generator_frame_is_refused_a_restart_and_takes_a_jump_to_a_body_line() {
     held_at(&mut debuggee, &fixture.path(), yielding);
     let frame = top(&mut debuggee);
 
-    let refused = debuggee
-        .restart_frame(frame)
-        .expect_err("a generator frame cannot be re-entered from the top");
-    let said = refused.to_string();
-    assert!(said.contains("`counter`"), "said {said}");
-    assert!(said.contains("a generator"), "said {said}");
-    assert!(
-        said.contains("StopIteration"),
-        "the refusal has to say what moving there really does, and said {said}"
-    );
-    assert!(
-        said.contains("set the next statement"),
-        "the refusal has to name the operation that works here, and said {said}"
-    );
-
-    // and it does work: a body line is an ordinary destination in a generator
     let jumped = debuggee
         .set_next_statement(frame, yielded)
         .expect("a body line is a place a generator frame can be moved to");
@@ -633,7 +531,7 @@ fn the_entry_stop_cannot_be_moved_and_cpython_says_why() {
 
     let frame = top(&mut debuggee);
     let jumped = debuggee
-        .restart_frame(frame)
+        .set_next_statement(frame, line_of(PROGRAM, "grown = growing(1)"))
         .expect("the request was answered");
     let Jump::Refused { error, .. } = &jumped.outcome else {
         panic!("a frame that has not begun has no line to move from: {jumped:?}")

@@ -321,6 +321,62 @@ pub enum StopReason {
         parent: u32,
     },
 
+    /// a frame the debugger restarted has been entered again, and is fresh
+    ///
+    /// a restart forces the old frame to return and rewinds the caller to the
+    /// line the call was made from, so this is the interpreter having built a
+    /// **new** frame from that call: nothing of it has run, and every local it
+    /// has is one this call bound
+    ///
+    /// held before its first statement, which is where the first `LINE` event
+    /// of a frame is delivered — so unlike the entry stop, a jump can be made
+    /// from here
+    Restarted {
+        /// `co_qualname` of what is running again
+        function: String,
+        /// the `co_filename` of the code object that is running
+        file: String,
+        /// the line it is about to run
+        line: u32,
+    },
+
+    /// a frame was forced out for a restart and the restart did not finish
+    ///
+    /// **which** of [`Abandoned`]'s reasons it was is carried on the stop, and
+    /// that list is `non_exhaustive`. an earlier version of this named cpython
+    /// refusing the rewind as though it were the only one, and a client reading
+    /// it as complete would have been reading a false set: the caller can also
+    /// leave before the rewind is made, and the rewind can land somewhere other
+    /// than the line it asked for
+    ///
+    /// the refusal is the half of a restart that cannot be decided in advance.
+    /// everything about the caller's line is read off its bytecode before
+    /// anything is attempted, but whether cpython will accept a move **to** that
+    /// line from wherever the caller got to is cpython's answer and it gives it
+    /// at the time
+    ///
+    /// so the thread is held where the refusal happened rather than let go. the
+    /// frame that was forced out is **gone** — it returned — and the call was
+    /// not made again. saying so is the whole point of this variant: a restart
+    /// that quietly did half of itself is the exact wrongness this project
+    /// refuses
+    RestartAbandoned {
+        /// `co_qualname` of the frame that was forced out and did not come back
+        function: String,
+        /// the line of the caller the rewind was going to
+        wanted: u32,
+        /// the `co_filename` of the caller
+        file: String,
+        /// the line of the caller it is held on
+        ///
+        /// after a move cpython accepted this is `wanted` — the two differ only
+        /// when the move itself was refused, which is
+        /// [`Abandoned::Refused`]
+        line: u32,
+        /// what stopped it
+        why: Abandoned,
+    },
+
     /// a breakpoint's condition or log message raised
     ///
     /// the program is held rather than resumed. an expression that raises has
@@ -341,6 +397,74 @@ pub enum StopReason {
         /// what the interpreter raised
         error: PythonError,
     },
+}
+
+/// why a restart did not finish, after the frame had already been forced out
+///
+/// the two things a restart cannot decide in advance. everything about the
+/// caller's line is read off its bytecode before anything is attempted, and
+/// neither of these is knowable from bytecode: whether cpython accepts a move
+/// **to** that line from wherever the caller got to, and whether the caller
+/// gets there at all
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "abandoned", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Abandoned {
+    /// cpython refused the move back to the call line
+    Refused {
+        /// its own refusal, with its reason intact
+        error: PythonError,
+    },
+
+    /// the caller was left by an exception before it reached a line
+    ///
+    /// only an exception can do this. the request refuses a call the caller has
+    /// no statement after, so a caller that **returns** always runs a line
+    /// first — which is the whole reason that refusal exists
+    CallerLeft,
+
+    /// the rewind landed at an instruction the analysis had not read
+    ///
+    /// everything about the caller's line is read before the frame is forced
+    /// out, from the offset a jump was **predicted** to land on. cpython picks
+    /// that offset by stack depth rather than by offset order, so a line with
+    /// more than one copy of its instructions can land somewhere else — and the
+    /// span that was checked is then not the span that would run
+    ///
+    /// so it is read back and compared, and a mismatch stops the restart rather
+    /// than resuming into code nobody checked. **nothing is put back**: the
+    /// assignment has already succeeded by the time the landing is read, and the
+    /// caller is left on the line it was moved to — an earlier version of this
+    /// note claimed a put-back, which was residue of a speculative jump that has
+    /// since been deleted. the frame that was forced out is gone either way
+    LandedElsewhere {
+        /// the offset the analysis was built on
+        expected: u32,
+        /// the offset cpython chose
+        landed: u32,
+    },
+}
+
+impl std::fmt::Display for Abandoned {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused { error } => {
+                write!(formatter, "cpython refused to move it back there: {error}")
+            }
+            Self::CallerLeft => formatter.write_str(
+                "an exception left the caller before it reached a line the move \
+                 could be made from",
+            ),
+            Self::LandedElsewhere { expected, landed } => write!(
+                formatter,
+                "the move back landed at offset {landed} and the line was read \
+                 from offset {expected}, so what would have run again is not \
+                 what bpd checked. cpython picks the destination of a move by \
+                 stack depth rather than by offset order, and a line with more \
+                 than one copy of its instructions can land on either"
+            ),
+        }
+    }
 }
 
 /// which way a step goes

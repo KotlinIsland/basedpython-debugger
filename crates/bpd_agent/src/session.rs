@@ -37,8 +37,8 @@ use bpd_protocol::message::{FromAgent, FromEngine};
 use pyo3::prelude::*;
 
 use crate::{
-    attach, breakpoints, events, exceptions, frames, pause, replace, sources, steps, stops,
-    templates, threads, world,
+    armed, attach, breakpoints, events, exceptions, frames, pause, replace, restarts, sources,
+    steps, stops, templates, threads, world,
 };
 
 /// tell the engine what a logpoint had to say, and carry straight on
@@ -69,14 +69,14 @@ pub(crate) fn log(record: LogRecord) {
 ///   a step in follows
 /// - `RAISE` is the exception breakpoint, and cannot be local either
 pub(crate) fn refresh_events(python: Python<'_>) -> PyResult<()> {
-    let stepping = steps::armed_anywhere();
-    let entering = steps::entering_anywhere();
+    let following = armed::armed_anywhere();
+    let entering = armed::entering_anywhere();
     events::watch_globally(
         python,
         events::Global {
             py_start: breakpoints::any_set() || entering,
             line: world::parking() || pause::pausing() || crate::trail::recording(),
-            py_unwind: stepping || exceptions::uncaught(),
+            py_unwind: following || exceptions::uncaught(),
             py_throw: entering,
             py_resume: entering,
             raised: exceptions::raised(),
@@ -97,7 +97,7 @@ pub(crate) fn refresh_code(python: Python<'_>, code: &Bound<'_, PyAny>) -> PyRes
         python,
         code,
         breakpoints::local(address)
-            | steps::local(address)
+            | armed::local(address)
             | templates::local(address)
             | crate::tasks::local(address),
     )
@@ -114,7 +114,7 @@ fn answer(
     ticket: &stops::Ticket,
     thread: u64,
     request: FromEngine,
-) -> PyResult<()> {
+) -> PyResult<Answered> {
     match request {
         FromEngine::SetBreakpoints { breakpoints } => {
             let resolved = breakpoints::apply(python, breakpoints)?;
@@ -192,8 +192,7 @@ fn answer(
             attach::send(&answer);
         }
         FromEngine::RestartFrame { frame } => {
-            let answer = stopped.restart_frame(frame)?;
-            attach::send(&answer);
+            return restarting(python, stopped, ticket, thread, frame);
         }
         FromEngine::ReplaceCode {
             file,
@@ -215,7 +214,64 @@ fn answer(
         other => unreachable!("a held thread was handed {other:?} to answer"),
     }
 
-    Ok(())
+    Ok(Answered::StayHeld)
+}
+
+/// what answering a request left the held thread to do
+///
+/// one request can end the stop that answered it. a restart has to make the
+/// caller **run** for there to be a fresh frame, so the thread is let go with
+/// the restart armed on it — every other request is answered in place
+#[derive(Debug)]
+enum Answered {
+    /// the stop goes on
+    StayHeld,
+    /// the stop is over and this thread is finishing a restart
+    Restarting,
+}
+
+/// arrange a restart, and say whether the thread is to be let go to finish it
+///
+/// the two halves are in one place because they must not be able to disagree:
+/// the answer says an arranged restart is under way, and the same branch is what
+/// leaves the held-thread registry and arms the events that finish it. a build
+/// where one happened without the other would either be a client waiting for a
+/// stop nothing is going to produce, or a frame forced out with nothing watching
+fn restarting(
+    python: Python<'_>,
+    stopped: &mut frames::Stopped<'_>,
+    ticket: &stops::Ticket,
+    thread: u64,
+    frame: bpd_core::FrameId,
+) -> PyResult<Answered> {
+    match stopped.restart_frame(frame)? {
+        frames::Restart::Refused(reason) => {
+            attach::send(&FromAgent::Refused { reason });
+            Ok(Answered::StayHeld)
+        }
+        frames::Restart::Answered(restarted) => {
+            attach::send(&FromAgent::Restarting { restarted });
+            Ok(Answered::StayHeld)
+        }
+        frames::Restart::Arranged {
+            restarting,
+            caller,
+            call_line,
+            from,
+            function,
+            code,
+        } => {
+            // armed before the answer goes out, so that a client which reads it
+            // and asks something of this session cannot find a thread that is
+            // neither held nor watched for
+            restarts::arm(python, thread, &caller, call_line, from, function, &code)?;
+            stops::leave(ticket.stop);
+            attach::send(&FromAgent::Restarting {
+                restarted: bpd_core::Restarted::Arranged(restarting),
+            });
+            Ok(Answered::Restarting)
+        }
+    }
 }
 
 /// report a stop and hold this thread until the engine resumes it
@@ -226,6 +282,7 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
     let ticket = stops::enter(thread, reason, frames::holding(python)?);
     let mut stopped = frames::begin(python, ticket.stop);
     let mut stepping = None;
+    let mut restarting = false;
 
     loop {
         // the GIL is given back for the whole of the wait. the rest of the
@@ -240,7 +297,16 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
             stops::Command::Answer(request) => request,
         };
 
-        answer(python, &mut stopped, &ticket, thread, request)?;
+        match answer(python, &mut stopped, &ticket, thread, request)? {
+            Answered::StayHeld => {}
+            // the thread let itself go rather than being told to: the restart is
+            // already armed on it, and there is nothing more this stop can be
+            // asked
+            Answered::Restarting => {
+                restarting = true;
+                break;
+            }
+        }
     }
 
     // the world goes when the last stop that asked for it does, and putting the
@@ -257,6 +323,11 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
     // the program reaches after it returns is already being watched for
     if let Some(kind) = stepping {
         return steps::arm(python, thread, kind);
+    }
+    // a restart armed itself before it answered, for the reason a step is armed
+    // here: the events that finish it have to be on before the callback returns
+    if restarting {
+        return Ok(());
     }
 
     // discovery costs a native call per code object first reached, and it buys

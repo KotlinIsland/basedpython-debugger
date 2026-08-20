@@ -316,6 +316,19 @@ pub enum FromAgent {
         jumped: bpd_core::Jumped,
     },
 
+    /// what restarting a frame arranged, or cpython's refusal to arrange it
+    ///
+    /// the one answer that can **let the thread go**. an arranged restart has
+    /// forced a frame out and needs the caller to actually execute the call
+    /// again, so the agent leaves the held-thread registry as it sends this and
+    /// the landing arrives as a stop of its own. a refused one moved nothing
+    /// and the thread is still held, so the engine must read the tag rather
+    /// than assume either
+    Restarting {
+        /// what became of it, and what the program will run again
+        restarted: bpd_core::Restarted,
+    },
+
     /// what replacing a file's code did to the process, or what stopped it
     ///
     /// the whole answer either way. a replacement that was not made carries
