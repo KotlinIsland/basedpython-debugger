@@ -108,10 +108,11 @@ for it, so there is no instruction pointer to move
 
 ## what a restart really is
 
-**the frame it names does not move.** it is moved to a line of its own code that
-is only loads and a return, so it **returns** — and then the caller is rewound to
-the line the call was made from, so the caller makes the call again and the
-interpreter builds a frame that has never run
+**the frame it names does not move.** it is moved to the point in its own code
+where a return's value is loaded, so the loads and the return are all that runs
+and it **returns** — and then the caller is rewound to the line the call was made
+from, so the caller makes the call again and the interpreter builds a frame that
+has never run
 
 ```
 caller:9  →  f:3 f:4 f:5   the call, and the frame forced out at f:5
@@ -254,11 +255,11 @@ call's value below the floor, and that is `span_not_understood`, which says it
 is a gap in `bpd` rather than something to change about the program. no
 permitted call site in either stdlib has a `SWAP` after the call.
 
-## the exit line and the caller's tail are asked different questions
+## the exit and the caller's tail are asked different questions
 
 both are spans of allow-listed instructions, and they do **not** get the same
 answer about a checked load. `frame_lineno_set_impl` walks `co_nlocalsplus` and
-fills every NULL slot with `None`, so a jump to an exit line binds every unbound
+fills every NULL slot with `None`, so a jump to an exit binds every unbound
 local on the way — `LOAD_FAST_CHECK` cannot raise there. it leaves cells alone,
 which is why an unbound **cell** still can.
 
@@ -325,23 +326,20 @@ measured only from *outside* the blocks, which is the one position where it
 happens to hold. the lowest offset is still what the analysis starts from — it
 has to start somewhere — but it is a guess, and both places it is used check it:
 
-- the **exit line** is not guessed at all: a line is a candidate only when the
-    walk from **every** one of its range starts is clean, so wherever cpython
-    chooses to land is clean. an earlier version jumped speculatively and put the
-    frame back when the landing turned out unusable — and the put-back landed on
-    a *different copy* of the same line, so a frame stopped on the exception copy
-    of a `finally` came back on the normal copy while the answer said
-    `NoCleanExit`, which says nothing moved. the debuggee then died. requiring
-    every range start costs almost nothing: `scripts/restart_shapes.py` measures
-    it at 3 lines on 3.13 and 1 on 3.14, out of 5344 and 5486 code objects that
-    have an exit line at all, and 2 code objects on 3.13 losing their last
-    candidate — every one a `return` inside a `finally`
+- the **exit** is not guessed at all, and is not a line: it is one offset, made
+    the only destination cpython has to choose between — see
+    [reaching an offset](#reaching-an-offset-f_lineno-cannot-name). an earlier
+    version jumped speculatively and put the frame back when the landing turned
+    out unusable — and the put-back landed on a *different copy* of the same
+    line, so a frame stopped on the exception copy of a `finally` came back on
+    the normal copy while the answer said `NoCleanExit`, which says nothing
+    moved. the debuggee then died
 - the **caller** cannot be jumped before the callee is forced out, so its guess is
     carried and compared with the landing at the moment of the rewind. a mismatch
     abandons the restart, with `restart_abandoned` saying which offset was read
     and which was reached, rather than resuming into a span nobody checked
 
-the same rule governs the **exit line**, where it is a forward walk: from the
+the same allow list governs the **exit**, where it is a forward walk: from the
 destination, every instruction up to the first return must be a load. accepting a
 line because *some* range of it was loads and a return let
 `return (side_effect(99) if total else None)` through — the jump landed on the
@@ -367,23 +365,144 @@ never on the event path. decoding `co_code` against a table of opcode numbers
 would be one more thing hand-maintained against an interpreter that renumbers
 them every release
 
+## reaching an offset `f_lineno` cannot name
+
+`frame.f_lineno` is the only supported way to move a running frame, and it will
+only land on a **mark**. `marklines` walks `co_linetable` and marks each range
+start whose line differs from the last; `frame_lineno_set_impl` then chooses
+among the marks carrying the line that was asked for.
+
+that is the *whole* of what made an exit rare. cpython fuses a function's
+implicit `return None` onto the **last statement's** line:
+
+```
+def f():
+    a = 1
+    print(a)                line 5: [LOAD_GLOBAL, LOAD_FAST_BORROW, CALL,
+                                     POP_TOP, LOAD_CONST, RETURN_VALUE]
+```
+
+the last two instructions are a perfectly clean exit. they are just not at a
+range start, so no line number names them — and the start of line 5 does name a
+`print`. that is an ordinary function, and it used to be refused.
+
+everything else `frame_lineno_set_impl` does is already general over offsets, and
+is exactly what this needs: `mark_stacks`, the stack-compatibility check, the
+unwind that decrefs what it pops and hands an `Except` entry back to
+`tstate->exc_info`, and binding unbound locals to `None`. so the offset is made a
+mark. for the length of one assignment the code object's line table is replaced
+by one carrying a line number the code object does not otherwise have, starting
+at the offset wanted:
+
+```
+the real table, byte for byte, up to the offset │ sentinel │ sentinel │ …
+```
+
+and then it is put back. the prefix is **byte-identical** — every offset the
+frame can actually be at keeps the line it really has, and only the epilogue it
+is about to be moved into reads differently.
+
+two things fall out of it:
+
+- the sentinel is the only line in the table, so cpython has exactly **one**
+    candidate. the choice between marks — the thing the old rule's "every range
+    start must walk clean" existed to be safe against — is gone
+- `compatible_stack(from, to)` returns true for **any** `from` when `to` is the
+    empty stack, so a depth-zero target is reachable from anywhere in the
+    function. no `incompatible stacks`, and no `can't jump into the body of a for
+    loop` to route around
+
+`scripts/restart_shapes.py` measures what it buys, against the interpreter's own
+stdlib: code objects with a clean exit go from 20.4% to 65.7% on 3.13, and from
+17.2% to 55.2% on 3.14.
+
+### the offset has to be at abstract stack depth zero
+
+the move unwinds the frame's stack **down** to the target's depth and no further.
+a target at depth one would have the frame return whatever the unwind happened to
+leave on top — an intermediate value of the program, returned as if the function
+had computed it, silently.
+
+depth is counted backwards from the return, because that is the one point in a
+code object whose depth cpython states: `mark_stacks` holds
+`pop_value(next_stack) == EMPTY_STACK` at `RETURN_VALUE`, so exactly one value is
+on the stack there, and `RETURN_CONST` carries its own and takes none. each step
+back is `dis.stack_effect`, which is `PyCompile_OpcodeStackEffect` — the same
+function `mark_stacks` itself falls back to for everything it does not
+special-case. a run that never reaches zero is not offered.
+
+### what can be observed while the table is swapped
+
+`PyCode_Addr2Line` reads the line data monitoring cached, **not** the line table,
+for any code object instrumented for `LINE` — and a frame `bpd` can restart is in
+one. so `frame.f_lineno` and every traceback answer the real line throughout,
+measured on 3.13, 3.14 and 3.14t. what does read differently is `co_lines()`,
+`co_positions()` and `dis` over that one code object's tail, until the table is
+put back.
+
+the cached line data cannot be corrupted by the window either: `initialize_lines`
+runs once, when `LINE` is first enabled on a code object, and the result is freed
+only in `code_dealloc` — so a code object already instrumented will not re-read
+the table at all.
+
+the swapped-in bytes are **never freed**. a thread that read the pointer out of
+the field before it was put back may still be reading the bytes behind it, and on
+a free-threaded build nothing serialises the two. they are tens of bytes and
+there is one per forced exit.
+
+### the one `unsafe` in the tree
+
+`unsafe_code` is denied for the whole workspace and allowed in
+`bpd_agent::linetable`, for two reads and four writes of a single word.
+`pyo3-ffi` does not declare `PyCodeObject`; hand-writing the layout is the
+per-version table this project refuses everywhere else; and doing the same poke
+through `ctypes` would only move it out of the lint's sight.
+
+what makes it reviewable is that the slot is not believed, it is **checked**. it
+is found by comparing the code object's own words against the address of its own
+`co_linetable` — calibrated once against a probe `bpd` compiles itself, and
+compared again immediately before every write. swept over both stdlibs it is the
+same word for every code object, and unique for all but one of 31927 on 3.14. a
+slot that does not check is `exit_not_addressable`, and not a write.
+
+the table `bpd` builds is checked too, and by cpython: with it in place and the
+frame still where it was, `co_lines()` has to read back exactly one range,
+starting at the exit, carrying the sentinel. if it does not, the table goes back
+and nothing moved.
+
+### what this does not reach
+
+the caller half. a rewind can only be made from a `LINE` event, and the same
+doctoring **cannot** manufacture one: `initialize_lines` runs once per code
+object and every caller `bpd` could restart in is already instrumented. tried and
+measured — the table is in place, `set_events` is cycled, `restart_events()` is
+called, and no event fires. so
+[nothing runs after the call](#the-other-three-refusals) stands.
+
 ## the other three refusals
 
-**no clean exit line.** a frame is forced out by moving it to a line that returns
-and does nothing else. cpython fuses a function's implicit `return None` onto the
-**last statement's** line:
+**no clean exit.** a frame is forced out by moving it to the point where a
+return's value is loaded, so that the loads and the return are all that runs.
+what has no such point is a function **every** return of which returns an
+expression:
 
 ```
-implicit  line 4: [LOAD_GLOBAL, LOAD_FAST_BORROW, CALL, POP_TOP, LOAD_CONST, RETURN_VALUE]
-explicit  line 8: [LOAD_FAST_BORROW, RETURN_VALUE]
+def size(path):
+    return path.stat().st_size     [ …, CALL, LOAD_ATTR, RETURN_VALUE ]
 ```
 
-so a function with no explicit `return` usually has none, and moving there would
-*execute that statement*. a function with several returns offers all of them:
-cpython accepts a move to some and not others — a `return` inside a `for` body
-answers `can't jump into the body of a for loop` — so they are tried in order.
-a refused assignment moves nothing and binds nothing, measured on 3.13, 3.14 and
-3.14t, so trying costs nothing
+there is no sequence anywhere in that code object which produces a value and
+returns without running the program, so no mechanism reaches it — not this one
+and not a different one. a function that falls off its end, or that returns a
+name or a constant anywhere, has one. `scripts/restart_shapes.py` counts what is
+left: 34.3% of code objects on 3.13 and 44.8% on 3.14, the 3.14 figure inflated
+by 5141 PEP 649 `__annotate__` functions, which return a dict display and which
+nobody restarts
+
+a function with several returns offers all of them, highest offset first — the
+epilogue, which is where the implicit `return None` lives. a refused assignment
+moves nothing and binds nothing, measured on 3.13, 3.14 and 3.14t, so trying
+costs nothing
 
 **nothing runs after the call.** the rewind can only be made from a `LINE` event:
 cpython answers `can only jump from a 'line' trace event` to anything else, so
