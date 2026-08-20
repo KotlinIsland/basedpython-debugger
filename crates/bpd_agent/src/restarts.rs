@@ -5,7 +5,7 @@
 //! operation is arranged inside the stop that asked for it, the thread is let
 //! go, and what it does next is watched for:
 //!
-//! 1. the frame was moved to a clean exit line before the thread was let go, so
+//! 1. the frame was moved to a clean exit before the thread was let go, so
 //!    it **returns**. that move is an `f_lineno` jump like any other and runs no
 //!    block's cleanup: a `with` the frame was inside gets no `__exit__` and a
 //!    `try` gets no `finally` — measured with a plain class context manager, two
@@ -113,7 +113,7 @@ pub(crate) enum Rewind {
 /// begin a restart on the thread that is about to be let go
 ///
 /// called from inside the stop that asked for it, with the frame already moved
-/// to its exit line. the caller is the frame the rewind will be made in, and it
+/// to its exit. the caller is the frame the rewind will be made in, and it
 /// is `f_back` of the frame that was forced out
 pub(crate) fn arm(
     python: Python<'_>,

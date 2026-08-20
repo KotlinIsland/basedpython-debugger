@@ -910,9 +910,10 @@ pub fn tools() -> Vec<Tool> {
                 (a setter, handed a value the program never computed), or a \
                 second call — `[f(), f()]`, a comprehension, `sorted(items, \
                 key=f)`, whose completed sibling calls really do re-run. so are a \
-                frame with no clean exit line (cpython fuses the implicit `return \
-                None` onto the last statement, so a function without an explicit \
-                `return` usually has none), a call the caller has no statement \
+                frame with no clean exit — one whose every return returns an \
+                expression, so there is nowhere in it that produces a value and \
+                returns without running its code — a call the caller has no \
+                statement \
                 after (the rewind needs a line event and none follows), and a \
                 generator or coroutine (`f_back` there is whoever *resumed* the \
                 frame, which need not be what produced it).\n\n\

@@ -480,7 +480,7 @@ pub enum Request {
     /// the unit is the caller's **line**. everything on it runs again, so a
     /// line carrying anything besides the one call — an attribute, a subscript,
     /// an operator, a second call — is refused rather than restarted, by name.
-    /// so is a frame with no clean exit line, one whose caller has no statement
+    /// so is a frame with no clean exit, one whose caller has no statement
     /// after the call, and a generator or coroutine. see
     /// [`crate::Unrestartable`]: the refusals are decided off the bytecode
     /// before anything is attempted, and they are most of this request

@@ -76,10 +76,13 @@ pub struct Restarting {
 
     /// the line of its own code object it was moved to, so that it returns
     ///
-    /// a line whose whole instruction range is loads and a return, so moving
-    /// there executes nothing of the program. cpython fuses a function's
-    /// implicit `return None` onto the last statement's line, which is why such
-    /// a line often does not exist and why its absence is a refusal
+    /// **it was moved partway into that line, not to its start.** the exit is
+    /// the point where a return's value is loaded, so that the loads and the
+    /// return are all that runs — and cpython fuses a function's implicit
+    /// `return None` onto the last statement's line, so that point is usually in
+    /// the middle of a range rather than at its start. a client rendering this
+    /// is naming the line the frame returned *from*, which is the honest thing
+    /// to show; it is not a line the whole of which ran
     pub exit_line: u32,
 
     /// the caller, at the line it is going to run again
@@ -121,9 +124,10 @@ pub struct Restarting {
     ///
     /// no `LINE` event is delivered for the line a jump moves to, and a restart
     /// makes **two** jumps. so it is both the [`Restarting::exit_line`], whose
-    /// loads and return really do execute, and the caller's call line the rewind
-    /// lands on. a breakpoint on either was passed over by a line the program
-    /// ran, and it is still set and fires the next time that line runs
+    /// tail of loads and a return really does execute, and the caller's call
+    /// line the rewind lands on. a breakpoint on either was passed over by a
+    /// line the program ran, and it is still set and fires the next time that
+    /// line runs
     ///
     /// one list rather than two: they are breakpoint ids, and what a client does
     /// with them is look them up
@@ -149,9 +153,10 @@ impl Restarting {
     pub fn told(&self) -> Vec<String> {
         let mut told = vec![
             format!(
-                "`{}` was forced to return through line {}, and the thread has \
-                 been let go. `{}` will run line {} again — the **whole** line, \
-                 which is why anything else on it is refused rather than \
+                "`{}` was forced to return from partway through line {}, and \
+                 the thread has been let go — only that line's closing loads and \
+                 its return ran. `{}` will run line {} again — the **whole** \
+                 line, which is why anything else on it is refused rather than \
                  restarted",
                 self.frame.function, self.exit_line, self.caller.function, self.caller.line,
             ),
@@ -226,7 +231,7 @@ pub enum Restarted {
     /// the sentence says so rather than reading as a disjunction it is not
     Arranged(Restarting),
 
-    /// cpython refused to move the frame to any of its exit lines
+    /// cpython refused to move the frame to an exit on any of its lines
     ///
     /// no code of the program ran: a refused assignment to `f_lineno` moves
     /// nothing and binds nothing — measured on 3.13, 3.14 and 3.14t — so the
@@ -241,7 +246,8 @@ pub enum Restarted {
     /// so a refusal really does change nothing — charges every session for a
     /// feature most of them never use
     Refused {
-        /// every exit line that was offered to cpython, in the order they were
+        /// the line of every exit that was offered to cpython, in the order they
+        /// were
         /// tried
         ///
         /// more than one because a function can have several returns and
@@ -375,14 +381,34 @@ pub enum Unrestartable {
         kind: Suspendable,
     },
 
-    /// no line of its code object is only loads and a return
+    /// nowhere in its code object returns without running the program first
     ///
-    /// a frame is forced out by moving it to a line that **returns and does
-    /// nothing else**. cpython fuses a function's implicit `return None` onto
-    /// the last statement's line, so a function with no explicit `return` very
-    /// often has no such line — and moving there would *execute that
-    /// statement*, which is a side effect nobody asked for
+    /// a frame is forced out by moving it to the point where a return's value is
+    /// loaded, so that the loads and the return are all that runs. what is left
+    /// over is a function **every** return of which returns an expression —
+    /// `def size(path): return path.stat().st_size` has one `RETURN_VALUE` and
+    /// the instruction before it is the call. there is no sequence in such a
+    /// function that produces a value and returns without running its code, so
+    /// there is nothing to move to
     NoCleanExit,
+
+    /// the exit is there, and bpd could not make cpython able to name it
+    ///
+    /// `frame.f_lineno` lands only on a `co_lines` range start, and the exit is
+    /// usually in the middle of one — so bpd puts a line table in front of the
+    /// code object for the length of one assignment, carrying a line the code
+    /// object does not otherwise have, starting at the exit. this is that
+    /// mechanism failing to establish itself
+    ///
+    /// it fails **closed**: the table is put back, the frame is not written to,
+    /// and this says which half could not be established rather than reporting a
+    /// function that has an exit as one that does not
+    ExitNotAddressable {
+        /// the line the exit is on
+        line: u32,
+        /// which half
+        part: Address,
+    },
 
     /// nothing bpd would report called it
     ///
@@ -719,6 +745,49 @@ pub enum Access {
     Writes,
 }
 
+/// which half of addressing an exit could not be established
+///
+/// `f_lineno` lands only on a line's first instruction, and a function's exit is
+/// usually in the middle of one — the implicit `return None` cpython fuses onto
+/// the last statement. so bpd puts a line table in front of the code object for
+/// the length of one assignment, carrying a line the code object does not
+/// otherwise have, starting at the exit. two things have to hold for that, and
+/// this is which of them did not
+///
+/// neither is about the program. both are bpd failing to read this interpreter,
+/// and both fail closed
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Address {
+    /// the word of the code object holding `co_linetable` could not be verified
+    ///
+    /// it is found by comparing the object's own words against the address of
+    /// its own `co_linetable`, so a failure here is not "the layout looks
+    /// wrong" — it is "the one word that has to be this object's line table is
+    /// not"
+    Field,
+    /// the table bpd built did not read back as the one mark it has to be
+    ///
+    /// asked of `co_lines()` with the table in place and the frame still where
+    /// it was, so this is cpython parsing what bpd wrote before anything moved
+    Mark,
+}
+
+impl std::fmt::Display for Address {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Field => {
+                "the word of the code object that holds `co_linetable` did not \
+                 hold it"
+            }
+            Self::Mark => {
+                "the line table bpd built did not read back as one line starting \
+                 at the exit"
+            }
+        })
+    }
+}
+
 /// what kind of frame its driver sends into
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -766,12 +835,24 @@ impl std::fmt::Display for Unrestartable {
                  it without needing the caller"
             ),
             Self::NoCleanExit => formatter.write_str(
-                "no line of its code object is only loads and a return, so there \
-                 is no way to make it return without running a statement of the \
-                 program. cpython fuses a function's implicit `return None` onto \
-                 the **last statement's** line, so a function with no explicit \
-                 `return` usually has none — give it one, or set the next \
-                 statement to a line of the body instead",
+                "every return in its code object returns an expression, so there \
+                 is nowhere bpd can put it that produces a value and returns \
+                 without running the program — `return path.stat().st_size` has \
+                 the call immediately before the return. a function that falls \
+                 off its end, or that returns a name or a constant anywhere, has \
+                 one. give it a `return` of a name or a constant, or set the \
+                 next statement to a line of the body instead",
+            ),
+            Self::ExitNotAddressable { line, part } => write!(
+                formatter,
+                "the exit on line {line} is there and bpd could not make cpython \
+                 able to name it: {part}. `f_lineno` lands only on a line's first \
+                 instruction, and the exit is in the middle of one, so bpd puts \
+                 a line table in front of the code object for the length of one \
+                 assignment. nothing was written and the frame did not move. set \
+                 the next statement to a line of the body instead, and report \
+                 this — it is bpd failing to read this interpreter, not the \
+                 program"
             ),
             Self::NoCaller => formatter.write_str(
                 "nothing bpd would report called it, and a restart is the caller \
@@ -986,7 +1067,7 @@ impl std::fmt::Display for Unrestartable {
                 match access {
                     Access::Reads => "reading",
                     // unreachable today: nothing that writes a name is allowed
-                    // on an exit line, which `bpd_agent::bytecode` asserts. said
+                    // at an exit, which `bpd_agent::bytecode` asserts. said
                     // rather than left to a wildcard, so that allowing one is a
                     // sentence somebody has to write
                     Access::Writes => "writing",
@@ -995,7 +1076,7 @@ impl std::fmt::Display for Unrestartable {
                     Access::Reads => "`__getitem__` or `__missing__`",
                     // and the dunder has to move with the verb. it did not: the
                     // write arm said `__getitem__`, so allowing a store on an
-                    // exit line would have shipped a false sentence rather than
+                    // exit would have shipped a false sentence rather than
                     // forced somebody to write a true one
                     Access::Writes => "`__setitem__`",
                 },
@@ -1060,6 +1141,12 @@ mod tests {
     // compile error and a new **discriminant** of an existing one is not — it
     // falls into an arm that already compiles, which is how a wording written
     // for one producer went out under another
+    //
+    // `ExitNotAddressable` has a row per [`Address`], and both arise: `Field` is
+    // an interpreter whose code object does not hold its own line table where
+    // the calibration found it, and `Mark` is the table bpd built not reading
+    // back as one line starting at the exit. neither is about the program, and
+    // the two send a reader to different places
     fn every_refusal_renders_a_sentence_that_is_true_of_its_own_case() {
         // a row silently deleted is a producer nobody renders again, and the
         // table is data so nothing else would notice. the number is here to be
@@ -1067,7 +1154,7 @@ mod tests {
         // discriminant combination that arises
         assert_eq!(
             every_refusal().len(),
-            22,
+            24,
             "a row was added or removed; check it is one that arises and say so \
              in the note above"
         );
@@ -1142,7 +1229,23 @@ mod tests {
             ),
             (
                 Unrestartable::NoCleanExit,
-                vec!["loads and a return", "implicit `return None`"],
+                vec!["returns an expression", "falls off its end"],
+                vec![],
+            ),
+            (
+                Unrestartable::ExitNotAddressable {
+                    line: 31,
+                    part: Address::Mark,
+                },
+                vec!["line 31", "did not read back", "nothing was written"],
+                vec![],
+            ),
+            (
+                Unrestartable::ExitNotAddressable {
+                    line: 31,
+                    part: Address::Field,
+                },
+                vec!["line 31", "`co_linetable`", "nothing was written"],
                 vec![],
             ),
             (
@@ -1263,7 +1366,7 @@ mod tests {
                 vec![],
             ),
             (
-                // the frame's own exit line, blocked by a **read** through the
+                // the frame's own exit, blocked by a **read** through the
                 // globals pair. it is one of possibly several blocked lines, not
                 // the only way out — the agent records the first it meets
                 Unrestartable::NamespaceIsNotADict {
@@ -1365,7 +1468,7 @@ mod tests {
                 vec!["line 9", "`cell`", "raises"],
                 // it is the first blocked line the agent met, not proof that
                 // every other one reads the same name — and it is the **frame's**
-                // exit line, so it must not be described as the caller's. the
+                // exit, so it must not be described as the caller's. the
                 // preamble says "rewinds its caller to the call", which is why
                 // this forbids the clause rather than the word
                 vec!["every line", "the caller's line"],

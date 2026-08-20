@@ -2142,12 +2142,12 @@ impl Adapter {
         // **before responding**, because the two outcomes are not the same
         // answer. an `Unrestartable` comes back as `Refusal::NotRestartable` and
         // is an error response already; a `Restarted::Refused` — cpython would
-        // not take any exit line — used to fall through to the success response
+        // not take any exit — used to fall through to the success response
         // below, so the one case where nothing at all happened was the one a
         // client was most likely to render as "it worked"
         if let bpd_core::Restarted::Refused { tried, error } = &restarted {
             return Err(Aborted::Refuse(format!(
-                "cpython would not move the frame to any of its exit lines \
+                "cpython would not move the frame to an exit on any of the lines \
                  {tried:?}: {error}. none of the program's code ran, and the \
                  thread is still held where it was. {}",
                 bpd_core::WHAT_READING_THE_BYTECODE_COSTS
@@ -2849,7 +2849,8 @@ fn restarting_notes(restarted: &bpd_core::Restarted) -> Vec<String> {
         bpd_core::Restarted::Refused { tried, error } => vec![
             format!(
                 "the restart was refused and none of the program's code ran — \
-                 cpython would not move the frame to any of its exit lines \
+                 cpython would not move the frame to an exit on any of the \
+                 lines \
                  {tried:?}: {error}. the thread is still held where it was"
             ),
             bpd_core::WHAT_READING_THE_BYTECODE_COSTS.to_string(),
