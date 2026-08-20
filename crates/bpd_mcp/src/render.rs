@@ -390,7 +390,7 @@ pub fn restarted(restarted: &Restarted) -> serde_json::Value {
         }
         Restarted::Refused { tried, error } => {
             notes.push(format!(
-                "cpython would not move the frame to any of its exit lines \
+                "cpython would not move the frame to an exit on any of the lines \
                  {tried:?} — `{error}` — so **none of the program's code ran**. \
                  the frame did not move, no local was bound, and the thread is \
                  still held exactly where it was"

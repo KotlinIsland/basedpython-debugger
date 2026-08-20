@@ -85,6 +85,17 @@ def implicit(value):
     value = value + 7
 
 
+def expressive(value):
+    RAN.append(("expressive", value))
+    return len(RAN)
+
+
+def readable(value):
+    RAN.append(("readable", value))
+    read_on = value + 1
+    RAN.append(("readable ran on", read_on))
+
+
 def guarded(value):
     RAN.append(("guarded", value))
     with Opened():
@@ -386,6 +397,18 @@ def implicitly():
     got = implicit(1)
     RAN.append(("implicitly", got))
     return got
+
+
+def expressively():
+    got = expressive(1)
+    RAN.append(("expressively", got))
+    return got
+
+
+def reading():
+    before = tuple(readable.__code__.co_lines())
+    got = readable(1)
+    RAN.append(("reading", tuple(readable.__code__.co_lines()) == before))
 
 
 def guarding():
@@ -770,6 +793,8 @@ comprehended()
 tail()
 into_attribute(Slotted())
 implicitly()
+expressively()
+reading()
 guarding()
 list(counter("t"))
 run_subclassed()
@@ -1074,31 +1099,124 @@ fn a_context_manager_open_across_a_restart_is_not_exited() {
 }
 
 #[test]
-fn a_function_whose_only_return_is_fused_onto_a_statement_is_refused_by_name() {
+fn a_function_whose_only_return_is_fused_onto_a_statement_restarts() {
+    // **this is the shape most functions have, and it used to be refused.**
     // cpython fuses the implicit `return None` onto the **last statement's**
-    // line, so there is no line that is only loads and a return — and moving
-    // there would run that statement. known before anything is attempted
-    let fixture = Fixture::new("no_clean_exit", PROGRAM);
+    // line, so there is no *line* that is only loads and a return — moving to
+    // the start of that line would run the statement. the two instructions that
+    // make up the return are a perfectly clean exit all the same; they are in
+    // the middle of a range, which is the only reason `f_lineno` could not name
+    // them, and [`bpd_agent::linetable`] is what names them
+    //
+    // `implicit` ends `value = value + 7` and returns nothing. asserted on what
+    // the program wrote: the statement must not have run a second time from the
+    // forced exit, and the restarted call must have run the whole body again
+    let fixture = Fixture::new("fused_exit", PROGRAM);
     let mut debuggee = launch(&fixture);
     let inside = line_of(PROGRAM, "    value = value + 7");
 
     held_at(&mut debuggee, &fixture.path(), inside);
     let frame = top(&mut debuggee);
+    let restarted = debuggee
+        .restart_frame(frame)
+        .expect("the restart was arranged");
+    let restarting = arranged(&restarted);
+    assert_eq!(restarting.frame.function, "implicit", "{restarting:?}");
+    // the exit is on the last statement's line, because that is the line
+    // cpython fused the implicit return onto — the frame returns from partway
+    // through it rather than from its start
+    assert_eq!(
+        restarting.exit_line,
+        line_of(PROGRAM, "    value = value + 7"),
+        "{restarting:?}"
+    );
+    // the caller binds the forced return, and is told so
+    assert_eq!(restarting.disturbed, ["got"], "{restarting:?}");
+
+    landed(&mut debuggee);
+    to_exit(&mut debuggee);
+    let said = recorded(&fixture);
+    assert!(
+        said.contains("('implicit', 1), ('implicit', 1)"),
+        "the call was not made a second time: {said}"
+    );
+    assert!(
+        said.contains("('implicit', 1), ('implicit', 1), ('implicitly', None)"),
+        "the caller bound the restarted call's own return, which is `None` \
+         because `implicit` has no `return`: {said}"
+    );
+}
+
+#[test]
+fn the_line_table_the_forced_exit_borrows_is_put_back() {
+    // **the frame is reached by lying to cpython about where a line starts, and
+    // the lie has to end.** for the length of one assignment the code object's
+    // line table is replaced by one carrying a line the code object does not
+    // have, starting at the exit — and if it were ever left in place, every
+    // traceback, every `co_lines()` and every future breakpoint binding on that
+    // function would be answering out of a table bpd wrote
+    //
+    // asserted by the **program**, not by bpd: `reading` reads
+    // `readable.__code__.co_lines()` before the call and again after the
+    // restarted one, and records whether they are the same tuple. bpd saying it
+    // put the table back and the table being back are different claims
+    let fixture = Fixture::new("table_restored", PROGRAM);
+    let mut debuggee = launch(&fixture);
+    held_at(
+        &mut debuggee,
+        &fixture.path(),
+        line_of(PROGRAM, "    read_on = value + 1"),
+    );
+
+    let frame = top(&mut debuggee);
+    let restarted = debuggee
+        .restart_frame(frame)
+        .expect("the restart was arranged");
+    assert_eq!(arranged(&restarted).frame.function, "readable");
+
+    landed(&mut debuggee);
+    to_exit(&mut debuggee);
+    let said = recorded(&fixture);
+    assert!(
+        said.contains("('reading', True)"),
+        "the code object's line table did not come back as it was: {said}"
+    );
+    assert!(
+        said.contains("('readable', 1), ('readable', 1), ('readable ran on', 2)"),
+        "the call was not made a second time, or the forced exit ran the rest of \
+         the body: {said}"
+    );
+}
+
+#[test]
+fn a_function_whose_every_return_returns_an_expression_is_refused_by_name() {
+    // what is left after the exit became an offset rather than a line. a
+    // function ending `return len(RAN)` has one `RETURN_VALUE` and the
+    // instruction before it is the call — there is no sequence anywhere in it
+    // that produces a value and returns without running its code, so there is
+    // nothing to move to and no mechanism reaches it. known before anything is
+    // attempted
+    let fixture = Fixture::new("no_clean_exit", PROGRAM);
+    let mut debuggee = launch(&fixture);
+    let inside = line_of(PROGRAM, "    RAN.append((\"expressive\", value))");
+
+    held_at(&mut debuggee, &fixture.path(), inside);
+    let frame = top(&mut debuggee);
     let (said, reason) = refused(debuggee.restart_frame(frame));
     assert!(matches!(reason, Unrestartable::NoCleanExit), "{reason:?}");
-    assert!(said.contains("`implicit`"), "said {said}");
-    assert!(said.contains("loads and a return"), "said {said}");
+    assert!(said.contains("`expressive`"), "said {said}");
+    assert!(said.contains("returns an expression"), "said {said}");
     assert!(
-        said.contains("implicit `return None`"),
-        "the refusal has to say why an ordinary function has none, and said \
-         {said}"
+        said.contains("falls off its end"),
+        "the refusal has to say which functions do have one, and said {said}"
     );
 
     // and the program is untouched by having been asked
     to_exit(&mut debuggee);
     let said = recorded(&fixture);
     assert!(
-        said.contains("('implicit', 1)") && !said.contains("('implicit', 1), ('implicit', 1)"),
+        said.contains("('expressive', 1)")
+            && !said.contains("('expressive', 1), ('expressive', 1)"),
         "a refused restart ran something: {said}"
     );
 }
@@ -2041,18 +2159,23 @@ fn an_exit_line_that_loads_an_unbound_cell_is_refused() {
 }
 
 #[test]
-fn a_frame_that_cannot_be_forced_out_is_never_moved_to_find_that_out() {
-    // **the refusal path is where a user is most entitled to believe nothing
-    // happened.** an earlier version jumped speculatively and put the frame back
-    // when the landing turned out unusable — and the put-back landed on a
-    // *different copy* of the same line, so a frame stopped on the exception
-    // copy of a `finally` came back on the normal copy with the exception state
-    // gone. bpd answered `NoCleanExit`, saying nothing moved, and the debuggee
-    // died with `TypeError: 'NoneType' object is not callable`
+fn a_frame_inside_a_finally_handling_an_exception_is_forced_out_cleanly() {
+    // the hardest position to be forced out of, and the one that broke an
+    // earlier mechanism. `stranded` is inside a `with`, inside a `finally`,
+    // while a `ValueError` is being handled — so the frame's value stack holds
+    // the context manager **and** an `Except` entry, and cpython duplicates the
+    // `finally` body so the same source line exists twice in the bytecode
     //
-    // nothing is moved to find out now: a line is an exit candidate only when
-    // the walk from **every** one of its range starts is clean, so wherever
-    // cpython chooses to land is clean and there is nothing to undo
+    // the exit is an offset now, at abstract stack depth zero, and
+    // `compatible_stack` accepts an empty target from anywhere — so cpython
+    // unwinds all of it, hands the exception back to `tstate->exc_info` itself,
+    // and the copies stop mattering. what the earlier mechanism did here was put
+    // the frame back onto the *other* copy of the same line and report that
+    // nothing had moved, after which the debuggee died
+    //
+    // asserted on the program's own record: the context manager is entered
+    // twice — once before the forced exit, once by the restarted call — and left
+    // once, because a forced return is a jump out of the block
     let fixture = Fixture::new("stranded_frame", PROGRAM);
     let mut debuggee = launch(&fixture);
     held_at(
@@ -2062,23 +2185,28 @@ fn a_frame_that_cannot_be_forced_out_is_never_moved_to_find_that_out() {
     );
 
     let frame = top(&mut debuggee);
-    let refusal = debuggee
+    let restarted = debuggee
         .restart_frame(frame)
-        .expect_err("this frame has no line it can be forced out through");
-    assert!(refusal.to_string().contains("`stranded`"), "said {refusal}");
+        .expect("the restart was arranged");
+    assert_eq!(arranged(&restarted).frame.function, "stranded");
 
-    // the whole point: the program runs on and finishes, and its own record
-    // shows the context manager entered and left exactly once
+    landed(&mut debuggee);
     to_exit(&mut debuggee);
     let said = recorded(&fixture);
     assert_eq!(
         said.matches("'cm_enter'").count(),
+        2,
+        "the restarted call did not open the block again: {said}"
+    );
+    assert_eq!(
+        said.matches("'cm_exit'").count(),
         1,
-        "the refused restart moved the frame: {said}"
+        "the forced return is a jump out of the `with`, so the first block's \
+         `__exit__` does not run: {said}"
     );
     assert!(
         said.contains("'after_stranded'"),
-        "the program did not survive being asked: {said}"
+        "the program did not survive the restart: {said}"
     );
 }
 

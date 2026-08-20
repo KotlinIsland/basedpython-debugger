@@ -324,7 +324,7 @@ pub(crate) struct Namespaces {
 /// `LOAD_FAST_CHECK` can raise
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Moved {
-    /// the exit line, which runs **after** `frame.f_lineno = line`
+    /// the frame's own exit, which runs **after** the move that reaches it
     ///
     /// that move binds every unbound local: `frame_lineno_set_impl` walks
     /// `co_nlocalsplus` and fills every NULL slot with `None` — measured on
@@ -378,9 +378,10 @@ impl Namespaces {
         } else if READS_A_NAME.contains(&one.opname.as_str()) {
             &self.unresolvable
         } else if READS_A_FAST.contains(&one.opname.as_str()) {
-            // the one question [`Moved`] exists to answer. on the exit line the
-            // move has already bound this slot to `None`, so asking would refuse
-            // a shape that is safe; in the caller's tail nothing has moved yet
+            // the one question [`Moved`] exists to answer. at the frame's own
+            // exit the move has already bound this slot to `None`, so asking
+            // would refuse a shape that is safe; in the caller's tail nothing
+            // has moved yet
             match moved {
                 Moved::First => return None,
                 Moved::NotYet => &self.unbound_fasts,
@@ -419,6 +420,12 @@ const READS_A_NAME: &[&str] = &["LOAD_GLOBAL", "LOAD_NAME"];
 struct Instruction {
     offset: u32,
     opname: String,
+    /// the opcode's number, which is what `dis.stack_effect` is keyed by
+    ///
+    /// the name is what every list here is consulted by, and the number is what
+    /// the interpreter answers a stack-effect question for. they are the same
+    /// instruction asked about two ways
+    opcode: u8,
     /// the names it reads or writes, in the order it names them
     ///
     /// empty for an instruction that names nothing — a constant, a jump target,
@@ -449,6 +456,7 @@ fn instructions(code: &Bound<'_, PyAny>) -> PyResult<Vec<Instruction>> {
         let opname: String = entry.getattr("opname")?.extract()?;
         read.push(Instruction {
             offset: entry.getattr("offset")?.extract()?,
+            opcode: entry.getattr("opcode")?.extract()?,
             names: names_of(&opname, &entry.getattr("argval")?)?,
             arg: entry.getattr("arg")?.extract()?,
             opname,
@@ -522,21 +530,13 @@ struct Span {
 /// an earlier version of this called the lowest offset a measured fact and "the
 /// whole of why the unit of this analysis is a span". it is neither
 ///
-/// **nothing depends on this being right any more.** the exit line does not use
-/// it to decide: [`exit_lines`] requires the walk from **every** range start of
-/// the line to be clean, so wherever cpython lands is clean. this is only where
-/// the caller's span is read from, and that guess is carried on
-/// [`CallLine::from`] and compared with the landing at the moment of the
-/// rewind — a mismatch abandons the restart rather than resuming into a span
-/// nobody read
-///
-/// what makes checking every range start a **superset** of what cpython can pick
-/// is that cpython marks a destination only at a `co_lines` range start:
-/// `marklines` marks one per line-table entry whose line differs from the last,
-/// and `frame_lineno_set_impl` chooses only among marks whose line equals the
-/// target. the one mark that is not in this set is `(line 0, offset 0)` — the
-/// `RESUME` of every `<module>` — which [`spans`] drops with its `line >= 1`
-/// filter and which no target `L >= 1` could match anyway
+/// **nothing depends on this being right any more.** the frame's own exit does
+/// not use it at all: [`exit_tails`] names an offset, and
+/// [`crate::linetable::move_to`] makes that offset the only destination cpython
+/// has to choose between. this is only where the **caller's** span is read from,
+/// and that guess is carried on [`CallLine::from`] and compared with the landing
+/// at the moment of the rewind — a mismatch abandons the restart rather than
+/// resuming into a span nobody read
 fn destination(spans: &[Span], line: u32) -> Option<u32> {
     spans
         .iter()
@@ -545,95 +545,95 @@ fn destination(spans: &[Span], line: u32) -> Option<u32> {
         .min()
 }
 
-/// the lines of a code object a frame can be forced out through, in offset order
+/// where a frame can be forced out, highest offset first
 ///
-/// **every range start of the line, not the lowest one.** cpython marks each
-/// `co_lines` range start as a candidate destination and picks between them by
-/// stack depth, so which one a jump lands on is not knowable from the line
-/// table. requiring all of them to be clean makes that irrelevant: wherever it
-/// lands, the landing is clean
+/// an **offset**, not a line. `frame.f_lineno` will only land on a `co_lines`
+/// range start, and cpython fuses a function's implicit `return None` onto the
+/// **last statement's** line — so the two instructions that make up that return
+/// are a perfectly clean exit sitting in the middle of a range, which no line
+/// number names. that is the whole of why an exit used to be rare: measured over
+/// each interpreter's own stdlib, 19.3% of code objects on 3.13 have a clean exit
+/// **line** and 64.4% have a clean exit **offset**. [`crate::linetable`] is what
+/// reaches one
 ///
-/// this replaced a jump-and-undo — move the frame, look at where it really
-/// landed, put it back if unusable. the put-back **relocated the frame**: one
-/// stopped on the exception copy of a `finally` came back on the normal copy,
-/// and bpd reported `NoCleanExit`, which says nothing moved. the debuggee then
-/// died. a mechanism that cannot touch the program on the refusal path is worth
-/// more than one that touches it and reports honestly, and this one costs almost
-/// nothing. `scripts/restart_shapes.py` is the measurement, run against the
-/// interpreter's own stdlib: requiring every range start rather than the lowest
-/// loses **3** lines on 3.13 and **1** on 3.14, out of 5344 and 5486 code
-/// objects that have an exit line at all, and only 2 code objects — both on
-/// 3.13, both a `return` inside a `finally` — lose their last candidate
+/// ## the offset has to be at abstract stack depth zero
 ///
-/// from wherever a jump lands the interpreter runs straight on, because nothing
-/// on the exit allow list is a jump. so what has to be loads and a return is the
-/// instructions from each candidate start up to and including the first return,
-/// whatever line the table attributes them to
+/// the move unwinds the frame's stack down to the target's depth and no further.
+/// so a target at depth one would have the frame return whatever the unwind
+/// happened to leave on top — an intermediate value of the program, returned as
+/// if the function had computed it, silently. every candidate here is at depth
+/// zero and nothing else is offered
 ///
-/// cpython fuses a function's implicit `return None` onto the **last
-/// statement's** line, so a function with no explicit `return` usually has none
-/// of these — and moving there would execute that statement
+/// depth is counted **backwards from the return**, because that is the one point
+/// in a code object whose depth cpython states: `mark_stacks` holds
+/// `pop_value(next_stack) == EMPTY_STACK` at `RETURN_VALUE`, so exactly one value
+/// is on the stack there, and `RETURN_CONST` carries its own and takes none. each
+/// step back is `dis.stack_effect`, which is `PyCompile_OpcodeStackEffect` — the
+/// same function `mark_stacks` itself falls back to for everything it does not
+/// special-case
 ///
-/// more than one line is offered because cpython accepts a move to some of a
-/// function's returns and not others: a `return` inside a `for` body answers
-/// `can't jump into the body of a for loop` while one at the top level of the
-/// same function is fine. which is which is cpython's answer and it gives it at
-/// the time, so they are tried in order
-pub(crate) fn exit_lines(
+/// ## more than one is offered
+///
+/// the depth-zero target is compatible with **every** position in the function —
+/// `compatible_stack` returns true whenever the target stack is empty, so there
+/// is no `incompatible stacks` and no `can't jump into the body of a for loop` to
+/// route around. what is left is a target `mark_stacks` never reached, which
+/// answers `cannot find bytecode for specified line`, and that is cpython's
+/// answer given at the time. so they are tried in order
+pub(crate) fn exit_tails(
     code: &Bound<'_, PyAny>,
     namespaces: &Namespaces,
-) -> PyResult<Result<Vec<u32>, Unrestartable>> {
+) -> PyResult<Result<Vec<Exit>, Unrestartable>> {
     let read = instructions(code)?;
     let spans = spans(code)?;
-    let mut lines: Vec<u32> = Vec::new();
+    let mut tails: Vec<Exit> = Vec::new();
     let mut blocked_by_a_namespace = None;
     let mut blocked_by_a_name = None;
 
-    for line in spans.iter().map(|span| span.line) {
-        if lines.contains(&line) {
+    for offset in depth_zero_tails(code.py(), &read)? {
+        if offset == 0 {
+            // the first instruction of a code object is its `RESUME`, so no
+            // exit is here — but the table bpd writes to reach an offset keeps
+            // a real prefix of the code object's own, and there is no prefix
+            // before the first unit. dropped rather than asserted about
             continue;
         }
-        let starts = spans
+        let Some(line) = spans
             .iter()
-            .filter(|span| span.line == line)
-            .map(|span| span.start);
-        let mut clean = true;
-        for start in starts {
-            match walk_to_a_return(&read, start, namespaces) {
-                Walk::Reaches => {}
-                Walk::ThroughANamespace {
-                    access,
-                    through,
-                    namespace,
-                } => {
-                    if would_reach_a_return(&read, start) {
-                        blocked_by_a_namespace.get_or_insert((line, access, through, namespace));
-                    }
-                    clean = false;
-                    break;
-                }
-                Walk::Raises { name } => {
-                    if would_reach_a_return(&read, start) {
-                        blocked_by_a_name.get_or_insert((line, name));
-                    }
-                    clean = false;
-                    break;
-                }
-                Walk::Runs => {
-                    clean = false;
-                    break;
-                }
+            .find(|span| offset >= span.start && offset < span.end)
+            .map(|span| span.line)
+        else {
+            // an offset the line table gives no line at all, which a client
+            // could not be told the exit line of. swept over both stdlibs it is
+            // 14 of 23754 tails on 3.13 and 16 of 24216 on 3.14, and every one
+            // is the `RETURN_CONST` of an **empty** module body, sitting in the
+            // line-0 range cpython gives a module's `RESUME`. those have no
+            // caller and are refused before this runs
+            continue;
+        };
+        match walk_to_a_return(&read, offset, namespaces) {
+            Walk::Reaches => tails.push(Exit { offset, line }),
+            Walk::ThroughANamespace {
+                access,
+                through,
+                namespace,
+            } => {
+                blocked_by_a_namespace.get_or_insert((line, access, through, namespace));
             }
-        }
-        if clean {
-            lines.push(line);
+            Walk::Raises { name } => {
+                blocked_by_a_name.get_or_insert((line, name));
+            }
+            Walk::Runs => unreachable!(
+                "a depth-zero tail is a run of exiting instructions ending in a return"
+            ),
         }
     }
+    tails.sort_unstable_by_key(|exit| std::cmp::Reverse(exit.offset));
 
-    // a line that would have been an exit but for the mapping behind a name is
-    // reported as that rather than as "this function has no clean exit line",
-    // which would send somebody looking for a `return` they already have
-    if lines.is_empty()
+    // a tail that would have been an exit but for the mapping behind a name is
+    // reported as that rather than as "this function has no clean exit", which
+    // would send somebody looking for a `return` they already have
+    if tails.is_empty()
         && let Some((line, access, through, namespace)) = blocked_by_a_namespace
     {
         return Ok(Err(Unrestartable::NamespaceIsNotADict {
@@ -644,9 +644,8 @@ pub(crate) fn exit_lines(
             namespace,
         }));
     }
-    // and the same for a read the frame holds nothing for. "no clean exit line"
-    // would send somebody looking for a `return` they can see they have
-    if lines.is_empty()
+    // and the same for a read the frame holds nothing for
+    if tails.is_empty()
         && let Some((line, name)) = blocked_by_a_name
     {
         return Ok(Err(Unrestartable::ExitWouldRaise {
@@ -655,25 +654,62 @@ pub(crate) fn exit_lines(
             name,
         }));
     }
-    Ok(Ok(lines))
+    Ok(Ok(tails))
 }
 
-/// whether the walk would reach a return if the frame held what it reads
+/// an offset a frame can be forced out through
+pub(crate) struct Exit {
+    /// where the interpreter is put, which is where the return's value is loaded
+    pub(crate) offset: u32,
+    /// the line that offset belongs to, which is what a client is told
+    pub(crate) line: u32,
+}
+
+/// every offset that runs nothing before returning and sits at stack depth zero
 ///
-/// the same walk with the two frame-dependent gates off. it is what separates
-/// "this line would have been an exit but for the mapping behind a name" from
-/// "this line was never going to be one" — and only the first is worth naming,
-/// because the second sends somebody to a line they cannot fix
-fn would_reach_a_return(read: &[Instruction], from: u32) -> bool {
-    for one in read.iter().filter(|one| one.offset >= from) {
-        if RETURNING.contains(&one.opname.as_str()) {
-            return true;
+/// one per return at most: stepping back from a return over [`EXITING`]
+/// instructions, whose stack effects are all pushes or nothing, the depth falls
+/// monotonically, so there is a single point at which it reaches zero
+fn depth_zero_tails(python: Python<'_>, read: &[Instruction]) -> PyResult<Vec<u32>> {
+    let dis = python.import("dis")?;
+    let mut found = Vec::new();
+    for (index, one) in read.iter().enumerate() {
+        if !RETURNING.contains(&one.opname.as_str()) {
+            continue;
         }
-        if !EXITING.contains(&one.opname.as_str()) {
-            return false;
+        // what the return itself takes off the stack. `RETURN_CONST` carries its
+        // own value and takes none, so it **is** the depth-zero offset
+        let mut depth: i32 = match one.opname.as_str() {
+            "RETURN_CONST" => {
+                found.push(one.offset);
+                continue;
+            }
+            _ => 1,
+        };
+        for before in read[..index].iter().rev() {
+            let opname = before.opname.as_str();
+            if RETURNING.contains(&opname) || !EXITING.contains(&opname) {
+                break;
+            }
+            let Ok(effect) = dis
+                .call_method1("stack_effect", (before.opcode, before.arg))
+                .and_then(|effect| effect.extract::<i32>())
+            else {
+                // an opcode the interpreter will not answer for is one nothing
+                // here can count, and a tail nobody counted is not offered
+                break;
+            };
+            depth -= effect;
+            if depth == 0 {
+                found.push(before.offset);
+                break;
+            }
+            if depth < 0 {
+                break;
+            }
         }
     }
-    false
+    Ok(found)
 }
 
 /// what running on from an offset does before it returns
@@ -1220,11 +1256,11 @@ mod tests {
         written_after_the_call,
     };
 
-    /// nothing on an exit line writes through a namespace
+    /// nothing at a frame's own exit writes through a namespace
     ///
     /// what makes `(Whose::TheFrame, Access::Writes)` unreachable, and therefore
     /// what `bpd_core::Access` points at rather than leaving a hole in the table
-    /// of rendered refusals. if a store is ever allowed on an exit line, that
+    /// of rendered refusals. if a store is ever allowed at an exit, that
     /// combination becomes reachable and needs a sentence of its own
     #[test]
     fn an_exit_line_holds_nothing_that_writes_a_name() {
@@ -1238,7 +1274,7 @@ mod tests {
             assert!(
                 !WRITES_A_NAME.contains(one),
                 "`{one}` writes through the frame's namespace mapping and is \
-                 allowed on an exit line, so a frame can now be refused with \
+                 allowed at an exit, so a frame can now be refused with \
                  `(TheFrame, Writes)` — a combination `bpd_core::jump` records \
                  as unreachable"
             );
@@ -1261,6 +1297,9 @@ mod tests {
         let one = |offset: u32, opname: &str, names: &[&str], arg: Option<u32>| Instruction {
             offset,
             opname: opname.to_string(),
+            // this walk is by name, and nothing in it asks a stack-effect
+            // question — the number is only what `dis.stack_effect` is keyed by
+            opcode: 0,
             names: names.iter().map(|name| (*name).to_string()).collect(),
             arg,
         };

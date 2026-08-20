@@ -52,7 +52,7 @@ use pyo3::types::PyDict;
 use crate::conditions::{self, capture};
 use crate::facts::Prover;
 use crate::values::Reader;
-use crate::{bytecode, events, sources, templates, world};
+use crate::{bytecode, events, linetable, sources, templates, world};
 
 /// `CO_OPTIMIZED` — the frame keeps its locals in slots the compiler assigned
 ///
@@ -692,7 +692,7 @@ impl<'py> Stopped<'py> {
     ///
     /// every reason it cannot be done is decided here, off the bytecode of the
     /// frame and of its caller, before the frame is moved. what cannot be
-    /// decided here is whether cpython will accept a move to an exit line, and
+    /// decided here is whether cpython will accept a move to an exit, and
     /// that is asked with the assignment itself — a refused one moves nothing
     /// and binds nothing, measured on 3.13, 3.14 and 3.14t, so the offers are
     /// made one at a time until one is taken
@@ -733,7 +733,7 @@ impl<'py> Stopped<'py> {
 
         // in order of how fundamental each is, so that a frame with two
         // reasons is told the one that would still be true if the other were
-        // fixed. a module frame has no clean exit line **and** no caller, and
+        // fixed. a module frame has no clean exit **and** no caller, and
         // giving it a `return` would not make it restartable
         if let Some(kind) = suspendable(&code)? {
             return refuse(Unrestartable::Suspendable { kind });
@@ -742,7 +742,7 @@ impl<'py> Stopped<'py> {
         if caller.is_none() || is_bootstrap(&caller) {
             return refuse(Unrestartable::NoCaller);
         }
-        let exits = match bytecode::exit_lines(&code, &namespaces_of(&frame)?)? {
+        let exits = match bytecode::exit_tails(&code, &namespaces_of(&frame)?)? {
             Ok(exits) => exits,
             Err(reason) => return refuse(reason),
         };
@@ -763,35 +763,45 @@ impl<'py> Stopped<'py> {
         let at = describe_where(&frame)?;
         let unbound = Place::of(&frame)?.unbound()?;
         let mut refused = None;
-        let mut exit_line = None;
-        for line in &exits {
-            // **the frame is never moved to find out whether it can be.** every
-            // range start of every line offered here walks clean, so wherever
-            // cpython chooses to land is clean — there is nothing to check
-            // afterwards and nothing to undo. an earlier version jumped
-            // speculatively and put the frame back, and the put-back relocated
-            // it onto a different copy of the same line while the answer said
-            // nothing had moved
-            match frame.setattr("f_lineno", *line) {
+        let mut taken = None;
+        for exit in &exits {
+            // **the frame is not moved to find out whether it can be.** every
+            // offset offered here runs nothing before it returns and sits at
+            // stack depth zero, so a move that is accepted has landed somewhere
+            // read — and one that is refused has moved nothing. an earlier
+            // version jumped speculatively and put the frame back, and the
+            // put-back relocated it onto a different copy of the same line while
+            // the answer said nothing had moved
+            match linetable::move_to(&frame, &code, exit.offset)? {
                 Ok(()) => {
-                    exit_line = Some(*line);
+                    taken = Some(exit);
                     break;
                 }
-                Err(error) => refused = Some(error),
+                // bpd could not establish the mechanism at all, which is not
+                // cpython refusing this offset and is not a reason to try the
+                // next one: it would fail the same way. nothing was written
+                Err(linetable::Unmarked::Unusable(part)) => {
+                    return refuse(Unrestartable::ExitNotAddressable {
+                        line: exit.line,
+                        part,
+                    });
+                }
+                Err(linetable::Unmarked::Refused { error }) => refused = Some(error),
             }
         }
-        let Some(exit_line) = exit_line else {
+        let Some(taken) = taken else {
             let Some(error) = refused else {
                 unreachable!(
-                    "the list is not empty, so either a line was taken or \
+                    "the list is not empty, so either an offset was taken or \
                      cpython refused one"
                 )
             };
             return Ok(Restart::Answered(Restarted::Refused {
-                tried: exits,
+                tried: exits.iter().map(|exit| exit.line).collect(),
                 error: capture(self.python, &error),
             }));
         };
+        let exit_line = taken.line;
 
         Ok(Restart::Arranged {
             restarting: Restarting {
@@ -801,7 +811,7 @@ impl<'py> Stopped<'py> {
                 disturbed: call.disturbed,
                 bound_to_none: bound_to_none(&frame, &unbound)?,
                 // **both** lines that will not fire, not only the rewind's
-                // destination. the exit line of the forced-out frame really
+                // destination. the exit of the forced-out frame really
                 // executes — its loads and its return run — and no `LINE` event
                 // is delivered for it either, because it is a jump's
                 // destination. a breakpoint there is one the program ran past
@@ -1107,7 +1117,7 @@ fn namespaces_of(frame: &Bound<'_, PyAny>) -> PyResult<bytecode::Namespaces> {
         // holds nothing after it
         unbound_cells: unbound_in(frame, &[Scope::Cell, Scope::Free])?,
         // read **before** anything moves, and only ever asked of the caller.
-        // the move binds these to `None`, so on an exit line they cannot raise
+        // the move binds these to `None`, so at an exit they cannot raise
         // — in the caller's tail, which runs before any move, they can
         unbound_fasts: unbound_in(frame, &[Scope::Local])?,
     })
