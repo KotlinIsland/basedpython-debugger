@@ -12,11 +12,12 @@ sentence
 it reads the interpreter it is run by, over that interpreter's own stdlib, and
 prints what it counted. the two claims:
 
-**the cost of the strict exit rule.** a line is offered as an exit only when the
-walk from *every* one of its `co_lines` range starts reaches a return having run
-nothing. the cheaper rule — walk from the lowest start only — is unsound, because
-cpython picks the destination by stack depth rather than by offset. what the
-strict rule costs is the lines the cheap one accepts and it does not
+**what forcing the frame out at an offset reaches that a line does not.** a frame
+is forced out by moving it to the point where a return's value is loaded. that
+point is almost never a `co_lines` range start — cpython fuses a function's
+implicit `return None` onto the last statement's line — so `f_lineno`, which only
+lands on range starts, could not name it. this counts the code objects each rule
+reaches, and what is left over after the second one
 
 **what lies past the `to` bound.** a caller's span ends at the end of the
 contiguous run holding the call. past that is normally a new line, which is where
@@ -101,6 +102,38 @@ def walks_clean(instructions: list, frm: int) -> bool:
     return False
 
 
+def depth_zero_tails(instructions: list) -> list[int]:
+    """the agent's `depth_zero_tails`
+
+    counted **backwards** from each return, whose depth cpython itself asserts:
+    `mark_stacks` holds `pop_value(next_stack) == EMPTY_STACK` at `RETURN_VALUE`,
+    and `RETURN_CONST` carries its own value and takes none. each step back is
+    `dis.stack_effect`, which is the `PyCompile_OpcodeStackEffect` that
+    `mark_stacks` itself falls back to
+    """
+    found = []
+    for index, one in enumerate(instructions):
+        if one.opname not in RETURNING:
+            continue
+        if one.opname == "RETURN_CONST":
+            found.append(one.offset)
+            continue
+        depth = 1
+        for before in reversed(instructions[:index]):
+            if before.opname in RETURNING or before.opname not in EXITING:
+                break
+            try:
+                depth -= dis.stack_effect(before.opcode, before.arg)
+            except ValueError:
+                break
+            if depth == 0:
+                found.append(before.offset)
+                break
+            if depth < 0:
+                break
+    return sorted(set(found))
+
+
 def code_objects(top):
     """every code object under `top`, and whether each **is** `top`
 
@@ -123,10 +156,11 @@ def sources() -> list[pathlib.Path]:
 
 
 def main() -> int:
-    lost_lines = 0
-    lost_objects = 0
-    with_an_exit = 0
-    examples: list[str] = []
+    counted = 0
+    with_an_exit_line = 0
+    with_an_exit_offset = 0
+    with_neither = 0
+    before_the_return: dict[str, int] = {}
 
     permitted = 0
     # what the tail writes where the **callee** can read it, which is what
@@ -168,26 +202,32 @@ def main() -> int:
             for offset, _end, line in lined:
                 starts.setdefault(line, []).append(offset)
 
-            lowest = {
-                line
-                for line, offsets in starts.items()
-                if walks_clean(instructions, min(offsets))
-            }
-            every = {
-                line
-                for line, offsets in starts.items()
-                if all(walks_clean(instructions, offset) for offset in offsets)
-            }
-            if lowest:
-                with_an_exit += 1
-            lost_lines += len(lowest - every)
-            if lowest and not every:
-                lost_objects += 1
-                if len(examples) < 8:
-                    examples.append(
-                        f"{code.co_qualname} in {path.name} "
-                        f"line(s) {sorted(lowest - every)}"
-                    )
+            counted += 1
+            # the rule the exit used to have: a whole line, every one of whose
+            # `co_lines` range starts walks to a return having run nothing
+            has_a_line = any(
+                all(walks_clean(instructions, offset) for offset in offsets)
+                for offsets in starts.values()
+            )
+            tails = depth_zero_tails(instructions)
+            with_an_exit_line += has_a_line
+            with_an_exit_offset += bool(tails)
+            if not tails:
+                with_neither += 1
+                # what sits immediately before the last return, which is what
+                # says why the function has nowhere to be forced out through
+                returns = [
+                    index
+                    for index, one in enumerate(instructions)
+                    if one.opname in RETURNING
+                ]
+                if not returns:
+                    key = f"no return at all, ends {instructions[-1].opname}"
+                elif returns[-1] == 0:
+                    key = "a return as the first instruction"
+                else:
+                    key = instructions[returns[-1] - 1].opname
+                before_the_return[key] = before_the_return.get(key, 0) + 1
 
             at = {one.offset: one.opname for one in instructions}
             for call in (one for one in instructions if one.opname in CALLING):
@@ -244,12 +284,21 @@ def main() -> int:
         f"{len(files)} stdlib files"
     )
     print()
-    print("the cost of requiring every range start to walk clean")
-    print(f"  code objects with at least one exit line   {with_an_exit}")
-    print(f"  lines the lowest-start rule accepts and this one does not   {lost_lines}")
-    print(f"  code objects that lose their last candidate   {lost_objects}")
-    for example in examples:
-        print(f"    {example}")
+    print("what an exit offset reaches that an exit line does not")
+    print(f"  code objects   {counted}")
+    share = f"{100 * with_an_exit_line / counted:.1f}%"
+    print(
+        f"  with a clean exit **line**, the rule before this   {with_an_exit_line} ({share})"
+    )
+    share = f"{100 * with_an_exit_offset / counted:.1f}%"
+    print(
+        f"  with a clean exit **offset** at stack depth 0   {with_an_exit_offset} ({share})"
+    )
+    share = f"{100 * with_neither / counted:.1f}%"
+    print(f"  with neither   {with_neither} ({share})")
+    print("  what sits before the last return in those:")
+    for opname, count in sorted(before_the_return.items(), key=lambda kv: -kv[1])[:8]:
+        print(f"    {count} x  {opname}")
     print()
     print("what lies past the `to` bound, over the call sites the rule permits")
     print(f"  call sites permitted   {permitted}")
