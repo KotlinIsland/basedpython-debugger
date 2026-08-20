@@ -34,6 +34,12 @@ repos:
         files: '\.(ya?ml|json|jsonc|m?js|toml|py|md)$'
         pass_filenames: false
 
+      - id: rustdoc
+        name: check the doc links
+        entry: cargo doc --workspace --no-deps --document-private-items
+        language: system
+        pass_filenames: false
+        types: [rust]
       - id: rustfmt
         name: rustfmt
         entry: cargo fmt --all --

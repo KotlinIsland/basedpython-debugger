@@ -358,7 +358,7 @@ pub enum Request {
     Record {
         /// whether to record
         on: bool,
-        /// how much of each step to keep — an experiment, see [`Depth`]
+        /// how much of each step to keep — an experiment, see [`crate::Depth`]
         depth: crate::Depth,
     },
 

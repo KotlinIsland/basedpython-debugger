@@ -81,7 +81,7 @@ pub enum Error {
         expected: usize,
     },
 
-    /// the headers went on past [`MAX_HEADER_BYTES`] without ending
+    /// the headers went on past the bound without ending
     #[error(
         "a message's headers passed {MAX_HEADER_BYTES} bytes without the blank \
          line that ends them. the headers began: {headers}"
