@@ -498,14 +498,48 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
         }),
     );
 
-    // moving where the program will carry on from, and re-entering the frame
-    // from the top. neither resumes anything: the thread is still held after
-    // both, which is why the conversation goes on asking about the same stop
+    // moving where the program will carry on from. it resumes nothing: the
+    // thread is still held after it, which is why the conversation goes on
+    // asking about the same stop
     client.call(
         "set_next_statement",
         &serde_json::json!({ "frame": 1, "line": 2 }),
     );
-    client.call("restart_frame", &serde_json::json!({ "frame": 1 }));
+
+    // a restart is the one that **does** resume the thread, and what it says
+    // about that is the whole answer. read back rather than discarded: nothing
+    // in this crate asserted on `render::restarted`, so every sentence it builds
+    // could have been inverted and no MCP test would have gone red
+    let restarted = client.call("restart_frame", &serde_json::json!({ "frame": 1 }));
+    let said = restarted.to_string();
+    for wanted in [
+        // it resumed, which is what makes a restart unlike every other control
+        "thread has been let go",
+        // the two facts a client acts on
+        "disturbed",
+        "exit_line",
+        // and the cleanup sentence, which four earlier versions got wrong
+        "no block cleanup",
+        "finalised",
+        // the scope clause. it said "the caller's own slots" while `STORE_GLOBAL`
+        // was still permitted, then named the globals and a cell after the
+        // commit that made those unreachable. every disturbed name resolves in
+        // the caller's own locals, and nothing pinned the sentence until now
+        "binds in its **own** locals",
+    ] {
+        assert!(
+            said.contains(wanted),
+            "the restart answer has to carry {wanted:?}, and said {said}"
+        );
+    }
+    assert!(
+        !said.contains("runs no cleanup."),
+        "the flat claim is false of a `@contextlib.contextmanager`: {said}"
+    );
+    assert!(
+        !said.contains("caller's own slots") && !said.contains("the module's globals"),
+        "a disturbed name is always a local of the caller, and never a global: {said}"
+    );
 
     // making the process run the file that is on disk. it is about the process
     // rather than about a held thread, so it names neither a stop nor a frame
@@ -1335,19 +1369,29 @@ impl Session for FakeSession {
                 },
                 mode: Mode::NonStop,
             }),
-            Request::RestartFrame { .. } => Response::Jumped(bpd_core::Jumped {
-                at: bpd_core::Where {
-                    file: "/tmp/fake.py".to_string(),
-                    line: 1,
-                    function: "main".to_string(),
-                },
-                outcome: bpd_core::Jump::Moved {
-                    from: 3,
-                    bound_to_none: Vec::new(),
-                    unannounced: Vec::new(),
-                },
-                mode: Mode::NonStop,
-            }),
+            // arranged rather than refused, because that is the branch whose
+            // notes an agent acts on: it says the thread was **let go**, which
+            // is the one thing about this tool an agent cannot see and would
+            // otherwise assume the opposite of
+            Request::RestartFrame { .. } => {
+                Response::Restarted(bpd_core::Restarted::Arranged(bpd_core::Restarting {
+                    frame: bpd_core::Where {
+                        file: "/tmp/fake.py".to_string(),
+                        line: 3,
+                        function: "work".to_string(),
+                    },
+                    exit_line: 5,
+                    caller: bpd_core::Where {
+                        file: "/tmp/fake.py".to_string(),
+                        line: 1,
+                        function: "main".to_string(),
+                    },
+                    disturbed: vec!["got".to_string()],
+                    bound_to_none: vec!["later".to_string()],
+                    unannounced: vec![1],
+                    mode: Mode::NonStop,
+                }))
+            }
             // the fake applies, so that what the renderer says about a
             // replacement that really happened is under test: which functions
             // moved, how many objects held each, and which breakpoints had to be

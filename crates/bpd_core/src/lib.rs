@@ -52,7 +52,10 @@ pub use frame::{
     Coverage, Depth, Frame, FrameId, FrameKind, Kept, Retainer, Retainers, Scheduling, Scope,
     TASK_NOT_SEEN, Trail, Visited,
 };
-pub use jump::{Jump, Jumped, Suspendable, Unrestartable};
+pub use jump::{
+    Access, Jump, Jumped, Restarted, Restarting, Suspendable, Through, Unrestartable,
+    WHAT_READING_THE_BYTECODE_COSTS, Whose,
+};
 pub use parity::{Carried, Facet, Naming, Reach, Told, ran, ran_as, say, surface};
 pub use query::{
     Answer, Appeared, Changed, Difference, FrameState, Frames, Moved, NotCompared, NotRead,
@@ -74,6 +77,6 @@ pub use session::{
 };
 pub use source_map::{Located, MapError, MappedFile, Mapping, SourceMap, Unmapped};
 pub use spawn::{Blindspot, Spawn, Verdict};
-pub use stop::{Holding, Mode, Part, Reported, StepKind, Stop, StopReason};
+pub use stop::{Abandoned, Holding, Mode, Part, Reported, StepKind, Stop, StopReason};
 pub use thread::{Progress, ThreadState, Where, Which};
 pub use value::{Content, Detail, Entry, Evaluated, Omitted, Pair, Value};

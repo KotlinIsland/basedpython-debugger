@@ -458,21 +458,36 @@ pub enum Request {
         line: u32,
     },
 
-    /// re-enter a frame from the top
+    /// run a frame again, from a call the caller makes a second time
     ///
-    /// [`Request::SetNextStatement`] to the line of the first instruction of
-    /// the frame's code object, worked out in the debuggee because the code
-    /// object is the only thing that knows it
+    /// **not a jump**, and the difference is the whole capability. the frame is
+    /// forced to **return** — moved to a line of its own code that is only
+    /// loads and a return — and then the **caller** is rewound to the line the
+    /// call was made from, so the interpreter builds a frame that has never
+    /// run. that is what makes the locals fresh
     ///
-    /// it re-enters with **what the parameters hold now**, which is not
-    /// necessarily what the frame was called with: a parameter the frame has
-    /// since assigned to holds the new value, and nothing captured the old one.
-    /// capturing them would mean copying every argument of every call in the
-    /// process, on the event path, for an operation almost nobody makes
+    /// it does **not** run the cleanup of a block the forced-out frame leaves:
+    /// that move is an `f_lineno` jump like any other, so a `with` it was inside
+    /// gets no `__exit__` and a `try` gets no `finally` — see [`crate::Jumped`]
     ///
-    /// side effects the frame already performed are not undone. nothing here
-    /// can undo them, and a debugger that implied otherwise would be inviting a
-    /// belief about the program that is false
+    /// it **resumes the thread**, because the caller has to actually execute
+    /// the call for a frame to exist. the answer says what was arranged; where
+    /// it got to arrives as a stop of its own —
+    /// [`crate::StopReason::Restarted`] at the top of the fresh frame, or
+    /// [`crate::StopReason::RestartAbandoned`] when it could not be finished,
+    /// carrying which of several reasons it was
+    ///
+    /// the unit is the caller's **line**. everything on it runs again, so a
+    /// line carrying anything besides the one call — an attribute, a subscript,
+    /// an operator, a second call — is refused rather than restarted, by name.
+    /// so is a frame with no clean exit line, one whose caller has no statement
+    /// after the call, and a generator or coroutine. see
+    /// [`crate::Unrestartable`]: the refusals are decided off the bytecode
+    /// before anything is attempted, and they are most of this request
+    ///
+    /// side effects the old frame already performed are **not** undone. nothing
+    /// here can undo them, and a debugger that implied otherwise would be
+    /// inviting a belief about the program that is false
     RestartFrame {
         /// which frame — the one its thread is executing, or a refusal
         frame: FrameId,
@@ -836,11 +851,21 @@ pub enum Response {
 
     /// what a jump did, and where the frame is now
     ///
-    /// the same answer for both jumps: they differ in where the line comes
-    /// from, and a client is told the same things about either — where the
-    /// frame is now, what the move bound to `None`, and which breakpoints on
-    /// the destination will not fire for this pass
+    /// **set next statement's** answer. a restart is not a jump and has its own
+    /// — see [`Response::Restarted`] — because the two leave the program in
+    /// different places: a jump is answered with a thread that is still held at
+    /// the line it moved to, and a restart with one that has been let go
     Jumped(Jumped),
+
+    /// what restarting a frame arranged, or cpython's refusal to arrange it
+    ///
+    /// its own answer rather than a [`Jumped`], because the two outcomes leave
+    /// the program in opposite states: an arranged restart has forced a frame
+    /// out and **let the thread go** to finish it, and a refused one moved
+    /// nothing and the thread is still held. a client that read one as the
+    /// other would either wait for a stop that is not coming or believe a frame
+    /// is alive that has already returned
+    Restarted(crate::Restarted),
 
     /// what replacing a file's code did to the process, or what stopped it
     Replaced(Replaced),

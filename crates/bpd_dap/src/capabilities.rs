@@ -65,11 +65,16 @@ pub fn capabilities() -> serde_json::Value {
         // would accept the same number against another one
         "supportsGotoTargetsRequest": true,
 
-        // `Request::RestartFrame`, which re-enters the frame the thread is
-        // executing with what its parameters hold **now**. DAP's own wording
-        // for this request implies discarding the frames above the one named,
-        // and there is no mechanism for that — so a frame that is not the
-        // executing one is refused with the reason rather than approximated
+        // `Request::RestartFrame`, which forces the executing frame to return
+        // and rewinds its caller to the call, so the frame that comes back is
+        // one the interpreter built. DAP's own wording for this request implies
+        // discarding the frames above the one named, and there is no mechanism
+        // for that — so a frame that is not the executing one is refused with
+        // the reason rather than approximated
+        //
+        // it fits the protocol's shape exactly: the response goes out, the
+        // thread runs, and the `stopped` event with reason `restart` arrives
+        // when the fresh frame is entered
         "supportsRestartFrame": true,
 
         // a stop holds **one thread** and the rest of the program keeps

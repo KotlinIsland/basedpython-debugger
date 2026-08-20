@@ -430,6 +430,8 @@ fn place_of(reason: &StopReason) -> Option<Place> {
         | StopReason::Raised { file, line, .. }
         | StopReason::Uncaught { file, line, .. }
         | StopReason::EvaluationFailed { file, line, .. }
+        | StopReason::Restarted { file, line, .. }
+        | StopReason::RestartAbandoned { file, line, .. }
         | StopReason::Forked { file, line, .. } => (file, line),
     };
     Some(Place {

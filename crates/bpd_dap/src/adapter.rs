@@ -2104,13 +2104,19 @@ impl Adapter {
         self.respond(message, None)
     }
 
-    /// re-enter a frame from the top
+    /// run a frame again, from a call its caller makes a second time
     ///
-    /// DAP's own wording for this request has it discard the frames above the
-    /// one named. there is no mechanism for that — the refusal for a frame that
-    /// is not the executing one says so — and what this does is exactly what it
-    /// says: the executing frame runs again from its first line, with what its
-    /// parameters hold now
+    /// DAP's own wording has this discard the frames above the one named. there
+    /// is no mechanism for that — the refusal for a frame that is not the
+    /// executing one says so — and what this does instead fits the protocol
+    /// exactly: the response goes out, the thread runs, and a `stopped` event
+    /// with reason `restart` says the frame is running again
+    ///
+    /// the two facts DAP has nowhere for go to the console, and neither is
+    /// decoration. **the whole caller line runs again**, so a client that
+    /// believed only the call had would be wrong about anything else on it; and
+    /// the forced return really returns, so the names its line binds hold a value
+    /// the program never computed until the restarted call finishes
     fn restart_frame(&mut self, message: &Incoming) -> Answered {
         let reference = message.arguments["frameId"]
             .as_i64()
@@ -2128,12 +2134,51 @@ impl Adapter {
             None => return Err(stale(reference)),
         };
 
-        let jumped = match self.ask(Request::RestartFrame { frame })? {
-            Response::Jumped(jumped) => jumped,
+        let stop = frame.stop;
+        let restarted = match self.ask(Request::RestartFrame { frame })? {
+            Response::Restarted(restarted) => restarted,
             other => unreachable!("a restart was answered with {other:?}"),
         };
+        // **before responding**, because the two outcomes are not the same
+        // answer. an `Unrestartable` comes back as `Refusal::NotRestartable` and
+        // is an error response already; a `Restarted::Refused` — cpython would
+        // not take any exit line — used to fall through to the success response
+        // below, so the one case where nothing at all happened was the one a
+        // client was most likely to render as "it worked"
+        if let bpd_core::Restarted::Refused { tried, error } = &restarted {
+            return Err(Aborted::Refuse(format!(
+                "cpython would not move the frame to any of its exit lines \
+                 {tried:?}: {error}. none of the program's code ran, and the \
+                 thread is still held where it was. {}",
+                bpd_core::WHAT_READING_THE_BYTECODE_COSTS
+            )));
+        }
         self.respond(message, None)?;
-        self.moved(frame.stop, &jumped, "restart")
+
+        // built once and then either **said** or **carried**, never composed
+        // twice. the sentence that no cleanup ran used to exist only on the
+        // console path, so a client that opted into the event — the clients most
+        // likely to act on it — was the one told least
+        let notes = restarting_notes(&restarted);
+
+        // no `stopped` event here, unlike a `goto`: an arranged restart let the
+        // thread go, and where it got to arrives as a stop of its own. one sent
+        // from here would be a stop the client re-read the stack at while the
+        // program was running past it
+        if self.client.understands.contains(RESTARTING_EVENT) {
+            return self.event(
+                RESTARTING_EVENT,
+                &serde_json::json!({
+                    "stop": stop,
+                    "restarting": &restarted,
+                    "notes": notes,
+                }),
+            );
+        }
+        for note in notes {
+            self.say(&format!("stop {stop}: {note}\n"))?;
+        }
+        Ok(())
     }
 
     /// the frame a stop's thread is **executing**, which is the only one that
@@ -2770,12 +2815,47 @@ struct ClientCan {
     understands: std::collections::BTreeSet<String>,
 }
 
-/// the event carrying what a jump or a frame restart really did
+/// the event carrying what a jump really did
 ///
 /// named once, because the narration it replaces is switched off by a client
 /// naming it back in `bpd/understands` — two spellings of it would mean a client
 /// that asked for quiet and did not get it
+///
 const MOVED_EVENT: &str = "bpd/moved";
+
+/// the event carrying what restarting a frame really did
+///
+/// separate from [`MOVED_EVENT`] because it is the opposite claim. a jump says
+/// where a frame **is**; this says a frame has **gone** and a call is about to
+/// be made again, and a client that rendered one as the other would draw a
+/// stack that no longer exists
+///
+/// **this** name is what switches the restart's narration off, and it has to be
+/// the same name both ways round: gating the console text on one and the event
+/// on the other left a client that had named `bpd/moved` and not this one with
+/// neither
+const RESTARTING_EVENT: &str = "bpd/restarting";
+
+/// everything about a restart that neither the response nor a `stopped` event
+/// has a field for
+///
+/// the facts come from [`bpd_core::Restarting::told`], which MCP renders from
+/// too — a claim about the program's state worded two ways is a claim somebody
+/// trusts two ways. what is added here is DAP's own: a refusal has no `stopped`
+/// event to follow it, so the console has to say the thread is still held
+fn restarting_notes(restarted: &bpd_core::Restarted) -> Vec<String> {
+    match restarted {
+        bpd_core::Restarted::Arranged(restarting) => restarting.told(),
+        bpd_core::Restarted::Refused { tried, error } => vec![
+            format!(
+                "the restart was refused and none of the program's code ran — \
+                 cpython would not move the frame to any of its exit lines \
+                 {tried:?}: {error}. the thread is still held where it was"
+            ),
+            bpd_core::WHAT_READING_THE_BYTECODE_COSTS.to_string(),
+        ],
+    }
+}
 
 /// what a handler returns: nothing, or the reason it got no further
 type Answered = Result<(), Aborted>;
@@ -2906,6 +2986,42 @@ fn stopped_for(reason: &StopReason) -> (&'static str, String, Vec<u32>) {
                 "this process was started by {parent} and is held at \
                  interpreter startup, before its program has been compiled. it \
                  has run nothing of its own"
+            ),
+            Vec::new(),
+        ),
+        // DAP's own reason for a `restartFrame` landing, which is what this
+        // really is: the frame is running again, from the top, with the locals
+        // the call bound
+        StopReason::Restarted {
+            function,
+            file,
+            line,
+        } => (
+            "restart",
+            format!(
+                "`{function}` is running again at {file}:{line}, in a frame the \
+                 caller's call built. nothing of it has run and every local it \
+                 has is one this call bound"
+            ),
+            Vec::new(),
+        ),
+        // deliberately **not** `restart`: a client that rendered it as one
+        // would say a frame is running again when it returned and did not come
+        // back. there is no DAP reason for "the debugger could not finish", and
+        // the description is the only place the fact can go
+        StopReason::RestartAbandoned {
+            function,
+            wanted,
+            file,
+            line,
+            why,
+        } => (
+            "pause",
+            format!(
+                "the restart of `{function}` could not be finished: {why}. it \
+                 was forced to return and the call was **not** made again. the \
+                 caller is held at {file}:{line} and line {wanted} is where it \
+                 was going"
             ),
             Vec::new(),
         ),

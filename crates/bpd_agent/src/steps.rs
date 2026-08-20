@@ -35,15 +35,18 @@
 //! is exactly what a breakpoint in that function makes happen — and a step that
 //! silently skipped it would land somewhere other than where it said. there is
 //! no per-location undo, so the process-wide one is what there is
+//!
+//! what a step wants of the interpreter lives in [`crate::armed`], shared with
+//! the other operation that arms instrumentation and lets a thread go — a
+//! restart. the two are different operations and what they need is the same
+//! shape, so the registry the event path reads is one rather than two
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
 
 use bpd_core::StepKind;
 use pyo3::prelude::*;
 
+use crate::armed::{self, Interest};
 use crate::{events, frames, session};
 
 /// one thread's step, held on that thread
@@ -69,69 +72,9 @@ thread_local! {
     static STEP: RefCell<Option<Step>> = const { RefCell::new(None) };
 }
 
-/// what one thread's step wants instrumented, readable from any thread
-///
-/// the thread local answers "what is this thread's step doing"; this answers
-/// "does any step in the process need events on this code object", which is
-/// what decides the interpreter's instrumentation and what stops another
-/// thread's line callback from disabling a line a step is waiting for
-static INTERESTS: Mutex<BTreeMap<u64, Interest>> = Mutex::new(BTreeMap::new());
-
-/// whether any thread is stepping, without taking the lock
-///
-/// read on the line event path to decide whether a line may be disabled, so it
-/// is an atomic: the common case is that nothing is stepping and the answer is
-/// a load
-static ARMED: AtomicBool = AtomicBool::new(false);
-
-/// whether any step still wants to catch a frame being entered
-static ENTERING: AtomicBool = AtomicBool::new(false);
-
-/// what one step wants of the interpreter
-#[derive(Debug, Clone)]
-struct Interest {
-    /// the code objects it watches, by address, and what for
-    watching: BTreeMap<usize, events::Local>,
-    /// whether it wants `PY_START`, `PY_RESUME` and `PY_THROW` for the program
-    entering: bool,
-}
-
-fn interests() -> MutexGuard<'static, BTreeMap<u64, Interest>> {
-    INTERESTS
-        .lock()
-        .expect("the step registry is only ever held to read or write one thread's entry")
-}
-
-/// whether any thread in the process is stepping
-///
-/// what stops a line callback from returning `DISABLE`: a line disabled on one
-/// thread is disabled for the process, and a step waiting for that line on
-/// another thread would never be offered it again
-pub(crate) fn armed_anywhere() -> bool {
-    ARMED.load(Ordering::Relaxed)
-}
-
-/// whether any step still needs to see a frame being entered
-///
-/// the same rule for `PY_START`: discovery disables it per code object, and a
-/// step in that was never offered the frame it entered would behave exactly
-/// like a step over
-pub(crate) fn entering_anywhere() -> bool {
-    ENTERING.load(Ordering::Relaxed)
-}
-
 /// whether this thread is stepping
 pub(crate) fn armed_here() -> bool {
     STEP.with(|cell| cell.borrow().is_some())
-}
-
-/// what the steps in the process want of one code object
-pub(crate) fn local(address: usize) -> events::Local {
-    interests()
-        .values()
-        .filter_map(|interest| interest.watching.get(&address))
-        .copied()
-        .fold(events::Local::default(), |all, one| all | one)
 }
 
 /// begin a step on the thread that is about to be let go
@@ -145,6 +88,12 @@ pub(crate) fn arm(python: Python<'_>, thread: u64, kind: StepKind) -> PyResult<(
          again until the step it is making has landed"
     );
 
+    // a restart in flight on this thread is taken off first. both want the same
+    // registry entry, and a thread asked to step while one was armed used to
+    // replace it silently — which de-instrumented the caller and left the
+    // restart unable to land
+    crate::restarts::cancel(python)?;
+
     let frame = events::current_frame(python)?;
     let mut step = Step {
         kind,
@@ -155,14 +104,13 @@ pub(crate) fn arm(python: Python<'_>, thread: u64, kind: StepKind) -> PyResult<(
         entering: matches!(kind, StepKind::In),
     };
 
-    interests().insert(
+    armed::hold(
         thread,
         Interest {
-            watching: BTreeMap::new(),
             entering: step.entering,
+            ..Interest::default()
         },
     );
-    republish();
 
     watch(python, &mut step, &frame.getattr("f_code")?)?;
     STEP.with(|cell| *cell.borrow_mut() = Some(step));
@@ -170,7 +118,7 @@ pub(crate) fn arm(python: Python<'_>, thread: u64, kind: StepKind) -> PyResult<(
     // a line of this frame that has already run told the interpreter never to
     // offer it again. there is no per-location undo, so the step that has to be
     // offered it pays for the process-wide one
-    events::restart(python)?;
+    armed::restart_locations(python)?;
     session::refresh_events(python)
 }
 
@@ -301,11 +249,10 @@ fn follow(python: Python<'_>, step: &mut Step, frame: Bound<'_, PyAny>) -> PyRes
     step.entering = false;
 
     let stale = std::mem::take(&mut step.armed);
-    if let Some(interest) = interests().get_mut(&step.thread) {
+    armed::amend(step.thread, |interest| {
         interest.watching.clear();
         interest.entering = false;
-    }
-    republish();
+    });
     for code in &stale {
         session::refresh_code(python, code.bind(python))?;
     }
@@ -324,30 +271,19 @@ fn watch(python: Python<'_>, step: &mut Step, code: &Bound<'_, PyAny>) -> PyResu
         // cannot be scoped to a code object that has not been reached yet
         py_start: false,
     };
-    if let Some(interest) = interests().get_mut(&step.thread) {
+    armed::amend(step.thread, |interest| {
         interest.watching.insert(code.as_ptr() as usize, wanted);
-    }
+    });
     step.armed.push(code.clone().unbind());
     session::refresh_code(python, code)
 }
 
 /// put back everything a step armed, and forget it
 fn release(python: Python<'_>, step: &Step) -> PyResult<()> {
-    interests().remove(&step.thread);
-    republish();
+    armed::release(step.thread);
 
     for code in &step.armed {
         session::refresh_code(python, code.bind(python))?;
     }
     session::refresh_events(python)
-}
-
-/// keep the two flags the event path reads in step with the registry
-fn republish() {
-    let interests = interests();
-    ARMED.store(!interests.is_empty(), Ordering::Relaxed);
-    ENTERING.store(
-        interests.values().any(|interest| interest.entering),
-        Ordering::Relaxed,
-    );
 }

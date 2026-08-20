@@ -29,9 +29,10 @@ use std::time::{Duration, Instant};
 use bpd_core::python::Capabilities;
 use bpd_core::{
     Addressed, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, Exit, Forwarded,
-    FrameId, Joined, Jumped, LogRecord, Replaced, Reporting, Request, Resolved, Response, Running,
-    Scope, Script, SessionId, Snapshot, SnapshotId, SourceBreakpoint, Spawn, Stack, StateQuery,
-    StepKind, Stop, TemplateContext, Threads, Transcript, Variables, Which, WorldStopped,
+    FrameId, Joined, Jumped, LogRecord, Replaced, Reporting, Request, Resolved, Response,
+    Restarted, Running, Scope, Script, SessionId, Snapshot, SnapshotId, SourceBreakpoint, Spawn,
+    Stack, StateQuery, StepKind, Stop, TemplateContext, Threads, Transcript, Variables, Which,
+    WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine};
@@ -578,8 +579,8 @@ impl Debuggee {
                 self.attached[at]
                     .move_frame(&FromEngine::SetNextStatement { frame, line }, reporting)?,
             )),
-            Request::RestartFrame { frame } => Ok(Response::Jumped(
-                self.attached[at].move_frame(&FromEngine::RestartFrame { frame }, reporting)?,
+            Request::RestartFrame { frame } => Ok(Response::Restarted(
+                self.attached[at].restart_frame(frame, reporting)?,
             )),
             Request::ReplaceCode {
                 file,
@@ -904,10 +905,19 @@ impl Debuggee {
         }
     }
 
-    /// re-enter a frame from the top, with what its parameters hold now
-    pub fn restart_frame(&mut self, frame: FrameId) -> Result<Jumped> {
+    /// run a frame again, from a call its caller makes a second time
+    ///
+    /// **it lets the thread go.** the caller has to actually execute the call
+    /// for a fresh frame to exist, so an arranged restart ends the stop that
+    /// asked for it and where it got to arrives from [`Self::wait`] as a stop of
+    /// its own — [`bpd_core::StopReason::Restarted`] at the top of the fresh
+    /// frame, or [`bpd_core::StopReason::RestartAbandoned`] when it could not
+    /// be finished, carrying which of several reasons it was — cpython refusing
+    /// the rewind is one of them and not the only one. a refused restart leaves
+    /// the thread held exactly where it was
+    pub fn restart_frame(&mut self, frame: FrameId) -> Result<Restarted> {
         match self.ask_for(Request::RestartFrame { frame })? {
-            Response::Jumped(jumped) => Ok(jumped),
+            Response::Restarted(restarted) => Ok(restarted),
             other => unreachable!("a restart was answered with {other:?}"),
         }
     }
@@ -1692,6 +1702,31 @@ impl Attached {
 
         match self.ask(request, EXPECTED, reporting)? {
             FromAgent::Jumped { jumped } => Ok(jumped),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// arrange a restart, and drop the stop it ended when it ends one
+    ///
+    /// the held-stop bookkeeping is read off the **tag** rather than assumed.
+    /// an arranged restart let the thread go and a refused one did not, and an
+    /// engine that guessed either way would leave its idea of what is held
+    /// different from the agent's — with nothing saying which is right
+    fn restart_frame(
+        &mut self,
+        frame: FrameId,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Restarted> {
+        const EXPECTED: &str = "the frame to restart";
+
+        let request = FromEngine::RestartFrame { frame };
+        match self.ask(&request, EXPECTED, reporting)? {
+            FromAgent::Restarting { restarted } => {
+                if matches!(restarted, Restarted::Arranged(_)) {
+                    self.held.retain(|held| held.stop != frame.stop);
+                }
+                Ok(restarted)
+            }
             other => Err(unexpected(&other, EXPECTED)),
         }
     }

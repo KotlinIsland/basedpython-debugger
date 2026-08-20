@@ -547,7 +547,7 @@ impl<'a> Server<'a> {
                 let frame =
                     self.frame_of(args.stop, args.session, args.frame, "restarting a frame")?;
                 match self.ask_in(args.session, Request::RestartFrame { frame })? {
-                    Response::Jumped(jumped) => Ok(render::jumped(&jumped)),
+                    Response::Restarted(restarted) => Ok(render::restarted(&restarted)),
                     other => unreachable!("a restart was answered with {other:?}"),
                 }
             }

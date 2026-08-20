@@ -89,7 +89,12 @@ pub enum Refusal {
         wanted: String,
     },
 
-    /// the frame cannot be re-entered from the top
+    /// the frame cannot be run again
+    ///
+    /// a restart is not a move of the frame it names: it forces that frame to
+    /// **return** and rewinds its **caller** to the call. so what stands in the
+    /// way is a property of the frame, of its caller's line, or of both — see
+    /// [`Unrestartable`]
     NotRestartable {
         /// what was asked about
         frame: FrameId,
@@ -260,8 +265,12 @@ impl std::fmt::Display for Refusal {
                 reason,
             } => write!(
                 formatter,
-                "{frame} runs `{function}` and cannot be re-entered from the \
-                 top: {reason}"
+                "{frame} runs `{function}` and cannot be run again. a restart \
+                 forces the frame to return and rewinds its caller to the call, \
+                 so that the interpreter builds a frame that has never run — and \
+                 {reason}. none of the program's code ran: this was decided off \
+                 the bytecode before anything moved. {}",
+                crate::WHAT_READING_THE_BYTECODE_COSTS
             ),
             Self::UnmappableLine { frame, reason } => write!(
                 formatter,
