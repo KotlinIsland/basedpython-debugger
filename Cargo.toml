@@ -39,6 +39,17 @@ unreachable_pub = "warn"
 missing_docs = "warn"
 unused_qualifications = "warn"
 
+# a doc comment that points at something no longer there is how a stale claim
+# stays invisible, and nothing in the gate said so: clippy does not run
+# rustdoc's lints and nothing else ran `cargo doc`. it turned up a link to an
+# enum that has never existed in this history
+#
+# only the broken-link lint, which is the one that catches a doc pointing at
+# something that is not there. `private_intra_doc_links` is a stylistic concern
+# and this tree links to private items on purpose
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -2 }
 

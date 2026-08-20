@@ -42,7 +42,7 @@ use crate::{Error, Interrupt, Listener, Result, Session, agent, mapping};
 ///
 /// what [`Debuggee::ask_for`] hands to [`Debuggee::dispatch`]. a log record or a
 /// child that arrives while one of those is in flight is kept by
-/// [`Debuggee::send_and_wait`] for the next wait, so almost nothing reaches
+/// `Attached::send_and_wait` for the next wait, so almost nothing reaches
 /// here — the exception is a debug script, whose steps do their own waiting
 ///
 /// a child is **collected** rather than dropped, and the caller puts it back on

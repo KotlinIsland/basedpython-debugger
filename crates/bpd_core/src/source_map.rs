@@ -49,7 +49,8 @@
 //! be inviting exactly the confusion the digest was added to end
 //!
 //! nothing here runs the generated python or imports the map. bpd reads the
-//! bytes, hashes the bytes, and parses the two tables itself — see [`literal`],
+//! bytes, hashes the bytes, and parses the two tables itself — see the private
+//! `literal` module,
 //! which accepts the literal subset the emitter writes and refuses everything
 //! else by name
 

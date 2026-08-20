@@ -41,12 +41,12 @@ pub struct Spawn {
 
     /// the file the child will execute, when the program named one
     ///
-    /// absent for [`Made::Fork`], where the child runs this very process
+    /// absent for an `os.fork`, where the child runs this very process
     pub executable: Option<String>,
 
     /// the argument vector, as the program gave it
     ///
-    /// empty for [`Made::Fork`], and for an event that carries no vector
+    /// empty for an `os.fork`, and for an event that carries no vector
     pub arguments: Vec<String>,
 
     /// what `bpd` can tell about the child being python, and on what evidence

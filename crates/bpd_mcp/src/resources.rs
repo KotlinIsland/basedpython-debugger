@@ -7,7 +7,8 @@
 //! its answer *claims*, and where the claim stops
 //!
 //! two pages, and no more, because a third would be padding. every sentence in
-//! them is a fact about what this session does, and [`mentions`] is how that
+//! them is a fact about what this session does, and [`Resource::mentions`] is
+//! how that
 //! stays true: every tool a page names is checked against the tool table, in
 //! both directions
 

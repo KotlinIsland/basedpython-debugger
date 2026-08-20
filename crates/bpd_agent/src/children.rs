@@ -116,7 +116,7 @@ static RESTORE: Mutex<Option<String>> = Mutex::new(None);
 ///
 /// where the agent itself is staged is read off the module's own `__file__`
 /// rather than taken from the launcher, for the reason
-/// [`crate::bpd_agent::main`] reads it there too: what a child is pointed at is
+/// the agent's own `main` reads it there too: what a child is pointed at is
 /// the directory the agent really came from
 pub(crate) fn remember(
     python: Python<'_>,
