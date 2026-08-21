@@ -557,6 +557,51 @@ fn destination(spans: &[Span], line: u32) -> Option<u32> {
         .min()
 }
 
+/// whether `lasti` is inside a block whose exit runs code of the program
+///
+/// exactly the question "was this frame inside a `with` or a `try`", and it is
+/// asked so that the answer can say a `__exit__` and a `finally` **did not run**
+/// only when there was one to run. said unconditionally it was a lecture: true
+/// of the operation rather than of this use of it, and a caveat repeated at
+/// every restart is one a reader learns to skip
+///
+/// the exception table is the exact answer and there is no public reader for
+/// it. this parse is checked against `dis._parse_exception_table` — cpython's
+/// own, private, so not usable here — over `with`, `try/finally`, `try/except`
+/// and a plain function on 3.13, 3.14 and 3.15, and matches entry for entry
+///
+/// the format is four varints per entry, six bits to a byte, bit 6 continuing
+/// and bit 7 opening an entry, with the offsets in **code units**
+pub(crate) fn inside_a_block(code: &Bound<'_, PyAny>, lasti: u32) -> PyResult<bool> {
+    let table: Vec<u8> = code.getattr("co_exceptiontable")?.extract()?;
+    let mut at = 0;
+    while at < table.len() {
+        assert!(
+            table[at] & 0x80 != 0,
+            "an exception table entry opens with the top bit set"
+        );
+        let mut read = || {
+            let mut byte = table[at];
+            let mut value = u32::from(byte & 0x3F);
+            at += 1;
+            while byte & 0x40 != 0 && at < table.len() {
+                byte = table[at];
+                value = (value << 6) | u32::from(byte & 0x3F);
+                at += 1;
+            }
+            value
+        };
+        let start = read();
+        let length = read();
+        let _target = read();
+        let _depth = read();
+        if lasti >= start * 2 && lasti < (start + length) * 2 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// where a frame can be forced out, highest offset first
 ///
 /// an **offset**, not a line. `frame.f_lineno` will only land on a `co_lines`

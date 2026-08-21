@@ -763,20 +763,8 @@ impl<'py> Stopped<'py> {
         let at = describe_where(&frame)?;
         let place = Place::of(&frame)?;
         let unbound = place.unbound()?;
-        // **bpd binds them, so that cpython does not warn the program about it.**
-        // `frame_lineno_set_impl` fills every NULL slot with `None` and raises a
-        // `RuntimeWarning` saying how many it filled — into the **debuggee's**
-        // stderr, about a move the program did not make. the end state is the
-        // same either way and the client is told which names in
-        // [`Restarting::bound_to_none`], so the warning was the debugger writing
-        // to the program's own output channel and saying nothing new
-        //
-        // slots only. an empty **cell** is a live cell object rather than a NULL
-        // slot, so cpython does not bind it either, and binding one here would
-        // be a change to the program cpython was never going to make
-        for (scope, name) in unbound.iter().filter(|(scope, _)| *scope == Scope::Local) {
-            place.write(*scope, name, &self.python.None().into_bound(self.python))?;
-        }
+        let (was_inside_a_block, finalising) = what_dies_with_it(&frame, &code, &place)?;
+        bind_the_unbound(self.python, &place, &unbound)?;
         let mut refused = None;
         let mut taken = None;
         for exit in &exits {
@@ -822,6 +810,8 @@ impl<'py> Stopped<'py> {
             restarting: Restarting {
                 frame: at,
                 exit_line,
+                inside_a_block: was_inside_a_block,
+                finalising,
                 caller: describe_where(&caller)?,
                 disturbed: call.disturbed,
                 bound_to_none: bound_to_none(&frame, &unbound)?,
@@ -833,17 +823,7 @@ impl<'py> Stopped<'py> {
                 //
                 // against the lines the interpreter has, which is what the
                 // breakpoint table is keyed by
-                unannounced: {
-                    let mut passed_over =
-                        crate::breakpoints::bound_at(code.as_ptr() as usize, exit_line);
-                    passed_over.extend(crate::breakpoints::bound_at(
-                        caller_code.as_ptr() as usize,
-                        call.line,
-                    ));
-                    passed_over.sort_unstable();
-                    passed_over.dedup();
-                    passed_over
-                },
+                unannounced: passed_over(&code, exit_line, &caller_code, call.line),
                 mode: world::mode(),
             },
             caller,
@@ -1234,6 +1214,91 @@ fn bound_to_none(frame: &Bound<'_, PyAny>, unbound: &[(Scope, String)]) -> PyRes
     Ok(bound)
 }
 
+/// the breakpoints on the two lines a restart moves to, which will not fire
+///
+/// **both** lines, not only the rewind's destination. the exit of the forced-out
+/// frame really executes — its loads and its return run — and no `LINE` event is
+/// delivered for it either, because it is a jump's destination. one list rather
+/// than two: they are breakpoint ids, and what a client does with them is look
+/// them up
+fn passed_over(
+    code: &Bound<'_, PyAny>,
+    exit_line: u32,
+    caller_code: &Bound<'_, PyAny>,
+    call_line: u32,
+) -> Vec<u32> {
+    let mut lines = crate::breakpoints::bound_at(code.as_ptr() as usize, exit_line);
+    lines.extend(crate::breakpoints::bound_at(
+        caller_code.as_ptr() as usize,
+        call_line,
+    ));
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+}
+
+/// bind this frame's unbound locals, so that cpython does not warn about it
+///
+/// `frame_lineno_set_impl` fills every NULL slot with `None` and raises a
+/// `RuntimeWarning` naming how many it filled — into the **debuggee's** stderr,
+/// about a move the program did not make. the end state is identical either way
+/// and the client is told which names in [`Restarting::bound_to_none`], so the
+/// warning was the debugger writing to the program's own output channel and
+/// saying nothing new
+///
+/// slots only. an empty **cell** is a live cell object rather than a NULL slot,
+/// so cpython does not bind one either, and binding one here would be a change
+/// to the program cpython was never going to make
+fn bind_the_unbound(
+    python: Python<'_>,
+    place: &Place<'_>,
+    unbound: &[(Scope, String)],
+) -> PyResult<()> {
+    for (scope, name) in unbound.iter().filter(|(scope, _)| *scope == Scope::Local) {
+        place.write(*scope, name, &python.None().into_bound(python))?;
+    }
+    Ok(())
+}
+
+/// what a forced exit from this frame does besides returning
+///
+/// both halves are about where the frame **is**, so both are read before it is
+/// moved: after the move its offset is the exit and its locals have gone with it
+fn what_dies_with_it(
+    frame: &Bound<'_, PyAny>,
+    code: &Bound<'_, PyAny>,
+    place: &Place<'_>,
+) -> PyResult<(bool, Vec<String>)> {
+    let inside = bytecode::inside_a_block(code, frame.getattr("f_lasti")?.extract()?)?;
+    Ok((inside, place.finalising()?))
+}
+
+/// whether releasing this value runs code of the program
+fn runs_as_it_dies(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let python = value.py();
+    let kind = value.get_type();
+    for class in kind.getattr("__mro__")?.try_iter()? {
+        // `__dict__` of a **type**, so this is a dict lookup rather than an
+        // attribute access — a `__getattr__` of the program cannot see it
+        if class?.getattr("__dict__")?.contains("__del__")? {
+            return Ok(true);
+        }
+    }
+    // a generator that has **started and not finished** is closed when its last
+    // reference goes, and closing throws `GeneratorExit` into it
+    let inspect = python.import("inspect")?;
+    for asking in ["getgeneratorstate", "getcoroutinestate"] {
+        let Ok(state) = inspect.call_method1(asking, (value,)) else {
+            continue;
+        };
+        let state: String = state.extract()?;
+        if state.ends_with("_SUSPENDED") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// the stack as a client sees it: the python frames, with template frames over
 ///
 /// a template frame goes immediately **above** the `Node.render_annotated`
@@ -1473,6 +1538,46 @@ impl<'py> Place<'py> {
             }
         }
         Ok(unbound)
+    }
+
+    /// the names this frame holds whose values run code of the program as it dies
+    ///
+    /// a type that defines `__del__` anywhere in its mro, or a **suspended**
+    /// generator, coroutine or async generator — closing one throws
+    /// `GeneratorExit` into it, which runs its `finally` and the `__exit__` of
+    /// any `with` inside it
+    ///
+    /// nothing here runs code of the program. `type(value)` is a read, walking
+    /// `__mro__` is a read, and `__del__ in cls.__dict__` is a dict lookup on a
+    /// **type**'s dict, which no `__getattr__` of the program can intercept.
+    /// asking `hasattr(value, "__del__")` would run a `__getattr__`, which is
+    /// the one thing this must not do
+    ///
+    /// only a frame that keeps its names in slots is scanned. a module or class
+    /// body reads through a mapping that may be the program's own code, and
+    /// those are refused before this runs — they have no caller
+    fn finalising(&self) -> PyResult<Vec<String>> {
+        if !self.optimized {
+            return Ok(Vec::new());
+        }
+        let mut found = Vec::new();
+        for scope in [Scope::Local, Scope::Cell, Scope::Free] {
+            let names = match scope {
+                Scope::Local => &self.varnames,
+                Scope::Cell => &self.cellvars,
+                Scope::Free => &self.freevars,
+                Scope::Global => continue,
+            };
+            for name in names {
+                let Held::Value(value) = self.read(scope, name)? else {
+                    continue;
+                };
+                if runs_as_it_dies(&value)? && !found.iter().any(|had| had == name) {
+                    found.push(name.clone());
+                }
+            }
+        }
+        Ok(found)
     }
 
     /// every scope of this frame that holds `name`

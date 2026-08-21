@@ -1386,6 +1386,11 @@ impl Session for FakeSession {
                         line: 1,
                         function: "main".to_string(),
                     },
+                    // a frame that really was inside a block and really does
+                    // hold a finaliser, because both notes are conditional now
+                    // and a fixture that was neither would assert nothing
+                    inside_a_block: true,
+                    finalising: vec!["conn".to_string()],
                     disturbed: vec!["got".to_string()],
                     bound_to_none: vec!["later".to_string()],
                     unannounced: vec![1],
