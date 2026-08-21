@@ -153,51 +153,42 @@ impl Restarting {
     pub fn told(&self) -> Vec<String> {
         let mut told = vec![
             format!(
-                "`{}` was forced to return from partway through line {}, and \
-                 the thread has been let go — only that line's closing loads and \
-                 its return ran. `{}` will run line {} again — the **whole** \
-                 line, which is why anything else on it is refused rather than \
-                 restarted",
+                "`{}` was forced to return from line {} and the thread has been \
+                 let go — only that line's closing loads and its return ran. \
+                 `{}` will run line {} again — the **whole** line",
                 self.frame.function, self.exit_line, self.caller.function, self.caller.line,
             ),
-            "the forced return runs **no block cleanup**: moving the frame out \
-             is an `f_lineno` jump, so a `with` the frame was inside gets no \
-             `__exit__` and a `try` gets no `finally`"
-                .to_string(),
-            "**but the frame dies, and what dies with it is finalised.** \
-             anything the forced-out frame was the last holder of is released at \
-             that moment — a moment the program never reached — and finalising \
-             can run arbitrary code of the program: a `__del__`, or the \
-             `GeneratorExit` thrown into a suspended generator, which runs its \
-             `finally` and the `__exit__` of any `with` inside it. bpd does not \
-             enumerate what that will be, and nothing can refuse it: it is what \
-             forcing any frame out does"
+            // **one line, and it used to be two paragraphs.** they said what
+            // forcing any frame out does rather than what this one did, and a
+            // client is told that once by the description of the request rather
+            // than again at every use of it. what stays here is the part a
+            // reader has to act on, because it has already happened
+            "**no block cleanup:** no `__exit__` and no `finally` ran, because a \
+             forced return is a jump. what the frame was the last holder of is \
+             finalised now instead, which can run a `__del__` or close a \
+             suspended generator"
                 .to_string(),
         ];
         if !self.disturbed.is_empty() {
             told.push(format!(
                 "{:?} hold the forced return's value until the restarted call \
                  finishes — a value the program never computed. they are names \
-                 `{}` binds in its **own** locals: its slots if it is a \
-                 function, its namespace if it is a module, class or `exec` \
-                 body. a line that writes a global or a cell after the call is \
-                 refused rather than restarted, so none of these is one",
+                 `{}` binds in its **own** locals, never a global or a cell: a \
+                 line that writes one of those after the call is refused",
                 self.disturbed, self.caller.function,
             ));
         }
         if !self.unannounced.is_empty() {
             told.push(format!(
                 "breakpoint(s) {:?} are on a line this restart moves to and will \
-                 not fire for the pass it lands in — no line event is delivered \
-                 for the line a jump moves to. they are still set",
+                 not fire for the pass it lands in. they are still set",
                 self.unannounced,
             ));
         }
         if !self.bound_to_none.is_empty() {
             told.push(format!(
                 "{:?} held nothing before the frame was forced out and hold \
-                 `None` now — cpython binds every unbound local when a frame \
-                 moves",
+                 `None` now",
                 self.bound_to_none,
             ));
         }
