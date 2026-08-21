@@ -491,6 +491,13 @@ pub enum Request {
     RestartFrame {
         /// which frame — the one its thread is executing, or a refusal
         frame: FrameId,
+        /// which of the two ways to run it again
+        ///
+        /// they are different operations rather than two implementations of
+        /// one: running it where it stands keeps the frame the program already
+        /// has and leaves the caller alone, and rewinding the caller builds a
+        /// frame that has never run. see [`crate::Again`]
+        again: crate::Again,
     },
 
     /// replace the code the process is running for one file with the code on
@@ -721,7 +728,7 @@ impl Request {
             | Self::SetNextStatement { frame, .. }
             | Self::Facts { frame, .. }
             | Self::Retainers { frame, .. }
-            | Self::RestartFrame { frame } => Some(frame.stop),
+            | Self::RestartFrame { frame, .. } => Some(frame.stop),
         }
     }
 }

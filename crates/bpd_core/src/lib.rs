@@ -53,8 +53,8 @@ pub use frame::{
     TASK_NOT_SEEN, Trail, Visited,
 };
 pub use jump::{
-    Access, Address, Jump, Jumped, Restarted, Restarting, Suspendable, Through, Unrestartable,
-    WHAT_READING_THE_BYTECODE_COSTS, Whose,
+    Access, Address, Again, Blocked, Jump, Jumped, Reset, Restarted, Restarting, Suspendable,
+    Through, Unresettable, Unrestartable, WHAT_READING_THE_BYTECODE_COSTS, Whose,
 };
 pub use parity::{Carried, Facet, Naming, Reach, Told, ran, ran_as, say, surface};
 pub use query::{

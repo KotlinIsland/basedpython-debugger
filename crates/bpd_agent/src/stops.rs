@@ -290,7 +290,7 @@ pub(crate) fn route(request: FromEngine) {
         | FromEngine::Source { frame, .. }
         | FromEngine::SetVariable { frame, .. }
         | FromEngine::SetNextStatement { frame, .. }
-        | FromEngine::RestartFrame { frame } => Address::Frame(*frame),
+        | FromEngine::RestartFrame { frame, .. } => Address::Frame(*frame),
         // `FromEngine` is non-exhaustive, so a newer engine could ask for
         // something this build cannot do. carrying on regardless would leave a
         // request unanswered and a debugger waiting for it

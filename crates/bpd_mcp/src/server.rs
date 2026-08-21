@@ -546,7 +546,13 @@ impl<'a> Server<'a> {
                 let args: RestartFrameArgs = parse(name, arguments)?;
                 let frame =
                     self.frame_of(args.stop, args.session, args.frame, "restarting a frame")?;
-                match self.ask_in(args.session, Request::RestartFrame { frame })? {
+                match self.ask_in(
+                    args.session,
+                    Request::RestartFrame {
+                        frame,
+                        again: args.again,
+                    },
+                )? {
                     Response::Restarted(restarted) => Ok(render::restarted(&restarted)),
                     other => unreachable!("a restart was answered with {other:?}"),
                 }
@@ -1702,6 +1708,9 @@ struct RestartFrameArgs {
     stop: Option<u64>,
     #[serde(default)]
     frame: u32,
+    /// which of the two ways to run the frame again, defaulting to either
+    #[serde(default)]
+    again: bpd_core::Again,
 }
 
 /// which file's code to replace

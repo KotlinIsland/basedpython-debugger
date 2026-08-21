@@ -5,7 +5,7 @@
 //! guess what was meant
 
 use crate::frame::{FrameId, Scope};
-use crate::jump::Unrestartable;
+use crate::jump::Blocked;
 
 /// a request the agent will not answer, and why
 ///
@@ -91,17 +91,17 @@ pub enum Refusal {
 
     /// the frame cannot be run again
     ///
-    /// a restart is not a move of the frame it names: it forces that frame to
-    /// **return** and rewinds its **caller** to the call. so what stands in the
-    /// way is a property of the frame, of its caller's line, or of both — see
-    /// [`Unrestartable`]
+    /// there are two ways to run one again and they fail for unrelated reasons:
+    /// running it where it stands is about the frame's own locals, and rewinding
+    /// its caller to the call is about the caller's line. which of them is named
+    /// here is which was **tried** — see [`Blocked`]
     NotRestartable {
         /// what was asked about
         frame: FrameId,
         /// `co_qualname` of what it is running
         function: String,
-        /// what stands in the way
-        reason: Unrestartable,
+        /// what stands in the way, of whichever ways were tried
+        reason: Blocked,
     },
 
     /// the request is about a template frame and that frame is a python frame
@@ -265,11 +265,9 @@ impl std::fmt::Display for Refusal {
                 reason,
             } => write!(
                 formatter,
-                "{frame} runs `{function}` and cannot be run again. a restart \
-                 forces the frame to return and rewinds its caller to the call, \
-                 so that the interpreter builds a frame that has never run — and \
-                 {reason}. none of the program's code ran: this was decided off \
-                 the bytecode before anything moved. {}",
+                "{frame} runs `{function}` and cannot be run again. {reason}. \
+                 none of the program's code ran: this was decided off the \
+                 bytecode before anything moved. {}",
                 crate::WHAT_READING_THE_BYTECODE_COSTS
             ),
             Self::UnmappableLine { frame, reason } => write!(
@@ -401,9 +399,9 @@ mod tests {
                 Refusal::NotRestartable {
                     frame,
                     function: "counter".to_string(),
-                    reason: Unrestartable::Suspendable {
+                    reason: Blocked::ThroughTheCaller(crate::Unrestartable::Suspendable {
                         kind: crate::jump::Suspendable::Generator,
-                    },
+                    }),
                 },
                 vec![
                     "frame 2 of stop 1",

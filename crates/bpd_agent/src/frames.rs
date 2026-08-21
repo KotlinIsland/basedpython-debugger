@@ -41,8 +41,9 @@
 use std::sync::OnceLock;
 
 use bpd_core::{
-    ContextLayer, Detail, Entry, Evaluated, Frame, FrameId, FrameKind, Holding, Jump, Jumped,
-    Omitted, Refusal, Restarted, Restarting, Scope, Suspendable, Unrestartable, Where,
+    Again, Blocked, ContextLayer, Detail, Entry, Evaluated, Frame, FrameId, FrameKind, Holding,
+    Jump, Jumped, Omitted, Refusal, Restarted, Restarting, Scope, Suspendable, Unrestartable,
+    Where,
 };
 use bpd_protocol::message::FromAgent;
 use pyo3::exceptions::PyKeyError;
@@ -52,7 +53,7 @@ use pyo3::types::PyDict;
 use crate::conditions::{self, capture};
 use crate::facts::Prover;
 use crate::values::Reader;
-use crate::{bytecode, events, linetable, sources, templates, world};
+use crate::{bytecode, events, inplace, linetable, sources, templates, world};
 
 /// `CO_OPTIMIZED` — the frame keeps its locals in slots the compiler assigned
 ///
@@ -700,7 +701,7 @@ impl<'py> Stopped<'py> {
     /// the second half of the answer is [`Restarting`]: what the caller will
     /// run again is a **line**, and what the forced return leaves in it is a
     /// value the program never computed
-    pub(crate) fn restart_frame(&mut self, id: FrameId) -> PyResult<Restart<'py>> {
+    pub(crate) fn restart_frame(&mut self, id: FrameId, again: Again) -> PyResult<Restart<'py>> {
         const WANTED: &str = "restarting a frame";
 
         let frame = match self.executing(id, WANTED)? {
@@ -709,14 +710,6 @@ impl<'py> Stopped<'py> {
         };
         let code = frame.getattr("f_code")?;
         let function: String = code.getattr("co_qualname")?.extract()?;
-        let refuse = |reason| {
-            Ok(Restart::Refused(Refusal::NotRestartable {
-                frame: id,
-                function: function.clone(),
-                reason,
-            }))
-        };
-
         // held for the whole of this, and it covers two different things.
         //
         // the **analysis** imports `dis` and reads two code objects. it runs
@@ -731,18 +724,82 @@ impl<'py> Stopped<'py> {
         // a known cost rather than a discovery
         let _suppressed = conditions::suppress();
 
+        // **tried first, and it writes nothing if it refuses.** every reason it
+        // can give is decided off the bytecode and off the layout, before the
+        // jump that would move the frame — so a frame it cannot reach is left
+        // exactly where the rewinding path below finds it
+        //
+        // first rather than second because it runs none of the caller's code.
+        // most of the refusals below are questions about the caller's line, and
+        // a mechanism that never re-enters that line does not have to ask them
+        let in_place = match again {
+            Again::ThroughTheCaller => None,
+            Again::Either | Again::InPlace => match inplace::reset(&frame)? {
+                Ok(reset) => return Ok(Restart::Answered(Restarted::Reset(reset))),
+                Err(why) => Some(why),
+            },
+        };
+        if again == Again::InPlace {
+            let Some(why) = in_place else {
+                unreachable!("`InPlace` takes the arm above, which either returns or says why not")
+            };
+            return Ok(Restart::Refused(Refusal::NotRestartable {
+                frame: id,
+                function,
+                reason: Blocked::InPlace(why),
+            }));
+        }
+
+        self.restart_through_the_caller(id, function, &frame, &code, in_place.as_ref())
+    }
+
+    /// rewind the caller to the call, so the interpreter builds a fresh frame
+    ///
+    /// split out of [`Stopped::restart_frame`] to keep each of the two
+    /// mechanisms readable on its own, and because they share nothing but the
+    /// frame — this one asks every question there is about the **caller's line**,
+    /// and the other asks none of them
+    ///
+    /// `in_place` is what the reset said when it was tried, so that a refusal
+    /// can name both halves. `None` when it was not tried at all, which is what
+    /// `Again::ThroughTheCaller` asks for
+    fn restart_through_the_caller(
+        &mut self,
+        id: FrameId,
+        function: String,
+        frame: &Bound<'py, PyAny>,
+        code: &Bound<'py, PyAny>,
+        in_place: Option<&bpd_core::Unresettable>,
+    ) -> PyResult<Restart<'py>> {
+        // what is reported names the ways that were **tried**. a user who asked
+        // to rewind the caller is not told about the frame's cell variables,
+        // because cell variables were never what stood in their way
+        let refuse = |reason: Unrestartable| {
+            Ok(Restart::Refused(Refusal::NotRestartable {
+                frame: id,
+                function: function.clone(),
+                reason: match in_place.cloned() {
+                    Some(in_place) => Blocked::Neither {
+                        in_place,
+                        through_the_caller: reason,
+                    },
+                    None => Blocked::ThroughTheCaller(reason),
+                },
+            }))
+        };
+
         // in order of how fundamental each is, so that a frame with two
         // reasons is told the one that would still be true if the other were
         // fixed. a module frame has no clean exit **and** no caller, and
         // giving it a `return` would not make it restartable
-        if let Some(kind) = suspendable(&code)? {
+        if let Some(kind) = suspendable(code)? {
             return refuse(Unrestartable::Suspendable { kind });
         }
         let caller = frame.getattr("f_back")?;
         if caller.is_none() || is_bootstrap(&caller) {
             return refuse(Unrestartable::NoCaller);
         }
-        let exits = match bytecode::exit_tails(&code, &namespaces_of(&frame)?)? {
+        let exits = match bytecode::exit_tails(code, &namespaces_of(frame)?)? {
             Ok(exits) => exits,
             Err(reason) => return refuse(reason),
         };
@@ -760,10 +817,10 @@ impl<'py> Stopped<'py> {
         };
 
         // nothing above this point has touched the program. from here it has
-        let at = describe_where(&frame)?;
-        let place = Place::of(&frame)?;
+        let at = describe_where(frame)?;
+        let place = Place::of(frame)?;
         let unbound = place.unbound()?;
-        let (was_inside_a_block, finalising) = what_dies_with_it(&frame, &code, &place)?;
+        let (was_inside_a_block, finalising) = what_dies_with_it(frame, code, &place)?;
         bind_the_unbound(self.python, &place, &unbound)?;
         let mut refused = None;
         let mut taken = None;
@@ -775,7 +832,7 @@ impl<'py> Stopped<'py> {
             // version jumped speculatively and put the frame back, and the
             // put-back relocated it onto a different copy of the same line while
             // the answer said nothing had moved
-            match linetable::move_to(&frame, &code, exit.offset)? {
+            match linetable::move_to(frame, code, exit.offset)? {
                 Ok(()) => {
                     taken = Some(exit);
                     break;
@@ -814,7 +871,7 @@ impl<'py> Stopped<'py> {
                 finalising,
                 caller: describe_where(&caller)?,
                 disturbed: call.disturbed,
-                bound_to_none: bound_to_none(&frame, &unbound)?,
+                bound_to_none: bound_to_none(frame, &unbound)?,
                 // **both** lines that will not fire, not only the rewind's
                 // destination. the exit of the forced-out frame really
                 // executes — its loads and its return run — and no `LINE` event
@@ -823,14 +880,14 @@ impl<'py> Stopped<'py> {
                 //
                 // against the lines the interpreter has, which is what the
                 // breakpoint table is keyed by
-                unannounced: passed_over(&code, exit_line, &caller_code, call.line),
+                unannounced: passed_over(code, exit_line, &caller_code, call.line),
                 mode: world::mode(),
             },
             caller,
             call_line: call.line,
             from: call.from,
             function,
-            code,
+            code: code.clone(),
         })
     }
 
@@ -1180,7 +1237,7 @@ fn unresolvable_names(
 /// all three are refused a restart, and for one reason rather than three:
 /// `f_back` of such a frame is whoever **resumed** it, which need not be what
 /// produced it — see [`Unrestartable::Suspendable`]
-fn suspendable(code: &Bound<'_, PyAny>) -> PyResult<Option<Suspendable>> {
+pub(crate) fn suspendable(code: &Bound<'_, PyAny>) -> PyResult<Option<Suspendable>> {
     let flags: u32 = code.getattr("co_flags")?.extract()?;
     Ok([
         (CO_GENERATOR, Suspendable::Generator),
@@ -1249,7 +1306,7 @@ fn passed_over(
 /// slots only. an empty **cell** is a live cell object rather than a NULL slot,
 /// so cpython does not bind one either, and binding one here would be a change
 /// to the program cpython was never going to make
-fn bind_the_unbound(
+pub(crate) fn bind_the_unbound(
     python: Python<'_>,
     place: &Place<'_>,
     unbound: &[(Scope, String)],
@@ -1444,7 +1501,7 @@ enum Held<'py> {
 }
 
 /// one frame, and the namespaces it reads and writes through
-struct Place<'py> {
+pub(crate) struct Place<'py> {
     globals: Bound<'py, PyAny>,
     locals: Bound<'py, PyAny>,
     optimized: bool,
@@ -1454,7 +1511,7 @@ struct Place<'py> {
 }
 
 impl<'py> Place<'py> {
-    fn of(frame: &Bound<'py, PyAny>) -> PyResult<Self> {
+    pub(crate) fn of(frame: &Bound<'py, PyAny>) -> PyResult<Self> {
         let code = frame.getattr("f_code")?;
         let flags: u32 = code.getattr("co_flags")?.extract()?;
         Ok(Self {
@@ -1520,7 +1577,7 @@ impl<'py> Place<'py> {
     /// module or a class body keeps its locals in a namespace mapping, where a
     /// name that is not there is absent rather than unbound, and cpython's jump
     /// binds nothing in one
-    fn unbound(&self) -> PyResult<Vec<(Scope, String)>> {
+    pub(crate) fn unbound(&self) -> PyResult<Vec<(Scope, String)>> {
         if !self.optimized {
             return Ok(Vec::new());
         }
