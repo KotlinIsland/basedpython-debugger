@@ -2134,8 +2134,22 @@ impl Adapter {
             None => return Err(stale(reference)),
         };
 
+        // DAP's `restartFrame` has no field for this, and its `arguments` is an
+        // object a client may put its own properties on — so the mode is
+        // reachable here rather than being a gap that wants a `JUSTIFIED` entry.
+        // absent, which is what every stock client sends, is the default
+        let again = match message.arguments.get("again") {
+            None => bpd_core::Again::Either,
+            Some(named) => serde_json::from_value(named.clone()).map_err(|_| {
+                Aborted::Refuse(format!(
+                    "`again` was {named}, and it is one of `either`, `in_place` \
+                     or `through_the_caller`"
+                ))
+            })?,
+        };
+
         let stop = frame.stop;
-        let restarted = match self.ask(Request::RestartFrame { frame })? {
+        let restarted = match self.ask(Request::RestartFrame { frame, again })? {
             Response::Restarted(restarted) => restarted,
             other => unreachable!("a restart was answered with {other:?}"),
         };
@@ -2846,6 +2860,18 @@ const RESTARTING_EVENT: &str = "bpd/restarting";
 fn restarting_notes(restarted: &bpd_core::Restarted) -> Vec<String> {
     match restarted {
         bpd_core::Restarted::Arranged(restarting) => restarting.told(),
+        bpd_core::Restarted::Reset(reset) => {
+            let mut said = reset.told();
+            // DAP's own half. the thread was never let go, so there is no
+            // `stopped` event behind this and a client waiting for one would
+            // wait for ever — the stop it is already showing is the answer
+            said.push(
+                "no `stopped` event follows this: the thread was not let go, so \
+                 the stop already on screen is the restarted frame"
+                    .to_string(),
+            );
+            said
+        }
         bpd_core::Restarted::Refused { tried, error } => vec![
             format!(
                 "the restart was refused and none of the program's code ran — \

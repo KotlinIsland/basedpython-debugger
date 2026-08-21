@@ -31,6 +31,8 @@ mod files;
 #[cfg(unix)]
 mod forks;
 mod frames;
+mod inplace;
+mod interpframe;
 mod linetable;
 mod pause;
 mod replace;

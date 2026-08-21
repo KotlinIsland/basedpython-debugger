@@ -596,6 +596,13 @@ pub enum FromEngine {
     RestartFrame {
         /// which frame
         frame: FrameId,
+        /// which of the two ways to run it again
+        ///
+        /// carried rather than decided here: both mechanisms live in the
+        /// debuggee, and which one a request wants is the client's answer rather
+        /// than the agent's
+        #[serde(default)]
+        again: bpd_core::Again,
     },
 
     /// replace the code the process is running for one file with what is on disk
@@ -1096,6 +1103,7 @@ mod tests {
     fn a_jump_cpython_refused_round_trips_with_cpythons_own_reason() {
         let request = FromEngine::RestartFrame {
             frame: FrameId { stop: 2, depth: 0 },
+            again: bpd_core::Again::ThroughTheCaller,
         };
         let answer = FromAgent::Jumped {
             jumped: bpd_core::Jumped {

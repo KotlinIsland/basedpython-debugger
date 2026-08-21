@@ -191,8 +191,8 @@ fn answer(
             let answer = stopped.set_next_statement(frame, line)?;
             attach::send(&answer);
         }
-        FromEngine::RestartFrame { frame } => {
-            return restarting(python, stopped, ticket, thread, frame);
+        FromEngine::RestartFrame { frame, again } => {
+            return restarting(python, stopped, ticket, thread, frame, again);
         }
         FromEngine::ReplaceCode {
             file,
@@ -243,8 +243,9 @@ fn restarting(
     ticket: &stops::Ticket,
     thread: u64,
     frame: bpd_core::FrameId,
+    again: bpd_core::Again,
 ) -> PyResult<Answered> {
-    match stopped.restart_frame(frame)? {
+    match stopped.restart_frame(frame, again)? {
         frames::Restart::Refused(reason) => {
             attach::send(&FromAgent::Refused { reason });
             Ok(Answered::StayHeld)

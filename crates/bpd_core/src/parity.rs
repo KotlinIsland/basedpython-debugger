@@ -647,7 +647,13 @@ pub fn surface() -> Vec<Request> {
             detail: Detail::default(),
         },
         Request::SetNextStatement { frame, line: 2 },
-        Request::RestartFrame { frame },
+        // the default, and the other two are reached through the same request
+        // rather than through a second one — a front end that carries the mode
+        // carries all three
+        Request::RestartFrame {
+            frame,
+            again: crate::Again::Either,
+        },
         // asked for under a live frame, because that is the half a front end
         // can drop with nothing failing: a replacement is made either way, and
         // only a front end that carries the flag can offer the trade at all

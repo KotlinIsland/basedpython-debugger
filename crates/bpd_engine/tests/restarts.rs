@@ -17,8 +17,8 @@ use std::path::Path;
 use bpd_core::Access;
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Abandoned, Binding, FrameId, Refusal, Restarted, Restarting, Running, SourceBreakpoint, Stop,
-    StopReason, Unrestartable, Whose,
+    Abandoned, Again, Binding, Blocked, FrameId, Refusal, Restarted, Restarting, Running,
+    SourceBreakpoint, Stop, StopReason, Unrestartable, Whose,
 };
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
@@ -928,7 +928,7 @@ fn restart_grows(debuggee: &mut Debuggee, fixture: &Fixture) -> bpd_engine::Resu
     let inside = line_of(PROGRAM, "    total = value + 1");
     held_at(debuggee, &fixture.path(), inside);
     let frame = top(debuggee);
-    debuggee.restart_frame(frame)
+    debuggee.restart_frame(frame, Again::ThroughTheCaller)
 }
 
 /// what an arranged restart said, or the outcome that was not one
@@ -938,6 +938,15 @@ fn arranged(restarted: &Restarted) -> &Restarting {
         Restarted::Refused { tried, error } => {
             panic!("cpython refused every exit line of {tried:?}: {error}")
         }
+        // this file is about the mechanism that rewinds the caller, and `grows`
+        // reaches it by writing over its own parameter — which is what stops the
+        // frame being run again where it stands. a fixture that stopped doing
+        // that would quietly start testing the other mechanism, so it is a
+        // failure rather than an accepted second answer
+        Restarted::Reset(reset) => panic!(
+            "the frame was reset in place rather than rewound, so this case is \
+             no longer about the caller's line: {reset:?}"
+        ),
     }
 }
 
@@ -983,7 +992,13 @@ fn refused(result: bpd_engine::Result<Restarted>) -> (String, Unrestartable) {
     match error {
         bpd_engine::Error::Session(bpd_core::Error::Refused {
             reason: Refusal::NotRestartable { reason, .. },
-        }) => (said, reason),
+        }) => match reason {
+            // this file asks for the caller to be rewound, so that is the only
+            // half there is to be told about — a refusal naming the other one
+            // would mean the request stopped asking for what the file is about
+            Blocked::ThroughTheCaller(why) => (said, why),
+            other => panic!("expected a rewinding refusal, got {other:?}"),
+        },
         other => panic!("expected a restart refusal, got {other:?}"),
     }
 }
@@ -1071,7 +1086,7 @@ fn a_context_manager_open_across_a_restart_is_not_exited() {
     held_at(&mut debuggee, &fixture.path(), inside);
     let frame = top(&mut debuggee);
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged");
     arranged(&restarted);
 
@@ -1118,7 +1133,7 @@ fn a_function_whose_only_return_is_fused_onto_a_statement_restarts() {
     held_at(&mut debuggee, &fixture.path(), inside);
     let frame = top(&mut debuggee);
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged");
     let restarting = arranged(&restarted);
     assert_eq!(restarting.frame.function, "implicit", "{restarting:?}");
@@ -1170,7 +1185,7 @@ fn the_line_table_the_forced_exit_borrows_is_put_back() {
 
     let frame = top(&mut debuggee);
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged");
     assert_eq!(arranged(&restarted).frame.function, "readable");
 
@@ -1202,7 +1217,7 @@ fn a_function_whose_every_return_returns_an_expression_is_refused_by_name() {
 
     held_at(&mut debuggee, &fixture.path(), inside);
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(matches!(reason, Unrestartable::NoCleanExit), "{reason:?}");
     assert!(said.contains("`expressive`"), "said {said}");
     assert!(said.contains("returns an expression"), "said {said}");
@@ -1337,7 +1352,7 @@ fn every_shape_that_would_re_run_something_on_the_callers_line_is_refused_by_nam
         held_in_grows_called_from(&mut debuggee, &fixture, caller_line);
 
         let frame = top(&mut debuggee);
-        let (said, reason) = refused(debuggee.restart_frame(frame));
+        let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
         assert!(matches(&reason), "{name}: {reason:?}");
         for expected in wanted {
             assert!(
@@ -1373,7 +1388,7 @@ fn a_call_the_caller_has_no_statement_after_is_refused_by_name() {
     held_in_grows_called_from(&mut debuggee, &fixture, "    grows(1)");
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(reason, Unrestartable::NothingRunsAfterTheCall { .. }),
         "{reason:?}"
@@ -1402,7 +1417,7 @@ fn a_generator_frame_is_refused_by_name_and_says_what_it_would_have_done() {
 
     held_at(&mut debuggee, &fixture.path(), yielding);
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             reason,
@@ -1436,7 +1451,7 @@ fn the_outermost_frame_has_no_caller_to_run_the_call_again_and_is_refused() {
     let mut debuggee = launch(&fixture);
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(matches!(reason, Unrestartable::NoCaller), "{reason:?}");
     assert!(said.contains("outermost frame"), "said {said}");
     assert!(
@@ -1521,7 +1536,7 @@ fn a_coroutine_and_an_async_generator_are_refused_for_the_reason_a_generator_is(
 
         held_at(&mut debuggee, &fixture.path(), line_of(PROGRAM, inside));
         let frame = top(&mut debuggee);
-        let (said, reason) = refused(debuggee.restart_frame(frame));
+        let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
         assert!(
             matches!(reason, Unrestartable::Suspendable { kind: got } if got == kind),
             "{name}: {reason:?}"
@@ -1561,7 +1576,7 @@ fn a_call_made_from_the_module_body_is_refused_because_its_names_are_globals() {
     held_in_grows_called_from(&mut debuggee, &fixture, "module_level = grows(1)");
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,
@@ -1592,7 +1607,7 @@ fn a_module_body_call_that_stores_nothing_still_restarts() {
 
     let frame = top(&mut debuggee);
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged");
     let restarting = arranged(&restarted);
     assert_eq!(restarting.caller.function, "<module>");
@@ -1623,7 +1638,7 @@ fn a_class_body_whose_namespace_is_not_a_dict_is_refused_by_name() {
     held_in_grows_called_from(&mut debuggee, &fixture, "    made = grows(1)");
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(reason, Unrestartable::NamespaceIsNotADict { .. }),
         "{reason:?}"
@@ -1680,7 +1695,7 @@ fn a_frame_entered_from_something_that_is_not_a_call_is_refused_rather_than_asse
     assert_eq!(stack.frames[0].name(), "Watched.attr");
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             reason,
@@ -1741,7 +1756,7 @@ fn a_call_that_reads_back_the_name_it_stores_into_is_refused() {
     held_in_grows_called_from(&mut debuggee, &fixture, "    seed = grows(seed)");
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             reason,
@@ -1797,7 +1812,7 @@ fn a_breakpoint_the_forced_return_passes_over_is_named_rather_than_skipped_quiet
 
     let frame = top(&mut debuggee);
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged");
     let restarting = arranged(&restarted);
     assert!(
@@ -1819,7 +1834,7 @@ fn a_chained_assignment_names_every_slot_the_forced_return_lands_in() {
 
     let frame = top(&mut debuggee);
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged");
     let restarting = arranged(&restarted);
     let mut named = restarting.disturbed.clone();
@@ -1853,7 +1868,7 @@ fn a_return_whose_line_has_a_dirty_range_before_it_is_refused() {
 
     held_at(&mut debuggee, &fixture.path(), inside);
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(matches!(reason, Unrestartable::NoCleanExit), "{reason:?}");
     assert!(said.contains("`charged`"), "said {said}");
 
@@ -1880,7 +1895,7 @@ fn a_call_split_over_source_lines_sees_what_is_on_the_argument_line() {
     held_in_grows_called_from(&mut debuggee, &fixture, "    fetched = grows(");
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,
@@ -1916,7 +1931,7 @@ fn a_call_inside_a_finally_is_restarted_rather_than_called_two_calls() {
 
     let frame = top(&mut debuggee);
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("a call inside a `finally` makes one call and is restartable");
     let restarting = arranged(&restarted);
     assert_eq!(restarting.caller.function, "protected");
@@ -1987,7 +2002,7 @@ fn a_load_global_on_the_exit_line_is_refused_when_the_globals_are_not_a_plain_di
 
     held_at_when_loaded(&mut debuggee, &inner, 3);
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(reason, Unrestartable::NamespaceIsNotADict { .. }),
         "{reason:?}"
@@ -2020,7 +2035,7 @@ fn the_exception_copy_of_a_finally_is_refused_with_a_reason_that_is_true() {
     held_in_grows_called_from(&mut debuggee, &fixture, "        caught_got = grows(2)");
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(reason, Unrestartable::CopiedLine { .. }),
         "{reason:?}"
@@ -2072,7 +2087,7 @@ fn a_load_global_that_falls_through_to_exotic_builtins_is_refused() {
 
     held_at_when_loaded(&mut debuggee, &inner, 3);
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     // the **line**, not just the type name. this producer is about a line of the
     // restarted frame, and it named the first line a `LOAD_GLOBAL` appeared on —
     // a call line that could never have been an exit — rather than the `return`
@@ -2132,7 +2147,7 @@ fn an_exit_line_that_loads_an_unbound_cell_is_refused() {
     );
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     // named, not "this function has no clean exit line" — it plainly has a
     // `return`, and the thing in the way is which name that `return` reads
     assert!(
@@ -2186,7 +2201,7 @@ fn a_frame_inside_a_finally_handling_an_exception_is_forced_out_cleanly() {
 
     let frame = top(&mut debuggee);
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged");
     assert_eq!(arranged(&restarted).frame.function, "stranded");
 
@@ -2234,7 +2249,7 @@ fn an_exit_line_that_loads_a_name_bound_nowhere_is_refused() {
     // LATE_AND_UNDEFINED` comes **first** in `co_lines` order, so it is the one
     // that was tried first and the one that raised into the program
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("this frame has a return that does not raise");
     let restarting = arranged(&restarted);
     assert_eq!(
@@ -2285,7 +2300,7 @@ fn a_caller_that_catches_what_the_forced_exit_raised_is_not_reported_as_a_succes
 
     let frame = top(&mut debuggee);
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("this frame has a return that does not raise");
     arranged(&restarted);
 
@@ -2325,7 +2340,7 @@ fn the_def_line_is_never_the_line_a_frame_is_forced_out_through() {
 
     let frame = top(&mut debuggee);
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("a one-line function has a clean exit: its own return");
     let restarting = arranged(&restarted);
     assert_eq!(
@@ -2354,7 +2369,7 @@ fn a_frame_whose_every_exit_would_raise_is_told_which_name() {
     );
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,
@@ -2401,7 +2416,7 @@ fn a_name_bound_nowhere_on_the_callers_line_is_refused_as_the_callers() {
     );
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,
@@ -2449,7 +2464,7 @@ fn what_a_restart_says_about_cleanup_admits_the_one_that_does_run() {
 
     let frame = top(&mut debuggee);
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged");
     let restarting = arranged(&restarted);
 
@@ -2496,7 +2511,7 @@ fn what_a_restart_says_about_cleanup_does_not_name_a_closed_list() {
 
     let frame = top(&mut debuggee);
     let restarted = debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged");
     let told = arranged(&restarted).told().join(" | ");
     assert!(
@@ -2540,7 +2555,7 @@ fn a_frame_whose_exits_are_blocked_differently_does_not_claim_they_all_read_it()
     );
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,
@@ -2584,7 +2599,7 @@ fn a_caller_whose_tail_reads_an_unbound_local_is_refused_rather_than_abandoned()
     );
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,
@@ -2636,11 +2651,11 @@ fn a_fused_store_and_load_names_only_the_slot_it_writes() {
 
     let frame = top(&mut debuggee);
     let arranged = match debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged")
     {
         Restarted::Arranged(restarting) => restarting,
-        other @ Restarted::Refused { .. } => {
+        other => {
             panic!("expected an arranged restart, got {other:?}")
         }
     };
@@ -2680,11 +2695,11 @@ fn a_name_the_call_reads_and_a_fused_load_names_is_not_a_name_the_line_stores() 
 
     let frame = top(&mut debuggee);
     let arranged = match debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged")
     {
         Restarted::Arranged(restarting) => restarting,
-        other @ Restarted::Refused { .. } => {
+        other => {
             panic!("the line stores into neither name the call reads: {other:?}")
         }
     };
@@ -2716,7 +2731,7 @@ fn a_call_split_over_lines_is_not_told_it_is_in_a_finally() {
     );
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(reason, Unrestartable::CopiedLine { .. }),
         "{reason:?}"
@@ -2749,7 +2764,7 @@ fn a_starred_call_is_not_told_to_do_what_it_already_does() {
     );
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,
@@ -2790,11 +2805,11 @@ fn a_container_built_from_the_forced_return_names_the_slot_it_lands_in() {
 
     let frame = top(&mut debuggee);
     let arranged = match debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged")
     {
         Restarted::Arranged(restarting) => restarting,
-        other @ Restarted::Refused { .. } => panic!("the line is one clean call: {other:?}"),
+        other => panic!("the line is one clean call: {other:?}"),
     };
     assert_eq!(
         arranged.disturbed,
@@ -2825,11 +2840,11 @@ fn a_value_the_caller_pushed_before_the_call_is_not_a_span_bpd_gives_up_on() {
 
     let frame = top(&mut debuggee);
     let arranged = match debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged")
     {
         Restarted::Arranged(restarting) => restarting,
-        other @ Restarted::Refused { .. } => panic!("this is one clean call: {other:?}"),
+        other => panic!("this is one clean call: {other:?}"),
     };
     // `second` takes the call's value; `first` takes `spare`, which the caller
     // pushed before the call ever ran
@@ -2896,7 +2911,7 @@ fn a_class_body_that_declares_a_global_is_refused_for_the_store_it_makes() {
     held_in_grows_called_from(&mut debuggee, &fixture, "        declared = grows(1)");
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,
@@ -2951,11 +2966,11 @@ fn a_name_that_reads_back_a_disturbed_one_is_disturbed_too() {
 
     let frame = top(&mut debuggee);
     let arranged = match debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged")
     {
         Restarted::Arranged(restarting) => restarting,
-        other @ Restarted::Refused { .. } => panic!("one clean call: {other:?}"),
+        other => panic!("one clean call: {other:?}"),
     };
     assert_eq!(
         arranged.disturbed,
@@ -2990,7 +3005,7 @@ fn a_call_whose_argument_is_fed_back_through_another_name_is_refused() {
     );
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,
@@ -3019,11 +3034,11 @@ fn a_slot_written_again_after_the_call_is_not_left_named() {
 
     let frame = top(&mut debuggee);
     let arranged = match debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged")
     {
         Restarted::Arranged(restarting) => restarting,
-        other @ Restarted::Refused { .. } => panic!("one clean call: {other:?}"),
+        other => panic!("one clean call: {other:?}"),
     };
     assert!(
         arranged.disturbed.is_empty(),
@@ -3058,11 +3073,11 @@ fn the_write_half_of_a_fused_store_is_not_a_read_the_call_makes() {
 
     let frame = top(&mut debuggee);
     let arranged = match debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged")
     {
         Restarted::Arranged(restarting) => restarting,
-        other @ Restarted::Refused { .. } => {
+        other => {
             panic!("nothing on the line reads `va` before the call: {other:?}")
         }
     };
@@ -3148,7 +3163,7 @@ fn a_call_reading_a_name_the_tail_writes_is_refused_even_when_bpd_wrote_nothing(
     );
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,
@@ -3191,11 +3206,11 @@ fn a_name_read_back_through_an_ordinary_load_is_followed_too() {
 
     let frame = top(&mut debuggee);
     let arranged = match debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged")
     {
         Restarted::Arranged(restarting) => restarting,
-        other @ Restarted::Refused { .. } => panic!("one clean call: {other:?}"),
+        other => panic!("one clean call: {other:?}"),
     };
     assert_eq!(
         arranged.disturbed,
@@ -3224,11 +3239,11 @@ fn a_constant_that_happens_to_be_a_string_is_not_a_name() {
 
     let frame = top(&mut debuggee);
     let arranged = match debuggee
-        .restart_frame(frame)
+        .restart_frame(frame, Again::ThroughTheCaller)
         .expect("the restart was arranged")
     {
         Restarted::Arranged(restarting) => restarting,
-        other @ Restarted::Refused { .. } => panic!("one clean call: {other:?}"),
+        other => panic!("one clean call: {other:?}"),
     };
     assert_eq!(
         arranged.disturbed,
@@ -3261,7 +3276,7 @@ fn a_tail_that_writes_a_global_the_callee_could_read_is_refused() {
     );
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,
@@ -3302,7 +3317,7 @@ fn the_refusal_names_the_read_that_takes_the_invented_value() {
     );
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,
@@ -3334,7 +3349,7 @@ fn a_tail_that_writes_a_cell_the_closure_shares_is_refused() {
     );
 
     let frame = top(&mut debuggee);
-    let (said, reason) = refused(debuggee.restart_frame(frame));
+    let (said, reason) = refused(debuggee.restart_frame(frame, Again::ThroughTheCaller));
     assert!(
         matches!(
             &reason,

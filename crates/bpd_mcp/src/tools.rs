@@ -874,60 +874,90 @@ pub fn tools() -> Vec<Tool> {
         Tool {
             name: "restart_frame",
             title: "run the held frame again, with the locals a call binds",
-            description: "**not a jump, and it resumes the thread.** the frame \
-                is forced to *return* — moved to a line of its own code that is \
-                only loads and a return — and its **caller** is then rewound to \
-                the line the call was made from, so the interpreter builds a \
-                frame that has never run. that is what makes the locals \
-                fresh.\n\n\
+            description: "**two ways, and `again` picks.** they are different \
+                operations rather than two implementations of one. the default \
+                (`either`) prefers the first and falls back to the second.\n\n\
+                `in_place` — **run the frame again where it stands.** the frame \
+                is moved back to the top of its own body and its locals are put \
+                back to what a call that had just started would hold. its \
+                **caller is never touched**: it stays suspended in the `CALL`, \
+                nothing on its line runs a second time, and when the frame does \
+                return its value goes where the program was always going to put \
+                it. so `x = f(f2())` restarts `f` without `f2` running twice, and \
+                `x = f(obj.attr)` restarts `f` without the property's getter \
+                running twice — not because either is analysed and found safe, \
+                but because neither is re-executed at all. the same holds for a \
+                frame called from C and one reached by an attribute lookup.\n\n\
+                **the thread is not resumed and no second stop follows.** this \
+                stop is the restart; it stays current and still answers \
+                questions, and the frame it names is the restarted frame at its \
+                first line. it is the **same frame object**, not a new one — a \
+                call would make a new frame and this does not, so anything the \
+                program holds it by still holds it.\n\n\
+                **it runs no block cleanup either.** sending the frame back to \
+                its first line is an `f_lineno` jump, so a `with` it was inside \
+                gets no `__exit__` and a `try` gets no `finally` — and the body \
+                then re-enters that block from the top, so the program has two \
+                `__enter__` against one `__exit__` and the first context manager \
+                is still open. the answer says `inside_a_block` when this \
+                happened.\n\n\
+                refused, by name, when: the frame **writes over one of its own \
+                parameters** (the parameter slots are the only place what the \
+                call passed still exists, so it has been lost); the code object \
+                **closes over names of its own** (`MAKE_CELL` carries no line, so \
+                no jump reaches it, and reusing the old cells would let a closure \
+                the first pass created see the second pass's writes); it is a \
+                generator or coroutine; or bpd could not establish where this \
+                interpreter keeps a frame's locals.\n\n\
+                `through_the_caller` — **force the frame out and rewind the \
+                caller**, so the interpreter builds a frame that has never run. \
+                ask for this when a genuinely new frame is what you want. it \
+                **resumes the thread**: do not ask this stop anything more; wait \
+                for the next stop, which is `restarted` at the first line of the \
+                fresh frame, or `restart_abandoned` when it could not be finished \
+                — the frame gone and the call not made again, with that stop \
+                carrying which of several reasons it was. a **third** thing can \
+                happen and is a known gap: another stop (a breakpoint, an \
+                exception, a pause, a stopped world) reaching this thread first \
+                takes the restart off, and neither of those two arrives.\n\n\
                 **it runs no block cleanup.** forcing the frame out is an \
                 `f_lineno` jump, so a `with` the frame was inside gets no \
                 `__exit__` and a `try` gets no `finally` — measured with a plain \
-                class context manager: two `__enter__`, one `__exit__`. a \
-                context manager the frame had open is still open, and the \
-                restarted call opens a second one.\n\n\
-                what the jump does not run, the frame **dying** can. anything it \
-                was the last holder of is finalised at that moment — a `__del__`, \
-                or the `GeneratorExit` thrown into a suspended generator, which \
-                runs its `finally` and the `__exit__` of any `with` inside it. a \
+                class context manager: two `__enter__`, one `__exit__`. what the \
+                jump does not run, the frame **dying** can: anything it was the \
+                last holder of is finalised at that moment — a `__del__`, or the \
+                `GeneratorExit` thrown into a suspended generator, which runs its \
+                `finally` and the `__exit__` of any `with` inside it. a \
                 `@contextlib.contextmanager` is exactly that shape, so its \
-                cleanup **does** run, at a point the program never reached. bpd \
-                does not enumerate what a finaliser will do.\n\n\
-                so **do not ask this stop anything more.** the answer says what \
-                was arranged and the thread is gone; wait for the next stop, \
-                which is `restarted` at the first line of the fresh frame, or \
-                `restart_abandoned` when the restart could not be finished — the \
-                frame gone and the call not made again, with that stop carrying \
-                which of several reasons it was. a **third** thing can happen and is a \
-                known gap: another stop (a breakpoint, an exception, a pause, a \
-                stopped world) reaching this thread first takes the restart off, \
-                and neither of those two arrives.\n\n\
-                **the unit is the caller's line, not the call.** everything on \
+                cleanup **does** run, at a point the program never reached.\n\n\
+                **its unit is the caller's line, not the call.** everything on \
                 that line runs a second time, so a line carrying anything besides \
-                the one call is refused by name rather than restarted: an \
-                attribute (a property would run again), a subscript (a \
-                `__getitem__`), an operator (a dunder), a store into an attribute \
-                (a setter, handed a value the program never computed), or a \
-                second call — `[f(), f()]`, a comprehension, `sorted(items, \
-                key=f)`, whose completed sibling calls really do re-run. so are a \
-                frame with no clean exit — one whose every return returns an \
-                expression, so there is nowhere in it that produces a value and \
-                returns without running its code — a call the caller has no \
-                statement \
-                after (the rewind needs a line event and none follows), and a \
-                generator or coroutine (`f_back` there is whoever *resumed* the \
-                frame, which need not be what produced it).\n\n\
-                every one of those is decided off the bytecode **before anything \
-                is attempted**, and the refusal names what stood in the way and \
-                what would work instead. this is still not `undo`: side effects \
-                the old frame already performed are not undone, and the frames it \
-                called are gone."
+                the one call is refused by name: an attribute, a subscript, an \
+                operator, a store into an attribute, or a second call. so are a \
+                frame with no clean exit, a call the caller has no statement \
+                after, and a generator or coroutine. **most of these are exactly \
+                what `in_place` does not have to ask**, which is why it is the \
+                default.\n\n\
+                every refusal is decided off the bytecode **before anything is \
+                attempted**, and names what stood in the way — of whichever ways \
+                were tried. neither is `undo`: side effects the frame already \
+                performed are not undone."
                 .to_string(),
             schema: object(
                 serde_json::json!({
                     "session": integer(SESSION),
                     "stop": integer(STOP),
                     "frame": integer(FRAME),
+                    "again": {
+                        "type": "string",
+                        "enum": ["either", "in_place", "through_the_caller"],
+                        "description": "which of the two ways to run the frame \
+                            again. `either` (the default) prefers running it \
+                            where it stands and falls back to rewinding the \
+                            caller. `in_place` keeps the same frame object and \
+                            never touches the caller. `through_the_caller` builds \
+                            a genuinely new frame and resumes the thread",
+                    },
                 }),
                 &[],
             ),

@@ -1306,6 +1306,85 @@ struct Written {
     written: Vec<String>,
 }
 
+/// the bit of `co_flags` saying the code object takes `*args`
+const CO_VARARGS: u32 = 0x04;
+/// the bit of `co_flags` saying it takes `**kwargs`
+const CO_VARKEYWORDS: u32 = 0x08;
+
+/// how many of a code object's `localsplus` slots are its parameters
+///
+/// they come first and in this order — positional, keyword-only, `*args`,
+/// `**kwargs` — which is what lets a slot index alone say whether a fresh call
+/// would have bound it
+pub(crate) fn parameter_slots(code: &Bound<'_, PyAny>) -> PyResult<usize> {
+    let flags: u32 = code.getattr("co_flags")?.extract()?;
+    let positional: usize = code.getattr("co_argcount")?.extract()?;
+    let keyword_only: usize = code.getattr("co_kwonlyargcount")?.extract()?;
+    Ok(positional
+        + keyword_only
+        + usize::from(flags & CO_VARARGS != 0)
+        + usize::from(flags & CO_VARKEYWORDS != 0))
+}
+
+/// the parameter this code object writes over, if it writes over one
+///
+/// a frame reset in place keeps its parameter slots exactly as they are. the
+/// arguments are the one thing about a call that cannot be worked out again:
+/// the caller's `CALL` **moved** its operands into these slots, so the caller's
+/// stack no longer holds them and there is nowhere else they survive
+///
+/// that is sound only while the frame has not written over them itself. `def
+/// f(n): n = n - 1` restarted from below the store would be called with bpd's
+/// value rather than the program's, which is the same objection that refuses
+/// `x = f(x)` on the rewinding path
+///
+/// **static, and over the whole code object rather than over what has run.** a
+/// frame stopped before its own store would pass a test of what has already
+/// happened and then run the store on the second pass, which is the restart
+/// getting it wrong one step later
+pub(crate) fn rebinds_a_parameter(code: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    let taken = parameter_slots(code)?;
+    let parameters: Vec<String> = code
+        .getattr("co_varnames")?
+        .try_iter()?
+        .take(taken)
+        .map(|name| name?.extract())
+        .collect::<PyResult<_>>()?;
+    for one in instructions(code)? {
+        // `DELETE_FAST` unbinds rather than rebinds, and loses the argument just
+        // as completely
+        let written = if one.opname == "DELETE_FAST" {
+            one.names.len()
+        } else {
+            writes(&one)
+        };
+        if let Some(name) = one
+            .names
+            .iter()
+            .take(written)
+            .find(|name| parameters.iter().any(|parameter| parameter == *name))
+        {
+            return Ok(Some(name.clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// the offset a jump to the top of a code object lands at
+///
+/// **not zero.** the prologue cpython puts before `RESUME` — `MAKE_CELL` for
+/// every cell variable, `COPY_FREE_VARS` for a closure — is in a `co_lines`
+/// range carrying **no line at all**, measured on 3.13, 3.14 and 3.15 as
+/// `(0, 2, None)`. `f_lineno` chooses among marks and a range with no line has
+/// none, so offset 0 is not somewhere a frame can be sent
+///
+/// what it lands on instead is the first range that does carry a line, which is
+/// the `RESUME`. that is why a code object with cell variables cannot be reset:
+/// its `MAKE_CELL` is on the far side of a door there is no handle on
+pub(crate) fn top_offset(code: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
+    Ok(spans(code)?.iter().map(|span| span.start).min())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

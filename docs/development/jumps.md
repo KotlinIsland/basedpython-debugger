@@ -106,6 +106,157 @@ a django template frame cannot be moved either. it is synthesised over the
 `Node.render_annotated` frame that renders it and the interpreter has no frame
 for it, so there is no instruction pointer to move
 
+## the two mechanisms, and which one is tried first
+
+a restart can be done two ways and they have almost nothing in common.
+**running the frame again where it stands** never touches the caller.
+**rewinding the caller to the call** never touches the frame's locals. one keeps
+the frame's identity, the other keeps the caller's line unexecuted, and no single
+answer is right for both — so the request carries which is wanted:
+
+| `again`                | what it does                                |
+| ---------------------- | ------------------------------------------- |
+| `either` (the default) | the reset, falling back to the rewind       |
+| `in_place`             | the reset, or the reason it cannot be done  |
+| `through_the_caller`   | the rewind, or the reason it cannot be done |
+
+a refusal names the ways that were **tried**, and only those. a user who asked to
+rewind the caller is not told about the frame's cell variables, because cell
+variables were never what stood in their way
+
+the reset is what `either` prefers, because of what it does *not* do. the rewind
+re-executes the caller's whole line, so every question about whether a restart is
+safe is a question about that line — and most of the refusals below exist only
+because of it. reset the frame instead and the caller stays suspended in its
+`CALL`, so the line is never re-entered and none of those questions arise:
+
+| the caller's line             | rewound                               | reset in place                  |
+| ----------------------------- | ------------------------------------- | ------------------------------- |
+| `x = f(f2())`                 | refused — `f2` would run twice        | restarted, `f2` runs once       |
+| `x = f(obj.attr)`             | refused — a property would run twice  | restarted, the getter runs once |
+| `sorted(items, key=f)`        | refused — no line event in a C caller | restarted                       |
+| `x = f(a)` inside a `finally` | refused — bpd cannot say which copy   | restarted                       |
+| `f()` as the last statement   | refused — nothing runs after the call | restarted                       |
+
+what the reset costs instead is a much smaller list, and it is about the frame
+rather than about its caller — see `Unresettable`. the two that matter:
+
+- a frame that **writes over one of its own parameters** cannot be reset. the
+    `CALL` moved the caller's operands into the parameter slots, so those slots are
+    the only place what the call passed still exists, and a frame that has written
+    over one has lost it. this is the case the rewind still serves, because
+    rewinding re-evaluates the arguments
+- a frame that **closes over names of its own** cannot be reset, because
+    `MAKE_CELL` is unreachable — see below
+
+### it is a jump, and then the part a jump cannot do
+
+the reset is `frame.f_lineno = co_firstlineno`, which is ordinary and supported:
+cpython pops the operand stack, closes what it pops, runs the block cleanup the
+jump implies, and sets the instruction pointer
+
+what it will not do is **unbind a local**. a jump binds every unbound local of
+the frame to `None`, so a frame sent back to the top of its own body starts with
+names bound that a frame the interpreter had just built would not have:
+
+```py
+def f(arg):
+    if arg == "never":
+        cond = 1
+    print(cond)  # a fresh call raises UnboundLocalError
+```
+
+a frame reset by a jump alone prints `None` there. that is a false belief about
+the program, produced by the debugger, with nothing downstream to catch it — so
+the reset is the jump **and** a second pass that puts every slot a fresh call
+would not have bound back to empty
+
+the order is fixed and is not an implementation detail: the jump binds them, so
+the pass has to come after it. a pass made first would clear exactly the slots
+the jump is about to fill
+
+### why the layout is measured rather than written down
+
+that second pass reaches `_PyInterpreterFrame`, which is internal and moves.
+`localsplus` is word 9 on 3.13, which has an `int stacktop`, and word 10 on 3.14
+and 3.15, which have a `_PyStackRef *stackpointer` instead. `f_frame` is word 3
+of `PyFrameObject` under the gil and word 5 without it, because a free-threaded
+`PyObject_HEAD` is four words rather than two
+
+that is a per-version, per-build table, and this project does not hand-maintain
+one: a table is right until an interpreter it was not written for loads it, and
+then it is silently wrong about somebody's memory
+
+so nothing is declared. every field is found by **matching a value bpd already
+knows**, against a probe it compiles itself — a generator, because a suspended
+generator keeps its locals and its frame data lives *inside the generator
+object*, so every read the calibration makes is bounded by an object bpd is
+holding and has asked the size of. the probe's three locals are the signature:
+one owned reference, one immortal, and one the interpreter never binds at all
+
+|              | `f_frame` | `localsplus` | `PyStackRef_NULL` |
+| ------------ | --------- | ------------ | ----------------- |
+| 3.13         | 3         | 9            | `0`               |
+| 3.14, 3.15   | 3         | 10           | `1`               |
+| 3.14t, 3.15t | 5         | 10           | `1`               |
+
+**one match or none.** two candidates is not a tie to be broken by preferring the
+lower — it is bpd not knowing which word is the field, and the next thing it
+would do with that is write. a build that does not match uniquely is one the
+reset refuses on
+
+which slots own what they hold needs no table and is argued rather than measured:
+a pointer to a `PyObject` is at least eight-aligned, so its low two bits are
+clear, and every tagged form cpython puts in a slot sets one of them —
+`Py_TAG_REFCNT` and `Py_TAG_DEFERRED` are both `1`, `Py_INT_TAG` is `3`,
+`Py_TAG_INVALID` is `2`. so a slot owns a reference exactly when `bits & 3 == 0`,
+and a tagged slot is left alone, which is what `PyStackRef_CLOSE` does with one
+
+### the door there is no handle on
+
+`MAKE_CELL` — and `COPY_FREE_VARS` for a closure — sits before `RESUME`, in a
+`co_lines` range carrying **no line at all**. measured as `(0, 2, None)` on 3.13,
+3.14 and 3.15. `f_lineno` chooses among marks and a range with no line has none,
+so offset 0 is not somewhere a frame can be sent: a reset lands on the `RESUME`
+at offset 2, and the prologue never re-runs
+
+free variables are unaffected — a fresh frame is handed the very same cells by
+`COPY_FREE_VARS` rather than making new ones, so keeping those slots is exactly
+right. **cell** variables are not: a fresh call makes new cells, and a closure
+the first pass created is still holding the old ones. a reset frame sharing them
+would let that escaped closure see the second pass's writes, which is a program
+behaviour the program does not have. so a code object with cell variables is
+refused, and the reason names the instruction rather than the symptom
+
+### it runs no block cleanup either
+
+sending the frame back to its first line is an `f_lineno` jump. cpython pops the
+operand stack and closes what it pops, which is **not** running a block's
+cleanup: a `with` the frame was inside gets no `__exit__` and a `try` gets no
+`finally`, and the body then re-enters that block from the top — measured, two
+`__enter__` against one `__exit__`, so the first context manager is still open
+
+`Reset::inside_a_block` says when this happened, and both front ends print it. it
+is the one thing a reset does that a call made afresh never would, so it is said
+rather than left to be discovered
+
+running the cleanup first is a chain of jumps through the compiler's own
+`__exit__` path — jump to the innermost cleanup, regain control at the next line
+boundary, repeat outward — and it is not built yet
+
+### what the reset does not claim
+
+**the frame object is the same object.** a fresh call makes a new frame and this
+does not, so `id(frame)` is unchanged and anything the program holds it by still
+holds it. both front ends say so on every reset, because a client that believed
+it had a new frame would be wrong about the program
+
+and it resets **one** frame. a frame with live frames above it cannot be reset
+while they are there — cpython crashes rather than refuses when a frame that is
+not executing is moved, measured on 3.13, 3.14 and 3.15 — so a reset `n` deep is
+a chain: force each frame above it out through its own cleanup, innermost first,
+then reset the target. that chain is not built yet
+
 ## what a restart really is
 
 **the frame it names does not move.** it is moved to the point in its own code

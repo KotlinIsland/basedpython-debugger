@@ -28,11 +28,11 @@ use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Addressed, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, Exit, Forwarded,
-    FrameId, Joined, Jumped, LogRecord, Replaced, Reporting, Request, Resolved, Response,
-    Restarted, Running, Scope, Script, SessionId, Snapshot, SnapshotId, SourceBreakpoint, Spawn,
-    Stack, StateQuery, StepKind, Stop, TemplateContext, Threads, Transcript, Variables, Which,
-    WorldStopped,
+    Addressed, Again, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, Exit,
+    Forwarded, FrameId, Joined, Jumped, LogRecord, Replaced, Reporting, Request, Resolved,
+    Response, Restarted, Running, Scope, Script, SessionId, Snapshot, SnapshotId, SourceBreakpoint,
+    Spawn, Stack, StateQuery, StepKind, Stop, TemplateContext, Threads, Transcript, Variables,
+    Which, WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine};
@@ -579,8 +579,8 @@ impl Debuggee {
                 self.attached[at]
                     .move_frame(&FromEngine::SetNextStatement { frame, line }, reporting)?,
             )),
-            Request::RestartFrame { frame } => Ok(Response::Restarted(
-                self.attached[at].restart_frame(frame, reporting)?,
+            Request::RestartFrame { frame, again } => Ok(Response::Restarted(
+                self.attached[at].restart_frame(frame, again, reporting)?,
             )),
             Request::ReplaceCode {
                 file,
@@ -915,8 +915,8 @@ impl Debuggee {
     /// be finished, carrying which of several reasons it was — cpython refusing
     /// the rewind is one of them and not the only one. a refused restart leaves
     /// the thread held exactly where it was
-    pub fn restart_frame(&mut self, frame: FrameId) -> Result<Restarted> {
-        match self.ask_for(Request::RestartFrame { frame })? {
+    pub fn restart_frame(&mut self, frame: FrameId, again: Again) -> Result<Restarted> {
+        match self.ask_for(Request::RestartFrame { frame, again })? {
             Response::Restarted(restarted) => Ok(restarted),
             other => unreachable!("a restart was answered with {other:?}"),
         }
@@ -1715,11 +1715,12 @@ impl Attached {
     fn restart_frame(
         &mut self,
         frame: FrameId,
+        again: Again,
         reporting: &mut dyn Reporting,
     ) -> Result<Restarted> {
         const EXPECTED: &str = "the frame to restart";
 
-        let request = FromEngine::RestartFrame { frame };
+        let request = FromEngine::RestartFrame { frame, again };
         match self.ask(&request, EXPECTED, reporting)? {
             FromAgent::Restarting { restarted } => {
                 if matches!(restarted, Restarted::Arranged(_)) {

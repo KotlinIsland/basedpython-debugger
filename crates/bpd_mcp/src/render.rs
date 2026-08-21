@@ -388,6 +388,18 @@ pub fn restarted(restarted: &Restarted) -> serde_json::Value {
                     .to_string(),
             );
         }
+        Restarted::Reset(reset) => {
+            notes.extend(reset.told());
+            // and this protocol's half: an agent told "restarted" by the other
+            // mechanism is told to wait for a stop, and doing that here would be
+            // waiting for something that is never sent
+            notes.push(
+                "do not wait for another stop. this one is still current and \
+                 still answers questions — the frame it names is the restarted \
+                 frame, at its first line"
+                    .to_string(),
+            );
+        }
         Restarted::Refused { tried, error } => {
             notes.push(format!(
                 "cpython would not move the frame to an exit on any of the lines \

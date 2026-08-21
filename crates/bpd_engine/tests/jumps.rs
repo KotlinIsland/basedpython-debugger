@@ -387,7 +387,7 @@ fn a_frame_that_is_not_the_one_the_thread_is_executing_is_refused_with_the_reaso
             .set_next_statement(caller, after)
             .expect_err("a frame suspended in a call cannot be moved"),
         debuggee
-            .restart_frame(caller)
+            .restart_frame(caller, bpd_core::Again::Either)
             .expect_err("a frame suspended in a call cannot be restarted"),
     ] {
         let said = refused.to_string();

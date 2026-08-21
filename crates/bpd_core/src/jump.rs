@@ -274,6 +274,13 @@ pub enum Restarted {
     /// the sentence says so rather than reading as a disjunction it is not
     Arranged(Restarting),
 
+    /// the frame was run again where it stood, and the thread is still in it
+    ///
+    /// no second stop follows this one and none should be waited for. the frame
+    /// is at its first line now, the caller was never touched, and nothing on
+    /// the caller's line was re-executed — see [`Reset`]
+    Reset(Reset),
+
     /// cpython refused to move the frame to an exit on any of its lines
     ///
     /// no code of the program ran: a refused assignment to `f_lineno` moves
@@ -734,6 +741,344 @@ pub enum Unrestartable {
         /// the caller's line the call is on
         line: u32,
     },
+}
+
+/// which of the two ways to run a frame again
+///
+/// they are not two implementations of one operation. **in place** reuses the
+/// frame the program already has and never touches its caller; **through the
+/// caller** rewinds the caller to the call so the interpreter builds a frame
+/// that has never run. one keeps the frame's identity and the other keeps the
+/// caller's line unexecuted, and no single answer is right for both
+///
+/// the default is [`Again::Either`] and it prefers the reset, because the reset
+/// runs none of the caller's code — every question the rewind has to ask about
+/// whether a restart is safe is a question about that line
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Again {
+    /// whichever of the two works, preferring the one that leaves the caller alone
+    ///
+    /// the reset is tried first and the rewind is the fallback. a refusal from
+    /// this carries **both** reasons, because a user told only one of them would
+    /// go and change the thing that was not in the way
+    #[default]
+    Either,
+
+    /// run the frame again where it stands, or say why that cannot be done
+    ///
+    /// the caller is not touched and nothing on its line runs a second time. the
+    /// frame object is the one the program already has
+    InPlace,
+
+    /// rewind the caller to the call, or say why that cannot be done
+    ///
+    /// asked for when a **new** frame is what is wanted rather than the old one
+    /// started over — the frame object is fresh, and anything holding the old
+    /// one is holding a frame that has gone
+    ThroughTheCaller,
+}
+
+impl std::fmt::Display for Again {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Either => "either way",
+            Self::InPlace => "where it stands",
+            Self::ThroughTheCaller => "through the caller",
+        })
+    }
+}
+
+/// what stood in the way of running a frame again
+///
+/// which halves are here says which were **tried**, and that follows from what
+/// was asked for. a user who asked to rewind the caller is not told about cell
+/// variables, because cell variables were never what stood in their way
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Blocked {
+    /// running it where it stands was asked for, and could not be done
+    InPlace(Unresettable),
+
+    /// rewinding the caller was asked for, and could not be done
+    ThroughTheCaller(Unrestartable),
+
+    /// either would have done, and neither could
+    ///
+    /// **both, because the two fail for unrelated reasons.** one is about the
+    /// frame's own locals and one is about the caller's line, so a user told
+    /// only the second would go and rewrite a call site that was never what
+    /// stood in the way
+    Neither {
+        /// what stopped it being run again where it stands
+        in_place: Unresettable,
+        /// what stopped the caller being rewound to the call
+        through_the_caller: Unrestartable,
+    },
+}
+
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InPlace(why) => write!(
+                formatter,
+                "running it again where it stands would keep its caller \
+                 suspended in the call, and {why}"
+            ),
+            Self::ThroughTheCaller(why) => write!(
+                formatter,
+                "rewinding its caller to the call builds a frame that has never \
+                 run, and {why}"
+            ),
+            Self::Neither {
+                in_place,
+                through_the_caller,
+            } => write!(
+                formatter,
+                "bpd has two ways to do it and neither reaches this frame. \
+                 running it again where it stands would keep its caller \
+                 suspended in the call, and {in_place}. rewinding its caller to \
+                 the call instead builds a frame that has never run, and \
+                 {through_the_caller}"
+            ),
+        }
+    }
+}
+
+/// a frame that was run again where it stood
+///
+/// the frame was **not** rebuilt. it was moved back to the top of its own body
+/// and its locals were put back to what a frame the interpreter had just built
+/// would hold — so the caller was never touched, and nothing the caller's line
+/// does was re-executed. that is why this reaches shapes the rewinding restart
+/// refuses: `x = f(f2())` without `f2` running twice, `x = f(obj.attr)` without
+/// the getter running twice, a frame called from C, a frame reached by
+/// `LOAD_ATTR`
+///
+/// the thread is still held, in the same frame, at its first line. there is no
+/// second stop to wait for, which is the other difference from [`Restarting`]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Reset {
+    /// the frame, at the line it is about to run again
+    ///
+    /// **the same frame object it was.** a fresh call makes a new frame and this
+    /// does not, so `id(frame)` is unchanged and anything the program holds it
+    /// by still holds it. said here because it is the one way this differs from
+    /// the call being made again, and a client that did not say so would be
+    /// reporting a new frame that is not one
+    pub frame: Where,
+
+    /// the parameters, which hold exactly what the call bound them to
+    ///
+    /// they are not re-evaluated and they are not re-derived: the `CALL` moved
+    /// the caller's operands into these slots, so what is in them **is** what the
+    /// program passed. a frame that writes over one of its own parameters is
+    /// refused rather than restarted with bpd's value — see
+    /// [`Unresettable::RebindsAParameter`]
+    pub kept: Vec<String>,
+
+    /// whether the frame was inside a `with` or a `try` when it was reset
+    ///
+    /// **and the cleanup did not run.** sending the frame back to its first line
+    /// is an `f_lineno` jump: cpython pops the operand stack and closes what it
+    /// pops, which is not the same thing as running a block's cleanup. a `with`
+    /// the frame was inside gets no `__exit__` and a `try` gets no `finally`,
+    /// and the body then re-enters that `with` from the top — so the program has
+    /// two `__enter__` against one `__exit__`, and the first context manager is
+    /// still open
+    ///
+    /// said rather than left to be found, because it is the one thing a reset
+    /// does that a call made afresh would never do. running the cleanup first is
+    /// a chain of jumps through the compiler's own `__exit__` path and is not
+    /// built yet
+    pub inside_a_block: bool,
+
+    /// the locals put back to unbound
+    ///
+    /// the whole reason this needs more than a jump. cpython binds every unbound
+    /// local of a frame to `None` as part of a move, so a frame sent to the top
+    /// of its own body starts with names bound that a fresh call would not have
+    /// — and `def f(a):` with a conditional `cond = 1` in it would read `None`
+    /// where a real call raises `UnboundLocalError`
+    ///
+    /// so these are emptied afterwards, and this is which ones. a name here is
+    /// unbound now, which is **not** the same as bound to `None`
+    pub emptied: Vec<String>,
+}
+
+impl Reset {
+    /// what a client is told about a frame that was run again where it stood
+    ///
+    /// short, and conditional past the first line, for the reason
+    /// [`Restarting::told`] is: a paragraph printed at every restart is a
+    /// paragraph nobody reads, and one nobody reads is one that does not warn
+    ///
+    /// the first line always says two things because a client that believed
+    /// either of them wrong would be wrong about the program — that **no second
+    /// stop is coming**, which is the opposite of the rewinding restart, and
+    /// that this is the frame it already had rather than a new one
+    pub fn told(&self) -> Vec<String> {
+        let mut said = vec![
+            "the frame is back at its first line and the thread is still held in \
+             it — this stop is the restart, and no other one is coming. it is the \
+             same frame object, not a new one, and its caller was never touched, \
+             so nothing else on the caller's line ran a second time"
+                .to_string(),
+        ];
+        if self.inside_a_block {
+            said.push(
+                "it was inside a `with` or a `try`, and **the cleanup did not \
+                 run** — no `__exit__`, no `finally`. the body re-enters that \
+                 block from the top, so a context manager the first pass opened \
+                 is still open and will be entered a second time"
+                    .to_string(),
+            );
+        }
+        if !self.emptied.is_empty() {
+            said.push(format!(
+                "{} unbound again, the way a call that had just started would \
+                 have them — not bound to `None`",
+                named(&self.emptied)
+            ));
+        }
+        if !self.kept.is_empty() {
+            said.push(format!(
+                "{} hold exactly what the call passed, which is read out of the \
+                 frame rather than worked out again",
+                named(&self.kept)
+            ));
+        }
+        said
+    }
+}
+
+/// why a frame could not be run again where it stood
+///
+/// separate from [`Unrestartable`] and deliberately so: that enum is about a
+/// **caller** — whether its line can be re-executed — and none of it applies
+/// here, because this mechanism never touches the caller. a frame refused by
+/// both is refused for two unrelated reasons
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Unresettable {
+    /// the code object makes cells of its own, and the instruction that makes
+    /// them cannot be reached
+    ///
+    /// `MAKE_CELL` sits before `RESUME`, in a `co_lines` range carrying **no
+    /// line at all** — measured as `(0, 2, None)` on 3.13, 3.14 and 3.15.
+    /// `f_lineno` chooses among marks, and a range with no line has none, so a
+    /// frame cannot be sent to offset 0
+    ///
+    /// keeping the cells instead is not the same thing and is not offered: a
+    /// fresh call makes **new** cells, and a closure the first pass created is
+    /// still holding the old ones. a restarted frame sharing them would let the
+    /// escaped closure see the second pass's writes, which is a program
+    /// behaviour the program does not have
+    MakesCells {
+        /// one of the names it closes over
+        name: String,
+        /// how many it closes over
+        cells: u32,
+    },
+
+    /// the frame writes over one of its own parameters
+    ///
+    /// the arguments are the one thing about a call that cannot be worked out
+    /// again. the `CALL` **moved** the caller's operands into the frame's
+    /// parameter slots, so the caller's stack no longer holds them and there is
+    /// nowhere else they survive — the slots themselves are the only copy
+    ///
+    /// so a frame that writes over one has lost what it was called with, and
+    /// restarting it would call it with bpd's value rather than the program's.
+    /// the same objection refuses `x = f(x)` on the rewinding path
+    ///
+    /// decided **statically, over the whole code object**, rather than from what
+    /// has run: a frame stopped before its own store would pass a test of what
+    /// has already happened and then run the store on the second pass
+    RebindsAParameter {
+        /// the parameter it writes over
+        name: String,
+    },
+
+    /// the frame is one its driver sends into rather than one that is called
+    ///
+    /// a generator, a coroutine or an async generator. resetting one where it
+    /// stands would leave the object driving it holding a frame that is about to
+    /// run its body from the top again, and what that does to the driver's own
+    /// idea of how far along it is — `gi_frame_state`, and a `send` already in
+    /// flight — is not something bpd has measured
+    ///
+    /// so it is refused until it has been, rather than tried to find out. the
+    /// mechanism has no reason of its own to exclude these: the caller is never
+    /// touched, which is exactly what makes the rewinding path refuse them
+    Suspendable {
+        /// which of the three it is, in the words `co_flags` distinguishes
+        kind: Suspendable,
+    },
+
+    /// every range of the code object carries no line, so there is no top
+    ///
+    /// `f_lineno` moves a frame to a **mark**, and a code object with no line
+    /// anywhere has none. no compiler this supports emits one, and it is a
+    /// refusal rather than an assertion because the alternative is picking an
+    /// offset nobody read
+    NoTopToReturnTo,
+
+    /// bpd could not work out where this interpreter keeps a frame's locals
+    ///
+    /// the fields are found by matching values bpd already knows against a probe
+    /// it compiles itself, because their offsets move between versions and
+    /// between the gil and free-threaded builds. a build where the match is not
+    /// unique is one bpd says it cannot do this on, rather than one it guesses
+    /// about
+    LayoutUnknown,
+
+    /// the frame's data did not hold the code object the frame says it runs
+    ///
+    /// the check that stands between a measured layout and a write into memory
+    /// that is not this frame's. it is made before anything is written, and it
+    /// has never fired
+    LayoutNotThisFrame,
+}
+
+impl std::fmt::Display for Unresettable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MakesCells { name, cells } => write!(
+                formatter,
+                "it closes over {cells} name{} of its own, `{name}` among them, and \
+                 the instruction that makes those cells fresh sits before its first \
+                 line, where a jump cannot reach it",
+                if *cells == 1 { "" } else { "s" }
+            ),
+            Self::RebindsAParameter { name } => write!(
+                formatter,
+                "it writes over its own parameter `{name}`, and its parameter slots \
+                 are the only place what it was called with still exists"
+            ),
+            Self::Suspendable { kind } => write!(
+                formatter,
+                "it is {kind}, and what resetting one does to the object driving \
+                 it is not something bpd has measured"
+            ),
+            Self::NoTopToReturnTo => write!(
+                formatter,
+                "no range of its code object carries a line at all, so it has no \
+                 first line to be sent back to"
+            ),
+            Self::LayoutUnknown => write!(
+                formatter,
+                "bpd could not establish where this interpreter keeps a frame's \
+                 locals, and will not write to a field it has not verified"
+            ),
+            Self::LayoutNotThisFrame => write!(
+                formatter,
+                "the frame's own data did not hold the code object the frame says \
+                 it is running"
+            ),
+        }
+    }
 }
 
 /// which frame's line a refusal is about
@@ -1213,7 +1558,10 @@ mod tests {
             let said = crate::Refusal::NotRestartable {
                 frame: crate::FrameId { stop: 1, depth: 2 },
                 function: "work".to_string(),
-                reason: reason.clone(),
+                // the rows below are about the rewinding half alone. a table
+                // checking two messages at once is a table that says which of
+                // them failed by not saying
+                reason: Blocked::ThroughTheCaller(reason.clone()),
             }
             .to_string();
             for expected in wanted {
