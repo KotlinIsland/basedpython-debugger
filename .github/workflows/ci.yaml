@@ -48,17 +48,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # both supported interpreters on every platform. the free-threaded build
+        # every supported interpreter on every platform. the free-threaded build
         # is a separate target rather than a variant, so it gets its own entry —
         # on two platforms, because its threading and its allocator differ by
         # more between linux and macos than the gil build's do
+        #
+        # 3.15 is here while it is still a release candidate, deliberately. the
+        # policy is that a release is a possible behaviour change to the event
+        # model rather than a compatibility exercise, and the only way that is
+        # true is if the release is being run against before it ships — 3.15
+        # moved a function's implicit `return None` onto `LOAD_COMMON_CONSTANT`,
+        # which the restart allow lists did not name, and 14065 of its 33030
+        # stdlib code objects silently lost the exit a frame is forced out
+        # through. the allow list failed closed and no answer was wrong, and
+        # nobody would have known until it shipped
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.13", "3.14"]
+        python: ["3.13", "3.14", "3.15"]
         include:
           - os: ubuntu-latest
             python: "3.14t"
           - os: macos-latest
             python: "3.14t"
+          - os: ubuntu-latest
+            python: "3.15t"
+          - os: macos-latest
+            python: "3.15t"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -67,6 +81,12 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python }}
+          # for the 3.15 entries, which are a release candidate. it widens
+          # resolution only where there is no final release to resolve to, so
+          # the 3.13 and 3.14 entries are unaffected — and it comes **off** when
+          # 3.15 ships rather than being left as a standing licence to test
+          # against whatever is newest
+          allow-prereleases: true
       # the agent is a cdylib nothing links, so `cargo test` never builds it —
       # it has to be built explicitly or the suite finds no agent to stage. on a
       # fresh checkout that fails loudly; on a machine that has built before it

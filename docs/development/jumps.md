@@ -413,8 +413,8 @@ two things fall out of it:
     loop` to route around
 
 `scripts/restart_shapes.py` measures what it buys, against the interpreter's own
-stdlib: code objects with a clean exit go from 20.4% to 65.7% on 3.13, and from
-17.2% to 55.2% on 3.14.
+stdlib: code objects with a clean exit go from 20.4% to 65.7% on 3.13, 17.2% to
+55.2% on 3.14, and 17.4% to 55.4% on 3.15.
 
 ### the offset has to be at abstract stack depth zero
 
@@ -495,9 +495,10 @@ there is no sequence anywhere in that code object which produces a value and
 returns without running the program, so no mechanism reaches it — not this one
 and not a different one. a function that falls off its end, or that returns a
 name or a constant anywhere, has one. `scripts/restart_shapes.py` counts what is
-left: 34.3% of code objects on 3.13 and 44.8% on 3.14, the 3.14 figure inflated
-by 5141 PEP 649 `__annotate__` functions, which return a dict display and which
-nobody restarts
+left: 34.3% of code objects on 3.13, 44.8% on 3.14 and 44.6% on 3.15, the two
+later figures inflated by the PEP 649 `__annotate__` functions those releases
+compile — 5141 and 5332 of them, each returning a dict display, and none of them
+a frame anybody restarts
 
 a function with several returns offers all of them, highest offset first — the
 epilogue, which is where the implicit `return None` lives. a refused assignment

@@ -2,11 +2,19 @@
 
 ## the policy
 
-|                | version      | why                                        |
-| -------------- | ------------ | ------------------------------------------ |
-| minimum        | cpython 3.13 | PEP 669 is the only event backbone         |
-| attach         | cpython 3.14 | PEP 768 `sys.remote_exec`                  |
-| implementation | cpython only | PEP 669 and PEP 768 are cpython interfaces |
+|                | version          | why                                                   |
+| -------------- | ---------------- | ----------------------------------------------------- |
+| minimum        | cpython 3.13     | PEP 669 is the only event backbone                    |
+| attach         | cpython 3.14     | PEP 768 `sys.remote_exec`                             |
+| tested against | 3.13, 3.14, 3.15 | every release from the minimum, gil and free-threaded |
+| implementation | cpython only     | PEP 669 and PEP 768 are cpython interfaces            |
+
+there is no **maximum**. every release from the minimum upwards is in the CI
+matrix, including one that has not shipped yet: 3.15 is there as a release
+candidate, because a release is treated as a possible behaviour change to the
+event model rather than as a compatibility exercise, and that is only true if it
+is being run against before it ships. `3.13t` is the one absence, and it is
+pyo3's rather than a decision — see below
 
 the attach row is the floor a **future** feature will have, not one bpd offers:
 there is no `bpd attach` command, and `bpd doctor` reports PEP 768 as a property
@@ -71,6 +79,10 @@ a free-threaded build is a **different abi**, not a variant of the same one, and
 refuses a mismatched interpreter with carries the build too — `3.14t` — because
 a version alone names two interpreters and would wave one of them through
 
+every release at or above that floor has both builds in the CI matrix, on linux
+and macos: `3.14t` and `3.15t`. `3.13t` is the one absence, and it is pyo3's
+rather than a decision
+
 the practical consequence is on the agent: nothing in it may be correct only
 because the GIL serialised it. the registry of held threads, the breakpoint table
 and the event counters are all explicitly synchronised. this is not extra work
@@ -108,6 +120,18 @@ as a compatibility exercise. what has to be checked, every time:
     `BRANCH_RIGHT`, which is the kind of change that silently drops a feature if
     nobody looks
 - `DISABLE` semantics, and what `restart_events()` re-enables
+- **the opcodes the allow lists name.** restarting a frame is decided against
+    two lists of instructions that provably run nothing — `EXITING`, for the run
+    a frame is forced out through, and `BESIDE_THE_CALL`, for the caller's line.
+    a release that spells an existing instruction differently, or introduces one
+    for something the compiler used to emit another way, does not make either
+    list wrong: they fail **closed**, so the refusal count goes up and no answer
+    becomes untrue. that is exactly why nobody notices. 3.15 moved a function's
+    implicit `return None` from `LOAD_CONST` onto `LOAD_COMMON_CONSTANT`, and
+    **14065** of its 33030 stdlib code objects lost their exit until the opcode
+    was named — a majority of ordinary functions, silently. run
+    `scripts/restart_shapes.py` under the new interpreter and compare the share
+    it reports against the release before it; a step down is an opcode to look at
 - the code object layout that breakpoint binding walks, and what `co_lines()`
     yields. 3.12 inlined list, dict and set comprehensions into their enclosing
     function, which moved every breakpoint inside one to a different code
