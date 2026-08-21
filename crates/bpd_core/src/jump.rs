@@ -110,6 +110,30 @@ pub struct Restarting {
     /// during the restarted run is reading this rather than the program's
     pub disturbed: Vec<String>,
 
+    /// whether the frame was inside a `with` or a `try` when it was forced out
+    ///
+    /// its offset was covered by an entry of its code object's exception table.
+    /// carried so that "no `__exit__` and no `finally` ran" is said when there
+    /// **was** one to run and not otherwise: it is true of the operation either
+    /// way, and a caveat repeated at every restart is one a reader skips
+    pub inside_a_block: bool,
+
+    /// names in the forced-out frame that run code of the program as it dies
+    ///
+    /// a value whose type defines `__del__`, or a suspended generator — closing
+    /// one throws `GeneratorExit` into it, which runs its `finally` and the
+    /// `__exit__` of any `with` inside it. the frame dies **now**, at a moment
+    /// the program never reached, so these run now
+    ///
+    /// **not a closed list, in two directions.** bpd cannot know whether the
+    /// frame was the last holder, so these are what *may* run; and its scan sees
+    /// a `__del__` on a type and a suspended generator, not a finaliser a C type
+    /// keeps to itself — so an empty list is not "nothing runs". the unqualified
+    /// fact stays in the sentence that is always said; this only **names** what
+    /// can be named, because "finalising can run arbitrary code" is a sentence
+    /// nobody can act on and `conn` is one they can
+    pub finalising: Vec<String>,
+
     /// locals of the forced-out frame that held nothing before the move and
     /// hold `None` after it
     ///
@@ -151,49 +175,77 @@ impl Restarting {
     /// because an agent would otherwise ask this stop another question
     #[must_use]
     pub fn told(&self) -> Vec<String> {
-        let mut told = vec![
-            format!(
-                "`{}` was forced to return from line {} and the thread has been \
-                 let go — only that line's closing loads and its return ran. \
-                 `{}` will run line {} again — the **whole** line",
-                self.frame.function, self.exit_line, self.caller.function, self.caller.line,
-            ),
-            // **one line, and it used to be two paragraphs.** they said what
-            // forcing any frame out does rather than what this one did, and a
-            // client is told that once by the description of the request rather
-            // than again at every use of it. what stays here is the part a
-            // reader has to act on, because it has already happened
-            "**no block cleanup:** no `__exit__` and no `finally` ran, because a \
-             forced return is a jump. what the frame was the last holder of is \
-             finalised now instead, which can run a `__del__` or close a \
-             suspended generator"
-                .to_string(),
-        ];
+        let mut told = vec![format!(
+            "`{}` was forced to return from line {} and the thread has been let \
+             go — `{}` will run line {} again, the **whole** line. the frame is \
+             gone, so anything it was the **last holder** of is finalised now, \
+             which can run a `__del__`",
+            self.frame.function, self.exit_line, self.caller.function, self.caller.line,
+        )];
+        // **every one of the rest is conditional, and that is the point.** they
+        // were three unconditional paragraphs saying what forcing any frame out
+        // does, which is true of the operation rather than of this use of it —
+        // read once and skipped forever after, taking the lines that do matter
+        // with them. what is here now is what happened this time
+        if self.inside_a_block {
+            told.push(format!(
+                "**no block cleanup:** `{}` was inside a `with` or a `try` at \
+                 line {}, and the move out is a jump — so no `__exit__` and no \
+                 `finally` ran",
+                self.frame.function, self.frame.line,
+            ));
+        }
+        if !self.finalising.is_empty() {
+            told.push(format!(
+                "{} in `{}` are ones bpd can see run code when they are \
+                 released — a `__del__`, or a suspended generator whose \
+                 `finally` runs when it is closed. it cannot see a finaliser a C \
+                 type keeps to itself, so this is what it found rather than what \
+                 there is",
+                named(&self.finalising),
+                self.frame.function,
+            ));
+        }
         if !self.disturbed.is_empty() {
             told.push(format!(
-                "{:?} hold the forced return's value until the restarted call \
-                 finishes — a value the program never computed. they are names \
-                 `{}` binds in its **own** locals, never a global or a cell: a \
-                 line that writes one of those after the call is refused",
-                self.disturbed, self.caller.function,
+                "{} now hold the forced return's value — a value the program \
+                 never computed — until the restarted call finishes. they are \
+                 names `{}` binds in its **own** locals, never a global or a \
+                 cell: a line that writes one of those after the call is refused",
+                named(&self.disturbed),
+                self.caller.function,
             ));
         }
         if !self.unannounced.is_empty() {
             told.push(format!(
-                "breakpoint(s) {:?} are on a line this restart moves to and will \
+                "breakpoint(s) {} are on a line this restart moves to and will \
                  not fire for the pass it lands in. they are still set",
-                self.unannounced,
+                self.unannounced
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
             ));
         }
-        if !self.bound_to_none.is_empty() {
-            told.push(format!(
-                "{:?} held nothing before the frame was forced out and hold \
-                 `None` now",
-                self.bound_to_none,
-            ));
-        }
+        // **`bound_to_none` is deliberately not narrated.** it is a real change
+        // to the frame and the field carries it, but the frame is destroyed
+        // microseconds later — so a sentence saying those names "hold `None`
+        // now" is read after the thing holding them has gone. a reader asked
+        // what it meant, and the honest answer was that it meant nothing to them
         told
     }
+}
+
+/// a list of names, as a sentence rather than as a rust value
+///
+/// `{:?}` on a `Vec<String>` renders `["b"]`, which is debug output in the
+/// middle of an english sentence — a reader asked what it was supposed to mean
+fn named(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// what became of a restart
@@ -1499,6 +1551,8 @@ mod tests {
                 line: 20,
                 function: "main".to_string(),
             },
+            inside_a_block: false,
+            finalising: Vec::new(),
             disturbed: vec!["got".to_string()],
             bound_to_none: vec!["later".to_string()],
             unannounced: vec![20],
