@@ -52,6 +52,16 @@ use pyo3::prelude::*;
 /// `LOAD_FAST_CHECK` really is covered by that binding, which is why it stays
 /// unconditional
 ///
+/// **`LOAD_COMMON_CONSTANT` carries no condition at all,** unlike every other
+/// load here. it is `tstate->interp->common_consts[oparg]` — an index into a
+/// twelve-entry array the interpreter owns, holding `None`, `True`, `False`,
+/// `""`, `-1`, `AssertionError`, `NotImplementedError` and five builtin types.
+/// no mapping, no descriptor, nothing of the program. 3.15 is where it starts
+/// carrying a function's implicit `return None`, and its absence cost **14065**
+/// of 33030 code objects their exit there — the allow list failing closed,
+/// which is the direction it is meant to fail in, but it is still a whole
+/// release's worth of ordinary functions
+///
 /// **`RESUME` is deliberately absent.** it sits on the `def` line rather than on
 /// the body's, so a walk that crossed it made the `def` line a candidate for any
 /// function whose body is immediately a clean return — and the `def` line comes
@@ -71,6 +81,7 @@ const EXITING: &[&str] = &[
     "RETURN_VALUE",
     "RETURN_CONST",
     "LOAD_CONST",
+    "LOAD_COMMON_CONSTANT",
     "LOAD_SMALL_INT",
     "LOAD_FAST",
     "LOAD_FAST_BORROW",
@@ -105,6 +116,7 @@ const BESIDE_THE_CALL: &[&str] = &[
     "LOAD_FAST_LOAD_FAST",
     "LOAD_FAST_BORROW_LOAD_FAST_BORROW",
     "LOAD_CONST",
+    "LOAD_COMMON_CONSTANT",
     "LOAD_SMALL_INT",
     "LOAD_GLOBAL",
     "LOAD_DEREF",
@@ -552,9 +564,9 @@ fn destination(spans: &[Span], line: u32) -> Option<u32> {
 /// **last statement's** line — so the two instructions that make up that return
 /// are a perfectly clean exit sitting in the middle of a range, which no line
 /// number names. that is the whole of why an exit used to be rare: measured over
-/// each interpreter's own stdlib, 19.3% of code objects on 3.13 have a clean exit
-/// **line** and 64.4% have a clean exit **offset**. [`crate::linetable`] is what
-/// reaches one
+/// each interpreter's own stdlib by `scripts/restart_shapes.py`, code objects
+/// with a clean exit go from 20.4% to 65.7% on 3.13, 17.2% to 55.2% on 3.14, and
+/// 17.4% to 55.4% on 3.15. [`crate::linetable`] is what reaches one
 ///
 /// ## the offset has to be at abstract stack depth zero
 ///

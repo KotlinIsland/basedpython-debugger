@@ -39,6 +39,10 @@ EXITING = {
     "RETURN_VALUE",
     "RETURN_CONST",
     "LOAD_CONST",
+    # 3.15 carries a function's implicit `return None` with this, and it is
+    # `tstate->interp->common_consts[oparg]` — an index into an array the
+    # interpreter owns, running nothing of the program
+    "LOAD_COMMON_CONSTANT",
     "LOAD_SMALL_INT",
     "LOAD_FAST",
     "LOAD_FAST_BORROW",
@@ -60,6 +64,7 @@ BESIDE_THE_CALL = {
     "LOAD_FAST_LOAD_FAST",
     "LOAD_FAST_BORROW_LOAD_FAST_BORROW",
     "LOAD_CONST",
+    "LOAD_COMMON_CONSTANT",
     "LOAD_SMALL_INT",
     "LOAD_GLOBAL",
     "LOAD_DEREF",
