@@ -761,7 +761,22 @@ impl<'py> Stopped<'py> {
 
         // nothing above this point has touched the program. from here it has
         let at = describe_where(&frame)?;
-        let unbound = Place::of(&frame)?.unbound()?;
+        let place = Place::of(&frame)?;
+        let unbound = place.unbound()?;
+        // **bpd binds them, so that cpython does not warn the program about it.**
+        // `frame_lineno_set_impl` fills every NULL slot with `None` and raises a
+        // `RuntimeWarning` saying how many it filled — into the **debuggee's**
+        // stderr, about a move the program did not make. the end state is the
+        // same either way and the client is told which names in
+        // [`Restarting::bound_to_none`], so the warning was the debugger writing
+        // to the program's own output channel and saying nothing new
+        //
+        // slots only. an empty **cell** is a live cell object rather than a NULL
+        // slot, so cpython does not bind it either, and binding one here would
+        // be a change to the program cpython was never going to make
+        for (scope, name) in unbound.iter().filter(|(scope, _)| *scope == Scope::Local) {
+            place.write(*scope, name, &self.python.None().into_bound(self.python))?;
+        }
         let mut refused = None;
         let mut taken = None;
         for exit in &exits {
