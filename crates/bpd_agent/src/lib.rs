@@ -49,6 +49,7 @@ mod tasks;
 mod templates;
 mod threads;
 mod trail;
+mod unwinds;
 mod values;
 mod world;
 
@@ -489,7 +490,12 @@ fn on_line<'py>(
     }
 
     // a restart takes this line before anything else on it decides anything —
-    // see `restart_took_the_line`
+    // see `restart_took_the_line`. the unwind is asked first because a frame it
+    // forces out here does not run this line at all, and a rewind's destination
+    // cannot be a frame an unwind is still working through
+    if unwind_took_the_line(python)? {
+        return Ok(python.None().into_bound(python));
+    }
     if restart_took_the_line(python)? {
         return Ok(python.None().into_bound(python));
     }
@@ -613,7 +619,27 @@ fn on_line<'py>(
 /// costs the whole process its `DISABLE` for the rest of the run
 fn left_armed_here(python: Python<'_>) -> PyResult<()> {
     steps::cancel(python)?;
-    restarts::cancel(python)
+    restarts::cancel(python)?;
+    unwinds::cancel(python)
+}
+
+/// whether an unwind took this line, so that nothing else on it decides anything
+///
+/// asked **before** the breakpoints, for the reason a rewind is: a frame forced
+/// out here does not run this line, so a breakpoint that fired would be
+/// reporting the program at a line it never executed
+fn unwind_took_the_line(python: Python<'_>) -> PyResult<bool> {
+    if !unwinds::armed_here() {
+        return Ok(false);
+    }
+    match unwinds::reaching(python)? {
+        unwinds::Reached::NotMine => Ok(false),
+        unwinds::Reached::Forced => Ok(true),
+        unwinds::Reached::Reset(reason) | unwinds::Reached::Abandoned(reason) => {
+            session::stop(python, events::thread_ident(python)?, reason)?;
+            Ok(true)
+        }
+    }
 }
 
 /// whether a restart took this line, so that nothing else on it decides anything
@@ -888,6 +914,13 @@ fn on_py_unwind<'py>(
     // saying so rather than carrying on as though nothing had been asked
     if restarts::armed_here()
         && let Some(reason) = restarts::left_frame(python)?
+    {
+        session::stop(python, events::thread_ident(python)?, reason)?;
+    }
+    // the same for an unwind, and only about the frame it was unwinding **to**:
+    // the frames above it leaving is the whole point of the operation
+    if unwinds::armed_here()
+        && let Some(reason) = unwinds::left_frame(python)?
     {
         session::stop(python, events::thread_ident(python)?, reason)?;
     }

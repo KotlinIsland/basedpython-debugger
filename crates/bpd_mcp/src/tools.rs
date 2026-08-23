@@ -901,6 +901,16 @@ pub fn tools() -> Vec<Tool> {
                 `__enter__` against one `__exit__` and the first context manager \
                 is still open. the answer says `inside_a_block` when this \
                 happened.\n\n\
+                **a frame that is not the one executing** is reached by forcing \
+                out everything above it first, innermost outward. that is the one \
+                reset that **does** resume the thread — a frame leaves by \
+                returning — so it answers `unwinding` and the reset arrives as a \
+                `frame_reset` stop, or `restart_abandoned` if the frame left \
+                before the unwinding reached it. between each link the rest of \
+                the calling line runs with a value the program never computed, so \
+                every frame in the chain is read first and the **whole** request \
+                is refused if any of those remainders would call something or \
+                write a global, a cell or a name.\n\n\
                 refused, by name, when: the frame **writes over one of its own \
                 parameters** (the parameter slots are the only place what the \
                 call passed still exists, so it has been lost); the code object \

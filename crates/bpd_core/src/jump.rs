@@ -281,6 +281,15 @@ pub enum Restarted {
     /// the caller's line was re-executed — see [`Reset`]
     Reset(Reset),
 
+    /// frames above the one asked about are being forced out so that it can be
+    /// reset
+    ///
+    /// **the thread has been let go**, unlike [`Restarted::Reset`]. the reset
+    /// itself arrives as [`crate::StopReason::FrameReset`] once the frames above
+    /// have returned — or as [`crate::StopReason::RestartAbandoned`] if the
+    /// frame left before the unwinding reached it
+    Unwinding(Unwinding),
+
     /// cpython refused to move the frame to an exit on any of its lines
     ///
     /// no code of the program ran: a refused assignment to `f_lineno` moves
@@ -952,6 +961,65 @@ impl Reset {
     }
 }
 
+/// a reset that had to force frames out from above it first
+///
+/// a frame with live frames above it cannot be reset while they are there:
+/// cpython **crashes** rather than refuses when a frame that is not executing is
+/// moved, measured on 3.13, 3.14 and 3.15. so they go first, innermost outward,
+/// each forced to return the way a one-frame restart forces its own frame out
+///
+/// unlike [`Reset`], **the thread is let go** — the interpreter has to actually
+/// run for those frames to leave — and the reset itself lands as a stop of its
+/// own, [`crate::StopReason::FrameReset`]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Unwinding {
+    /// the frame that will be run again, where it is now
+    pub frame: Where,
+
+    /// the frames above it, innermost first, that are being forced out
+    ///
+    /// they are **gone**, not suspended: each returns, and nothing puts them
+    /// back. anything they were the last holder of is finalised as they go
+    pub above: Vec<Where>,
+}
+
+impl Unwinding {
+    /// what a client is told about a reset that had to unwind first
+    ///
+    /// two lines, and both are things a client that assumed otherwise would be
+    /// wrong about: that a stop is coming, which is the opposite of a one-frame
+    /// reset, and that the frames above are gone rather than waiting
+    pub fn told(&self) -> Vec<String> {
+        vec![
+            format!(
+                "the thread has been let go so that {} above it can return. wait \
+                 for the next stop, which is `frame_reset` at the first line of \
+                 the frame that was asked about — or `restart_abandoned` if that \
+                 frame left before the unwinding reached it",
+                match self.above.len() {
+                    1 => "the frame".to_string(),
+                    many => format!("the {many} frames"),
+                }
+            ),
+            format!(
+                "{} gone rather than suspended — each returns, and anything it \
+                 was the last holder of is finalised as it goes. no block \
+                 cleanup runs on the way: forcing a frame out is a jump",
+                match self.above.as_slice() {
+                    [only] => format!("`{}` is", only.function),
+                    many => {
+                        let named: Vec<String> = many
+                            .iter()
+                            .map(|one| format!("`{}`", one.function))
+                            .collect();
+                        format!("{} are", named.join(", "))
+                    }
+                }
+            ),
+        ]
+    }
+}
+
 /// why a frame could not be run again where it stood
 ///
 /// separate from [`Unrestartable`] and deliberately so: that enum is about a
@@ -1017,6 +1085,76 @@ pub enum Unresettable {
         kind: Suspendable,
     },
 
+    /// a frame above the one asked about cannot be forced out of the way
+    ///
+    /// resetting a frame means the frames above it have to go first, and each
+    /// goes the way a one-frame restart forces its own frame out — moved to a
+    /// point in its code where a return's value is loaded, so the loads and the
+    /// return are all that runs. a frame with no such point cannot be moved out
+    /// of the way, and the chain stops at it
+    AFrameAboveHasNoCleanExit {
+        /// the frame that cannot be forced out
+        function: String,
+    },
+
+    /// a frame above the one asked about is one its driver sends into
+    ///
+    /// a generator, a coroutine or an async generator between the target and the
+    /// top. forcing one out makes it **return**, which raises `StopIteration` in
+    /// whatever was driving it rather than handing control back down the stack
+    /// the way an ordinary return does
+    AFrameAboveIsSuspendable {
+        /// the frame in the way
+        function: String,
+        /// which of the three it is
+        kind: Suspendable,
+    },
+
+    /// something would run in a frame between the forced return and bpd getting
+    /// control back
+    ///
+    /// **this is the cost of unwinding rather than a technicality.** when the
+    /// frame above returns, the rest of the line that called it runs, with a
+    /// value the program never computed, before any event reaches bpd. where
+    /// that remainder is loads and stores into the frame's own locals, nothing
+    /// observable happened and the frame is being discarded anyway. where it
+    /// calls something, or writes a global, a cell or an attribute, the program
+    /// has done something it would never have done
+    ///
+    /// so the same allow list that decides a rewind decides this, asked once per
+    /// frame in the chain instead of once
+    ATailWouldRun {
+        /// the frame whose line would carry on running
+        function: String,
+        /// the instruction that is not on the allow list, by `opname`
+        opcode: String,
+    },
+
+    /// the frame asked about returns as soon as the one above it does
+    ///
+    /// nothing follows the call in it, so no `LINE` event ever fires in it again
+    /// and there is no moment at which it could be reset — it simply returns
+    /// too. `return helper()` is the shape
+    NoLineFollowsTheCall {
+        /// the line the call is on
+        line: u32,
+    },
+
+    /// a frame in the chain is stopped at an instruction with no line of the
+    /// source
+    ///
+    /// what runs after its call comes back is read out of its line table, and a
+    /// frame at an offset that table does not cover is one nothing can be said
+    /// about. **no producer test, and the reason is that nothing can produce
+    /// it**: cpython emits a line-table entry for every instruction it can stop
+    /// at, so this is the branch that fires if that stops being true
+    FrameHasNoLine {
+        /// the frame it is about
+        function: String,
+        /// the instruction offset it is stopped at
+        lasti: u32,
+    },
+
     /// every range of the code object carries no line, so there is no top
     ///
     /// `f_lineno` moves a frame to a **mark**, and a code object with no line
@@ -1061,6 +1199,36 @@ impl std::fmt::Display for Unresettable {
                 formatter,
                 "it is {kind}, and what resetting one does to the object driving \
                  it is not something bpd has measured"
+            ),
+            Self::AFrameAboveHasNoCleanExit { function } => write!(
+                formatter,
+                "`{function}` is above it and cannot be forced out of the way: \
+                 nowhere in that function produces a value and returns without \
+                 running its code"
+            ),
+            Self::AFrameAboveIsSuspendable { function, kind } => write!(
+                formatter,
+                "`{function}` is above it and is {kind}, so forcing it out would \
+                 raise `StopIteration` in whatever drives it rather than \
+                 returning down the stack"
+            ),
+            Self::ATailWouldRun { function, opcode } => write!(
+                formatter,
+                "the rest of the line `{function}` is stopped on would run before \
+                 bpd could get control back, and it carries `{opcode}`, which is \
+                 not something that provably runs no code of the program"
+            ),
+            Self::NoLineFollowsTheCall { line } => write!(
+                formatter,
+                "nothing follows the call on line {line}, so it returns as soon \
+                 as the frame above it does and there is no moment at which it \
+                 could be run again"
+            ),
+            Self::FrameHasNoLine { function, lasti } => write!(
+                formatter,
+                "`{function}` is stopped at offset {lasti}, which its own line \
+                 table does not cover, so what runs when its call comes back \
+                 cannot be read"
             ),
             Self::NoTopToReturnTo => write!(
                 formatter,

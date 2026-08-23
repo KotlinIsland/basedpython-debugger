@@ -54,7 +54,7 @@ pub use frame::{
 };
 pub use jump::{
     Access, Address, Again, Blocked, Jump, Jumped, Reset, Restarted, Restarting, Suspendable,
-    Through, Unresettable, Unrestartable, WHAT_READING_THE_BYTECODE_COSTS, Whose,
+    Through, Unresettable, Unrestartable, Unwinding, WHAT_READING_THE_BYTECODE_COSTS, Whose,
 };
 pub use parity::{Carried, Facet, Naming, Reach, Told, ran, ran_as, say, surface};
 pub use query::{

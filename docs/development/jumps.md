@@ -251,11 +251,55 @@ does not, so `id(frame)` is unchanged and anything the program holds it by still
 holds it. both front ends say so on every reset, because a client that believed
 it had a new frame would be wrong about the program
 
-and it resets **one** frame. a frame with live frames above it cannot be reset
-while they are there — cpython crashes rather than refuses when a frame that is
-not executing is moved, measured on 3.13, 3.14 and 3.15 — so a reset `n` deep is
-a chain: force each frame above it out through its own cleanup, innermost first,
-then reset the target. that chain is not built yet
+### resetting a frame that is not the one executing
+
+a frame with live frames above it cannot be reset while they are there — cpython
+**crashes** rather than refuses when a frame that is not executing is moved,
+measured on 3.13, 3.14 and 3.15. so they go first, innermost outward, each moved
+to a point in its own code where a return's value is loaded, exactly the way a
+one-frame restart forces its own frame out
+
+that makes it the one reset that **lets the thread go**: a frame leaves by
+returning, and returning is the interpreter running. so it answers
+`Restarted::Unwinding` and the reset itself arrives later, as
+`StopReason::FrameReset` — or as `RestartAbandoned` if the target left before the
+unwinding reached it
+
+```
+outer:3  middle:3  deepest:3   held here, `outer` is asked for
+outer:3  middle:3              `deepest` forced to return
+outer:3                        `middle` forced to return
+outer:1                        `outer` reset, and this is the stop
+outer:3  middle:3  deepest:3   and on, into frames the interpreter built
+```
+
+#### what runs between the links
+
+**this is the cost, and it is the reason the chain is decided before it starts.**
+when a frame returns, the rest of the line that called it runs — with the value
+the forced return produced, which is a value the program never computed — before
+any event reaches bpd. there is no event between the two, so bpd cannot be there
+for it
+
+where that remainder is loads and stores into the frame's own locals, nothing
+observable happened: the frame is being discarded, and the target's own locals
+are unbound by the reset anyway. where it calls something, or writes a global, a
+cell or a name, the program has done something it would never have done
+
+so the same allow list that decides a rewind decides this, asked once per frame
+in the chain instead of once — minus the three stores that write outside the
+frame, which a rewind may permit because it separately reasons about what the
+restarted call reads, and an unwind may not because the write outlives the frame
+that made it. `Unresettable::ATailWouldRun` names the frame and the instruction,
+and it refuses the **whole** request: a chain that stopped half way would have
+destroyed frames for a reset that then did not happen
+
+two more fall out of the same walk. a frame whose line ends in a return leaves on
+its own and needs no forcing; one that does not have to be forced, which takes a
+clean exit, and `AFrameAboveHasNoCleanExit` is a frame that has none. and the
+**target** must reach another line after its call returns — `return helper()` is
+`NoLineFollowsTheCall`, because a frame that returns as soon as the one above it
+does is never executing again, so there is no moment at which it could be reset
 
 ## what a restart really is
 

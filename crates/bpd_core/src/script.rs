@@ -433,6 +433,8 @@ fn place_of(reason: &StopReason) -> Option<Place> {
         | StopReason::Restarted { file, line, .. }
         | StopReason::RestartAbandoned { file, line, .. }
         | StopReason::Forked { file, line, .. } => (file, line),
+        // its line lives on the `Where` the reset carries, rather than beside it
+        StopReason::FrameReset(reset) => (&reset.frame.file, &reset.frame.line),
     };
     Some(Place {
         file: file.clone(),

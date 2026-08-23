@@ -370,7 +370,8 @@ fn a_line_cpython_will_not_move_to_is_refused_in_cpythons_own_words() {
 fn a_frame_that_is_not_the_one_the_thread_is_executing_is_refused_with_the_reason() {
     // cpython does **not** refuse this, which is why bpd does. it accepts a
     // move in a frame suspended in a call and the frame then returns something
-    // it never computed
+    // it never computed — and worse, measured on 3.13, 3.14 and 3.15, writing
+    // `f_lineno` on a frame that is not the one executing segfaults
     let fixture = Fixture::new("deeper", PROGRAM);
     let mut debuggee = launch(&fixture);
     let inner = line_of(PROGRAM, "note(\"deeper_ran\")");
@@ -386,9 +387,14 @@ fn a_frame_that_is_not_the_one_the_thread_is_executing_is_refused_with_the_reaso
         debuggee
             .set_next_statement(caller, after)
             .expect_err("a frame suspended in a call cannot be moved"),
+        // **the rewinding mechanism**, named rather than left to the default.
+        // resetting a frame in place reaches one suspended in a call, by forcing
+        // out everything above it first; rewinding cannot, because it forces
+        // *this* frame out and rewinds its caller, and neither half says
+        // anything about the frames still live above it
         debuggee
-            .restart_frame(caller, bpd_core::Again::Either)
-            .expect_err("a frame suspended in a call cannot be restarted"),
+            .restart_frame(caller, bpd_core::Again::ThroughTheCaller)
+            .expect_err("a frame suspended in a call cannot be rewound"),
     ] {
         let said = refused.to_string();
         assert!(

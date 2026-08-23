@@ -14,7 +14,7 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use bpd_core::python::Capabilities;
-use bpd_core::{Again, Binding, FrameId, Restarted, Running, SourceBreakpoint, Stop};
+use bpd_core::{Again, Binding, FrameId, Restarted, Running, SourceBreakpoint, Stop, StopReason};
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
 
@@ -80,6 +80,44 @@ def blocked_call():
     return blocked("B")
 
 
+def deepest(v):
+    RAN.append(("deepest", v))
+    bottom = 1
+    return "D"
+
+
+def middle(v):
+    RAN.append(("middle", v))
+    inner = deepest(v)
+    settled = inner
+    return "M"
+
+
+def outer(v):
+    RAN.append(("outer", v))
+    passed = middle(v)
+    after = passed
+    return "O"
+
+
+MARK = None
+
+
+def noisy_middle(v):
+    global MARK
+    RAN.append(("noisy middle", v))
+    MARK = deepest(v)
+    settled = MARK
+    return "NM"
+
+
+def noisy_outer(v):
+    RAN.append(("noisy outer", v))
+    got = noisy_middle(v)
+    after = got
+    return "NO"
+
+
 def nested_call():
     return target(f2())
 
@@ -92,6 +130,8 @@ def main():
     nested_call()
     attribute_call()
     blocked_call()
+    outer("N")
+    noisy_outer("Q")
     (HERE / "ran.txt").write_text(repr(RAN))
 
 
@@ -245,6 +285,119 @@ fn reset_target_called_from(
     match restarted {
         Restarted::Reset(reset) => reset,
         other => panic!("expected the frame to be reset in place, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_frame_two_deep_is_reset_after_the_frames_above_it_are_forced_out() {
+    let fixture = Fixture::new("reset_deep", PROGRAM);
+    let mut debuggee = launch(&fixture);
+    // held in `deepest`, which is two frames above `outer`
+    let inside = line_of(PROGRAM, "    bottom = 1");
+    held_at(&mut debuggee, &fixture.path(), inside);
+    let stack = debuggee.the_stack(None).expect("the stack was answered");
+    assert_eq!(stack.frames[0].name(), "deepest");
+    assert_eq!(stack.frames[1].name(), "middle");
+    assert_eq!(stack.frames[2].name(), "outer");
+
+    let unwinding = match debuggee
+        .restart_frame(stack.frames[2].id, Again::InPlace)
+        .expect("the restart request was answered")
+    {
+        Restarted::Unwinding(unwinding) => unwinding,
+        other => panic!("expected an unwind to `outer`, got {other:?}"),
+    };
+    let above: Vec<&str> = unwinding
+        .above
+        .iter()
+        .map(|frame| frame.function.as_str())
+        .collect();
+    assert_eq!(
+        above,
+        ["deepest", "middle"],
+        "the frames above the target, innermost first"
+    );
+
+    // the thread was let go, so the reset arrives as a stop of its own
+    let stop = landed(&mut debuggee);
+    let reset = match &stop.reason {
+        StopReason::FrameReset(reset) => reset,
+        other => panic!("expected the reset to land, got {other:?}"),
+    };
+    assert_eq!(reset.frame.function, "outer");
+    assert_eq!(reset.kept, vec!["v".to_string()]);
+    to_exit(&mut debuggee);
+
+    let ran = recorded(&fixture);
+    // **the whole subtree runs again.** `outer` starts over, so it calls
+    // `middle`, which calls `deepest` — the point being that the two frames that
+    // were forced out are gone rather than resumed, and the program builds fresh
+    // ones on the second pass
+    assert_eq!(
+        ran.matches("('outer', 'N')").count(),
+        2,
+        "`outer` ran twice: {ran}"
+    );
+    assert_eq!(
+        ran.matches("('middle', 'N')").count(),
+        2,
+        "`middle` was forced out and then called again by the restarted \
+         `outer`: {ran}"
+    );
+    assert_eq!(
+        ran.matches("('deepest', 'N')").count(),
+        2,
+        "and so was `deepest`: {ran}"
+    );
+}
+
+#[test]
+fn a_tail_that_would_write_a_global_refuses_the_whole_unwind() {
+    let fixture = Fixture::new("reset_noisy", PROGRAM);
+    let mut debuggee = launch(&fixture);
+    // held in `deepest`, called from `noisy_middle`, whose line stores the
+    // result into a **global** once the call comes back
+    let inside = line_of(PROGRAM, "    bottom = 1");
+    loop {
+        held_at(&mut debuggee, &fixture.path(), inside);
+        let stack = debuggee.the_stack(None).expect("the stack was answered");
+        if stack.frames[1].name() == "noisy_middle" {
+            break;
+        }
+    }
+    let stack = debuggee.the_stack(None).expect("the stack was answered");
+    assert_eq!(stack.frames[2].name(), "noisy_outer");
+
+    let error = debuggee
+        .restart_frame(stack.frames[2].id, Again::InPlace)
+        .expect_err("the unwind had to be refused");
+    let said = error.to_string();
+    // **nothing was forced out.** the refusal is decided off the bytecode of
+    // every frame in the chain before the first of them is touched, so a chain
+    // that cannot finish never starts
+    assert!(
+        said.contains("noisy_middle") && said.contains("STORE_GLOBAL"),
+        "the refusal names the frame whose line would carry on running and the \
+         instruction that would run: {said}"
+    );
+    to_exit(&mut debuggee);
+
+    let ran = recorded(&fixture);
+    assert_eq!(
+        ran.matches("'noisy outer'").count(),
+        1,
+        "the refused unwind ran nothing again: {ran}"
+    );
+}
+
+/// wait for the next stop, which is where an unwind put the thread
+fn landed(debuggee: &mut Debuggee) -> Stop {
+    match debuggee
+        .wait(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was waited on")
+    {
+        Running::Stopped { stop, .. } => stop,
+        other => panic!("expected the reset to land, got {other:?}"),
     }
 }
 

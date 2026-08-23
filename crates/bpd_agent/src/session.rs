@@ -38,7 +38,7 @@ use pyo3::prelude::*;
 
 use crate::{
     armed, attach, breakpoints, events, exceptions, frames, pause, replace, restarts, sources,
-    steps, stops, templates, threads, world,
+    steps, stops, templates, threads, unwinds, world,
 };
 
 /// tell the engine what a logpoint had to say, and carry straight on
@@ -253,6 +253,22 @@ fn restarting(
         frames::Restart::Answered(restarted) => {
             attach::send(&FromAgent::Restarting { restarted });
             Ok(Answered::StayHeld)
+        }
+        frames::Restart::Unwinding {
+            unwinding,
+            target,
+            above,
+            function,
+        } => {
+            // armed before the answer goes out, for the reason a rewind is: a
+            // client which reads it and asks something of this session must not
+            // find a thread that is neither held nor watched for
+            unwinds::arm(python, thread, &target, &above, function)?;
+            stops::leave(ticket.stop);
+            attach::send(&FromAgent::Restarting {
+                restarted: bpd_core::Restarted::Unwinding(unwinding),
+            });
+            Ok(Answered::Restarting)
         }
         frames::Restart::Arranged {
             restarting,

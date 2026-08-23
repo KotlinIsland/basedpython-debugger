@@ -943,9 +943,13 @@ fn arranged(restarted: &Restarted) -> &Restarting {
         // frame being run again where it stands. a fixture that stopped doing
         // that would quietly start testing the other mechanism, so it is a
         // failure rather than an accepted second answer
-        Restarted::Reset(reset) => panic!(
-            "the frame was reset in place rather than rewound, so this case is \
-             no longer about the caller's line: {reset:?}"
+        // this file is about the mechanism that rewinds the caller. `grows`
+        // reaches it by writing over its own parameter, which is what stops the
+        // frame being run again where it stands — a fixture that stopped doing
+        // that would quietly start testing the other mechanism
+        other => panic!(
+            "the frame was reset rather than rewound, so this case is no longer \
+             about the caller's line: {other:?}"
         ),
     }
 }

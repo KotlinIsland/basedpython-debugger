@@ -53,7 +53,7 @@ use pyo3::types::PyDict;
 use crate::conditions::{self, capture};
 use crate::facts::Prover;
 use crate::values::Reader;
-use crate::{bytecode, events, inplace, linetable, sources, templates, world};
+use crate::{bytecode, events, inplace, linetable, sources, templates, unwinds, world};
 
 /// `CO_OPTIMIZED` — the frame keeps its locals in slots the compiler assigned
 ///
@@ -704,12 +704,22 @@ impl<'py> Stopped<'py> {
     pub(crate) fn restart_frame(&mut self, id: FrameId, again: Again) -> PyResult<Restart<'py>> {
         const WANTED: &str = "restarting a frame";
 
-        let frame = match self.executing(id, WANTED)? {
+        // **not `executing`.** a frame further down the stack is reachable, by
+        // forcing out everything above it first — which is what `above` is, and
+        // it is empty for the frame the thread is actually in
+        let frame = match self.frame(id, WANTED)? {
             Ok(frame) => frame,
             Err(reason) => return Ok(Restart::Refused(reason)),
         };
         let code = frame.getattr("f_code")?;
         let function: String = code.getattr("co_qualname")?.extract()?;
+        let above = self.above(&frame)?;
+        if !above.is_empty() && again == Again::ThroughTheCaller {
+            // rewinding is a one-frame operation: it forces this frame out and
+            // rewinds its caller, and neither half says anything about frames
+            // that are still live above it
+            return Ok(Restart::Refused(self.not_the_executing_frame(id, WANTED)?));
+        }
         // held for the whole of this, and it covers two different things.
         //
         // the **analysis** imports `dis` and reads two code objects. it runs
@@ -723,6 +733,21 @@ impl<'py> Stopped<'py> {
         // happens to run — same as any other jump, and named here so that it is
         // a known cost rather than a discovery
         let _suppressed = conditions::suppress();
+
+        // a frame that is not the one the thread is executing is reached only by
+        // forcing out everything above it, and only the reset can do that — so a
+        // refusal here is final rather than a fall-through to the rewind
+        if !above.is_empty() {
+            let why = match self.unwind_to(&frame, &above, &function)? {
+                Ok(arranged) => return Ok(arranged),
+                Err(why) => why,
+            };
+            return Ok(Restart::Refused(Refusal::NotRestartable {
+                frame: id,
+                function,
+                reason: Blocked::InPlace(why),
+            }));
+        }
 
         // **tried first, and it writes nothing if it refuses.** every reason it
         // can give is decided off the bytecode and off the layout, before the
@@ -899,6 +924,72 @@ impl<'py> Stopped<'py> {
     /// value stack that no longer matches where it is, so the function returns
     /// something it never computed. that is the whole reason this check is here
     /// rather than left to the interpreter
+    /// the python frames above this one, innermost first
+    ///
+    /// empty when it **is** the frame the thread is executing, which is the
+    /// one-frame case. the walk is by `f_back` from the frame the interpreter is
+    /// in, which is the same chain the stack is reported from
+    fn above(&mut self, frame: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let mut above = Vec::new();
+        let mut walk = events::current_frame(self.python)?;
+        while !walk.is(frame) {
+            above.push(walk.clone());
+            let back = walk.getattr("f_back")?;
+            assert!(
+                !back.is_none(),
+                "the frame id was resolved against this thread's own stack, so \
+                 walking down from the frame the interpreter is in reaches it",
+            );
+            walk = back;
+        }
+        Ok(above)
+    }
+
+    /// the refusal a frame that is not the executing one gets
+    fn not_the_executing_frame(&mut self, id: FrameId, wanted: &'static str) -> PyResult<Refusal> {
+        match self.executing(id, wanted)? {
+            Err(reason) => Ok(reason),
+            Ok(_) => unreachable!("only asked about a frame that is not the executing one"),
+        }
+    }
+
+    /// force out the frames above `target` so that it can be reset
+    ///
+    /// every question is asked **before** anything is forced out: a chain that
+    /// stopped half way would have destroyed frames for a reset that then did
+    /// not happen
+    fn unwind_to(
+        &mut self,
+        target: &Bound<'py, PyAny>,
+        above: &[Bound<'py, PyAny>],
+        function: &str,
+    ) -> PyResult<Result<Restart<'py>, bpd_core::Unresettable>> {
+        if let Err(why) = inplace::resettable(target)? {
+            return Ok(Err(why));
+        }
+        if let Err(why) = inplace::unwindable(target, above)? {
+            return Ok(Err(why));
+        }
+
+        let unwinding = bpd_core::Unwinding {
+            frame: describe_where(target)?,
+            above: above
+                .iter()
+                .map(describe_where)
+                .collect::<PyResult<Vec<_>>>()?,
+        };
+        // nothing above this point has touched the program. from here it has
+        if let Err(refused) = unwinds::force_out(self.python, &above[0])? {
+            return Ok(Ok(Restart::Answered(refused)));
+        }
+        Ok(Ok(Restart::Unwinding {
+            unwinding,
+            target: target.clone(),
+            above: above.to_vec(),
+            function: function.to_string(),
+        }))
+    }
+
     fn executing(
         &mut self,
         id: FrameId,
@@ -1101,6 +1192,19 @@ pub(crate) enum Restart<'py> {
     /// there is an answer and the thread stays held
     Answered(Restarted),
 
+    /// the frames above the target are being forced out, and the thread is to
+    /// be let go so that they can return
+    Unwinding {
+        /// what to tell the client was arranged
+        unwinding: bpd_core::Unwinding,
+        /// the frame that will be reset once they have gone
+        target: Bound<'py, PyAny>,
+        /// the frames still above it, innermost first
+        above: Vec<Bound<'py, PyAny>>,
+        /// `co_qualname` of what is being reset
+        function: String,
+    },
+
     /// the frame was forced out, and the thread is to be let go to finish it
     Arranged {
         /// what to tell the client was arranged
@@ -1135,7 +1239,7 @@ fn translate(code: &Bound<'_, PyAny>, line: u32) -> PyResult<Result<u32, bpd_cor
 /// two opcodes on the analysis's allow lists run nothing **only** when the
 /// mapping behind them is an exact dict, and that is a property of the frame
 /// rather than of the code — so it is read here and carried into the analysis
-fn namespaces_of(frame: &Bound<'_, PyAny>) -> PyResult<bytecode::Namespaces> {
+pub(crate) fn namespaces_of(frame: &Bound<'_, PyAny>) -> PyResult<bytecode::Namespaces> {
     let globals = frame.getattr("f_globals")?;
     let locals = frame.getattr("f_locals")?;
     // **both**, because a `LOAD_GLOBAL` that misses globals falls through to
