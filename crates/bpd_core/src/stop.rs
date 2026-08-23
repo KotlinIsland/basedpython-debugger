@@ -340,6 +340,18 @@ pub enum StopReason {
         line: u32,
     },
 
+    /// a frame that had other frames above it was reset, and this is it
+    ///
+    /// the landing of [`crate::Restarted::Unwinding`]. the frames above have
+    /// returned and this frame is at its first line — the same frame object it
+    /// always was, with its locals put back to what a call that had just started
+    /// would hold
+    ///
+    /// separate from [`StopReason::Restarted`], which is the rewinding
+    /// mechanism landing in a frame the interpreter **built**. reporting one as
+    /// the other would tell a client it had a new frame when it has the old one
+    FrameReset(crate::Reset),
+
     /// a frame was forced out for a restart and the restart did not finish
     ///
     /// **which** of [`Abandoned`]'s reasons it was is carried on the stop, and

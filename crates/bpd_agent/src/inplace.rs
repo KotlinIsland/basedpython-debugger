@@ -54,29 +54,9 @@ use crate::{bytecode, frames, interpframe};
 /// thread is held in it
 pub(crate) fn reset(frame: &Bound<'_, PyAny>) -> PyResult<Result<Reset, Unresettable>> {
     let code = frame.getattr("f_code")?;
-
-    // in order of how fundamental each is, so that a frame with two reasons is
-    // told the one that would still be true if the other were fixed
-    if let Some(kind) = frames::suspendable(&code)? {
-        return Ok(Err(Unresettable::Suspendable { kind }));
-    }
-    let cells: Vec<String> = code.getattr("co_cellvars")?.extract()?;
-    if let Some(name) = cells.first() {
-        return Ok(Err(Unresettable::MakesCells {
-            name: name.clone(),
-            cells: u32::try_from(cells.len()).expect("a function has few cell variables"),
-        }));
-    }
-    if let Some(name) = bytecode::rebinds_a_parameter(&code)? {
-        return Ok(Err(Unresettable::RebindsAParameter { name }));
-    }
-    if let Err(why) = interpframe::reachable(frame)? {
-        return Ok(Err(unreachable_as(why)));
-    }
-    let Some(landing) = bytecode::top_offset(&code)? else {
-        // a code object whose every range carries no line is one no frame can be
-        // sent to the top of, and there is nothing to guess at
-        return Ok(Err(Unresettable::NoTopToReturnTo));
+    let landing = match resettable(frame)? {
+        Ok(landing) => landing,
+        Err(why) => return Ok(Err(why)),
     };
 
     let slots = interpframe::nlocalsplus(&code)?;
@@ -135,6 +115,134 @@ pub(crate) fn reset(frame: &Bound<'_, PyAny>) -> PyResult<Result<Reset, Unresett
             .map(|(_, name)| name.clone())
             .collect(),
     }))
+}
+
+/// whether this frame could be run again where it stands, deciding nothing else
+///
+/// split from [`reset`] because an unwind has to know the answer **before** it
+/// forces anything out: a chain that discovered at the end that the frame it was
+/// unwinding to could not be reset would have destroyed the frames above it for
+/// nothing
+///
+/// answers with the offset a reset lands on, which is the one thing the check
+/// works out that the act would otherwise work out again
+pub(crate) fn resettable(frame: &Bound<'_, PyAny>) -> PyResult<Result<u32, Unresettable>> {
+    let code = frame.getattr("f_code")?;
+
+    // in order of how fundamental each is, so that a frame with two reasons is
+    // told the one that would still be true if the other were fixed
+    if let Some(kind) = frames::suspendable(&code)? {
+        return Ok(Err(Unresettable::Suspendable { kind }));
+    }
+    let cells: Vec<String> = code.getattr("co_cellvars")?.extract()?;
+    if let Some(name) = cells.first() {
+        return Ok(Err(Unresettable::MakesCells {
+            name: name.clone(),
+            cells: u32::try_from(cells.len()).expect("a function has few cell variables"),
+        }));
+    }
+    if let Some(name) = bytecode::rebinds_a_parameter(&code)? {
+        return Ok(Err(Unresettable::RebindsAParameter { name }));
+    }
+    if let Err(why) = interpframe::reachable(frame)? {
+        return Ok(Err(unreachable_as(why)));
+    }
+    match bytecode::top_offset(&code)? {
+        Some(landing) => Ok(Ok(landing)),
+        // a code object whose every range carries no line is one no frame can be
+        // sent to the top of, and there is nothing to guess at
+        None => Ok(Err(Unresettable::NoTopToReturnTo)),
+    }
+}
+
+/// whether the frames above `target` can be forced out of its way
+///
+/// `above` is innermost first. every question here is asked **before** anything
+/// is forced out, because a chain that stopped half way would have destroyed
+/// frames for a reset that then did not happen
+///
+/// two different things are asked of each frame, and which depends on where it
+/// sits. every frame **receives** a forced return except the innermost, and what
+/// its line does with that return before bpd hears about it is
+/// [`crate::bytecode::tail_after`]. every frame has to **leave**, and one whose
+/// line ends in a return leaves on its own — the rest have to be forced, which
+/// takes a clean exit
+pub(crate) fn unwindable(
+    target: &Bound<'_, PyAny>,
+    above: &[Bound<'_, PyAny>],
+) -> PyResult<Result<(), Unresettable>> {
+    for (index, frame) in above.iter().enumerate() {
+        let code = frame.getattr("f_code")?;
+        let function: String = code.getattr("co_qualname")?.extract()?;
+        if let Some(kind) = frames::suspendable(&code)? {
+            return Ok(Err(Unresettable::AFrameAboveIsSuspendable {
+                function,
+                kind,
+            }));
+        }
+        // the innermost is not suspended in a call — it is where the thread is
+        // held — so it has no tail and always has to be forced
+        let forcing = if index == 0 {
+            true
+        } else {
+            match tail_of(frame, &code, &function)? {
+                Ok(tail) => {
+                    if let Some(opcode) = tail.runs {
+                        return Ok(Err(Unresettable::ATailWouldRun { function, opcode }));
+                    }
+                    !tail.returns
+                }
+                Err(why) => return Ok(Err(why)),
+            }
+        };
+        if forcing && !has_a_clean_exit(frame, &code)? {
+            return Ok(Err(Unresettable::AFrameAboveHasNoCleanExit { function }));
+        }
+    }
+
+    // and the target's own line, which has to both run nothing and reach another
+    // line — a frame that returns as soon as the one above it does is never
+    // executing again, so there is no moment at which it could be reset
+    let code = target.getattr("f_code")?;
+    let function: String = code.getattr("co_qualname")?.extract()?;
+    match tail_of(target, &code, &function)? {
+        Ok(tail) => {
+            if let Some(opcode) = tail.runs {
+                return Ok(Err(Unresettable::ATailWouldRun { function, opcode }));
+            }
+            if tail.returns {
+                return Ok(Err(Unresettable::NoLineFollowsTheCall { line: tail.line }));
+            }
+            Ok(Ok(()))
+        }
+        Err(why) => Ok(Err(why)),
+    }
+}
+
+/// what this frame's line does after the call it is suspended in comes back
+fn tail_of(
+    frame: &Bound<'_, PyAny>,
+    code: &Bound<'_, PyAny>,
+    function: &str,
+) -> PyResult<Result<bytecode::Tail, Unresettable>> {
+    let lasti: u32 = frame.getattr("f_lasti")?.extract()?;
+    Ok(match bytecode::tail_after(code, lasti)? {
+        Some(tail) => Ok(tail),
+        None => Err(Unresettable::FrameHasNoLine {
+            function: function.to_string(),
+            lasti,
+        }),
+    })
+}
+
+/// whether this frame has a point it can be moved to that only returns
+fn has_a_clean_exit(frame: &Bound<'_, PyAny>, code: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(
+        match bytecode::exit_tails(code, &frames::namespaces_of(frame)?)? {
+            Ok(exits) => !exits.is_empty(),
+            Err(_) => false,
+        },
+    )
 }
 
 /// a layout that could not be reached, in the words the client is told

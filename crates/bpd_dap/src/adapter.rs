@@ -2860,6 +2860,7 @@ const RESTARTING_EVENT: &str = "bpd/restarting";
 fn restarting_notes(restarted: &bpd_core::Restarted) -> Vec<String> {
     match restarted {
         bpd_core::Restarted::Arranged(restarting) => restarting.told(),
+        bpd_core::Restarted::Unwinding(unwinding) => unwinding.told(),
         bpd_core::Restarted::Reset(reset) => {
             let mut said = reset.told();
             // DAP's own half. the thread was never let go, so there is no

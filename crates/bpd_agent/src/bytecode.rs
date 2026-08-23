@@ -1385,11 +1385,137 @@ pub(crate) fn top_offset(code: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
     Ok(spans(code)?.iter().map(|span| span.start).min())
 }
 
+/// the stores on [`BESIDE_THE_CALL`] that write somewhere the frame is not
+///
+/// a rewind may permit these — it separately reasons about what the restarted
+/// call could read — but an unwind may not. the frame carrying them is about to
+/// be discarded and the write is not, so it outlives the frame that made it
+///
+/// it exists to be **checked against**, in `tails_and_the_call_agree`, rather
+/// than to be consulted: [`AFTER_A_FORCED_RETURN`] is written out in full so
+/// that an opcode added to [`BESIDE_THE_CALL`] is not permitted here by
+/// derivation
+#[cfg(test)]
+const OUTSIDE_THE_FRAME: &[&str] = &["STORE_DEREF", "STORE_GLOBAL", "STORE_NAME"];
+
+/// what may run between a forced return arriving in a frame and bpd getting
+/// control back
+///
+/// spelled out rather than derived as "[`BESIDE_THE_CALL`] minus
+/// `OUTSIDE_THE_FRAME`", deliberately: derived, an opcode added to that list
+/// would be permitted here without anybody deciding it should be, which is the
+/// silent widening an allow list exists to prevent. `tails_and_the_call_agree`
+/// keeps the two from contradicting each other instead
+const AFTER_A_FORCED_RETURN: &[&str] = &[
+    "LOAD_FAST",
+    "LOAD_FAST_BORROW",
+    "LOAD_FAST_CHECK",
+    "LOAD_FAST_LOAD_FAST",
+    "LOAD_FAST_BORROW_LOAD_FAST_BORROW",
+    "LOAD_CONST",
+    "LOAD_COMMON_CONSTANT",
+    "LOAD_SMALL_INT",
+    "LOAD_GLOBAL",
+    "LOAD_DEREF",
+    "LOAD_NAME",
+    "PUSH_NULL",
+    "COPY",
+    "SWAP",
+    "BUILD_TUPLE",
+    "BUILD_LIST",
+    "POP_TOP",
+    "STORE_FAST",
+    "STORE_FAST_STORE_FAST",
+    "STORE_FAST_LOAD_FAST",
+    "NOP",
+    "NOT_TAKEN",
+    "RESUME",
+    "CACHE",
+    "EXTENDED_ARG",
+];
+
+/// what a frame does after a call it is suspended in returns
+pub(crate) struct Tail {
+    /// the line the call is on
+    pub(crate) line: u32,
+    /// whether the frame returns rather than reaching another line
+    ///
+    /// when it does, no `LINE` event fires in it again: it is gone as soon as
+    /// the frame above it is. that is what bpd wants of a frame it is unwinding
+    /// **past**, and it is the end of the road for the frame it is unwinding
+    /// **to**
+    pub(crate) returns: bool,
+    /// an instruction after the call that is not on the allow list, if any
+    pub(crate) runs: Option<String>,
+}
+
+/// what runs in `code` after the call at `lasti` hands control back
+///
+/// only as far as the end of the run the call is in. past that is either a new
+/// line — which is where bpd gets control — or a range carrying no line, and
+/// neither is something that runs before the event
+///
+/// `None` when `lasti` is at an offset the code object's own line table does not
+/// cover, which is the same thing [`Unrestartable::CallerHasNoLine`] reports and
+/// is not something to guess about
+pub(crate) fn tail_after(code: &Bound<'_, PyAny>, lasti: u32) -> PyResult<Option<Tail>> {
+    let read = instructions(code)?;
+    let spans = spans(code)?;
+    let Some(holding) = spans
+        .iter()
+        .find(|span| lasti >= span.start && lasti < span.end)
+    else {
+        return Ok(None);
+    };
+
+    let mut tail = Tail {
+        line: holding.line,
+        returns: false,
+        runs: None,
+    };
+    for one in read
+        .iter()
+        .filter(|one| one.offset > lasti && one.offset < holding.end)
+    {
+        if RETURNING.contains(&one.opname.as_str()) {
+            tail.returns = true;
+            break;
+        }
+        if tail.runs.is_none() && !AFTER_A_FORCED_RETURN.contains(&one.opname.as_str()) {
+            tail.runs = Some(one.opname.clone());
+        }
+    }
+    Ok(Some(tail))
+}
+
 #[cfg(test)]
 mod tests {
+    /// the unwind's allow list says nothing the call's does not
+    ///
+    /// they are written out separately so that neither widens the other by
+    /// accident, and this is what stops them drifting into disagreement: an
+    /// opcode this permits and `BESIDE_THE_CALL` does not would be one an unwind
+    /// runs and a rewind refuses, which is two answers about the same bytecode
+    #[test]
+    fn tails_and_the_call_agree() {
+        for opname in AFTER_A_FORCED_RETURN {
+            assert!(
+                BESIDE_THE_CALL.contains(opname),
+                "`{opname}` may run after a forced return but not beside a call"
+            );
+        }
+        for opname in OUTSIDE_THE_FRAME {
+            assert!(
+                !AFTER_A_FORCED_RETURN.contains(opname),
+                "`{opname}` writes outside the frame and may not run after a \
+                 forced return"
+            );
+        }
+    }
+
     use super::{
-        BESIDE_THE_CALL, EXITING, Instruction, THROUGH_GLOBALS, THROUGH_LOCALS, WRITES_A_NAME,
-        written_after_the_call,
+        AFTER_A_FORCED_RETURN, BESIDE_THE_CALL, EXITING, Instruction, OUTSIDE_THE_FRAME,
+        THROUGH_GLOBALS, THROUGH_LOCALS, WRITES_A_NAME, written_after_the_call,
     };
 
     /// nothing at a frame's own exit writes through a namespace

@@ -388,6 +388,17 @@ pub fn restarted(restarted: &Restarted) -> serde_json::Value {
                     .to_string(),
             );
         }
+        Restarted::Unwinding(unwinding) => {
+            notes.extend(unwinding.told());
+            // the same warning the rewinding mechanism carries, and for the same
+            // reason: the thread is gone, so this stop is no longer a thing to
+            // ask questions of
+            notes.push(
+                "do not ask this stop anything more: it has ended. the frame it \
+                 named is still there and is what the next stop will be in"
+                    .to_string(),
+            );
+        }
         Restarted::Reset(reset) => {
             notes.extend(reset.told());
             // and this protocol's half: an agent told "restarted" by the other
