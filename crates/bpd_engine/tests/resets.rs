@@ -100,6 +100,31 @@ def outer(v):
     return "O"
 
 
+class Latch:
+    def __enter__(self):
+        RAN.append("latch enter")
+        return self
+
+    def __exit__(self, *rest):
+        RAN.append("latch exit")
+        return False
+
+
+def held_middle(v):
+    RAN.append(("held middle", v))
+    with Latch():
+        inner = deepest(v)
+        settled = inner
+    return "HM"
+
+
+def held_outer(v):
+    RAN.append(("held outer", v))
+    got = held_middle(v)
+    after = got
+    return "HO"
+
+
 MARK = None
 
 
@@ -132,6 +157,7 @@ def main():
     blocked_call()
     outer("N")
     noisy_outer("Q")
+    held_outer("H")
     (HERE / "ran.txt").write_text(repr(RAN))
 
 
@@ -307,10 +333,14 @@ fn a_frame_two_deep_is_reset_after_the_frames_above_it_are_forced_out() {
         Restarted::Unwinding(unwinding) => unwinding,
         other => panic!("expected an unwind to `outer`, got {other:?}"),
     };
+    assert!(
+        unwinding.above.iter().all(|frame| !frame.inside_a_block),
+        "neither frame above was inside a block in this shape"
+    );
     let above: Vec<&str> = unwinding
         .above
         .iter()
-        .map(|frame| frame.function.as_str())
+        .map(|frame| frame.at.function.as_str())
         .collect();
     assert_eq!(
         above,
@@ -387,6 +417,61 @@ fn a_tail_that_would_write_a_global_refuses_the_whole_unwind() {
         ran.matches("'noisy outer'").count(),
         1,
         "the refused unwind ran nothing again: {ran}"
+    );
+}
+
+#[test]
+fn a_discarded_frame_that_held_a_block_open_says_its_cleanup_did_not_run() {
+    let fixture = Fixture::new("reset_held", PROGRAM);
+    let mut debuggee = launch(&fixture);
+    // held in `deepest`, called from inside a `with` in `held_middle`
+    let inside = line_of(PROGRAM, "    bottom = 1");
+    loop {
+        held_at(&mut debuggee, &fixture.path(), inside);
+        let stack = debuggee.the_stack(None).expect("the stack was answered");
+        if stack.frames[1].name() == "held_middle" {
+            break;
+        }
+    }
+    let stack = debuggee.the_stack(None).expect("the stack was answered");
+    assert_eq!(stack.frames[2].name(), "held_outer");
+
+    let unwinding = match debuggee
+        .restart_frame(stack.frames[2].id, Again::InPlace)
+        .expect("the restart request was answered")
+    {
+        Restarted::Unwinding(unwinding) => unwinding,
+        other => panic!("expected an unwind to `held_outer`, got {other:?}"),
+    };
+    let held: Vec<(&str, bool)> = unwinding
+        .above
+        .iter()
+        .map(|frame| (frame.at.function.as_str(), frame.inside_a_block))
+        .collect();
+    // `deepest` is not in a block; `held_middle` is, and it is the one that is
+    // never coming back — so its `Opened()` stays open with nothing left that
+    // could close it
+    assert_eq!(held, [("deepest", false), ("held_middle", true)]);
+    assert!(
+        unwinding
+            .told()
+            .iter()
+            .any(|said| said.contains("held_middle") && said.contains("cleanup did not run")),
+        "the note names the discarded frame whose cleanup was skipped: {:?}",
+        unwinding.told()
+    );
+
+    let stop = landed(&mut debuggee);
+    assert!(matches!(&stop.reason, StopReason::FrameReset(_)));
+    to_exit(&mut debuggee);
+
+    let ran = recorded(&fixture);
+    // and the program shows it: two `enter` against one `exit`, because the
+    // first pass's context manager was never closed
+    assert_eq!(
+        ran.matches("'latch enter'").count() - ran.matches("'latch exit'").count(),
+        1,
+        "one context manager was left open by the discarded frame: {ran}"
     );
 }
 

@@ -273,6 +273,13 @@ outer:1                        `outer` reset, and this is the stop
 outer:3  middle:3  deepest:3   and on, into frames the interpreter built
 ```
 
+a frame being discarded can be inside a `with` or a `try` of its own, and
+forcing it out is a jump, so that cleanup does not run either. `Discarded::
+inside_a_block` says which of them were, and both front ends name them — it is
+worse than the same fact about the frame being reset, because a discarded frame
+is not coming back, so a context manager it had open stays open for the rest of
+the run with nothing left that could close it
+
 #### what runs between the links
 
 **this is the cost, and it is the reason the chain is decided before it starts.**
