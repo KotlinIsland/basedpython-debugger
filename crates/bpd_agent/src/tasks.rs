@@ -201,6 +201,7 @@ pub(crate) fn is_hook(address: usize) -> bool {
 pub(crate) fn local(address: usize) -> events::Local {
     events::Local {
         line: false,
+        instruction: false,
         py_return: is_hook(address),
         py_start: false,
     }

@@ -32,6 +32,7 @@ use crate::DEBUGGER_TOOL_ID;
 struct Handles {
     disable: Py<PyAny>,
     line: u32,
+    instruction: u32,
     py_start: u32,
     py_return: u32,
     py_resume: u32,
@@ -158,6 +159,8 @@ pub(crate) struct Callbacks<'py> {
     pub(crate) py_start: &'py Bound<'py, PyAny>,
     /// a line is about to run
     pub(crate) line: &'py Bound<'py, PyAny>,
+    /// a single instruction is about to run
+    pub(crate) instruction: &'py Bound<'py, PyAny>,
     /// a python function returns
     pub(crate) py_return: &'py Bound<'py, PyAny>,
     /// a generator or coroutine is resumed
@@ -217,9 +220,24 @@ pub(crate) struct Global {
 /// untouched. the same replacement rule applies per code object, so the
 /// breakpoints and the steps that want events on one are decided together
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the same reason [`Global`] carries it: one field per \
+              `sys.monitoring` event a code object can have, and \
+              `set_local_events` replaces the whole mask, so every one of them \
+              is decided together or the ones left out are turned off"
+)]
 pub(crate) struct Local {
     /// every line of it is reported
     pub(crate) line: bool,
+    /// every instruction of it is reported
+    ///
+    /// the most expensive thing this tool can ask for, and it is asked for in
+    /// the smallest window there is: a frame has just returned into this code
+    /// object and the step that followed it wants the **next instruction** of
+    /// the caller, because a return lands mid-line and there is no line event
+    /// left in it. armed at the return and taken off at the first one
+    pub(crate) instruction: bool,
     /// its return is reported
     ///
     /// a `yield` is deliberately not: it suspends a frame rather than finishing
@@ -240,6 +258,7 @@ impl std::ops::BitOr for Local {
     fn bitor(self, other: Self) -> Self {
         Self {
             line: self.line || other.line,
+            instruction: self.instruction || other.instruction,
             py_return: self.py_return || other.py_return,
             py_start: self.py_start || other.py_start,
         }
@@ -265,6 +284,7 @@ pub(crate) fn install(
     for (name, callback) in [
         ("PY_START", callbacks.py_start),
         ("LINE", callbacks.line),
+        ("INSTRUCTION", callbacks.instruction),
         ("PY_RETURN", callbacks.py_return),
         ("PY_RESUME", callbacks.py_resume),
         ("PY_UNWIND", callbacks.py_unwind),
@@ -281,6 +301,7 @@ pub(crate) fn install(
     let handles = Handles {
         disable: monitoring.getattr("DISABLE")?.unbind(),
         line: bit("LINE")?,
+        instruction: bit("INSTRUCTION")?,
         py_start: bit("PY_START")?,
         py_return: bit("PY_RETURN")?,
         py_resume: bit("PY_RESUME")?,
@@ -382,6 +403,7 @@ pub(crate) fn watch_locally(
     let mut events: u32 = 0;
     for (armed, bit) in [
         (wanted.line, handles.line),
+        (wanted.instruction, handles.instruction),
         (wanted.py_return, handles.py_return),
         (wanted.py_start, handles.py_start),
     ] {
@@ -457,6 +479,7 @@ pub(crate) fn disarm(python: Python<'_>) -> PyResult<()> {
     for bit in [
         handles.py_start,
         handles.line,
+        handles.instruction,
         handles.py_return,
         handles.py_resume,
         handles.py_unwind,

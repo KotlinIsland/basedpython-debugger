@@ -286,6 +286,7 @@ pub(crate) fn local(address: usize) -> events::Local {
 
     events::Local {
         line: false,
+        instruction: false,
         py_return: state.watching_parses && hooks.init.as_ptr() as usize == address,
         py_start: !state.armed.is_empty() && hooks.render.as_ptr() as usize == address,
     }
