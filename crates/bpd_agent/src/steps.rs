@@ -28,6 +28,23 @@
 //! the same coroutine rather than somewhere in the event loop, and a step out
 //! of a generator runs it to its end rather than to its next `yield`
 //!
+//! ## where a finished frame puts the step, and why the two ways differ
+//!
+//! a **return** hands control straight back to the caller, at the instruction
+//! after the call. that is where the step goes, and waiting for the caller to
+//! reach a *line* instead is wrong twice over. cpython covers the call, the pop
+//! of its result and — when the call is the caller's last statement — the
+//! caller's own return with **one** line table entry, so the line event for it
+//! has already been and gone: a step waiting for another one is waiting for
+//! something that will not happen, and follows the caller out too, and its
+//! caller, until the program ends. even where a next line does exist, running
+//! on to it spends the value the call returned before anyone can look at it
+//!
+//! an **unwind** is not the same event wearing a different name. the caller is
+//! still propagating, and where it comes to rest is the first line of whichever
+//! handler catches — a line, and not one that can be worked out from here. so a
+//! return lands on the next instruction and an unwind on the next line
+//!
 //! ## what it costs
 //!
 //! arming a step calls `restart_events()`. a line of the frame being stepped in
@@ -49,6 +66,41 @@ use pyo3::prelude::*;
 use crate::armed::{self, Interest};
 use crate::{events, frames, session};
 
+/// what a step is waiting for in the frame it follows
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Landing {
+    /// nothing yet — a step out has not left the frame it was asked in
+    NotYet,
+    /// the next line of it
+    Line,
+    /// the next instruction of it, which is where a call it made returned to
+    ///
+    /// only ever set on a caller, and only from the return that put the step
+    /// there. it is taken off again at the first instruction that arrives, so
+    /// the most expensive event `sys.monitoring` has is armed across a window
+    /// one instruction wide
+    Instruction,
+}
+
+/// how the frame a step was following came to an end
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Finish {
+    /// it returned, and the caller is at the call
+    Returned,
+    /// an exception left it, and the caller is still propagating
+    Unwound,
+}
+
+impl Finish {
+    /// what the step that was in that frame waits for in the caller
+    fn landing(self) -> Landing {
+        match self {
+            Self::Returned => Landing::Instruction,
+            Self::Unwound => Landing::Line,
+        }
+    }
+}
+
 /// one thread's step, held on that thread
 #[derive(Debug)]
 struct Step {
@@ -59,10 +111,8 @@ struct Step {
     frame: Py<PyAny>,
     /// the code objects it has armed, so they can be put back as they were
     armed: Vec<Py<PyAny>>,
-    /// whether reaching a line of `frame` is where it lands
-    ///
-    /// false only for a step out that has not left its frame yet
-    landing: bool,
+    /// what reaching `frame` again means for this step
+    landing: Landing,
     /// whether a frame this thread enters is what it follows next
     entering: bool,
 }
@@ -100,7 +150,11 @@ pub(crate) fn arm(python: Python<'_>, thread: u64, kind: StepKind) -> PyResult<(
         thread,
         frame: frame.clone().unbind(),
         armed: Vec::new(),
-        landing: !matches!(kind, StepKind::Out),
+        landing: if matches!(kind, StepKind::Out) {
+            Landing::NotYet
+        } else {
+            Landing::Line
+        },
         entering: matches!(kind, StepKind::In),
     };
 
@@ -139,8 +193,21 @@ pub(crate) fn cancel(python: Python<'_>) -> PyResult<()> {
 /// the step it belongs to, when it belongs to this thread's and this thread's
 /// is waiting for exactly this frame
 pub(crate) fn reached_line(python: Python<'_>) -> PyResult<Option<StepKind>> {
+    reaching(python, Landing::Line)
+}
+
+/// an instruction of a code object some step watches is about to run
+///
+/// the caller a return put a step in, reached again — which is the landing for
+/// every step whose frame finished, because a return comes back mid-line
+pub(crate) fn reached_instruction(python: Python<'_>) -> PyResult<Option<StepKind>> {
+    reaching(python, Landing::Instruction)
+}
+
+/// this thread reached a `waited` event in a code object some step watches
+fn reaching(python: Python<'_>, waited: Landing) -> PyResult<Option<StepKind>> {
     decide(python, |python, step| {
-        if !step.landing {
+        if step.landing != waited {
             return Ok(Outcome::Carry);
         }
         let frame = events::current_frame(python)?;
@@ -166,7 +233,7 @@ pub(crate) fn entered_frame(python: Python<'_>) -> PyResult<()> {
         if frame.is(step.frame.bind(python)) {
             return Ok(Outcome::Carry);
         }
-        follow(python, step, frame)?;
+        follow(python, step, frame, Landing::Line)?;
         Ok(Outcome::Carry)
     })?;
     Ok(())
@@ -175,7 +242,7 @@ pub(crate) fn entered_frame(python: Python<'_>) -> PyResult<()> {
 /// a frame finished — returned, or was left by an exception
 ///
 /// deliberately not a yield: that suspends a frame rather than finishing it
-pub(crate) fn left_frame(python: Python<'_>) -> PyResult<()> {
+pub(crate) fn left_frame(python: Python<'_>, finish: Finish) -> PyResult<()> {
     decide(python, |python, step| {
         let frame = events::current_frame(python)?;
         if !frame.is(step.frame.bind(python)) {
@@ -190,7 +257,7 @@ pub(crate) fn left_frame(python: Python<'_>) -> PyResult<()> {
             // is what the client is told about
             return Ok(Outcome::Abandon);
         }
-        follow(python, step, caller)?;
+        follow(python, step, caller, finish.landing())?;
         Ok(Outcome::Carry)
     })?;
     Ok(())
@@ -241,11 +308,16 @@ where
     }
 }
 
-/// follow a different frame from here on
-fn follow(python: Python<'_>, step: &mut Step, frame: Bound<'_, PyAny>) -> PyResult<()> {
+/// follow a different frame from here on, waiting for `landing` in it
+fn follow(
+    python: Python<'_>,
+    step: &mut Step,
+    frame: Bound<'_, PyAny>,
+    landing: Landing,
+) -> PyResult<()> {
     let code = frame.getattr("f_code")?;
     step.frame = frame.unbind();
-    step.landing = true;
+    step.landing = landing;
     step.entering = false;
 
     let stale = std::mem::take(&mut step.armed);
@@ -264,7 +336,8 @@ fn follow(python: Python<'_>, step: &mut Step, frame: Bound<'_, PyAny>) -> PyRes
 /// arm one code object for this step
 fn watch(python: Python<'_>, step: &mut Step, code: &Bound<'_, PyAny>) -> PyResult<()> {
     let wanted = events::Local {
-        line: step.landing,
+        line: step.landing == Landing::Line,
+        instruction: step.landing == Landing::Instruction,
         py_return: true,
         // a step never wants a start on a code object it is following: a frame
         // being entered is caught globally, because "some frame, somewhere"

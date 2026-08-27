@@ -137,6 +137,39 @@ twice(1)
 twice(2)
 ";
 
+/// a call in tail position, three frames deep
+///
+/// cpython covers the call, the pop of its result and the implicit return with
+/// **one** line table entry, so a frame returning into one of these produces no
+/// further line event in the caller. a step that waited for a line rather than
+/// for the return followed every caller out in turn and let the program finish
+const TAIL: &str = r#"import pathlib
+
+HERE = pathlib.Path(__file__).parent
+
+
+def note(name):
+    (HERE / name).write_text("x")
+
+
+def deepest():
+    reached = 1
+    note("deepest_ran")
+    print("deepest")  # a builtin, so a step in has nothing to enter
+
+
+def middle():
+    deepest()  # the only statement of middle
+
+
+def outer():
+    middle()  # the only statement of outer
+
+
+outer()  # the last call of the module
+note("program_finished")
+"#;
+
 /// two threads inside the **same** function, so a step armed on one of them is
 /// offered lines the other is running
 const SHARED: &str = r#"import pathlib, threading, time
@@ -528,10 +561,10 @@ fn a_step_in_on_a_line_that_calls_nothing_is_a_step_over() {
 }
 
 #[test]
-fn a_step_out_finishes_the_frame_and_lands_in_the_caller() {
+fn a_step_out_finishes_the_frame_and_lands_where_the_call_was_made() {
     let fixture = Fixture::new("program", PROGRAM);
     let inside = line_of(PROGRAM, "inside = value * 2");
-    let after = line_of(PROGRAM, "after_helper = doubled + 1");
+    let calling = line_of(PROGRAM, "doubled = helper(4)");
 
     let mut driven = launch(&fixture);
     held_at(&mut driven, &fixture.path(), inside);
@@ -539,13 +572,109 @@ fn a_step_out_finishes_the_frame_and_lands_in_the_caller() {
 
     let stop = stepped(&mut driven, StepKind::Out);
     landed_as(&driven, &stop, StepKind::Out);
-    landed_on(&driven, &stop, after);
+    landed_on(&driven, &stop, calling);
     assert_eq!(function(&mut driven), "main");
 
     // out means the frame was finished, not abandoned: the rest of it ran
     assert!(
         ran(&fixture, "helper_ran"),
         "a step out runs the frame it steps out of to its end"
+    );
+
+    // and it stops at the call rather than after it. the caller is holding a
+    // value it has not stored yet, and this is the only moment that value can
+    // be looked at — a step out that ran on to the next line has spent it
+    assert_eq!(
+        value_of(&mut driven, "'doubled' in locals()"),
+        value_of(&mut driven, "False"),
+        "the landing is the call site, before what the call returned was stored"
+    );
+
+    to_exit(&mut driven);
+}
+
+#[test]
+fn a_step_out_lands_in_the_caller_when_the_call_was_its_last_statement() {
+    let fixture = Fixture::new("tail", TAIL);
+    let inside = line_of(TAIL, "reached = 1");
+    let in_middle = line_of(TAIL, "the only statement of middle");
+    let in_outer = line_of(TAIL, "the only statement of outer");
+    let in_module = line_of(TAIL, "the last call of the module");
+
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), inside);
+
+    // three frames, each of which returns without reaching another line of the
+    // one below it. a step out per frame, and each one lands
+    for (caller, line) in [
+        ("middle", in_middle),
+        ("outer", in_outer),
+        ("<module>", in_module),
+    ] {
+        let stop = stepped(&mut driven, StepKind::Out);
+        landed_as(&driven, &stop, StepKind::Out);
+        landed_on(&driven, &stop, line);
+        assert_eq!(function(&mut driven), caller);
+        assert!(
+            !ran(&fixture, "program_finished"),
+            "the step out ran the program to its end instead of landing in \
+             `{caller}`\n{}",
+            driven.trace
+        );
+    }
+
+    assert!(
+        ran(&fixture, "deepest_ran"),
+        "out means the frame was finished, not abandoned"
+    );
+
+    to_exit(&mut driven);
+}
+
+#[test]
+fn a_step_over_the_last_line_of_a_frame_lands_where_the_call_was_made() {
+    let fixture = Fixture::new("tail", TAIL);
+    let last = line_of(TAIL, "a builtin");
+    let in_middle = line_of(TAIL, "the only statement of middle");
+
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), last);
+
+    // the frame runs out from under the step rather than reaching another line
+    // of its own, which is the same landing a step out makes and has to be
+    let stop = stepped(&mut driven, StepKind::Over);
+    landed_as(&driven, &stop, StepKind::Over);
+    landed_on(&driven, &stop, in_middle);
+    assert_eq!(function(&mut driven), "middle");
+    assert!(
+        !ran(&fixture, "program_finished"),
+        "the step ran the program to its end instead of landing in `middle`\n{}",
+        driven.trace
+    );
+
+    to_exit(&mut driven);
+}
+
+#[test]
+fn a_step_in_on_a_builtin_at_the_end_of_a_frame_lands_where_the_call_was_made() {
+    let fixture = Fixture::new("tail", TAIL);
+    let last = line_of(TAIL, "a builtin");
+    let in_middle = line_of(TAIL, "the only statement of middle");
+
+    let mut driven = launch(&fixture);
+    held_at(&mut driven, &fixture.path(), last);
+
+    // `print` has no python frame to enter, so the step in is a step over —
+    // and the frame then ends, which is the same landing as every other way of
+    // finishing one. the two together are the shape a user meets first
+    let stop = stepped(&mut driven, StepKind::In);
+    landed_as(&driven, &stop, StepKind::In);
+    landed_on(&driven, &stop, in_middle);
+    assert_eq!(function(&mut driven), "middle");
+    assert!(
+        !ran(&fixture, "program_finished"),
+        "the step ran the program to its end instead of landing in `middle`\n{}",
+        driven.trace
     );
 
     to_exit(&mut driven);

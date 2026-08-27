@@ -131,6 +131,7 @@ pub(crate) fn any_set() -> bool {
 pub(crate) fn local(address: usize) -> events::Local {
     events::Local {
         line: read().armed.contains_key(&address),
+        instruction: false,
         py_return: false,
         py_start: false,
     }

@@ -367,6 +367,7 @@ fn arm(python: Python<'_>) -> PyResult<()> {
         &events::Callbacks {
             py_start: wrap_pyfunction!(on_py_start, python)?.as_any(),
             line: wrap_pyfunction!(on_line, python)?.as_any(),
+            instruction: wrap_pyfunction!(on_instruction, python)?.as_any(),
             py_return: wrap_pyfunction!(on_py_return, python)?.as_any(),
             py_resume: wrap_pyfunction!(on_py_resume, python)?.as_any(),
             py_unwind: wrap_pyfunction!(on_py_unwind, python)?.as_any(),
@@ -610,6 +611,54 @@ fn on_line<'py>(
     Ok(python.None().into_bound(python))
 }
 
+/// the `INSTRUCTION` callback, armed on one caller for one instruction
+///
+/// the landing of every step whose frame returned. it is the most expensive
+/// event `sys.monitoring` has — every instruction of the code object, on every
+/// thread running it — and it is armed between a return and the single
+/// instruction that follows it, then taken off by the landing itself
+///
+/// there is no breakpoint, pause or stopped world to consider here the way
+/// there is on a line: all three are decided at lines, and the line this lands
+/// mid-way through has already been offered to them
+#[pyfunction]
+fn on_instruction<'py>(
+    python: Python<'py>,
+    code: &Bound<'py, PyAny>,
+    _offset: i32,
+) -> PyResult<Bound<'py, PyAny>> {
+    if !steps::armed_here() {
+        return Ok(python.None().into_bound(python));
+    }
+    let Some(kind) = steps::reached_instruction(python)? else {
+        return Ok(python.None().into_bound(python));
+    };
+
+    // the caller is part way through the line the call was written on, which
+    // is what `f_lineno` reads off the instruction it is at. reported through
+    // `locate` like every other line, so a basedpython build says the `.by`
+    // line rather than the generated one
+    let line: u32 = events::current_frame(python)?
+        .getattr("f_lineno")?
+        .extract()?;
+    let at = sources::locate(code.getattr("co_filename")?.extract()?, line);
+    let thread = events::thread_ident(python)?;
+    session::stop(
+        python,
+        thread,
+        StopReason::Stepped {
+            kind,
+            file: at.file,
+            line: at.line,
+        },
+    )?;
+
+    // deliberately not `DISABLE`: the landing has already taken this code
+    // object's instrumentation off, and a location forgotten here would be one
+    // the next step out into this caller was never offered
+    Ok(python.None().into_bound(python))
+}
+
 /// take off whatever this thread had armed, because something is about to hold it
 ///
 /// every path that holds a thread calls this, and none of them may skip it. an
@@ -815,8 +864,9 @@ fn rendering_a_template_node(python: Python<'_>) -> PyResult<()> {
 /// the `PY_RETURN` callback, armed on the code objects a step is following
 ///
 /// a return finishes a frame. the step that was in it moves to the caller and
-/// lands at its next line, which is what makes stepping over the last statement
-/// of a function land where the call came from
+/// lands at its next **instruction** — control came back mid-line, so the line
+/// event for the call has already been and gone and there may never be another
+/// one. see the landing rule in [`crate::steps`]
 ///
 /// it is also how a django template becomes visible: `Template.__init__`
 /// compiles its nodelist as its last act, so the frame that is returning holds
@@ -833,7 +883,7 @@ fn on_py_return<'py>(
     returned: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
     if steps::armed_here() {
-        steps::left_frame(python)?;
+        steps::left_frame(python, steps::Finish::Returned)?;
     }
 
     // a task made while a condition of ours is running was made by bpd rather
@@ -907,7 +957,7 @@ fn on_py_unwind<'py>(
         return Ok(python.None().into_bound(python));
     }
     if steps::armed_here() {
-        steps::left_frame(python)?;
+        steps::left_frame(python, steps::Finish::Unwound)?;
     }
     // a restart whose caller is being left by an exception can never complete,
     // and the frame it forced out has already gone. the thread is held here

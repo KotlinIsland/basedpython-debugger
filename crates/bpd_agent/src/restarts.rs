@@ -388,6 +388,10 @@ fn watch(
         // the only event a restart reads on a code object. the rewind is made
         // from one in the caller and the landing from one in the fresh frame
         line: true,
+        // a restart lands on a line of a frame it started itself, never
+        // mid-line in a caller, so it never needs the instruction a step out
+        // does
+        instruction: false,
         // **not** asked for. a restart reads `PY_RETURN` nowhere: the caller
         // being left is caught by `PY_UNWIND`, which cannot be a local event at
         // all — `set_local_events` refuses it — so it is armed globally by

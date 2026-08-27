@@ -49,10 +49,58 @@ acceptance, and it does not take the agent's word for which generator it landed
 in: a second generator of the same function runs both of its first lines while
 the first is suspended, and the test reads `tag` out of the frame it landed in
 
-when a frame really is finished, the step moves to its caller and lands at the
-caller's next line. that chains: a frame that returns immediately is followed
-out of too, which is why stepping over the last statement of a function lands
-where the call was made
+## where a finished frame puts the step
+
+when a frame really is finished, the step moves to its caller. **where** in the
+caller depends on how the frame ended, and the two ways are genuinely different
+events rather than one wearing two names
+
+a **return** hands control straight back to the caller, at the instruction after
+the call. that is where the step lands, and it is reported at the caller's
+current line — the line the call was written on. so stepping out of `helper` in
+`doubled = helper(4)` stops on that line with `doubled` not yet bound, which is
+the only moment the value the call returned can be looked at
+
+an **unwind** does not hand control back. the caller is still propagating, and
+where it comes to rest is the first line of whichever handler catches — a line,
+and not one that can be worked out from the frame being left. so a return lands
+on the next instruction and an unwind on the next line, and
+`a_step_over_a_call_that_raises_lands_where_the_caller_catches_it` is the
+acceptance for the second
+
+### why the return case cannot wait for a line
+
+cpython covers the call, the pop of its result and — when the call is the
+caller's last statement — the caller's own return with **one** line table entry.
+returning into `main` here produces no further line event in it at all:
+
+```py
+def f():
+    print(1)
+
+
+def main():
+    f()
+```
+
+so a step out that waited for the caller's next line was waiting for something
+that would never arrive. it followed `main` out too, and `<module>` after it,
+and the program ran to completion — the one outcome a step must never produce,
+because the state it was asked to show is gone and cannot be got back. it is
+`a_step_out_lands_in_the_caller_when_the_call_was_its_last_statement`, which
+makes three step outs through three tail-position frames and requires all three
+to land
+
+the landing therefore comes from an `INSTRUCTION` event on the caller. that is
+the most expensive event `sys.monitoring` has — every instruction of the code
+object, on every thread running it — so it is armed **at the return** and taken
+off by the landing itself, a window one instruction wide
+
+this is the shape a user meets first, because it does not need a step out to
+reach it: `print(1)` is a builtin with no frame to enter, so a step **in** on it
+is a step over, and the frame then ends. `a_step_in_on_a_builtin_at_the_end_of_a_frame_lands_where_the_call_was_made`
+and `a_step_over_the_last_line_of_a_frame_lands_where_the_call_was_made` are the
+same landing reached by the other two kinds
 
 when there is no caller `bpd` would report — the frame above the program's own
 module is the `-c` the interpreter was entered through — the step has nowhere to

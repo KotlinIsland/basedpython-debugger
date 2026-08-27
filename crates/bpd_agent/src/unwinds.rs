@@ -286,6 +286,7 @@ fn watch(python: Python<'_>, unwind: &mut Unwind, code: &Bound<'_, PyAny>) -> Py
         // the only event an unwind reads. every frame it touches is reached at
         // one, and the reset is made at one
         line: true,
+        instruction: false,
         py_return: false,
         py_start: false,
     };
