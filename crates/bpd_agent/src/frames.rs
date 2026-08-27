@@ -971,12 +971,22 @@ impl<'py> Stopped<'py> {
             return Ok(Err(why));
         }
 
+        // **read before anything is forced out.** a frame's offset is what says
+        // whether it is inside a block, and after the move its offset is the
+        // exit it was moved to
+        let mut discarded = Vec::with_capacity(above.len());
+        for frame in above {
+            discarded.push(bpd_core::Discarded {
+                at: describe_where(frame)?,
+                inside_a_block: bytecode::inside_a_block(
+                    &frame.getattr("f_code")?,
+                    frame.getattr("f_lasti")?.extract()?,
+                )?,
+            });
+        }
         let unwinding = bpd_core::Unwinding {
             frame: describe_where(target)?,
-            above: above
-                .iter()
-                .map(describe_where)
-                .collect::<PyResult<Vec<_>>>()?,
+            above: discarded,
         };
         // nothing above this point has touched the program. from here it has
         if let Err(refused) = unwinds::force_out(self.python, &above[0])? {

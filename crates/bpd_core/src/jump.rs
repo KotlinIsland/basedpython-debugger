@@ -961,6 +961,16 @@ impl Reset {
     }
 }
 
+/// the qualified names of some discarded frames
+fn functions(frames: &[Discarded]) -> Vec<String> {
+    frames.iter().map(|one| one.at.function.clone()).collect()
+}
+
+/// the same, for a borrowed selection of them
+fn functions_of(frames: &[&Discarded]) -> Vec<String> {
+    frames.iter().map(|one| one.at.function.clone()).collect()
+}
+
 /// a reset that had to force frames out from above it first
 ///
 /// a frame with live frames above it cannot be reset while they are there:
@@ -980,7 +990,23 @@ pub struct Unwinding {
     ///
     /// they are **gone**, not suspended: each returns, and nothing puts them
     /// back. anything they were the last holder of is finalised as they go
-    pub above: Vec<Where>,
+    pub above: Vec<Discarded>,
+}
+
+/// a frame forced out of the way so that the one below it could be reset
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Discarded {
+    /// where it was when it was forced out
+    pub at: Where,
+
+    /// whether it was inside a `with` or a `try`, whose cleanup did not run
+    ///
+    /// the same fact [`Reset::inside_a_block`] carries about the frame being
+    /// reset, asked about each frame being **discarded** — which was a gap, and
+    /// a worse one: that frame is not coming back, so a context manager it had
+    /// open is open for the rest of the run with nothing left that could close
+    /// it. forcing a frame out is a jump, and a jump runs no block cleanup
+    pub inside_a_block: bool,
 }
 
 impl Unwinding {
@@ -990,7 +1016,7 @@ impl Unwinding {
     /// wrong about: that a stop is coming, which is the opposite of a one-frame
     /// reset, and that the frames above are gone rather than waiting
     pub fn told(&self) -> Vec<String> {
-        vec![
+        let mut said = vec![
             format!(
                 "the thread has been let go so that {} above it can return. wait \
                  for the next stop, which is `frame_reset` at the first line of \
@@ -1003,20 +1029,40 @@ impl Unwinding {
             ),
             format!(
                 "{} gone rather than suspended — each returns, and anything it \
-                 was the last holder of is finalised as it goes. no block \
-                 cleanup runs on the way: forcing a frame out is a jump",
+                 was the last holder of is finalised as it goes",
                 match self.above.as_slice() {
-                    [only] => format!("`{}` is", only.function),
-                    many => {
-                        let named: Vec<String> = many
-                            .iter()
-                            .map(|one| format!("`{}`", one.function))
-                            .collect();
-                        format!("{} are", named.join(", "))
-                    }
+                    [only] => format!("`{}` is", only.at.function),
+                    many => format!("{} are", named(&functions(many))),
                 }
             ),
-        ]
+        ];
+        // said only about the frames it is true of, for the reason
+        // `Reset::inside_a_block` is said only when there was cleanup to skip.
+        // and it is worse here than there: a discarded frame is not coming back,
+        // so a context manager it had open stays open for the rest of the run
+        // with nothing left that could close it
+        let blocked: Vec<&Discarded> = self
+            .above
+            .iter()
+            .filter(|frame| frame.inside_a_block)
+            .collect();
+        if !blocked.is_empty() {
+            said.push(format!(
+                "{} inside a `with` or a `try`, and **the cleanup did not run** — \
+                 no `__exit__`, no `finally`. forcing a frame out is a jump, and \
+                 {} not coming back, so anything it had open stays open",
+                match blocked.as_slice() {
+                    [only] => format!("`{}` was", only.at.function),
+                    many => format!("{} were", named(&functions_of(many))),
+                },
+                if blocked.len() == 1 {
+                    "it is"
+                } else {
+                    "they are"
+                }
+            ));
+        }
+        said
     }
 }
 
