@@ -78,6 +78,8 @@ over_each_transport!(
     an_editor_can_run_a_whole_investigation_the_way_an_agent_can,
     an_editor_can_ask_what_changed_between_two_stops,
     an_editor_can_move_where_the_program_carries_on_from,
+    a_frame_a_thread_is_executing_is_restarted_where_it_stands,
+    a_frame_below_the_top_is_restarted_by_forcing_the_frames_above_it_out,
     a_capability_that_is_not_advertised_is_refused_rather_than_guessed_at,
     a_client_is_refused_the_same_interpreter_the_command_line_is,
     a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds,
@@ -679,6 +681,217 @@ fn an_editor_can_move_where_the_program_carries_on_from(transport: Transport) {
     assert!(
         said.contains("doubled 44"),
         "the lines after the destination ran against the old value: {said:?}"
+    );
+
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+/// three frames, each saying when it ran
+///
+/// the prints are the measurement, not bpd's answer: a frame that really ran
+/// again prints again, and a frame forced out of the way to reach the one below
+/// it prints when the restarted call builds it a second time
+const NESTED: &str = r#"import sys
+
+
+def deepest(v):
+    print("deepest", v, flush=True)
+    bottom = v * 2
+    return bottom
+
+
+def middle(v):
+    print("middle", v, flush=True)
+    inner = deepest(v)
+    settled = inner
+    return settled
+
+
+def outer(v):
+    passed = middle(v)
+    print("outer", passed, flush=True)
+    return passed
+
+
+outer(1)
+print("done", flush=True)
+sys.exit(0)
+"#;
+
+/// stop three frames down, with the breakpoint still set
+///
+/// shared by the two restart scenarios because it is the same session up to the
+/// point they differ: which frame of the three is asked to run again
+fn held_three_deep(transport: Transport, fixture: &Fixture) -> (Client, serde_json::Value) {
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line_of(NESTED, "bottom = v * 2") } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint");
+    let thread = stopped["body"]["threadId"].clone();
+
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    assert_eq!(
+        named(&stack),
+        ["deepest", "middle", "outer", "<module>"],
+        "the stack was {stack}"
+    );
+    (client, thread)
+}
+
+/// the functions on a `stackTrace` response, top first
+fn named(stack: &serde_json::Value) -> Vec<&str> {
+    stack["body"]["stackFrames"]
+        .as_array()
+        .expect("a stack is frames")
+        .iter()
+        .map(|frame| frame["name"].as_str().expect("a frame is named"))
+        .collect()
+}
+
+/// let the program finish, and give back everything it printed
+fn ran_to_the_end(client: &mut Client, fixture: &Fixture, thread: &serde_json::Value) -> String {
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [],
+        }),
+    );
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    let exited = client.event("exited");
+    assert_eq!(exited["body"]["exitCode"], 0);
+    client.event("terminated");
+    client.output()
+}
+
+fn a_frame_a_thread_is_executing_is_restarted_where_it_stands(transport: Transport) {
+    // the frame the thread is executing is run again where it stands. nothing is
+    // let go, so **the event that follows is this same stop announced again**,
+    // with the frame somewhere else — and without it a client goes on pointing at
+    // the line the frame has just left, which is the whole of "reset frame did
+    // nothing" as a person sees it
+    let fixture = Fixture::new("restarting_top", NESTED);
+    let (mut client, thread) = held_three_deep(transport, &fixture);
+
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    client.request(
+        "restartFrame",
+        &serde_json::json!({ "frameId": stack["body"]["stackFrames"][0]["id"] }),
+    );
+
+    let reset = client.event("stopped");
+    assert_eq!(
+        reset["body"]["reason"], "restart",
+        "DAP's own reason for a `restartFrame` landing: {reset}"
+    );
+    assert_eq!(reset["body"]["threadId"], thread);
+
+    let back = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    assert_eq!(
+        back["body"]["stackFrames"][0]["line"],
+        line_of(NESTED, "def deepest(v):"),
+        "the frame is at its first line, and the client has to be able to read \
+         that: {back}"
+    );
+    assert_eq!(named(&back), ["deepest", "middle", "outer", "<module>"]);
+
+    // and it really is going to run again, which is the program's to say
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    let second = client.event("stopped");
+    assert_eq!(
+        second["body"]["reason"], "breakpoint",
+        "the event was {second}"
+    );
+
+    let said = ran_to_the_end(&mut client, &fixture, &thread);
+    assert_eq!(
+        said.matches("deepest 1").count(),
+        2,
+        "`deepest` ran twice, the second time because it was restarted: {said:?}"
+    );
+    assert_eq!(
+        said.matches("middle 1").count(),
+        1,
+        "the caller was never touched: {said:?}"
+    );
+
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+fn a_frame_below_the_top_is_restarted_by_forcing_the_frames_above_it_out(transport: Transport) {
+    // a frame two deep. this one **does** let the thread go — the frames above it
+    // have to return before it can be reset — so the stop arrives on the
+    // connection, with nothing asked for in between. an adapter that went on
+    // believing the old stop was held would never wait for the program, and this
+    // event would arrive only when something unrelated woke it
+    let fixture = Fixture::new("restarting_deep", NESTED);
+    let (mut client, thread) = held_three_deep(transport, &fixture);
+
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    let target = stack["body"]["stackFrames"][2].clone();
+    assert_eq!(target["name"], "outer", "the stack was {stack}");
+    client.request(
+        "restartFrame",
+        &serde_json::json!({ "frameId": target["id"] }),
+    );
+
+    let landed = client.event("stopped");
+    assert_eq!(
+        landed["body"]["reason"], "restart",
+        "the reset of a frame below the top is a `restartFrame` landing like \
+         any other: {landed}"
+    );
+    let description = landed["body"]["description"]
+        .as_str()
+        .expect("a stop says what it is")
+        .to_string();
+    let enters_outer = line_of(NESTED, "def outer(v):");
+    assert!(
+        description.contains("`outer`") && description.contains(&format!(":{enters_outer}")),
+        "the description has to name the frame and where it is, in a sentence \
+         rather than a debug dump: {description:?}"
+    );
+
+    let unwound = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    assert_eq!(
+        named(&unwound),
+        ["outer", "<module>"],
+        "the frames above the one reset are gone rather than suspended: \
+         {unwound}"
+    );
+    assert_eq!(
+        unwound["body"]["stackFrames"][0]["line"], enters_outer,
+        "the stack was {unwound}"
+    );
+
+    let said = ran_to_the_end(&mut client, &fixture, &thread);
+    assert_eq!(
+        said.matches("middle 1").count(),
+        2,
+        "`middle` was forced out and then called again by the restarted \
+         `outer`: {said:?}"
+    );
+    assert!(
+        said.contains("outer 2") && said.contains("done"),
+        "the program carried on to its end: {said:?}"
     );
 
     client.request("disconnect", &serde_json::json!({}));

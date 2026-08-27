@@ -2175,24 +2175,73 @@ impl Adapter {
         // likely to act on it — was the one told least
         let notes = restarting_notes(&restarted);
 
-        // no `stopped` event here, unlike a `goto`: an arranged restart let the
-        // thread go, and where it got to arrives as a stop of its own. one sent
-        // from here would be a stop the client re-read the stack at while the
-        // program was running past it
         if self.client.understands.contains(RESTARTING_EVENT) {
-            return self.event(
+            self.event(
                 RESTARTING_EVENT,
                 &serde_json::json!({
                     "stop": stop,
                     "restarting": &restarted,
                     "notes": notes,
                 }),
-            );
+            )?;
+        } else {
+            for note in notes {
+                self.say(&format!("stop {stop}: {note}\n"))?;
+            }
         }
-        for note in notes {
-            self.say(&format!("stop {stop}: {note}\n"))?;
+
+        // a reset moved the frame with the thread still held, which is a `goto`
+        // in every way a client cares about — and [`Self::moved`] says why the
+        // event is not optional there: the response carries no position, so a
+        // client that gets nothing else goes on showing the stack it read
+        // before the move, pointing at the line the frame has just left. that
+        // is the whole of "reset frame does nothing" as a person sees it
+        //
+        // the tags that let the thread go send nothing from here. where that
+        // thread got to arrives as a stop of its own, and an event from here
+        // would have the client re-read the stack while the program was running
+        // past it
+        if let bpd_core::Restarted::Reset(reset) = &restarted {
+            return self.reset_landed(stop, reset);
         }
         Ok(())
+    }
+
+    /// tell the client the frame is back at its first line
+    ///
+    /// the same shape as the `stopped` [`Self::moved`] sends, and for the same
+    /// reason: it is the one announcement of a position that changed while the
+    /// thread stayed exactly where it was. the stop is the one already on
+    /// screen — this re-announces it rather than reporting a new one, which is
+    /// what DAP's `restart` reason is for
+    fn reset_landed(&mut self, stop: u64, reset: &bpd_core::Reset) -> Answered {
+        let Some(held) = self.announced.iter().find(|held| held.stop == stop) else {
+            // the stop ended under the restart, which means the thread ran on.
+            // there is no position left to report and `announce` has already
+            // said the stop is gone — the same case [`Self::moved`] handles
+            return Ok(());
+        };
+        let thread = self.threads.of(held.thread);
+        let description = format!(
+            "`{}` is running again at {}:{}, in the frame it already had \
+             rather than one a fresh call built. its caller was never touched, \
+             so nothing else on the caller's line ran a second time",
+            reset.frame.function, reset.frame.file, reset.frame.line
+        );
+        self.event(
+            "stopped",
+            &serde_json::json!({
+                "reason": "restart",
+                "description": description,
+                "text": description,
+                "threadId": thread,
+                // the thread was never resumed, so nothing about the other
+                // threads changed and this says what the first announcement of
+                // this stop said
+                "allThreadsStopped": self.worlds.get(&stop).copied().unwrap_or(false),
+                "preserveFocusHint": false,
+            }),
+        )
     }
 
     /// the frame a stop's thread is **executing**, which is the only one that
@@ -2863,12 +2912,14 @@ fn restarting_notes(restarted: &bpd_core::Restarted) -> Vec<String> {
         bpd_core::Restarted::Unwinding(unwinding) => unwinding.told(),
         bpd_core::Restarted::Reset(reset) => {
             let mut said = reset.told();
-            // DAP's own half. the thread was never let go, so there is no
-            // `stopped` event behind this and a client waiting for one would
-            // wait for ever — the stop it is already showing is the answer
+            // DAP's own half. the `stopped` event behind this is the stop
+            // already on screen announced a second time, because the frame it
+            // is showing has moved — it is not a new stop and the program has
+            // not run on between the two
             said.push(
-                "no `stopped` event follows this: the thread was not let go, so \
-                 the stop already on screen is the restarted frame"
+                "the `stopped` event that follows is this same stop again, sent \
+                 because the frame moved under it: the thread was never let go, \
+                 so no second stop is coming"
                     .to_string(),
             );
             said
@@ -3017,6 +3068,45 @@ fn stopped_for(reason: &StopReason) -> (&'static str, String, Vec<u32>) {
             ),
             Vec::new(),
         ),
+        // the three a restart can land on, together because they are one
+        // question — see [`restarting`]
+        StopReason::Restarted { .. }
+        | StopReason::FrameReset(_)
+        | StopReason::RestartAbandoned { .. } => restarting(reason),
+        StopReason::EvaluationFailed {
+            breakpoint,
+            part,
+            expression,
+            file,
+            line,
+            error,
+        } => (
+            "exception",
+            format!(
+                "the {part} `{expression}` of breakpoint {breakpoint} raised {error} \
+                 at {file}:{line}. the program is held rather than resumed: an \
+                 expression that raised has not said `false`"
+            ),
+            Vec::new(),
+        ),
+        // `StopReason` is `#[non_exhaustive]`: a reason this adapter has not
+        // been taught is reported as itself rather than as one it knows
+        other => ("pause", format!("{other:?}"), Vec::new()),
+    }
+}
+
+/// what a client is told about a stop a restart landed on
+///
+/// three reasons rather than one, because a restart has three endings and a
+/// client that rendered them alike would say something false about two of them:
+/// the call was made again, the frame it already had is running again, or the
+/// frame went and never came back
+///
+/// split out of [`stopped_for`] to keep that table readable rather than because
+/// these are a different kind of thing. it takes the whole [`StopReason`] and
+/// not the fields of one, so the arms stay where the variants are matched
+fn restarting(reason: &StopReason) -> (&'static str, String, Vec<u32>) {
+    match reason {
         // DAP's own reason for a `restartFrame` landing, which is what this
         // really is: the frame is running again, from the top, with the locals
         // the call bound
@@ -3030,6 +3120,37 @@ fn stopped_for(reason: &StopReason) -> (&'static str, String, Vec<u32>) {
                 "`{function}` is running again at {file}:{line}, in a frame the \
                  caller's call built. nothing of it has run and every local it \
                  has is one this call bound"
+            ),
+            Vec::new(),
+        ),
+        // `restart` for the reason above it is: DAP has one word for "a
+        // `restartFrame` landed" and this is one landing. what the description
+        // has to carry is which frame it landed in — this is the frame the
+        // program already had, sent back to its first line once the frames
+        // above it returned, so anything holding it still holds it
+        //
+        // without an arm of its own this fell through to the `other` catch-all
+        // of [`stopped_for`] and reached a person as `pause` with a rust
+        // `Debug` dump for a description
+        StopReason::FrameReset(reset) => (
+            "restart",
+            format!(
+                "`{}` is running again at {}:{}, in the frame it already had \
+                 rather than one a fresh call built — the frames above it were \
+                 forced out to get here, and they are gone rather than \
+                 suspended{}",
+                reset.frame.function,
+                reset.frame.file,
+                reset.frame.line,
+                if reset.emptied.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ". {:?} are unbound again, the way a call that had just \
+                         started would have them",
+                        reset.emptied
+                    )
+                }
             ),
             Vec::new(),
         ),
@@ -3053,25 +3174,7 @@ fn stopped_for(reason: &StopReason) -> (&'static str, String, Vec<u32>) {
             ),
             Vec::new(),
         ),
-        StopReason::EvaluationFailed {
-            breakpoint,
-            part,
-            expression,
-            file,
-            line,
-            error,
-        } => (
-            "exception",
-            format!(
-                "the {part} `{expression}` of breakpoint {breakpoint} raised {error} \
-                 at {file}:{line}. the program is held rather than resumed: an \
-                 expression that raised has not said `false`"
-            ),
-            Vec::new(),
-        ),
-        // `StopReason` is `#[non_exhaustive]`: a reason this adapter has not
-        // been taught is reported as itself rather than as one it knows
-        other => ("pause", format!("{other:?}"), Vec::new()),
+        other => unreachable!("{other:?} is not a stop a restart landed on"),
     }
 }
 

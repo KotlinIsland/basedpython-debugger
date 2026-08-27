@@ -348,6 +348,17 @@ fn a_frame_two_deep_is_reset_after_the_frames_above_it_are_forced_out() {
         "the frames above the target, innermost first"
     );
 
+    // the thread was let go, so the stop it was held at is **over** — and the
+    // engine has to say so before the reset lands, because that is what a front
+    // end reads to decide whether to wait for the program at all. it did not,
+    // and a client left believing the old stop was still held never waited and
+    // never announced the one below
+    assert!(
+        debuggee.held().is_empty(),
+        "the stop the unwind ended is still reported as held: {:?}",
+        debuggee.held()
+    );
+
     // the thread was let go, so the reset arrives as a stop of its own
     let stop = landed(&mut debuggee);
     let reset = match &stop.reason {

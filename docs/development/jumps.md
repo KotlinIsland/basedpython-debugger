@@ -95,12 +95,15 @@ discarding the frames above it, and there is no mechanism for that.
 public C API pops a frame
 
 what is left is making each intervening frame **return**, which is a different
-operation and would have to be described as one. [restart frame](#what-a-restart-really-is)
-does the nearest thing for **one** frame — and note that it does not get the
-`finally` and `except` blocks either, because the way it makes a frame return is
-a jump. it is not a way to reach a deeper frame at all: it needs the caller's
-line to be the thing that built the frame. pydevd advertises
-`supportsRestartFrame: false` rather than answering either question
+operation and is described as one:
+[resetting a frame that is not the one executing](#resetting-a-frame-that-is-not-the-one-executing)
+is that operation, and it is how restart frame reaches a frame below the top. it
+is not a jump into that frame and it is not free — every frame in the chain is
+decided against the same allow list before the first of them is touched, and none
+of them gets its `finally` and `except` blocks, because the way each is made to
+return is a jump. what a *jump* cannot do is any of it: it moves one frame and
+nothing else. pydevd advertises `supportsRestartFrame: false` rather than
+answering either question
 
 a django template frame cannot be moved either. it is synthesised over the
 `Node.render_annotated` frame that renders it and the interpreter has no frame
@@ -891,10 +894,20 @@ stack to see where it is. that event repeats what the stop was announced with
 about the other threads rather than recomputing it: nothing about them changed,
 and a second event saying otherwise would contradict the first
 
-**`restartFrame`** is answered and then nothing — the thread was let go, and
-sending a `stopped` event from there would have the client read a stack while the
-program ran past it. the `stopped` event arrives when the restart lands, with
-reason `restart`, which is DAP's own name for exactly this. a rewind cpython
+**`restartFrame`** is answered and then followed by a `stopped` event with
+reason `restart`, which is DAP's own name for exactly this — but *when* it goes
+out is the tag's to say, and getting that wrong is a client left pointing at a
+line the frame has already left:
+
+| what the restart did       | when the `stopped` event goes out                                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| reset where it stood       | straight after the response — this is a `goto` in every way that matters, the thread never moved and only the frame did |
+| rewound through the caller | when the restarted call lands, because the thread was let go                                                            |
+| unwound the frames above   | when the reset lands, for the same reason                                                                               |
+| refused                    | never — it is an error response, and nothing moved                                                                      |
+
+sending one from the adapter for either of the two that let the thread go would
+have the client read a stack while the program ran past it. a rewind cpython
 refused arrives as a stop too, deliberately **not** with reason `restart`: a
 client that rendered it as one would say a frame is running again when it
 returned and did not come back

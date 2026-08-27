@@ -1712,6 +1712,13 @@ impl Attached {
     /// an arranged restart let the thread go and a refused one did not, and an
     /// engine that guessed either way would leave its idea of what is held
     /// different from the agent's — with nothing saying which is right
+    ///
+    /// **two tags let the thread go, not one.** an unwind does it as well —
+    /// the frames above the one being reset have to actually return — and it
+    /// was missing here, so the engine went on reporting a stop the thread had
+    /// already left. a front end reads [`Debuggee::held`] to decide whether to
+    /// wait for the program, so what it read was "nothing to wait for" and the
+    /// stop the unwind landed on was never announced
     fn restart_frame(
         &mut self,
         frame: FrameId,
@@ -1723,7 +1730,7 @@ impl Attached {
         let request = FromEngine::RestartFrame { frame, again };
         match self.ask(&request, EXPECTED, reporting)? {
             FromAgent::Restarting { restarted } => {
-                if matches!(restarted, Restarted::Arranged(_)) {
+                if matches!(restarted, Restarted::Arranged(_) | Restarted::Unwinding(_)) {
                     self.held.retain(|held| held.stop != frame.stop);
                 }
                 Ok(restarted)
