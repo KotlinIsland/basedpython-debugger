@@ -905,3 +905,247 @@ fn source_chain(error: &dyn std::error::Error) -> String {
     }
     said
 }
+
+// ── staging the build again, which is what a hot reload is ──────────────────
+
+/// a `.by` whose module body only **defines**, so a program can be stopped while
+/// none of it is running
+///
+/// [`SOURCE`] calls `main()` at the end, which is a fine program and the wrong
+/// shape for this: a module that calls into itself has its own module frame live
+/// for as long as the call lasts, and a replacement is refused while any frame of
+/// the file is running. that refusal is bpd's own rule and is tested where it
+/// belongs; what is being tested here is what happens when it does *not* apply
+const IMPORTED: &str = "\
+def add(a: int, b: int) -> int:
+    total = a + b
+    return total
+
+
+# a comment, which the transpile does not keep
+def main() -> None:
+    answer = add(2, 3)
+    print(answer)
+";
+
+/// the python [`IMPORTED`] transpiles to
+const IMPORTED_GENERATED: &str = "\
+from __future__ import annotations
+import os
+from pathlib import Path
+import sys
+
+
+def add(a: int, b: int) -> int:
+    total = a + b
+    return total
+
+
+def main() -> None:
+    answer = add(2, 3)
+    Path(sys.argv[1]).write_text(str(answer) + os.linesep)
+";
+
+/// the same file after `by` staged it again, with one more line of prelude
+///
+/// **every line below it moves, and nothing the module body does changes** — a
+/// blank line emits no instruction. that is what makes the replacement applicable
+/// at all, and the line table moving is the entire point: it is the one thing
+/// excluded from the comparison, and the one thing a stale map gets wrong
+const IMPORTED_RESTAGED: &str = "\
+from __future__ import annotations
+import os
+from pathlib import Path
+import sys
+
+
+
+def add(a: int, b: int) -> int:
+    total = a + b
+    return total
+
+
+def main() -> None:
+    answer = add(2, 3)
+    Path(sys.argv[1]).write_text(str(answer) + os.linesep)
+";
+
+/// which `.by` line each generated line of [`IMPORTED_GENERATED`] came from
+fn imported_table() -> Vec<Option<u32>> {
+    vec![
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(0), // def add
+        Some(1), // total = a + b
+        Some(2), // return total
+        Some(3),
+        Some(4),
+        Some(6), // def main, the `.by`'s comment on line 5 generating nothing
+        Some(7), // answer = add(2, 3)
+        Some(8), // print(answer), which became a write_text
+    ]
+}
+
+/// [`imported_table`] with the prelude one line longer, to match [`IMPORTED_RESTAGED`]
+fn imported_restaged_table() -> Vec<Option<u32>> {
+    let mut lines = vec![None];
+    lines.extend(imported_table());
+    lines
+}
+
+/// a runner that **imports** the build and stops outside it
+///
+/// what `by run` really does — `_by_runner.py` starts and the user's modules are
+/// imported — reduced to the part that matters here: at the breakpoint, `demo`
+/// has been imported and its module body has returned, so no frame of the file
+/// being replaced is on the stack
+fn importing_runner(build: &Build) -> PathBuf {
+    let path = build.root().join("runner.py");
+    std::fs::write(
+        &path,
+        format!(
+            "import sys\n\
+             sys.path.insert(0, {root:?})\n\
+             import demo\n\
+             held = True  # the line this stops on\n\
+             demo.main()\n",
+            root = build.root().display().to_string(),
+        ),
+    )
+    .expect("the runner is written");
+    path
+}
+
+/// **the whole of a hot reload from bpd's side, in one request.**
+///
+/// `by` has staged one file of the build again: the generated python is new, and
+/// `_by_sourcemap.py` beside it was rewritten — so the tables this session holds
+/// describe the tree it used to be, and the `.by` breakpoint is armed on a
+/// generated line that came out of them.
+///
+/// What is asserted is that the two moved **together**. The `.by` line is a fact
+/// about what the user asked for and must not change. The generated line behind
+/// it is a fact about the tree and must.
+#[test]
+fn staging_the_build_again_replaces_the_code_and_moves_the_breakpoints_with_the_map() {
+    let build = Build::pair(IMPORTED, IMPORTED_GENERATED, &imported_table());
+    let runner = importing_runner(&build);
+    let mut debuggee = launch_program(&build, &runner);
+
+    let asked = bpd_test::debuggee::line_of(IMPORTED, "print(answer)");
+    let held = bpd_test::debuggee::line_of(
+        &std::fs::read_to_string(&runner).expect("the runner was just written"),
+        "held = True",
+    );
+    let resolved = debuggee
+        .set_breakpoints(vec![
+            // the one that stops the program, in the runner — which is not part
+            // of the build and goes through the map untouched
+            SourceBreakpoint::at(1, &runner, held),
+            // and the one this is about, on a `.by` line whose generated line is
+            // about to move
+            SourceBreakpoint::at(2, &build.source, asked),
+        ])
+        .expect("the breakpoints were answered");
+    // nothing of the build is loaded yet — the program is held at entry and the
+    // import has not run — so the `.by` one is honestly unbound rather than
+    // pretending to be armed on a module the interpreter has never seen
+    let armed = resolved
+        .iter()
+        .find(|one| one.id == 2)
+        .expect("the `.by` breakpoint was answered");
+    assert!(
+        matches!(
+            &armed.binding,
+            Binding::Unbound {
+                reason: Unbound::InGeneratedPython { .. }
+            }
+        ),
+        "before the import there is no code to bind to: {armed:?}"
+    );
+
+    let reason = run_to_stop(&mut debuggee);
+    assert!(
+        matches!(&reason, StopReason::Breakpoint { file, .. } if Path::new(file) == runner),
+        "the program stops in the runner, with the build imported and none of it running: {reason:?}"
+    );
+
+    // asked again now the module is loaded, which is what arms it on the tree as
+    // it was staged — and is the line the replacement below has to move
+    let resolved = debuggee
+        .set_breakpoints(vec![
+            SourceBreakpoint::at(1, &runner, held),
+            SourceBreakpoint::at(2, &build.source, asked),
+        ])
+        .expect("the breakpoints were answered again");
+    let armed = resolved
+        .iter()
+        .find(|one| one.id == 2)
+        .expect("the `.by` breakpoint was answered");
+    let Binding::BoundInSource { generated, .. } = &armed.binding else {
+        panic!("with the module loaded a `.by` breakpoint binds as a mapped one: {armed:?}")
+    };
+    assert_eq!(
+        generated.line,
+        bpd_test::debuggee::line_of(IMPORTED_GENERATED, "write_text"),
+        "it is armed on the tree as it was staged"
+    );
+
+    // what `by` does to the tree, done here directly: this suite builds its own
+    // builds rather than shelling out to `by`, for the reason every fixture in it
+    // does — what is under test is bpd's half, and a test that needed the
+    // transpiler would be testing two things and reporting one
+    std::fs::write(&build.generated, IMPORTED_RESTAGED).expect("the re-staged python is written");
+    build.write_map(&imported_restaged_table());
+
+    // named as the `.by`, which the interpreter never compiled: it is resolved to
+    // the generated python through the map, the same translation a breakpoint and
+    // a frame go through
+    let replaced = debuggee
+        .restage_and_replace([build.source.clone()])
+        .expect("the replacement was answered");
+
+    let [only] =
+        <[bpd_core::Replaced; 1]>::try_from(replaced.files.clone()).expect("one file was replaced");
+    assert!(
+        matches!(only.outcome, bpd_core::Replacement::Applied { .. }),
+        "a body that only moved is applicable: {:#?}",
+        only.outcome
+    );
+
+    let remapped = replaced
+        .remapped
+        .as_ref()
+        .unwrap_or_else(|| panic!("a remap was asked for and the tables moved: {replaced:#?}"));
+    assert_eq!(remapped.directory, build.root());
+    assert_eq!(remapped.files, 1, "the build has one mapped file");
+    assert_eq!(
+        remapped.breakpoints, 2,
+        "the whole set is translated through the new tables, not the breakpoints of the file replaced"
+    );
+
+    let moved = replaced
+        .rebound
+        .iter()
+        .find(|one| one.id == 2)
+        .unwrap_or_else(|| panic!("the `.by` breakpoint bound again: {replaced:#?}"));
+    let Binding::BoundInSource {
+        line, generated, ..
+    } = &moved.binding
+    else {
+        panic!("it is still a mapped breakpoint, and it is {moved:?}")
+    };
+    assert_eq!(
+        *line, asked,
+        "the `.by` line is what the user asked for, and the tree moving does not move it"
+    );
+    assert_eq!(
+        generated.line,
+        bpd_test::debuggee::line_of(IMPORTED_RESTAGED, "write_text"),
+        "the generated line behind it is the tree as it is now"
+    );
+}

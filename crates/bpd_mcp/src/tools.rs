@@ -1105,7 +1105,46 @@ pub fn tools() -> Vec<Tool> {
                                         debuggee's own filesystem. it is matched \
                                         by filesystem identity rather than by \
                                         path text, so a symlink and the file it \
-                                        points at are the same file",
+                                        points at are the same file. a `.by` may \
+                                        be named: the interpreter never compiled \
+                                        one, so it is resolved to the generated \
+                                        python through the build's own source \
+                                        map. give this or `files`",
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "several files, replaced together or not \
+                                        at all — every refusal of every one of \
+                                        them is collected before anything is \
+                                        written. that is what staging a \
+                                        basedpython build again produces: the \
+                                        transpile is type-directed, so one edit \
+                                        can change the python emitted for more \
+                                        than one module, and applying some of \
+                                        them would leave the process half way \
+                                        between two versions of the build. give \
+                                        this or `file`",
+                    },
+                    "remap": {
+                        "type": "boolean",
+                        "description": "read the build's `_by_sourcemap.py` again \
+                                        before replacing anything, and translate \
+                                        the whole breakpoint set through the new \
+                                        tables. for a basedpython build whose \
+                                        tree was just staged again: the map \
+                                        beside the generated python was rewritten \
+                                        too, so every `.by` breakpoint is armed \
+                                        on a generated line that came out of a \
+                                        table that no longer describes the tree. \
+                                        it happens in the same message as the \
+                                        replacement, before any code is swapped, \
+                                        because anything split across two would \
+                                        leave a window in which another thread's \
+                                        location is mapped through the old one. \
+                                        defaults to false, which is right for a \
+                                        program that is not a basedpython build \
+                                        — it has no map to read",
                     },
                     "even_under_a_live_frame": {
                         "type": "boolean",
@@ -1127,7 +1166,12 @@ pub fn tools() -> Vec<Tool> {
                                         has",
                     },
                 }),
-                &["file"],
+                // neither `file` nor `files` alone: one of them is needed and
+                // either will do, which `required` cannot say. naming one would
+                // make the other unreachable for an agent reading the schema, so
+                // the pairing is said in both descriptions and an empty set is
+                // refused when it arrives
+                &[],
             ),
         },
         Tool {

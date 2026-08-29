@@ -71,28 +71,212 @@
 //! replacement requires that no frame anywhere in the process is running any of
 //! the file's code — not on a thread, and not suspended inside a generator, a
 //! coroutine or an async generator waiting to be sent into
+//!
+//! ## a whole build, and the map that goes with it
+//!
+//! basedpython does not put the file a person edits in front of the interpreter.
+//! `by run` transpiles the project into a temporary tree, stages every other file
+//! of it in there verbatim, writes `_by_sourcemap.py` beside them and runs the
+//! program out of that — so **nothing the user edits is the file the process is
+//! running**, a `.by` because it was transpiled and a hand-written `.py` because
+//! it was copied. an edit reaches the running process by staging that one file
+//! into the tree again, which changes two things at once: the code, and the table
+//! that says which `.by` line each generated line came from
+//!
+//! that is why a replacement takes a **list** and carries [`Remapped`]:
+//!
+//! - `files` is applied all at once or not at all. it is the same rule the single
+//!   file already has — a process half way between two versions produces evidence
+//!   about neither — one level up, so every refusal of every file is collected
+//!   before anything is written and one refusal anywhere leaves the whole process
+//!   untouched. a file that was itself fine says so, by name, in
+//!   [`Unreplaceable::Withheld`]
+//! - a remap reloads the build's map, reinstalls it, and translates the `.by`
+//!   breakpoints through it **before** the code is replaced. their generated
+//!   lines came out of the old table and are stale the moment the tree is staged
+//!   again, so a client that did those in two requests could order them wrong —
+//!   and everything reported in between would be mapped through the table for
+//!   code the process is no longer running. the ordering is not the client's to
+//!   get right, which is why it is one request
+//!
+//! the ordering holds inside the debuggee rather than across a sequence of
+//! requests to it, and that is the whole reason it is one message: the agent
+//! answers with the GIL held, so no thread of the program runs between installing
+//! the map, arming the breakpoints and assigning the code. a debugger that sent
+//! three requests would leave two windows in which another thread's logpoint
+//! record is mapped through a table that no longer describes what it is running
 
 use std::path::PathBuf;
 
 use crate::breakpoint::Resolved;
 use crate::exception::PythonError;
 use crate::jump::Suspendable;
+use crate::source_map::Unmapped;
 use crate::stop::Mode;
 
-/// what a replacement did to the process
+/// what one request to replace code did to the process
+///
+/// the request names a **list** of files and this is the one answer to it, for
+/// the reason the list is applied at once: the three facts under `files` are
+/// facts about the process rather than about a file, and duplicating them per
+/// entry would be three answers to one question that a client would have to
+/// check against each other
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Replaced {
-    /// the file that was asked about, as the client named it
-    pub file: PathBuf,
-    /// what became of it
-    pub outcome: Replacement,
+pub struct Replacements {
+    /// one answer per file asked about, in the order it was asked about
+    pub files: Vec<Replaced>,
+
+    /// breakpoints whose binding this changed
+    ///
+    /// process-wide, and it has to be: a breakpoint was bound to a code object
+    /// nothing will execute any more and is rebound against the code that is
+    /// running now — and after a remap the whole set was translated again
+    /// through a table that moved, so a breakpoint in a file that was **not**
+    /// replaced can move too. a client that was not told would be watching a
+    /// line it can see is armed and never reached
+    pub rebound: Vec<Resolved>,
+
+    /// the build's source map, reloaded before any code was replaced
+    ///
+    /// `None` when none was asked for, which is every replacement of ordinary
+    /// python. a refusal never carries one: nothing is remapped when nothing is
+    /// applied
+    pub remapped: Option<Remapped>,
+
     /// how the program was moving while this was done
     ///
     /// [`Mode::NonStop`] is the ordinary one, and it bounds what the refusals
-    /// below are: whether another thread is running this file's code is read
-    /// from a **sample** of the threads that are not held. stopping the world
-    /// first is what makes it a reading of all of them
-    pub mode: Mode,
+    /// below are: whether another thread is running a file's code is read from a
+    /// **sample** of the threads that are not held. stopping the world first is
+    /// what makes it a reading of all of them
+    ///
+    /// `None` when the process was never asked. a request naming a `.by` the
+    /// build's map cannot place is refused **out of process**, where the map is,
+    /// before a byte of it reaches the debuggee — so no thread was sampled and
+    /// there is nothing for a mode to qualify. answering [`Mode::NonStop`] there
+    /// would be reporting a reading that was never taken, which is the one thing
+    /// every refusal in this module is careful not to do
+    pub mode: Option<Mode>,
+}
+
+impl Replacements {
+    /// whether every file of the request was applied
+    ///
+    /// the request is atomic, so this is the whole outcome rather than a
+    /// summary: they were all applied or none of them was
+    #[must_use]
+    pub fn applied(&self) -> bool {
+        self.files
+            .iter()
+            .all(|replaced| matches!(replaced.outcome, Replacement::Applied { .. }))
+    }
+
+    /// the whole request refused, or `None` when nothing stood in the way
+    ///
+    /// `reasons` is one entry per file, in the order the request asked about
+    /// them, holding everything that file refuses for — empty for a file nothing
+    /// was wrong with. if **any** of them has a reason then none of them is
+    /// applied, and the ones with nothing wrong get [`Unreplaceable::Withheld`]
+    /// naming the ones that held them back
+    ///
+    /// it lives here rather than in the debuggee because both sides decide it. a
+    /// `.by` that is no longer the file its build was transpiled from is refused
+    /// out of process, where the map is, and a changed module body is refused in
+    /// the process, where the code objects are — and two implementations of "one
+    /// refusal refuses the request" is how they come to disagree about which
+    /// files an answer is about
+    ///
+    /// `mode` is `None` for a refusal decided out of process, which is what an
+    /// unplaceable `.by` is: the debuggee was never asked, so no thread of it
+    /// was sampled
+    #[must_use]
+    pub fn refused(
+        mode: Option<Mode>,
+        reasons: Vec<(PathBuf, Vec<Unreplaceable>)>,
+    ) -> Option<Self> {
+        let blocked: Vec<PathBuf> = reasons
+            .iter()
+            .filter(|(_, because)| !because.is_empty())
+            .map(|(file, _)| file.clone())
+            .collect();
+        if blocked.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            files: reasons
+                .into_iter()
+                .map(|(file, because)| Replaced {
+                    outcome: Replacement::Refused {
+                        because: if because.is_empty() {
+                            vec![Unreplaceable::Withheld {
+                                because_of: blocked
+                                    .iter()
+                                    .filter(|blocked| **blocked != file)
+                                    .cloned()
+                                    .collect(),
+                                file: file.clone(),
+                            }]
+                        } else {
+                            because
+                        },
+                    },
+                    file,
+                })
+                .collect(),
+            // nothing was applied, so nothing was rebound and nothing was
+            // remapped. empty here is the guarantee rather than an absence of
+            // information
+            rebound: Vec::new(),
+            remapped: None,
+            mode,
+        })
+    }
+}
+
+/// the build's source map, read again and installed
+///
+/// what a client needs to tell a remap that did something from one that did
+/// nothing. the map is loaded by `bpd` out of process through
+/// `bpd_core::SourceMap::load`, which hashes both files of every pair against
+/// disk before it returns — so a value of this exists only because the tree it
+/// describes really is the tree the map was written for
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Remapped {
+    /// the build directory the map was read out of
+    pub directory: PathBuf,
+    /// how many `.by`/`.py` pairs the map covers now
+    pub files: u32,
+    /// how many breakpoints were translated again through it
+    pub breakpoints: u32,
+}
+
+impl std::fmt::Display for Remapped {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the basedpython build in `{}` was mapped again — {} file(s) in the \
+             map, {} breakpoint(s) translated through it. that happened before \
+             any code was replaced, because the generated lines the breakpoints \
+             were armed on came out of the table this replaced",
+            self.directory.display(),
+            self.files,
+            self.breakpoints
+        )
+    }
+}
+
+/// what a replacement did to one file
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Replaced {
+    /// the file that was asked about, as the client named it
+    ///
+    /// a `.by` stays spelled as a `.by`. it is resolved to the generated python
+    /// through the map the session already holds, and answering about the
+    /// temporary path that came out would be answering a question nobody asked
+    pub file: PathBuf,
+    /// what became of it
+    pub outcome: Replacement,
 }
 
 /// what became of a replacement
@@ -113,14 +297,6 @@ pub enum Replacement {
         changed: Vec<Rebound>,
         /// `co_qualname` of the file's functions whose code is unchanged
         unchanged: Vec<String>,
-        /// breakpoints whose binding the replacement changed
-        ///
-        /// a breakpoint was bound to a code object nothing will execute any
-        /// more, and it is rebound against the code that is running now. this
-        /// is the second thing a replacement changes about the process, and a
-        /// client that was not told would be watching a line it can see is
-        /// armed and never reached
-        rebound: Vec<Resolved>,
 
         /// frames that go on running the code this replaced
         ///
@@ -305,6 +481,54 @@ pub enum Unreplaceable {
         cells: u32,
         /// the free variables the code on disk wants
         wanted: u32,
+    },
+
+    /// nothing about this file stood in the way, and something about another did
+    ///
+    /// the only refusal that is not about the file it names. a request naming
+    /// several files is applied at once or not at all, so a file that was itself
+    /// replaceable is still not replaced — and saying nothing about it would
+    /// leave a client with an answer that has a hole where one of its questions
+    /// was. what to do about it is in the entries this names
+    Withheld {
+        /// the file that was fine
+        file: PathBuf,
+        /// the files in the same request whose refusals held it back
+        because_of: Vec<PathBuf>,
+    },
+
+    /// a `.by` was named and bpd has no map of the build it belongs to
+    ///
+    /// the analogue of [`crate::Unbound::NoSourceMap`], and it is a refusal for
+    /// the same reason: the interpreter never compiled a `.by` and never will,
+    /// so there is no code of it to replace. what places one is the map the
+    /// build wrote, and without that there is nothing to place it with
+    NoSourceMap {
+        /// the `.by` that was asked about
+        file: PathBuf,
+    },
+
+    /// a `.by` was named and the build's map does not cover it
+    Unmappable {
+        /// the `.by` that was asked about
+        file: PathBuf,
+        /// what the map said
+        reason: Unmapped,
+    },
+
+    /// a `.by` was named and it is not the file the build was transpiled from
+    ///
+    /// the same check [`crate::Unverified::NotTheSameSource`] makes, at the
+    /// moment it matters most. the code the process runs is the generated
+    /// python, so replacing it with what is beside it in the build tree would
+    /// succeed and change nothing — and a person who had just edited the `.by`
+    /// would read "nothing needed replacing" as a statement about their edit.
+    /// it is a statement about a file they are not looking at
+    NotTheSameSource {
+        /// the `.by` that was asked about
+        file: PathBuf,
+        /// the generated python the build has for it
+        generated: PathBuf,
     },
 }
 
@@ -601,6 +825,52 @@ impl std::fmt::Display for Unreplaceable {
                  half way through — the enclosing function's variables are what \
                  changed, so replace it from the outside or restart the process"
             ),
+            Self::Withheld { file, because_of } => {
+                write!(
+                    formatter,
+                    "nothing about `{}` stood in the way, and it was not replaced \
+                     either: this request named {} file(s) and they are applied \
+                     at once or not at all, because a process half way between \
+                     two versions of a build produces evidence about neither. \
+                     what stood in the way is under",
+                    file.display(),
+                    because_of.len() + 1
+                )?;
+                for (index, other) in because_of.iter().enumerate() {
+                    write!(
+                        formatter,
+                        "{} `{}`",
+                        if index == 0 { "" } else { " and" },
+                        other.display()
+                    )?;
+                }
+                Ok(())
+            }
+            Self::NoSourceMap { file } => write!(
+                formatter,
+                "`{}` is basedpython source and bpd has no map of the build it \
+                 belongs to, so there is nothing to say which generated python \
+                 the interpreter is running for it. the map is the file `by run` \
+                 writes into the build directory — run the program out of that \
+                 directory and bpd finds it",
+                file.display()
+            ),
+            Self::Unmappable { file, reason } => write!(
+                formatter,
+                "`{}` cannot be placed in the build that is running: {reason}",
+                file.display()
+            ),
+            Self::NotTheSameSource { file, generated } => write!(
+                formatter,
+                "`{}` is not the file `{}` was transpiled from — it has been \
+                 edited since the build was made. the code the process runs is \
+                 the generated python, so replacing it with what is beside it in \
+                 the build tree would succeed and change nothing at all. \
+                 transpile that file into the build again, and replace the code \
+                 that comes out",
+                file.display(),
+                generated.display()
+            ),
         }
     }
 }
@@ -732,6 +1002,49 @@ mod tests {
                     },
                 },
                 vec!["SyntaxError", "runs none of the program"],
+            ),
+            (
+                Unreplaceable::Withheld {
+                    file: PathBuf::from("/tmp/build/fine.py"),
+                    because_of: vec![PathBuf::from("/tmp/build/broken.py")],
+                },
+                vec![
+                    "/tmp/build/fine.py",
+                    "/tmp/build/broken.py",
+                    // the whole of why a file nothing was wrong with is in the
+                    // answer at all
+                    "at once or not at all",
+                ],
+            ),
+            (
+                Unreplaceable::NoSourceMap {
+                    file: PathBuf::from("/src/app.by"),
+                },
+                vec!["/src/app.by", "build directory"],
+            ),
+            (
+                Unreplaceable::Unmappable {
+                    file: PathBuf::from("/src/app.by"),
+                    reason: Unmapped::NotInTheMap {
+                        file: PathBuf::from("/src/app.by"),
+                    },
+                },
+                vec!["/src/app.by", "says nothing about"],
+            ),
+            (
+                Unreplaceable::NotTheSameSource {
+                    file: PathBuf::from("/src/app.by"),
+                    generated: PathBuf::from("/tmp/build/app.py"),
+                },
+                vec![
+                    "/src/app.by",
+                    "/tmp/build/app.py",
+                    // the trap this refusal exists for: without it the answer is
+                    // a truthful "nothing needed replacing" about a file the
+                    // person is not looking at
+                    "change nothing at all",
+                    "transpile",
+                ],
             ),
         ];
 

@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Binding, Divergence, LiveFrame, Replaced, Replacement, Running, SourceBreakpoint, Stop,
-    Unreplaceable,
+    Binding, Divergence, LiveFrame, Replaced, Replacement, Replacements, Running, SourceBreakpoint,
+    Stop, Unreplaceable,
 };
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
@@ -256,12 +256,30 @@ fn recorded(fixture: &Fixture) -> String {
         .unwrap_or_else(|error| panic!("the program never wrote {}: {error}", path.display()))
 }
 
+/// the one file a replacement was about
+///
+/// every test here replaces a single file, which now comes back as a list of one.
+/// asserting the length rather than taking the first is the point: a request for
+/// one file that answered about two would be a different bug than any of these
+/// tests are looking for, and would otherwise pass silently
+fn only(replaced: &Replacements) -> &Replaced {
+    assert_eq!(
+        replaced.files.len(),
+        1,
+        "one file was replaced and the answer was about {}",
+        replaced.files.len()
+    );
+    &replaced.files[0]
+}
+
 /// what a replacement changed, or the refusals that say it changed nothing
-fn applied(replaced: &Replaced) -> (&Vec<bpd_core::Rebound>, &Vec<bpd_core::Resolved>) {
-    match &replaced.outcome {
-        Replacement::Applied {
-            changed, rebound, ..
-        } => (changed, rebound),
+///
+/// `rebound` comes off the whole answer rather than off the file: binding walks
+/// down from each file's root code object, so a replacement resolves the build's
+/// breakpoints together rather than one file's
+fn applied(replaced: &Replacements) -> (&Vec<bpd_core::Rebound>, &Vec<bpd_core::Resolved>) {
+    match &only(replaced).outcome {
+        Replacement::Applied { changed, .. } => (changed, &replaced.rebound),
         Replacement::Refused { because } => {
             let said: Vec<String> = because.iter().map(ToString::to_string).collect();
             panic!("the replacement was refused: {said:#?}")
@@ -270,8 +288,8 @@ fn applied(replaced: &Replaced) -> (&Vec<bpd_core::Rebound>, &Vec<bpd_core::Reso
 }
 
 /// the reasons a replacement was refused, or a panic saying it was not
-fn refused(replaced: &Replaced) -> &Vec<Unreplaceable> {
-    match &replaced.outcome {
+fn refused(replaced: &Replacements) -> &Vec<Unreplaceable> {
+    match &only(replaced).outcome {
         Replacement::Refused { because } => because,
         Replacement::Applied { changed, .. } => {
             panic!("the replacement was applied, changing {changed:#?}")
@@ -362,7 +380,7 @@ fn a_file_that_is_already_what_the_process_runs_replaces_nothing_and_says_so() {
          {changed:#?}"
     );
 
-    let Replacement::Applied { unchanged, .. } = &replaced.outcome else {
+    let Replacement::Applied { unchanged, .. } = &only(&replaced).outcome else {
         unreachable!("`applied` already required it")
     };
     assert!(
@@ -517,8 +535,8 @@ fn a_changed_class_body_is_refused_and_a_changed_method_body_is_not() {
 }
 
 /// what an applied replacement says about frames still on the old code
-fn still_running(replaced: &Replaced) -> &Vec<bpd_core::StillRunning> {
-    match &replaced.outcome {
+fn still_running(replaced: &Replacements) -> &Vec<bpd_core::StillRunning> {
+    match &only(replaced).outcome {
         Replacement::Applied { still_running, .. } => still_running,
         Replacement::Refused { because } => {
             let said: Vec<String> = because.iter().map(ToString::to_string).collect();

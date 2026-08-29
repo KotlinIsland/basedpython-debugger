@@ -600,10 +600,24 @@ impl<'a> Server<'a> {
             }
             "replace_code" => {
                 let args: ReplaceCodeArgs = parse(name, arguments)?;
+                if args.files().is_empty() {
+                    // an empty set asks for nothing to change, which is not
+                    // something a replacement can answer. said here rather than
+                    // left to the engine, because the engine would be answering
+                    // about a process nobody asked it about
+                    return Err(
+                        "`replace_code` needs `file` or `files` — the path of a file \
+                                whose code to replace, on the debuggee's own filesystem. an \
+                                empty set asks for nothing to change, which is not something a \
+                                replacement can answer"
+                            .to_string(),
+                    );
+                }
                 match self.ask_in(
                     args.session,
                     Request::ReplaceCode {
-                        file: args.file,
+                        files: args.files(),
+                        remap: args.remap,
                         even_under_a_live_frame: args.even_under_a_live_frame,
                     },
                 )? {
@@ -1750,7 +1764,27 @@ struct RetainersArgs {
 struct ReplaceCodeArgs {
     #[serde(default)]
     session: Option<u64>,
-    file: PathBuf,
+    /// the one file whose code to replace
+    ///
+    /// kept beside `files` because one file is what this is nearly always about,
+    /// and an agent naming a single path should not have to wrap it in a list
+    #[serde(default)]
+    file: Option<PathBuf>,
+    /// several files, replaced together or not at all
+    ///
+    /// what staging a basedpython build again produces: one edit can change the
+    /// python emitted for more than one module, and applying some of them would
+    /// leave the process half way between two versions of the build
+    #[serde(default)]
+    files: Vec<PathBuf>,
+    /// read `_by_sourcemap.py` again before replacing anything
+    ///
+    /// for a basedpython build whose tree was just staged again: the map beside
+    /// the generated python was rewritten too, so the generated lines every `.by`
+    /// breakpoint is armed on came out of a table that no longer describes the
+    /// tree. off for a program that is not one, which has no map to read
+    #[serde(default)]
+    remap: bool,
     /// apply it even where a frame is running the code being replaced
     ///
     /// defaults to off, and that default is the guarantee rather than a
@@ -1759,6 +1793,22 @@ struct ReplaceCodeArgs {
     /// not be handed it
     #[serde(default)]
     even_under_a_live_frame: bool,
+}
+
+impl ReplaceCodeArgs {
+    /// the files to replace, however they were named
+    ///
+    /// both spellings at once is not refused: they are one set, and an agent that
+    /// sent a file twice meant it once.
+    fn files(&self) -> Vec<PathBuf> {
+        let mut files = self.files.clone();
+        if let Some(file) = &self.file
+            && !files.contains(file)
+        {
+            files.insert(0, file.clone());
+        }
+        files
+    }
 }
 
 /// a whole investigation, submitted as data

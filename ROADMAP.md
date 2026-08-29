@@ -505,10 +505,18 @@ against a real `by run` before anything was built on them. see
 
 **what is left**
 
-- **`replaceCode` is generated python.** the code the process runs is the
-    generated `.py`, and replacing a build's code means transpiling it again —
-    which is `by`'s job. it is named as generated python rather than accepting a
-    `.by` and doing something adjacent to what was asked
+- ~~**`replaceCode` is generated python.**~~ done. transpiling is still `by`'s
+    and has not moved: `by` re-stages one file into the tree the program is
+    running out of, and by the time this request arrives the generated python on
+    disk is already right. what changed is that a `.by` no longer has to be
+    refused for it — it is resolved to the generated python through the map the
+    session already holds, which is the translation a breakpoint, a frame and a
+    source read all go through. `replaceCode` also takes a **list**, applied at
+    once or not at all, and a `remap` that reads `_by_sourcemap.py` again and
+    translates every `.by` breakpoint through it before any `__code__` is
+    assigned — one message, because the agent holds the GIL for the whole of one
+    and no longer, so three would leave two windows in which another thread's
+    logpoint is mapped through a table for code it is not running
 - **a subcommand that sets the run up.** what a person types today is a two line
     wrapper handed to `by run` through `PYTHON`, written out on the source mapping
     page and driven end to end against the real `by` binary. `bpd by <module>`

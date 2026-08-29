@@ -324,12 +324,16 @@ some generate none
 
 ## what is still generated python
 
-- **`replaceCode`** takes a file whose code the process is running, and the code
-    the process is running is the generated `.py`. a `.by` is not something the
-    interpreter can compile, and replacing a build's code means transpiling it
-    again — which is `by`'s to do and not `bpd`'s. it is named as generated
-    python because that is what it is, rather than accepting a `.by` and doing
-    something adjacent to what was asked
 - **a django template frame** has no generated line at all: django does not
     compile a template to python, so there is nothing for a line map to be about.
     it carries no `mapping` for that reason and not by omission
+
+`replaceCode` was on this list and is not any more. a `.by` named on it is
+resolved to the generated python through the map, which is the translation a
+breakpoint, a frame and a source read all go through. transpiling has not moved
+and is still `by`'s: `by` stages the file into the tree again first, so by the
+time the request arrives the generated python on disk is already the code to
+compile. what was added here is a `remap`, which reads `_by_sourcemap.py` again
+in the same message — staging a file again rewrites the map beside it, and every
+`.by` breakpoint is armed on a generated line that came out of the table it
+replaced

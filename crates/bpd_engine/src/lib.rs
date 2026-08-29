@@ -132,6 +132,38 @@ pub enum Error {
         source: bpd_core::source_map::MapError,
     },
 
+    /// a `.by`, or a remap, was asked of a program that is not a basedpython build
+    ///
+    /// bpd finds a map rather than being told where one is: a program running out
+    /// of a directory holding `_by_sourcemap.py` is running that build. a session
+    /// without one has no `.by` in it anywhere, so there is nothing to translate a
+    /// `.by` path through and no map to read again — and answering about whatever
+    /// python sits beside it would be answering a question nobody asked
+    #[error(
+        "this program is not running out of a basedpython build, so there is no source map to \
+         {wanted}. only a program `by run` transpiled has one"
+    )]
+    NotABasedpythonBuild {
+        /// what was being attempted, written as the end of that sentence
+        wanted: &'static str,
+    },
+
+    /// a `.by` the build's map does not describe
+    ///
+    /// refused rather than answered about whichever python sits nearest it. the
+    /// answer would be about a file the user did not edit, and a replacement made
+    /// against one of those is worse than a replacement that did not happen
+    #[error(
+        "`{}` is not a file of the basedpython build this program runs out of: {reason}",
+        file.display()
+    )]
+    NotInTheBuild {
+        /// the `.by` that was named
+        file: std::path::PathBuf,
+        /// what the map said about it
+        reason: bpd_core::source_map::Unmapped,
+    },
+
     /// a source map arrived after breakpoints had already been resolved
     ///
     /// the map decides what a `.by` breakpoint binds to, so a set resolved

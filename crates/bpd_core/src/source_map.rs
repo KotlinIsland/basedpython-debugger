@@ -265,6 +265,13 @@ impl std::fmt::Display for Mapping {
 /// pair it was built from
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceMap {
+    /// the build directory this was read out of
+    ///
+    /// kept because a map can be read **again**. staging one file of a build
+    /// into the tree again rewrites [`MAP_FILENAME`] beside it, and reloading it
+    /// means going back to the directory it came from — a caller that had to
+    /// remember which one that was would be a second place the answer lives
+    directory: PathBuf,
     /// keyed by the canonical generated path, so a lookup is one comparison
     pairs: BTreeMap<PathBuf, MappedFile>,
 }
@@ -599,7 +606,38 @@ impl SourceMap {
             });
         }
 
-        Ok(Self { pairs })
+        Ok(Self {
+            directory: directory.to_path_buf(),
+            pairs,
+        })
+    }
+
+    /// the build directory this map was read out of
+    ///
+    /// what a reload goes back to. the map and the directory are one fact — a
+    /// map read from somewhere else would describe a different build — so the
+    /// directory travels with it rather than being remembered beside it
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// the pair a `.by` is the source of
+    ///
+    /// the direction a **file** goes rather than a location: a client naming a
+    /// `.by` in a request about code is naming a file the interpreter never
+    /// compiled, and this is what says which generated python it did. the digest
+    /// comes with it, because the question that follows is always whether the
+    /// `.by` on disk is still the one that was transpiled
+    ///
+    /// # errors
+    ///
+    /// [`Unmapped::NotInTheMap`] when no pair of this build was transpiled from
+    /// that file
+    pub fn generated_from(&self, source: &Path) -> Result<&MappedFile, Unmapped> {
+        self.pair_from(source).ok_or_else(|| Unmapped::NotInTheMap {
+            file: source.to_path_buf(),
+        })
     }
 
     /// the `.by` location a generated python location came from

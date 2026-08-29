@@ -1038,7 +1038,7 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
         serde_json::json!({ "file": "/tmp/fake.py" }),
     );
     assert_eq!(
-        replaced["body"]["outcome"]["replaced"], "refused",
+        replaced["body"]["files"][0]["outcome"]["replaced"], "refused",
         "the fake refuses, and the adapter has to carry the whole answer rather \
          than a yes or a no: {replaced}"
     );
@@ -1054,11 +1054,11 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
         serde_json::json!({ "file": "/tmp/fake.py", "evenUnderALiveFrame": true }),
     );
     assert_eq!(
-        traded["body"]["outcome"]["replaced"], "applied",
+        traded["body"]["files"][0]["outcome"]["replaced"], "applied",
         "the flag is what turns a live frame from a refusal into a report, and \
          the answer was {traded}"
     );
-    let left_behind = traded["body"]["outcome"]["still_running"]
+    let left_behind = traded["body"]["files"][0]["outcome"]["still_running"]
         .as_array()
         .unwrap_or_else(|| panic!("the report of what it cost is missing: {traded}"));
     assert!(
@@ -1853,45 +1853,70 @@ impl Session for FakeSession {
                 },
             }),
             Request::ReplaceCode {
-                file,
+                files,
+                remap,
                 even_under_a_live_frame,
             } if even_under_a_live_frame =>
             // the trade, taken. a front end that carried the flag and dropped
             // the report would make it for its user in silence, so the fake
             // answers with the one thing that says it was made
             {
-                Response::Replaced(bpd_core::Replaced {
-                    file,
-                    outcome: bpd_core::Replacement::Applied {
-                        changed: Vec::new(),
-                        unchanged: Vec::new(),
-                        rebound: Vec::new(),
-                        still_running: vec![bpd_core::StillRunning {
-                            function: "main".to_string(),
-                            frame: bpd_core::LiveFrame::Thread {
-                                thread: THREAD,
-                                line: 3,
-                                held: Some(1),
+                Response::Replaced(bpd_core::Replacements {
+                    files: files
+                        .into_iter()
+                        .map(|file| bpd_core::Replaced {
+                            file,
+                            outcome: bpd_core::Replacement::Applied {
+                                changed: Vec::new(),
+                                unchanged: Vec::new(),
+                                still_running: vec![bpd_core::StillRunning {
+                                    function: "main".to_string(),
+                                    frame: bpd_core::LiveFrame::Thread {
+                                        thread: THREAD,
+                                        line: 3,
+                                        held: Some(1),
+                                    },
+                                }],
                             },
-                        }],
-                    },
-                    mode: Mode::NonStop,
+                        })
+                        .collect(),
+                    rebound: Vec::new(),
+                    mode: Some(Mode::NonStop),
+                    // the other half of what a front end has to carry: a remap
+                    // that happened and was not reported is a client believing
+                    // its `.by` lines came out of the table it last saw
+                    remapped: remap.then(|| bpd_core::Remapped {
+                        directory: std::path::PathBuf::from("/tmp/build"),
+                        files: 2,
+                        breakpoints: 1,
+                    }),
                 })
             }
-            Request::ReplaceCode { file, .. } => Response::Replaced(bpd_core::Replaced {
-                file,
-                outcome: bpd_core::Replacement::Refused {
-                    because: vec![bpd_core::Unreplaceable::Running {
-                        function: "main".to_string(),
-                        frame: bpd_core::LiveFrame::Thread {
-                            thread: THREAD,
-                            line: 3,
-                            held: Some(1),
-                        },
-                    }],
-                },
-                mode: Mode::NonStop,
-            }),
+            Request::ReplaceCode { files, remap, .. } => {
+                Response::Replaced(bpd_core::Replacements {
+                    files: files
+                        .into_iter()
+                        .map(|file| bpd_core::Replaced {
+                            file,
+                            outcome: bpd_core::Replacement::Refused {
+                                because: vec![bpd_core::Unreplaceable::Running {
+                                    function: "main".to_string(),
+                                    frame: bpd_core::LiveFrame::Thread {
+                                        thread: THREAD,
+                                        line: 3,
+                                        held: Some(1),
+                                    },
+                                }],
+                            },
+                        })
+                        .collect(),
+                    rebound: Vec::new(),
+                    mode: Some(Mode::NonStop),
+                    // nothing is remapped when nothing was applied, which is the
+                    // rule the engine keeps and the fake has to keep with it
+                    remapped: None,
+                })
+            }
             // the same two capabilities an agent's front end reaches, reached by
             // an editor. that a query really reads a real interpreter is
             // `crates/bpd_engine/tests/queries.rs`

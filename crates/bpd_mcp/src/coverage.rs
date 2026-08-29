@@ -122,6 +122,22 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
              on the old code in the answer",
         ),
 
+        // `files` beside `file` on the same tool, because an agent naming one
+        // path should not have to wrap it in a list to say the ordinary thing.
+        // both together are one set: an agent that named a file twice meant it
+        // once
+        Facet::ManyFilesAtOnce => {
+            Reach::Direct("`files` on `replace_code`, with one entry per file in the answer")
+        }
+
+        // an argument rather than something the tool decides: whether the map
+        // beside the generated python was rewritten is a fact about what the
+        // caller just did to the tree, and reading it again when nothing did
+        // would cost a reload to learn nothing had changed
+        Facet::Remap => {
+            Reach::Direct("`remap` on `replace_code`, with what the reload installed in the answer")
+        }
+
         // the capability DAP has no route for. an MCP tool takes JSON Schema
         // input, so the typed form goes across as itself and there is no
         // convention to guess at

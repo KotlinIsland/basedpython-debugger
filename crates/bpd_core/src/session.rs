@@ -21,7 +21,7 @@ use crate::breakpoint::{LogRecord, Resolved, SourceBreakpoint};
 use crate::frame::{Frame, FrameId, Scheduling, Scope};
 use crate::jump::Jumped;
 use crate::query::{Difference, Snapshot, SnapshotId, StateQuery};
-use crate::replace::Replaced;
+use crate::replace::Replacements;
 use crate::script::{Script, Transcript};
 use crate::spawn::{Blindspot, Spawn};
 use crate::stop::{Mode, StepKind, Stop};
@@ -515,8 +515,45 @@ pub enum Request {
     /// with what blocked it, and **nothing is applied partially** — see
     /// [`crate::Replaced`]
     ReplaceCode {
-        /// the file whose code to replace, on the debuggee's own filesystem
-        file: PathBuf,
+        /// the files whose code to replace, on the debuggee's own filesystem
+        ///
+        /// a **list**, and it is applied at once or not at all: every refusal of
+        /// every file is collected before anything is written, and one refusal
+        /// anywhere leaves the process untouched. that is the rule one file
+        /// already has — a process half way between two versions produces
+        /// evidence about neither — one level up, and it is what a basedpython
+        /// build needs: staging a tree again can change several files together,
+        /// and applying some of them would be the half-replaced process this
+        /// refuses to make
+        ///
+        /// an entry may be a `.by`. the interpreter never compiled one and never
+        /// will, so it is resolved to the generated python through the map the
+        /// session already holds — the same translation a breakpoint, a frame
+        /// and a source read go through. a `.by` that is no longer the file the
+        /// build was transpiled from is refused rather than answered about the
+        /// generated python beside it, because that answer would be true and
+        /// would be read as a statement about the edit
+        files: Vec<PathBuf>,
+
+        /// read the build's source map again, and move the breakpoints with it
+        ///
+        /// what a re-staged basedpython build needs and nothing else does.
+        /// staging one file of a build again rewrites `_by_sourcemap.py` too, so
+        /// the table every `.by` breakpoint's generated line came out of is
+        /// stale the moment the tree changes
+        ///
+        /// asked for on the **replacement** rather than as a request of its own,
+        /// because the order between them is not a client's to get right: the
+        /// map is reloaded and verified, installed, and the `.by` breakpoints
+        /// are translated through it again, and only then is any code replaced.
+        /// a client that sent two requests could order them the other way, and
+        /// everything reported in between would be mapped through the table for
+        /// code the process is no longer running
+        ///
+        /// **nothing is remapped when anything is refused**, which is the
+        /// atomicity above applied to the map: a build whose code was not
+        /// replaced is still running the code the old table describes
+        remap: bool,
 
         /// apply it even where a frame is running the code being replaced
         ///
@@ -875,7 +912,7 @@ pub enum Response {
     Restarted(crate::Restarted),
 
     /// what replacing a file's code did to the process, or what stopped it
-    Replaced(Replaced),
+    Replaced(Replacements),
 
     /// what a debug script did, step by step
     Transcript(Transcript),

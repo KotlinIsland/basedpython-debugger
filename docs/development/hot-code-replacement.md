@@ -215,6 +215,50 @@ never run again, which is why the heap is not searched for frames at all — the
 two kinds that will run are asked for directly, from `sys._current_frames()` and
 from the suspendable objects themselves
 
+## a whole build at once, and the map with it
+
+a replacement takes a **list** of files. it is applied at once or not at all:
+every refusal of every file is collected before anything is written, and one
+refusal anywhere leaves the process untouched. that is the rule one file already
+had — a process half way between two versions produces evidence about neither —
+one level up
+
+what needs it is basedpython. the program runs out of a tree `by run` transpiled
+the project into, so nothing the user edits is the file the interpreter compiled:
+a `.by` because it was transpiled, a hand-written `.py` because it was copied
+there. giving that program an edit means `by` staging the file into the tree
+again — and one edit can change the python emitted for more than one module,
+because the transpile is type-directed
+
+so a `.by` may be named on the request now. it is resolved to the generated
+python through the map the session already holds, which is the same translation a
+breakpoint, a frame and a source read go through. **transpiling has not moved
+here and will not**: by the time the request arrives, `by` has already written the
+bytes, and what this compiles is the generated python it always compiled
+
+### `remap`, and why it is not its own request
+
+staging one file of a build again rewrites `_by_sourcemap.py` beside the
+generated python. so the tables the session holds describe the tree it used to
+be, and every `.by` breakpoint is armed on a generated line that came out of
+them. both have to land before any `__code__` is assigned
+
+they land in **one message** because of what the agent is. it holds the GIL for
+the whole of one message and for no longer, so a debugger that sent the tables,
+the breakpoints and the replacement as three would leave two windows in between —
+and in either of them another thread's logpoint is mapped through a table
+describing code it is not running. one message has no window in it
+
+the order inside it is: install the tables, translate and re-arm the whole
+breakpoint set, then replace. the order **outside** it is the reverse — the
+engine reads the new map first, because everything it sends depends on which
+tables they are, and adopts it last, because a refused replacement installs
+nothing and a session whose map had moved on while the process had not would
+report every line of the build out of a table describing code nothing is running
+
+the whole breakpoint set is translated rather than the breakpoints of the files
+being replaced: a table that moved moves every breakpoint of the build
+
 ## what a replacement reports
 
 the same standard `Jumped` is held to: a user has to be able to see what is now
