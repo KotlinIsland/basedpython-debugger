@@ -189,11 +189,35 @@ pub enum Facet {
     /// front end that hard-coded one would be choosing that for its user without
     /// saying so
     RecordingDepth,
+
+    /// replacing several files at once, all or nothing —
+    /// [`Request::ReplaceCode`]
+    ///
+    /// a shape of one field, and a capability all the same. a front end that
+    /// only ever names one file can still replace code, and it cannot replace a
+    /// **build**: staging a basedpython project's tree again changes several
+    /// files together, and applying them one request at a time is the
+    /// half-replaced process the whole feature refuses to make. one that carried
+    /// the list and dropped [`crate::Unreplaceable::Withheld`] from the answer
+    /// would leave a client with no answer at all about a file it asked about
+    ManyFilesAtOnce,
+
+    /// moving the build's source map with the code — [`Request::ReplaceCode`]
+    ///
+    /// a field of one request, and the one capability here that is about two
+    /// things happening in an order. staging a file of a basedpython build again
+    /// rewrites the map beside it, so the generated lines the `.by` breakpoints
+    /// are armed on are stale the moment the tree changes — and a front end
+    /// without this can replace the code of a build and go on reporting every
+    /// location in it through the table for the code that was there before. it
+    /// is not droppable in favour of a second request either: the two have to
+    /// happen in one, which is why the flag is where it is
+    Remap,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
@@ -204,6 +228,8 @@ impl Facet {
         Self::Scheduling,
         Self::SchedulingCut,
         Self::RecordingDepth,
+        Self::ManyFilesAtOnce,
+        Self::Remap,
     ];
 
     /// what to call this capability in a message about it
@@ -219,6 +245,8 @@ impl Facet {
             Self::Scheduling => "where the task a stack is inside was created",
             Self::SchedulingCut => "that a scheduling record does not reach the program's entry",
             Self::RecordingDepth => "how much of each step a recording keeps",
+            Self::ManyFilesAtOnce => "replacing several files at once, all or nothing",
+            Self::Remap => "reading the build's source map again as its code is replaced",
         }
     }
 }
@@ -657,9 +685,17 @@ pub fn surface() -> Vec<Request> {
         // asked for under a live frame, because that is the half a front end
         // can drop with nothing failing: a replacement is made either way, and
         // only a front end that carries the flag can offer the trade at all
+        // two files, under a live frame, with the build mapped again: every
+        // one of those is a half a front end can drop with a replacement still
+        // being made, and only a front end that carries all three can replace a
+        // basedpython build that was staged again
         Request::ReplaceCode {
             even_under_a_live_frame: true,
-            file: std::path::PathBuf::from("a.py"),
+            files: vec![
+                std::path::PathBuf::from("a.py"),
+                std::path::PathBuf::from("b.py"),
+            ],
+            remap: true,
         },
         Request::Query {
             stop: 1,

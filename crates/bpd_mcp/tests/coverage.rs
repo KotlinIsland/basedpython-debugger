@@ -1440,45 +1440,67 @@ impl Session for FakeSession {
                 },
             }),
             Request::ReplaceCode {
-                file,
+                files,
+                remap,
                 even_under_a_live_frame,
             } if even_under_a_live_frame =>
             // the trade, taken. a front end that carried the flag and dropped
             // the report would make it for its user in silence, so the fake
             // answers with the one thing that says it was made
             {
-                Response::Replaced(bpd_core::Replaced {
-                    file,
-                    outcome: bpd_core::Replacement::Applied {
-                        changed: Vec::new(),
-                        unchanged: Vec::new(),
-                        rebound: Vec::new(),
-                        still_running: vec![bpd_core::StillRunning {
-                            function: "main".to_string(),
-                            frame: bpd_core::LiveFrame::Thread {
-                                thread: THREAD,
-                                line: 3,
-                                held: Some(1),
+                Response::Replaced(bpd_core::Replacements {
+                    files: files
+                        .into_iter()
+                        .map(|file| bpd_core::Replaced {
+                            file,
+                            outcome: bpd_core::Replacement::Applied {
+                                changed: Vec::new(),
+                                unchanged: Vec::new(),
+                                still_running: vec![bpd_core::StillRunning {
+                                    function: "main".to_string(),
+                                    frame: bpd_core::LiveFrame::Thread {
+                                        thread: THREAD,
+                                        line: 3,
+                                        held: Some(1),
+                                    },
+                                }],
                             },
-                        }],
-                    },
-                    mode: Mode::NonStop,
+                        })
+                        .collect(),
+                    rebound: Vec::new(),
+                    remapped: remap.then(|| bpd_core::Remapped {
+                        directory: std::path::PathBuf::from("/tmp/build"),
+                        files: 2,
+                        breakpoints: 1,
+                    }),
+                    mode: Some(Mode::NonStop),
                 })
             }
-            Request::ReplaceCode { file, .. } => Response::Replaced(bpd_core::Replaced {
-                file,
-                outcome: bpd_core::Replacement::Applied {
-                    // nothing was live: this is the ordinary replacement, and
-                    // its guarantee is that the process is on one version of
-                    // the code. the arm above is the one that traded it away
-                    still_running: Vec::new(),
-                    changed: vec![bpd_core::Rebound {
-                        function: "main".to_string(),
-                        was_at: 2,
-                        now_at: 5,
-                        objects: 2,
-                    }],
-                    unchanged: vec!["<module>".to_string()],
+            Request::ReplaceCode { files, remap, .. } => {
+                Response::Replaced(bpd_core::Replacements {
+                    files: files
+                        .into_iter()
+                        .map(|file| bpd_core::Replaced {
+                            file,
+                            outcome: bpd_core::Replacement::Applied {
+                                // nothing was live: this is the ordinary
+                                // replacement, and its guarantee is that the
+                                // process is on one version of the code. the arm
+                                // above is the one that traded it away
+                                still_running: Vec::new(),
+                                changed: vec![bpd_core::Rebound {
+                                    function: "main".to_string(),
+                                    was_at: 2,
+                                    now_at: 5,
+                                    objects: 2,
+                                }],
+                                unchanged: vec!["<module>".to_string()],
+                            },
+                        })
+                        .collect(),
+                    // beside the files rather than in one of them: binding walks
+                    // down from each file's root code object, so a replacement
+                    // that swapped several resolved the whole set again
                     rebound: vec![Resolved {
                         waiting_for: None,
                         id: 1,
@@ -1492,9 +1514,14 @@ impl Session for FakeSession {
                             evaluation: Evaluation::Always,
                         },
                     }],
-                },
-                mode: Mode::NonStop,
-            }),
+                    remapped: remap.then(|| bpd_core::Remapped {
+                        directory: std::path::PathBuf::from("/tmp/build"),
+                        files: 2,
+                        breakpoints: 1,
+                    }),
+                    mode: Some(Mode::NonStop),
+                })
+            }
             Request::RunScript { stop, script } => Response::Transcript(transcript(stop, &script)),
             Request::Query { stop, query } => Response::State(snapshot(stop, &query)),
             Request::Diff { before, after } => Response::Difference(bpd_core::difference(

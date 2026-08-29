@@ -5,10 +5,10 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 rust-version = "1.97"
-version = "0.0.0"
+version = "0.0.1-a1"
 publish = false
 license = "MIT"
-repository = "https://github.com/KotlinIsland/basedpythondebugger"
+repository = "https://github.com/KotlinIsland/basedpython-debugger"
 
 [workspace.dependencies]
 bpd_core = { path = "crates/bpd_core" }

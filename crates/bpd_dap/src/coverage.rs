@@ -182,6 +182,24 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
              on the old code in the answer and on the console",
         ),
 
+        // the list on the same custom request that carries a single file. the
+        // rule it brings is the one a single file already had — every refusal of
+        // every file is collected before anything is written — so what a client
+        // sees is one answer per file and a process that moved for all of them or
+        // for none
+        Facet::ManyFilesAtOnce => {
+            Reach::Direct("`files` on `bpd/replaceCode`, with one entry per file in the answer")
+        }
+
+        // a boolean on the same request rather than something bpd works out for
+        // itself: whether `_by_sourcemap.py` was rewritten is a fact about what
+        // the caller just did to the tree, and a map read again when nothing
+        // rewrote it would cost a reload to discover nothing had changed
+        Facet::Remap => Reach::Direct(
+            "`remap` on `bpd/replaceCode`, with what the reload installed said on \
+             the console before any code was replaced",
+        ),
+
         // the one capability of the core that DAP cannot carry, and the reason
         // is DAP's rather than bpd's: `hitCondition` is free text whose meaning
         // is a per-client convention. `>5`, `=5`, `%5` and a bare `5` are read

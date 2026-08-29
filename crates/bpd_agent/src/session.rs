@@ -194,11 +194,18 @@ fn answer(
         FromEngine::RestartFrame { frame, again } => {
             return restarting(python, stopped, ticket, thread, frame, again);
         }
+        // the source map and the breakpoint set travel **on** this request when
+        // a basedpython build was staged again, rather than arriving as two of
+        // their own. the order between them and the code is the debugger's, and
+        // it only holds inside one message: the GIL is held for the whole of one
+        // and no longer, so a sequence of three would leave windows in which
+        // another thread reports a location through the wrong table
         FromEngine::ReplaceCode {
-            file,
+            files,
             even_under_a_live_frame,
+            remap,
         } => {
-            let replaced = replace::replace(python, &file, even_under_a_live_frame)?;
+            let replaced = replace::replace(python, &files, even_under_a_live_frame, remap)?;
             attach::send(&FromAgent::Replaced { replaced });
         }
         FromEngine::Threads { settle_ms } => {

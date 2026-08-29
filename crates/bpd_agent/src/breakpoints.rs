@@ -142,6 +142,28 @@ pub(crate) fn apply(
     python: Python<'_>,
     requested: Vec<SourceBreakpoint>,
 ) -> PyResult<Vec<Resolved>> {
+    Ok(set(python, requested)?.0)
+}
+
+/// replace the whole set and say only what the client has not been told
+///
+/// what a **remap** arms the set with. the client did not ask for a breakpoint
+/// set here — it asked for a build's code to be replaced, and the set is being
+/// translated again because the table its generated lines came out of moved. so
+/// the answer is the same shape a rebinding has: the ones whose answer is not
+/// what the client was last told, and nothing about the ones that did not move
+pub(crate) fn rearm(
+    python: Python<'_>,
+    requested: Vec<SourceBreakpoint>,
+) -> PyResult<Vec<Resolved>> {
+    Ok(set(python, requested)?.1)
+}
+
+/// both answers to replacing the set: every resolution, and the ones that moved
+fn set(
+    python: Python<'_>,
+    requested: Vec<SourceBreakpoint>,
+) -> PyResult<(Vec<Resolved>, Vec<Resolved>)> {
     debug_assert!(
         requested
             .iter()
@@ -181,8 +203,7 @@ pub(crate) fn apply(
         .collect();
     write().pending = pending;
 
-    let (all, _changed) = resolve_all(python)?;
-    Ok(all)
+    resolve_all(python)
 }
 
 /// re-resolve everything and report only what a newly loaded file changed

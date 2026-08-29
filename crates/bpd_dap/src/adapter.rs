@@ -1439,13 +1439,59 @@ impl Adapter {
     /// given only "yes" cannot show what is now different about the process, and
     /// one given only "no" cannot show which of the user's edits to undo
     fn replace_code(&mut self, message: &Incoming) -> Answered {
-        let file = message.arguments["file"].as_str().ok_or_else(|| {
-            Aborted::Refuse(
-                "a `bpd/replaceCode` needs `file`, the path of the file whose \
-                 code to replace, on the debuggee's own filesystem"
+        // `files` or `file`, and one of them is required. the list is what this
+        // grew into — a basedpython build staged again can change several modules
+        // together and they go at once or not at all — while the single one is
+        // what every client already speaking this sends
+        let files: Vec<std::path::PathBuf> = match (
+            message.arguments.get("files"),
+            message.arguments.get("file"),
+        ) {
+            (Some(serde_json::Value::Array(named)), _) => {
+                let mut files = Vec::with_capacity(named.len());
+                for one in named {
+                    let Some(path) = one.as_str() else {
+                        return Err(Aborted::Refuse(format!(
+                            "`files` is a list of paths on the debuggee's own filesystem, \
+                                 and one of them was {one}"
+                        )));
+                    };
+                    files.push(std::path::PathBuf::from(path));
+                }
+                files
+            }
+            (_, Some(serde_json::Value::String(file))) => {
+                vec![std::path::PathBuf::from(file)]
+            }
+            _ => {
+                return Err(Aborted::Refuse(
+                    "a `bpd/replaceCode` needs `files`, the paths of the files whose code \
+                         to replace on the debuggee's own filesystem — or `file` for one"
+                        .to_string(),
+                ));
+            }
+        };
+        if files.is_empty() {
+            return Err(Aborted::Refuse(
+                "a `bpd/replaceCode` named no files. an empty list asks for nothing to change, \
+                 which is not something a replacement can answer"
                     .to_string(),
-            )
-        })?;
+            ));
+        }
+
+        // optional, defaulting off. it says whether `_by_sourcemap.py` was
+        // rewritten beside the code being replaced, which is what decides whether
+        // every `.by` breakpoint of the build is translated again — a fact about
+        // what the caller just did to the tree, and not one to guess at
+        let remap = match message.arguments.get("remap") {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Bool(asked)) => *asked,
+            Some(other) => {
+                return Err(Aborted::Refuse(format!(
+                    "`remap` is a boolean and this was {other}"
+                )));
+            }
+        };
 
         // an optional argument, defaulting off, because the default is the
         // guarantee: a replacement under a live frame leaves the process
@@ -1466,43 +1512,70 @@ impl Adapter {
         };
 
         let replaced = match self.ask(Request::ReplaceCode {
-            file: file.into(),
+            files,
+            remap,
             even_under_a_live_frame,
         })? {
             Response::Replaced(replaced) => replaced,
             other => unreachable!("a code replacement was answered with {other:?}"),
         };
 
-        // every refusal, as its own sentence, on the `output` stream the client
-        // already shows a user — the body carries the same facts as data, and a
-        // user watching a debug console is the one who has to decide what to
-        // change about their edit
-        if let bpd_core::Replacement::Refused { because } = &replaced.outcome {
-            for reason in because {
-                self.event(
-                    "output",
-                    &serde_json::json!({
-                        "category": "important",
-                        "output": format!("bpd did not replace the code: {reason}\n"),
-                    }),
-                )?;
-            }
+        // said first because it happened first, and because it is the half a user
+        // cannot otherwise see: the tables moved under every `.by` line of the
+        // build a moment before any code was replaced
+        if let Some(remapped) = &replaced.remapped {
+            self.event(
+                "output",
+                &serde_json::json!({
+                    "category": "important",
+                    "output": format!("{remapped}\n"),
+                }),
+            )?;
         }
 
-        // and the other way round: a replacement that **was** applied under a
-        // live frame is the one case where succeeding costs something, and the
-        // cost goes where a refusal's reason goes. a user who asked for this and
-        // then read an unqualified success would have been told the process is
-        // on one version of the code when it is on two
-        if let bpd_core::Replacement::Applied { still_running, .. } = &replaced.outcome {
-            for running in still_running {
-                self.event(
-                    "output",
-                    &serde_json::json!({
-                        "category": "important",
-                        "output": format!("bpd replaced the code under a live frame: {running}\n"),
-                    }),
-                )?;
+        for one in &replaced.files {
+            let named = one.file.display();
+
+            // every refusal, as its own sentence, on the `output` stream the
+            // client already shows a user — the body carries the same facts as
+            // data, and a user watching a debug console is the one who has to
+            // decide what to change about their edit. the file is named because
+            // there can now be several, and a reason with no file in front of it
+            // is a reason about whichever one the reader assumes
+            if let bpd_core::Replacement::Refused { because } = &one.outcome {
+                for reason in because {
+                    self.event(
+                        "output",
+                        &serde_json::json!({
+                            "category": "important",
+                            "output": format!("bpd did not replace the code in `{named}`: {reason}\n"),
+                        }),
+                    )?;
+                }
+            }
+
+            // and the other way round: a replacement that **was** applied under a
+            // live frame is the one case where succeeding costs something, and
+            // the cost goes where a refusal's reason goes. a user who asked for
+            // this and then read an unqualified success would have been told the
+            // process is on one version of the code when it is on two
+            if let bpd_core::Replacement::Applied { still_running, .. } = &one.outcome {
+                for running in still_running {
+                    self.event(
+                        "output",
+                        &serde_json::json!({
+                            "category": "important",
+                            // the file goes after the phrase rather than inside
+                            // it: "replaced the code under a live frame" is what
+                            // tells this apart from the refusal in the same
+                            // conversation, which says the same thing about why
+                            // it refused
+                            "output": format!(
+                                "bpd replaced the code under a live frame in `{named}`: {running}\n"
+                            ),
+                        }),
+                    )?;
+                }
             }
         }
 

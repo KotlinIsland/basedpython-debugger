@@ -45,19 +45,48 @@
 //! behave two different ways is evidence about neither. so no frame of the
 //! process may be running any code object that is about to change — on a thread,
 //! or suspended inside a generator, a coroutine or an async generator
+//!
+//! ## several files, and the map that moves with them
+//!
+//! a request names a **list**. that is not a convenience: basedpython runs a
+//! program out of a tree `by` staged, so an edit reaches the process by staging
+//! one file into that tree again — and staging can change several files together.
+//! applying some of them would be the half-replaced process the rule above
+//! refuses, one level up, so every file is planned before any of them is written
+//! and one refusal anywhere leaves the whole process untouched. the files that
+//! were themselves fine say so by name, in [`Unreplaceable::Withheld`]
+//!
+//! the heap is walked **once** for the whole request rather than once per file.
+//! which function objects and which frames hold a code object is what the walk
+//! answers, and it costs a pass over `gc.get_objects()` — asking about every
+//! file's code objects at once is the same pass
+//!
+//! staging a file of a basedpython build also rewrites `_by_sourcemap.py`, so
+//! the generated lines every `.by` breakpoint is armed on came out of a table
+//! that no longer describes the tree. a request may therefore carry a
+//! `Remapping`, and this module installs it — the tables, then the breakpoints,
+//! then the code, in that order and inside one message. **that ordering is why
+//! it is one message.** the agent answers with the GIL held and releases it when
+//! the answer goes out, so a debugger that sent three would leave two windows in
+//! which another thread's logpoint record is mapped through the table for code
+//! it is not running. nothing here decides that a map is trustworthy: it arrives
+//! as [`bpd_core::MappedFile`], which `bpd` could not have built without hashing
+//! both files against disk first — see [`crate::sources`]
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use bpd_core::{
-    Divergence, LiveFrame, Rebound, Replaced, Replacement, StillRunning, Suspendable, Unreplaceable,
+    Divergence, LiveFrame, Rebound, Remapped, Replaced, Replacement, Replacements, Resolved,
+    StillRunning, Suspendable, Unreplaceable,
 };
+use bpd_protocol::message::Remapping;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
 use crate::conditions::capture;
 use crate::files::{self, FileId};
-use crate::{breakpoints, code, events, stops, world};
+use crate::{breakpoints, code, events, sources, stops, world};
 
 /// `CO_OPTIMIZED` — the code object keeps its locals in compiler-assigned slots
 ///
@@ -69,22 +98,135 @@ const CO_OPTIMIZED: u32 = 0x1;
 const CO_VARARGS: u32 = 0x4;
 const CO_VARKEYWORDS: u32 = 0x8;
 
-/// replace the code of one file with what is on disk, or refuse whole
+/// one file's comparison, ready to be applied or to be refused
+///
+/// what the planning pass produces per file. it holds live `Bound` handles onto
+/// the interpreter, which is why planning and applying happen inside one call
+/// rather than across two requests: the code objects a plan names have to be the
+/// ones that are still there when it is written
+struct Prepared<'py> {
+    /// the file as the client named it
+    file: PathBuf,
+    /// the filesystem's identity for it, which the code registry is keyed by
+    identity: FileId,
+    /// the module-level code object compiled from what is on disk now
+    fresh: Bound<'py, PyAny>,
+    /// what the comparison decided
+    plan: Plan<'py>,
+}
+
+/// replace the code of these files with what is on disk, or refuse whole
+///
+/// the whole request is one unit. every file is planned, the heap is walked once
+/// for all of them, and **nothing at all is written unless every file can be** —
+/// which is [`crate::replace`]'s partial-application rule one level up
+///
+/// `remap` is installed between the planning and the writing, in the order the
+/// module doc gives: the tables, the breakpoints, then the code. it is skipped
+/// entirely on a refusal, because a build whose code was not replaced is still
+/// running the code the table that is installed describes
 pub(crate) fn replace(
     python: Python<'_>,
-    file: &Path,
+    files: &[PathBuf],
     even_under_a_live_frame: bool,
-) -> PyResult<Replaced> {
-    let refused = |because: Vec<Unreplaceable>| Replaced {
-        file: file.to_path_buf(),
-        outcome: Replacement::Refused { because },
-        mode: world::mode(),
-    };
+    remap: Option<Remapping>,
+) -> PyResult<Replacements> {
+    let mut prepared: Vec<Prepared<'_>> = Vec::new();
+    // by file, in the order the request asked about them. a file that could not
+    // even be planned has no `Prepared` and its refusals are only here
+    let mut refusals: Vec<(PathBuf, Vec<Unreplaceable>)> = Vec::new();
 
+    for file in files {
+        refusals.push((file.clone(), Vec::new()));
+        match prepare(python, file)? {
+            Ok(one) => prepared.push(one),
+            Err(because) => {
+                refusals
+                    .last_mut()
+                    .unwrap_or_else(|| unreachable!("an entry was just pushed"))
+                    .1 = because;
+            }
+        }
+    }
+
+    // one walk of the heap for the whole request. which function objects and
+    // which frames hold a code object is what it answers, and asking about every
+    // file's code objects at once is the same pass over `gc.get_objects()`
+    let wanted: BTreeSet<usize> = prepared.iter().flat_map(|one| one.plan.wanted()).collect();
+    let live = Live::of(python, &wanted)?;
+
+    for one in &mut prepared {
+        one.plan.check(python, &live)?;
+
+        // a live frame is a refusal unless the caller asked for it, and this is
+        // the only place that turns one into the other. it happens **before** the
+        // emptiness check so that "nothing is applied partially" still reads the
+        // whole list: a replacement refused for a signature change is refused for
+        // that whether or not a frame was also running
+        if !even_under_a_live_frame {
+            let running = one
+                .plan
+                .live
+                .drain(..)
+                .map(|running| Unreplaceable::Running {
+                    function: running.function,
+                    frame: running.frame,
+                });
+            one.plan.refusals.extend(running);
+        }
+    }
+
+    if let Some(refused) = refuse_the_request(&mut prepared, &mut refusals) {
+        return Ok(refused);
+    }
+
+    apply(python, prepared, &live, remap)
+}
+
+/// the whole request, refused, or `None` when every file of it can be applied
+///
+/// the refusals are drained out of the plans and put back in the order the
+/// request asked about the files, and the rule that one refusal refuses the
+/// whole request is [`Replacements::refused`] — in the core, because the engine
+/// decides part of it too and two implementations of it would disagree
+fn refuse_the_request(
+    prepared: &mut Vec<Prepared<'_>>,
+    refusals: &mut [(PathBuf, Vec<Unreplaceable>)],
+) -> Option<Replacements> {
+    for one in prepared.iter_mut() {
+        if one.plan.refusals.is_empty() {
+            continue;
+        }
+        let taken = std::mem::take(&mut one.plan.refusals);
+        for (file, because) in refusals.iter_mut() {
+            if *file == one.file {
+                because.extend(taken);
+                break;
+            }
+        }
+    }
+
+    let refused = Replacements::refused(Some(world::mode()), refusals.to_vec())?;
+    // the plans hold `Bound` handles onto code objects that are not going to be
+    // written now. dropped here so that nothing downstream can be handed a plan
+    // for a replacement that was refused
+    prepared.clear();
+    Some(refused)
+}
+
+/// compare one file on disk against the code the process is running
+///
+/// nothing of the process is touched. compiling runs none of the program — it is
+/// the compiler, on bytes — and a module that would raise on import raises
+/// nothing here
+fn prepare<'py>(
+    python: Python<'py>,
+    file: &Path,
+) -> PyResult<Result<Prepared<'py>, Vec<Unreplaceable>>> {
     let identity = match files::identify(file) {
         Ok(identity) => identity,
         Err(reason) => {
-            return Ok(refused(vec![Unreplaceable::NotAFile {
+            return Ok(Err(vec![Unreplaceable::NotAFile {
                 file: file.to_path_buf(),
                 reason,
             }]));
@@ -93,7 +235,7 @@ pub(crate) fn replace(
 
     let roots = match module_roots(python, &identity, file)? {
         Ok(roots) => roots,
-        Err(reason) => return Ok(refused(vec![reason])),
+        Err(reason) => return Ok(Err(vec![reason])),
     };
 
     // the filename the interpreter compiled this file under, reused verbatim so
@@ -103,7 +245,7 @@ pub(crate) fn replace(
     let bytes = match std::fs::read(file) {
         Ok(bytes) => bytes,
         Err(error) => {
-            return Ok(refused(vec![Unreplaceable::NotAFile {
+            return Ok(Err(vec![Unreplaceable::NotAFile {
                 file: file.to_path_buf(),
                 reason: error.to_string(),
             }]));
@@ -112,7 +254,7 @@ pub(crate) fn replace(
     let fresh = match compile(python, &bytes, &filename) {
         Ok(fresh) => fresh,
         Err(error) => {
-            return Ok(refused(vec![Unreplaceable::DoesNotCompile {
+            return Ok(Err(vec![Unreplaceable::DoesNotCompile {
                 file: file.to_path_buf(),
                 error: capture(python, &error),
             }]));
@@ -121,73 +263,126 @@ pub(crate) fn replace(
 
     let mut plan = Plan::new(file);
     plan.compare(&roots, &fresh, Kind::Module)?;
+    Ok(Ok(Prepared {
+        file: file.to_path_buf(),
+        identity,
+        fresh,
+        plan,
+    }))
+}
 
-    // the heap is walked once, for every code object of the file rather than
-    // only the ones that changed: which of them a function object holds is what
-    // the walk answers, and it is cheaper to ask about all of them at once
-    let live = Live::of(python, &plan.wanted())?;
-    plan.check(python, &live)?;
-
-    // a live frame is a refusal unless the caller asked for it, and this is the
-    // only place that turns one into the other. it happens **before** the
-    // emptiness check so that "nothing is applied partially" still reads the
-    // whole list: a replacement refused for a signature change is refused for
-    // that whether or not a frame was also running
-    let mut plan = plan;
-    if !even_under_a_live_frame {
-        plan.refusals
-            .extend(plan.live.drain(..).map(|running| Unreplaceable::Running {
-                function: running.function,
-                frame: running.frame,
-            }));
-    }
-    if !plan.refusals.is_empty() {
-        return Ok(refused(plan.refusals));
-    }
-
-    let mut changed = Vec::with_capacity(plan.changed.len());
-    for (old, new) in &plan.changed {
-        let holders = live.functions.get(&(old.as_ptr() as usize));
-        for holder in holders.into_iter().flatten() {
-            // every way this can fail was checked before anything was written:
-            // cpython's only condition on the assignment is that the code's free
-            // variable count matches the function's cells, which `Plan::check`
-            // refuses on. a partial application is the one outcome this whole
-            // feature exists to prevent
-            holder
-                .bind(python)
-                .setattr("__code__", new)
-                .expect("a replacement writes only assignments it proved cpython accepts");
+/// write every plan of the request, in the one order that is right
+///
+/// reached only when nothing refused. the sequence is the whole of why a remap
+/// travels on the replacement:
+///
+/// 1. **the tables**, so every location the process reports afterwards is read
+///    through the map for the tree that is on disk now
+/// 2. **the breakpoints**, translated through those tables out of process and
+///    armed here. they are armed against the code that is still running, which
+///    is a moment away from being replaced — and step 4 is what re-binds them
+/// 3. **the code**, one assignment to `function.__code__` per live holder
+/// 4. **the roots and the bindings**, because binding walks down from a file's
+///    registered root and every live function of it now runs the new tree
+///
+/// no thread of the program runs anywhere in that sequence: it happens with the
+/// GIL held, inside one message, which is what makes the order a property of the
+/// debugger rather than of the client
+fn apply(
+    python: Python<'_>,
+    prepared: Vec<Prepared<'_>>,
+    live: &Live,
+    remap: Option<Remapping>,
+) -> PyResult<Replacements> {
+    let mut rebound: Vec<Resolved> = Vec::new();
+    let remapped = match remap {
+        Some(Remapping { files, breakpoints }) => {
+            let installed = sources::install(files);
+            let moved = breakpoints::rearm(python, breakpoints.clone())?;
+            rebound.extend(moved);
+            Some(Remapped {
+                // the map's own directory is the engine's to name — the agent is
+                // handed tables and never a path to read one from — so the
+                // engine fills this in on the way out. what the agent can say is
+                // how many of them it installed and how many breakpoints were
+                // armed through them
+                directory: PathBuf::new(),
+                files: installed,
+                breakpoints: u32::try_from(breakpoints.len()).unwrap_or(u32::MAX),
+            })
         }
-        changed.push(Rebound {
-            function: new.getattr("co_qualname")?.extract()?,
-            was_at: old.getattr("co_firstlineno")?.extract()?,
-            now_at: new.getattr("co_firstlineno")?.extract()?,
-            objects: u32::try_from(holders.map_or(0, Vec::len))
-                .expect("a process does not hold four billion copies of one function"),
+        None => None,
+    };
+
+    let mut answers = Vec::with_capacity(prepared.len());
+    for one in &prepared {
+        let mut changed = Vec::with_capacity(one.plan.changed.len());
+        for (old, new) in &one.plan.changed {
+            let holders = live.functions.get(&(old.as_ptr() as usize));
+            for holder in holders.into_iter().flatten() {
+                // every way this can fail was checked before anything was
+                // written: cpython's only condition on the assignment is that
+                // the code's free variable count matches the function's cells,
+                // which `Plan::check` refuses on. a partial application is the
+                // one outcome this whole feature exists to prevent
+                holder
+                    .bind(python)
+                    .setattr("__code__", new)
+                    .expect("a replacement writes only assignments it proved cpython accepts");
+            }
+            changed.push(Rebound {
+                function: new.getattr("co_qualname")?.extract()?,
+                was_at: old.getattr("co_firstlineno")?.extract()?,
+                now_at: new.getattr("co_firstlineno")?.extract()?,
+                objects: u32::try_from(holders.map_or(0, Vec::len))
+                    .expect("a process does not hold four billion copies of one function"),
+            });
+        }
+
+        // binding walks down from the file's registered root, and every live
+        // function of it now runs the new tree — so the old root describes code
+        // nothing will execute, and a breakpoint bound through it would be armed
+        // where no thread will ever arrive
+        code::adopt(python, &one.identity, &one.fresh)?;
+
+        answers.push(Replaced {
+            file: one.file.clone(),
+            outcome: Replacement::Applied {
+                changed,
+                unchanged: one.plan.unchanged.clone(),
+                // empty unless the caller asked for a replacement under a live
+                // frame: without that, one of these is a refusal and this is
+                // never reached
+                still_running: one.plan.live.clone(),
+            },
         });
     }
 
-    // binding walks down from the file's registered root, and every live
-    // function of it now runs the new tree — so the old root describes code
-    // nothing will execute, and a breakpoint bound through it would be armed
-    // where no thread will ever arrive
-    code::adopt(python, &identity, &fresh)?;
-    let rebound = breakpoints::reresolve(python)?;
+    // once, after every file's root has been adopted. resolving between them
+    // would bind a breakpoint against a tree that is half the old build
+    merge(&mut rebound, breakpoints::reresolve(python)?);
 
-    Ok(Replaced {
-        file: file.to_path_buf(),
-        outcome: Replacement::Applied {
-            changed,
-            unchanged: plan.unchanged,
-            rebound,
-            // empty unless the caller asked for a replacement under a live
-            // frame: without that, one of these is a refusal and this is never
-            // reached
-            still_running: plan.live,
-        },
-        mode: world::mode(),
+    Ok(Replacements {
+        files: answers,
+        rebound,
+        remapped,
+        mode: Some(world::mode()),
     })
+}
+
+/// fold a second round of resolutions into the first, latest answer winning
+///
+/// a remap resolves the set twice — once as it is armed through the new tables,
+/// and again once every root has been adopted — and a breakpoint that moved in
+/// the first pass and not the second would otherwise be reported by neither: the
+/// second pass answers with what changed since the first
+fn merge(into: &mut Vec<Resolved>, later: Vec<Resolved>) {
+    for answer in later {
+        match into.iter_mut().find(|earlier| earlier.id == answer.id) {
+            Some(earlier) => *earlier = answer,
+            None => into.push(answer),
+        }
+    }
 }
 
 /// the module-level code object registered for this file
@@ -558,7 +753,7 @@ fn missing(wanted: &[String], held: &[String]) -> Vec<String> {
 
 /// the comparison, and what it decided
 struct Plan<'py> {
-    file: std::path::PathBuf,
+    file: PathBuf,
     /// the pairs whose code differs, old first
     changed: Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>,
     /// `co_qualname` of everything the file has that did not move at all
@@ -819,7 +1014,7 @@ struct Live {
 }
 
 impl Live {
-    fn of(python: Python<'_>, wanted: &[usize]) -> PyResult<Self> {
+    fn of(python: Python<'_>, wanted: &BTreeSet<usize>) -> PyResult<Self> {
         let mut live = Self {
             functions: BTreeMap::new(),
             frames: BTreeMap::new(),
@@ -899,7 +1094,7 @@ impl Live {
     /// [`bpd_core::Replaced::mode`] qualifies. it is the conservative direction:
     /// a sighting refuses, and stopping the world first is what turns the
     /// absence of one into a reading of every thread
-    fn walk_threads(&mut self, python: Python<'_>, wanted: &[usize]) -> PyResult<()> {
+    fn walk_threads(&mut self, python: Python<'_>, wanted: &BTreeSet<usize>) -> PyResult<()> {
         let frames = events::current_frames(python)?;
         for (thread, innermost) in frames.cast::<PyDict>()? {
             let thread: u64 = thread.extract()?;

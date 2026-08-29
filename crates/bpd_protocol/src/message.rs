@@ -329,14 +329,15 @@ pub enum FromAgent {
         restarted: bpd_core::Restarted,
     },
 
-    /// what replacing a file's code did to the process, or what stopped it
+    /// what replacing code did to the process, or what stopped it
     ///
-    /// the whole answer either way. a replacement that was not made carries
-    /// **all** of what stood in the way rather than the first thing, because a
-    /// client fixing them one at a time is a client asking this seventeen times
+    /// the whole answer either way, and one answer for every file the request
+    /// named. a replacement that was not made carries **all** of what stood in
+    /// the way rather than the first thing, because a client fixing them one at
+    /// a time is a client asking this seventeen times
     Replaced {
-        /// what became of it, and what it changed about the process
-        replaced: bpd_core::Replaced,
+        /// what became of them, and what it changed about the process
+        replaced: bpd_core::Replacements,
     },
 
     /// the source around one frame's current line, or why there is none
@@ -365,6 +366,41 @@ pub enum FromAgent {
         /// what stood in the way
         reason: Refusal,
     },
+}
+
+/// the build's map and breakpoint set, to install as its code is replaced
+///
+/// **why this rides on [`FromEngine::ReplaceCode`] rather than being the two
+/// requests it looks like.** staging one file of a basedpython build into the
+/// tree again changes the code *and* rewrites `_by_sourcemap.py` beside it, so
+/// the generated lines every `.by` breakpoint is armed on came out of a table
+/// that no longer describes the tree. those have to be installed before any
+/// `__code__` is assigned, and a debugger that sent three messages would leave
+/// two windows between them — the agent holds the GIL for the whole of one
+/// message and for no longer than that, so in either window another thread's
+/// logpoint record is mapped through the table for code it is not running
+///
+/// what crosses is the tables and never the decision, exactly as
+/// [`FromEngine::MapSources`]: a `bpd_core::MappedFile` only exists because
+/// `bpd` hashed both files it describes against disk first, and the breakpoints
+/// are already translated into generated lines because a `.by` is translated out
+/// of process — before the program has run, and in DAP before it was launched
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Remapping {
+    /// every `.by`/`.py` pair of the build as it stands now, with its table
+    ///
+    /// replaces whatever is installed, wholesale, for the reason
+    /// [`FromEngine::MapSources`] does: a second idea of where a location is is
+    /// two answers to one question
+    pub files: Vec<bpd_core::MappedFile>,
+
+    /// the whole breakpoint set, translated through those tables
+    ///
+    /// the same value [`FromEngine::SetBreakpoints`] carries and it replaces the
+    /// set for the same reason. it is the whole set rather than the breakpoints
+    /// of the files being replaced, because a table that moved moves every
+    /// breakpoint of the build
+    pub breakpoints: Vec<SourceBreakpoint>,
 }
 
 /// what the engine tells the agent
@@ -605,21 +641,38 @@ pub enum FromEngine {
         again: bpd_core::Again,
     },
 
-    /// replace the code the process is running for one file with what is on disk
+    /// replace the code the process is running for these files with what is on
+    /// disk
     ///
-    /// the debuggee reads and compiles the file, for the reasons
+    /// the debuggee reads and compiles the files, for the reasons
     /// [`FromEngine::Source`] does — it is the filesystem the interpreter read
-    /// it from — and because the code objects the new ones are compared against
-    /// are only in the debuggee. compiling runs none of the program
+    /// them from — and because the code objects the new ones are compared
+    /// against are only in the debuggee. compiling runs none of the program
+    ///
+    /// **the whole list is applied at once or not at all**, which is the rule
+    /// one file already has one level up: every refusal of every file is
+    /// collected before anything is written
     ReplaceCode {
-        /// the file whose code to replace, as the client named it
-        file: std::path::PathBuf,
+        /// the generated python whose code to replace, as the engine resolved it
+        ///
+        /// already the file the interpreter compiled: a `.by` the client named
+        /// was translated to it out of process, through the map, before this was
+        /// sent. the agent has never heard of a source map's paths and does not
+        /// learn of them here
+        files: Vec<std::path::PathBuf>,
         /// apply it even where a frame is running the code being replaced
         ///
         /// carried to the agent rather than decided here, because the agent is
         /// the only thing that can see the frames — see
         /// `bpd_core::Request::ReplaceCode`
         even_under_a_live_frame: bool,
+        /// the build's map and breakpoints, to install before anything is applied
+        ///
+        /// `None` for every replacement of ordinary python, which is most of
+        /// them. see [`Remapping`] for why it rides on this message rather than
+        /// being two of its own
+        #[serde(default)]
+        remap: Option<Remapping>,
     },
 
     /// start or stop recording where the program goes
@@ -1144,42 +1197,61 @@ mod tests {
             // can see the frames, so a flag lost on the wire is a guarantee
             // traded away by nobody
             even_under_a_live_frame: true,
-            file: PathBuf::from("/tmp/victim.py"),
+            files: vec![PathBuf::from("/tmp/victim.py")],
+            // and the map that has to be installed before any of it is applied.
+            // a remap lost on the wire is a build whose code was replaced and
+            // whose locations are still reported through the old table
+            remap: Some(Remapping {
+                files: vec![bpd_core::MappedFile {
+                    generated: PathBuf::from("/tmp/build/demo.py"),
+                    source: PathBuf::from("/src/demo.by"),
+                    digest: "sha256:00".to_string(),
+                    lines: vec![None, Some(0)],
+                }],
+                breakpoints: vec![SourceBreakpoint::at(1, "/tmp/build/demo.py", 2)],
+            }),
         };
         let answer = FromAgent::Replaced {
-            replaced: bpd_core::Replaced {
-                file: PathBuf::from("/tmp/victim.py"),
-                outcome: bpd_core::Replacement::Applied {
-                    still_running: vec![bpd_core::StillRunning {
-                        function: "worker".to_string(),
-                        frame: bpd_core::LiveFrame::Thread {
-                            thread: 12,
-                            line: 40,
-                            held: Some(3),
-                        },
-                    }],
-                    changed: vec![bpd_core::Rebound {
-                        function: "boom".to_string(),
-                        was_at: 2,
-                        now_at: 5,
-                        objects: 2,
-                    }],
-                    unchanged: vec!["<module>".to_string()],
-                    rebound: vec![Resolved {
-                        waiting_for: None,
-                        id: 1,
-                        binding: Binding::Bound {
-                            line: 6,
-                            sites: vec![Site {
-                                qualname: "boom".to_string(),
-                                first_line: 5,
-                                offset: 4,
-                            }],
-                            evaluation: Evaluation::Always,
-                        },
-                    }],
-                },
-                mode: Mode::NonStop,
+            replaced: bpd_core::Replacements {
+                files: vec![bpd_core::Replaced {
+                    file: PathBuf::from("/tmp/victim.py"),
+                    outcome: bpd_core::Replacement::Applied {
+                        still_running: vec![bpd_core::StillRunning {
+                            function: "worker".to_string(),
+                            frame: bpd_core::LiveFrame::Thread {
+                                thread: 12,
+                                line: 40,
+                                held: Some(3),
+                            },
+                        }],
+                        changed: vec![bpd_core::Rebound {
+                            function: "boom".to_string(),
+                            was_at: 2,
+                            now_at: 5,
+                            objects: 2,
+                        }],
+                        unchanged: vec!["<module>".to_string()],
+                    },
+                }],
+                rebound: vec![Resolved {
+                    waiting_for: None,
+                    id: 1,
+                    binding: Binding::Bound {
+                        line: 6,
+                        sites: vec![Site {
+                            qualname: "boom".to_string(),
+                            first_line: 5,
+                            offset: 4,
+                        }],
+                        evaluation: Evaluation::Always,
+                    },
+                }],
+                remapped: Some(bpd_core::Remapped {
+                    directory: PathBuf::from("/tmp/build"),
+                    files: 1,
+                    breakpoints: 1,
+                }),
+                mode: Some(Mode::NonStop),
             },
         };
 
@@ -1201,28 +1273,49 @@ mod tests {
         // all of them rather than the first: a client fixing them one at a time
         // is a client asking this seventeen times
         let sent = FromAgent::Replaced {
-            replaced: bpd_core::Replaced {
-                file: PathBuf::from("/tmp/victim.py"),
-                outcome: bpd_core::Replacement::Refused {
-                    because: vec![
-                        bpd_core::Unreplaceable::TopLevelChanged {
-                            file: PathBuf::from("/tmp/victim.py"),
-                            differences: vec![bpd_core::Divergence::Defines {
-                                added: vec!["helper".to_string()],
-                                removed: Vec::new(),
+            replaced: bpd_core::Replacements {
+                files: vec![
+                    bpd_core::Replaced {
+                        file: PathBuf::from("/tmp/victim.py"),
+                        outcome: bpd_core::Replacement::Refused {
+                            because: vec![
+                                bpd_core::Unreplaceable::TopLevelChanged {
+                                    file: PathBuf::from("/tmp/victim.py"),
+                                    differences: vec![bpd_core::Divergence::Defines {
+                                        added: vec!["helper".to_string()],
+                                        removed: Vec::new(),
+                                    }],
+                                },
+                                bpd_core::Unreplaceable::Running {
+                                    function: "boom".to_string(),
+                                    frame: bpd_core::LiveFrame::Thread {
+                                        thread: 8_482_561_408,
+                                        line: 3,
+                                        held: Some(1),
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                    // the second file of the request, which nothing was wrong
+                    // with and which was not replaced either. it has to survive
+                    // the wire, because it is the only answer the client gets
+                    // about a file it asked about
+                    bpd_core::Replaced {
+                        file: PathBuf::from("/tmp/other.py"),
+                        outcome: bpd_core::Replacement::Refused {
+                            because: vec![bpd_core::Unreplaceable::Withheld {
+                                file: PathBuf::from("/tmp/other.py"),
+                                because_of: vec![PathBuf::from("/tmp/victim.py")],
                             }],
                         },
-                        bpd_core::Unreplaceable::Running {
-                            function: "boom".to_string(),
-                            frame: bpd_core::LiveFrame::Thread {
-                                thread: 8_482_561_408,
-                                line: 3,
-                                held: Some(1),
-                            },
-                        },
-                    ],
-                },
-                mode: Mode::StopTheWorld { native: Vec::new() },
+                    },
+                ],
+                // nothing was applied, so nothing was rebound and nothing was
+                // remapped
+                rebound: Vec::new(),
+                remapped: None,
+                mode: Some(Mode::StopTheWorld { native: Vec::new() }),
             },
         };
 

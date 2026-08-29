@@ -12,7 +12,7 @@
 //!   than one per front end
 
 use bpd_core::{
-    Binding, Difference, Evaluated, Jump, Jumped, LogRecord, Replaced, Replacement, Resolved,
+    Binding, Difference, Evaluated, Jump, Jumped, LogRecord, Replacement, Replacements, Resolved,
     Restarted, Snapshot, Source, SourceBreakpoint, Stack, Stop, Threads, Transcript, Variables,
     WorldStopped,
 };
@@ -431,87 +431,111 @@ pub fn restarted(restarted: &Restarted) -> serde_json::Value {
 /// the refusals are rendered as their own sentences rather than summarised.
 /// every one of them names the thing that blocked it, and an agent handed
 /// "cannot" would be left guessing which of its edits to undo
-pub fn replaced(replacement: &Replaced) -> serde_json::Value {
+pub fn replaced(replacement: &Replacements) -> serde_json::Value {
     let mut rendered = serde_json::json!({
-        "file": replacement.file,
-        "outcome": replacement.outcome,
-        "mode": replacement.mode.to_string(),
+        "files": replacement.files,
+        "rebound": replacement.rebound,
+        "remapped": replacement.remapped,
+        // `None` for a refusal decided out of process — an unplaceable `.by` — where
+        // the debuggee was never asked and no thread of it was sampled
+        "mode": replacement.mode.as_ref().map(ToString::to_string),
     });
 
     let mut notes: Vec<String> = Vec::new();
-    match &replacement.outcome {
-        Replacement::Applied {
-            changed,
-            rebound,
-            unchanged,
-            still_running,
-        } => {
-            // first, because it qualifies everything under it: a replacement
-            // applied under a live frame did not put the process on one version
-            // of the code, and an agent reading the changes below without this
-            // would act on a process it has the wrong model of
-            for running in still_running {
-                notes.push(running.to_string());
-            }
-            if changed.is_empty() {
-                notes.push(format!(
-                    "nothing needed replacing: the {} code objects of that file \
-                     on disk are exactly what the process is running",
-                    unchanged.len()
-                ));
-            } else {
-                for one in changed {
-                    let moved = if one.was_at == one.now_at {
-                        String::new()
-                    } else {
-                        format!(
-                            ", which has moved from line {} to {}",
-                            one.was_at, one.now_at
-                        )
-                    };
+
+    // first, because it happened first and because everything below is read
+    // through it: the tables moved under every `.by` line of the build before a
+    // single `__code__` was assigned
+    if let Some(remapped) = &replacement.remapped {
+        notes.push(remapped.to_string());
+    }
+
+    for one in &replacement.files {
+        let named = one.file.display();
+        match &one.outcome {
+            Replacement::Applied {
+                changed,
+                unchanged,
+                still_running,
+            } => {
+                // first, because it qualifies everything under it: a replacement
+                // applied under a live frame did not put the process on one
+                // version of the code, and an agent reading the changes below
+                // without this would act on a process it has the wrong model of
+                for running in still_running {
+                    notes.push(format!("{named}: {running}"));
+                }
+                if changed.is_empty() {
                     notes.push(format!(
-                        "`{}` now runs the code on disk{moved}. {} function \
-                         object(s) in the process held it — every one of them was \
-                         rebound, including any a decorator kept",
-                        one.function, one.objects
+                        "{named}: nothing needed replacing — the {} code objects of that file \
+                         on disk are exactly what the process is running",
+                        unchanged.len()
                     ));
+                } else {
+                    for one in changed {
+                        let moved = if one.was_at == one.now_at {
+                            String::new()
+                        } else {
+                            format!(
+                                ", which has moved from line {} to {}",
+                                one.was_at, one.now_at
+                            )
+                        };
+                        notes.push(format!(
+                            "{named}: `{}` now runs the code on disk{moved}. {} function \
+                             object(s) in the process held it — every one of them was rebound, \
+                             including any a decorator kept",
+                            one.function, one.objects
+                        ));
+                    }
                 }
             }
-            for one in rebound {
-                notes.push(match &one.binding {
-                    Binding::Bound { line, .. }
-                    | Binding::BoundInTemplate { line, .. }
-                    | Binding::BoundInSource { line, .. } => {
-                        format!(
-                            "breakpoint {} is bound to line {line} now — it was \
-                             armed on a code object nothing will execute any \
-                             more, and was resolved again against the code that \
-                             is running",
-                            one.id
-                        )
-                    }
-                    Binding::Unbound { reason } => {
-                        format!("breakpoint {} is **unbound** now: {reason}", one.id)
-                    }
-                });
+            Replacement::Refused { because } => {
+                notes.push(format!(
+                    "{named}: nothing was changed. a replacement is never applied partially, \
+                     because a process half way between two versions of a file produces \
+                     evidence about neither — all {} reasons follow",
+                    because.len()
+                ));
+                notes.extend(because.iter().map(|reason| format!("{named}: {reason}")));
             }
-            notes.push(
-                "the top level was **not** re-run: no name was bound or unbound \
-                 and no object was created, so every instance and every \
-                 reference the program already had is the one it had before"
-                    .to_string(),
-            );
-        }
-        Replacement::Refused { because } => {
-            notes.push(format!(
-                "nothing was changed. a replacement is never applied partially, \
-                 because a process half way between two versions of a file \
-                 produces evidence about neither — all {} reasons follow",
-                because.len()
-            ));
-            notes.extend(because.iter().map(ToString::to_string));
         }
     }
+
+    // the whole set at once rather than per file: binding walks down from each
+    // file's root code object, and a replacement that swapped several roots
+    // resolved every breakpoint of the build against the code that is running now
+    for one in &replacement.rebound {
+        notes.push(match &one.binding {
+            Binding::Bound { line, .. }
+            | Binding::BoundInTemplate { line, .. }
+            | Binding::BoundInSource { line, .. } => {
+                format!(
+                    "breakpoint {} is bound to line {line} now — it was armed on a code object \
+                     nothing will execute any more, and was resolved again against the code \
+                     that is running",
+                    one.id
+                )
+            }
+            Binding::Unbound { reason } => {
+                format!("breakpoint {} is **unbound** now: {reason}", one.id)
+            }
+        });
+    }
+
+    if replacement
+        .files
+        .iter()
+        .any(|one| matches!(one.outcome, Replacement::Applied { .. }))
+    {
+        notes.push(
+            "the top level was **not** re-run: no name was bound or unbound and no object was \
+             created, so every instance and every reference the program already had is the one \
+             it had before"
+                .to_string(),
+        );
+    }
+
     rendered["notes"] = notes.into();
     rendered
 }

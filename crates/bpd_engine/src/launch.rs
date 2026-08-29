@@ -29,13 +29,13 @@ use std::time::{Duration, Instant};
 use bpd_core::python::Capabilities;
 use bpd_core::{
     Addressed, Again, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, Exit,
-    Forwarded, FrameId, Joined, Jumped, LogRecord, Replaced, Reporting, Request, Resolved,
+    Forwarded, FrameId, Joined, Jumped, LogRecord, Replacements, Reporting, Request, Resolved,
     Response, Restarted, Running, Scope, Script, SessionId, Snapshot, SnapshotId, SourceBreakpoint,
     Spawn, Stack, StateQuery, StepKind, Stop, TemplateContext, Threads, Transcript, Variables,
     Which, WorldStopped,
 };
 use bpd_protocol::env;
-use bpd_protocol::message::{FromAgent, FromEngine};
+use bpd_protocol::message::{FromAgent, FromEngine, Remapping};
 
 use crate::{Error, Interrupt, Listener, Result, Session, agent, mapping};
 
@@ -454,12 +454,19 @@ impl Debuggee {
     fn answer_a_replacement(
         &mut self,
         at: usize,
-        file: PathBuf,
+        files: Vec<PathBuf>,
+        remap: bool,
         even_under_a_live_frame: bool,
         reporting: &mut dyn Reporting,
     ) -> Result<Response> {
         let replaced =
-            self.attached[at].replace_the_code(file, even_under_a_live_frame, reporting)?;
+            self.attached[at].replace_the_code(files, remap, even_under_a_live_frame, reporting)?;
+        // the map a session attaching *later* is given, kept in step with the one
+        // the session that just replaced now holds. a debugged fork runs the same
+        // build out of the same directory, and handing it the table the tree used
+        // to have would be a child reporting a different line from its parent for
+        // one location
+        self.map.clone_from(&self.attached[at].map);
         Ok(Response::Replaced(replaced))
     }
 
@@ -583,9 +590,10 @@ impl Debuggee {
                 self.attached[at].restart_frame(frame, again, reporting)?,
             )),
             Request::ReplaceCode {
-                file,
+                files,
+                remap,
                 even_under_a_live_frame,
-            } => self.answer_a_replacement(at, file, even_under_a_live_frame, reporting),
+            } => self.answer_a_replacement(at, files, remap, even_under_a_live_frame, reporting),
             Request::Record { on, depth } => self.recording(at, on, depth, reporting),
             Request::Trail => self.taken(at, reporting),
             Request::Retainers { frame, expression } => {
@@ -976,8 +984,31 @@ impl Debuggee {
     ///
     /// when the session cannot be reached, or the agent answers with something
     /// else
-    pub fn replace_code(&mut self, file: impl Into<PathBuf>) -> Result<Replaced> {
-        self.replacing(file, false)
+    pub fn replace_code(&mut self, file: impl Into<PathBuf>) -> Result<Replacements> {
+        self.replacing(vec![file.into()], false, false)
+    }
+
+    /// stage a basedpython build again and take the whole of what changed
+    ///
+    /// what `by` has just rewritten in the tree, given to the process in one
+    /// message: the files at once — applied together or not at all — and the map
+    /// beside them, because re-staging rewrote `_by_sourcemap.py` too and the
+    /// generated lines every `.by` breakpoint is armed on came out of the table
+    /// it replaced. see [`Attached::replace_the_code`] for why that is one
+    /// message and not three.
+    ///
+    /// An entry may be a `.by`; it is resolved through the map before it is sent.
+    ///
+    /// # errors
+    ///
+    /// when the program is not running out of a basedpython build, when the map
+    /// cannot be read again or no longer describes the tree, when a named `.by`
+    /// is not part of the build, or when the session cannot be reached
+    pub fn restage_and_replace(
+        &mut self,
+        files: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Replacements> {
+        self.replacing(files.into_iter().collect(), true, false)
     }
 
     /// the same, applied even where a frame is running the code
@@ -998,18 +1029,20 @@ impl Debuggee {
     pub fn replace_code_even_under_a_live_frame(
         &mut self,
         file: impl Into<PathBuf>,
-    ) -> Result<Replaced> {
-        self.replacing(file, true)
+    ) -> Result<Replacements> {
+        self.replacing(vec![file.into()], false, true)
     }
 
-    /// what both of them are
+    /// what all three of them are
     fn replacing(
         &mut self,
-        file: impl Into<PathBuf>,
+        files: Vec<PathBuf>,
+        remap: bool,
         even_under_a_live_frame: bool,
-    ) -> Result<Replaced> {
+    ) -> Result<Replacements> {
         match self.ask_for(Request::ReplaceCode {
-            file: file.into(),
+            files,
+            remap,
             even_under_a_live_frame,
         })? {
             Response::Replaced(replaced) => Ok(replaced),
@@ -1605,25 +1638,128 @@ impl Attached {
         }
     }
 
+    /// replace the code of some of this build's files, and move the map with it
+    ///
+    /// ## why the map rides on this and is not the request it looks like
+    ///
+    /// staging one file of a basedpython build again rewrites the generated
+    /// python **and** `_by_sourcemap.py` beside it. so the tables this session
+    /// holds describe the tree it used to be, and every `.by` breakpoint is armed
+    /// on a generated line that came out of them. both have to land before any
+    /// `__code__` is assigned — and the agent holds the GIL for the whole of one
+    /// message and for no longer, so a debugger that sent the tables, the
+    /// breakpoints and the replacement as three messages would leave two windows
+    /// in which another thread's logpoint is mapped through a table describing
+    /// code it is not running. one message has no window in it
+    ///
+    /// ## the order here is the reverse of the order there
+    ///
+    /// the new tables are read **first** and adopted **last**.
+    ///
+    /// First, because everything that goes out depends on which tables they are:
+    /// a `.by` this was asked about is resolved through them, and so is every
+    /// breakpoint that rides along.
+    ///
+    /// Last, because the agent installs nothing when the replacement is refused —
+    /// a refusal changes nothing at all, which is the rule one file already has.
+    /// A session that had moved on to the new tables while the process had not
+    /// would report every line of the build out of a table describing code
+    /// nothing is running, which is the exact failure the map exists to prevent.
     fn replace_the_code(
         &mut self,
-        file: PathBuf,
+        files: Vec<PathBuf>,
+        remap: bool,
         even_under_a_live_frame: bool,
         reporting: &mut dyn Reporting,
-    ) -> Result<Replaced> {
+    ) -> Result<Replacements> {
         const EXPECTED: &str = "what replacing a file's code did";
+
+        // read before anything is sent, and held until the answer says it was
+        // taken. `SourceMap::load` is the only way to one of these, so what is
+        // built here has been hashed against both files it describes — the
+        // debuggee applies a map, it never decides one is trustworthy
+        let remapping = if remap {
+            let map = Arc::new(self.map_again()?);
+            // the whole set rather than the breakpoints of the files being
+            // replaced: a table that moved moves every breakpoint of the build
+            let sent = mapping::send(Some(&map), self.armed.clone());
+            Some((map, sent))
+        } else {
+            None
+        };
+        let map = match &remapping {
+            Some((map, _)) => Some(map.as_ref()),
+            None => self.map.as_deref(),
+        };
+
+        // a `.by` is not something the interpreter ever compiled, so what goes to
+        // the agent is the generated python it was transpiled into. the same
+        // translation a breakpoint and a frame go through, done here for the same
+        // reason: the agent has never heard of a source map's paths
+        let files = files
+            .into_iter()
+            .map(|file| generated_for(map, file))
+            .collect::<Result<Vec<_>>>()?;
+
+        let payload = remapping.as_ref().map(|(map, sent)| Remapping {
+            files: map.files(),
+            breakpoints: sent.breakpoints.clone(),
+        });
 
         match self.ask(
             &FromEngine::ReplaceCode {
-                file,
+                files,
                 even_under_a_live_frame,
+                remap: payload,
             },
             EXPECTED,
             reporting,
         )? {
-            FromAgent::Replaced { replaced } => Ok(replaced),
+            FromAgent::Replaced { mut replaced } => {
+                // adopted only where the agent adopted it. the two must not be
+                // able to disagree about which tree they are describing
+                if let Some((map, sent)) = remapping
+                    && replaced.remapped.is_some()
+                {
+                    // the directory is named here because only here knows it: the
+                    // agent is handed tables and never a path to read one from,
+                    // so it leaves this empty and says so. a report naming no
+                    // directory would be a client told its build was mapped again
+                    // without being told which build
+                    if let Some(remapped) = replaced.remapped.as_mut() {
+                        remapped.directory = map.directory().to_path_buf();
+                    }
+                    self.map = Some(map);
+                    // replaced whole, like the set it describes — a translation
+                    // left over from the old tables would map an answer through a
+                    // route this set never took
+                    self.translated = sent.translated;
+                }
+                // the rebindings are answers about the client's own breakpoints
+                // and leave in `.by` terms, like every other answer from here
+                Ok(Replacements {
+                    rebound: self.restore(replaced.rebound),
+                    ..replaced
+                })
+            }
             other => Err(unexpected(&other, EXPECTED)),
         }
+    }
+
+    /// read this build's map again, out of the directory it was read from
+    ///
+    /// the directory travels on the map rather than being remembered beside it,
+    /// so a reload cannot go looking somewhere the first read did not.
+    fn map_again(&self) -> Result<bpd_core::SourceMap> {
+        let directory = self
+            .map
+            .as_ref()
+            .ok_or(Error::NotABasedpythonBuild {
+                wanted: "read again",
+            })?
+            .directory()
+            .to_path_buf();
+        bpd_core::SourceMap::load(&directory).map_err(|source| Error::SourceMap { source })
     }
 
     /// start or stop recording, and say what the window holds
@@ -2451,6 +2587,29 @@ fn attached_in_terminal(listener: Listener, map: Option<bpd_core::SourceMap>) ->
         debuggee.map_sources(map)?;
     }
     Ok(Launched::Stopped(debuggee))
+}
+
+/// the file the interpreter compiled, for the file a client named
+///
+/// a `.py` is already it. under `by run` that is the copy in the build tree
+/// rather than the one in the project — the tree is what `sys.path[0]` is and
+/// what the interpreter imported — and naming it is the client's job, because
+/// the client is what knows which of the two it means.
+///
+/// a `.by` never was: it is resolved through the map, which is the same
+/// translation a breakpoint, a frame and a source read go through. one the map
+/// does not describe is refused rather than answered about the python nearest it.
+fn generated_for(map: Option<&bpd_core::SourceMap>, file: PathBuf) -> Result<PathBuf> {
+    if !mapping::is_source(&file) {
+        return Ok(file);
+    }
+    let map = map.ok_or(Error::NotABasedpythonBuild {
+        wanted: "resolve a `.by` through",
+    })?;
+    match map.generated_from(&file) {
+        Ok(mapped) => Ok(mapped.generated.clone()),
+        Err(reason) => Err(Error::NotInTheBuild { file, reason }),
+    }
 }
 
 /// the basedpython build directory this program runs out of, if it does
