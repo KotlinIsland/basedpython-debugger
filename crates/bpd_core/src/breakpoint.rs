@@ -171,6 +171,40 @@ pub struct Resolved {
     pub waiting_for: Option<u32>,
 }
 
+impl Resolved {
+    /// what a breakpoint resolves to while there is no program to bind it in
+    ///
+    /// a front end can be asked for breakpoints **before** a debuggee exists.
+    /// DAP is built that way — `initialized` is the adapter saying "send me
+    /// your configuration now", and a client is entitled to send every
+    /// breakpoint it has and only then ask for a program — so the honest answer
+    /// has to be sayable without an interpreter to ask
+    ///
+    /// it is here rather than in the adapter for the reason
+    /// [`Unbound::will_bind_later`] is here: what a breakpoint's state is
+    /// called is the core's vocabulary, and a front end that worded its own
+    /// would be a second story about the same fact. nothing is invented — the
+    /// binding is [`Unbound`], because nothing is bound, and the reason is
+    /// [`Unbound::NoProgram`], which says so and says that starting one is what
+    /// changes it
+    #[must_use]
+    pub fn without_a_program(breakpoint: &SourceBreakpoint) -> Self {
+        Self {
+            id: breakpoint.id,
+            binding: Binding::Unbound {
+                reason: Unbound::NoProgram {
+                    file: breakpoint.file.clone(),
+                    line: breakpoint.line,
+                },
+            },
+            // not `Some`, and not a claim either way. `waiting_for` is about a
+            // breakpoint that **bound** and is not armed yet; this one did not
+            // bind, so the question has not arisen
+            waiting_for: None,
+        }
+    }
+}
+
 /// whether a breakpoint has a code object and an offset behind it
 ///
 /// deliberately closed. there is no third state between "the interpreter will
@@ -353,6 +387,32 @@ pub struct Site {
 #[serde(tag = "unbound", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Unbound {
+    /// there is no program yet, so there is no interpreter to bind it in
+    ///
+    /// **not a refusal.** a breakpoint can be set before a debuggee exists, and
+    /// in DAP it usually is: `initialized` is the adapter asking for the
+    /// client's configuration, and the client is entitled to send every
+    /// breakpoint it has and only then ask for a program. what cannot be done
+    /// yet is binding one — there is no code object anywhere to bind it to —
+    /// and saying so is the only answer that is true at that moment
+    ///
+    /// it is the same shape as [`Self::NotLoaded`] one step earlier: that is a
+    /// file the interpreter has not read, this is an interpreter that does not
+    /// exist. both bind when the thing that is missing arrives, which is why
+    /// both answer `true` to [`Self::will_bind_later`], and neither is a
+    /// breakpoint the user should be shown as armed
+    NoProgram {
+        /// the path as the client gave it
+        file: PathBuf,
+        /// the line that was asked for
+        ///
+        /// carried so the reason can name the whole request. nothing checks it
+        /// against the file: there is no interpreter to check it with, and a
+        /// front end that read the file itself would be answering a question
+        /// about the program from something that is not the program
+        line: u32,
+    },
+
     /// the path does not name a file on disk
     Unresolvable {
         /// the path as the client gave it
@@ -530,6 +590,11 @@ impl Unbound {
     )]
     pub fn will_bind_later(&self) -> bool {
         match self {
+            // there is no program, and starting one is the next thing the
+            // client is going to do. this is the most temporary refusal there
+            // is: nothing about the breakpoint has been examined yet
+            Self::NoProgram { .. } => true,
+
             // the file is not loaded, and loading it is a thing that happens
             Self::NotLoaded { .. } => true,
 
@@ -571,6 +636,27 @@ impl Unbound {
             Self::LogMessageInvalid { .. } => false,
         }
     }
+}
+
+/// [`Unbound::NoProgram`], and what will change it
+///
+/// worded as a stage rather than as a failure, because that is what it is: the
+/// client is answering `initialized`, and asking for a program is the next
+/// thing it does. what a person must not read out of it is that the breakpoint
+/// was lost — that is exactly the belief the refusal this replaced produced
+fn no_program(
+    formatter: &mut std::fmt::Formatter<'_>,
+    file: &std::path::Path,
+    line: u32,
+) -> std::fmt::Result {
+    write!(
+        formatter,
+        "no program has been started yet, so there is no interpreter to bind \
+         line {line} of `{}` in. it is held exactly as it was asked for and \
+         bound for real the moment one starts — a client that sends its \
+         breakpoints before it asks for a program loses none of them",
+        file.display()
+    )
 }
 
 /// [`Unbound::NotLoaded`], which has two routes into a file and neither taken
@@ -672,6 +758,7 @@ fn in_generated_python(
 impl std::fmt::Display for Unbound {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NoProgram { file, line } => no_program(formatter, file, *line),
             Self::NeverArms { after, why } => write!(
                 formatter,
                 "it is armed only once breakpoint {after} has been hit, and \

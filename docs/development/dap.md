@@ -361,6 +361,67 @@ parked in a C call has released the GIL and reaches no monitoring event, so
 nothing can hold it; when there is one, the client gets an `output` event naming
 it and `allThreadsStopped` stays false. see [threads](threads.md)
 
+### the configuration phase happens before there is a program
+
+this one is not a difference in model, it is a difference bpd used to have
+wrong, and it cost every breakpoint an IDE set
+
+the handshake is not "launch, then configure". the adapter answers `initialize`,
+sends `initialized` — which the spec defines as *"the debug adapter is ready to
+accept configuration requests"* — and the client then sends `setBreakpoints`,
+`setExceptionBreakpoints` and `configurationDone`. **`launch` is ordered against
+none of that.** the spec says only that the client sends it "at any point after
+the client receives the capabilities", and the two clients bpd is driven by sit
+at the two ends of that range:
+
+| client              | what it sends                                                                       |
+| ------------------- | ------------------------------------------------------------------------------------ |
+| vs code             | `initialize`, `launch`, then the configuration when `initialized` arrives            |
+| the intellij platform | `initialize`, the configuration when `initialized` arrives, `configurationDone`, `launch` |
+
+bpd used to answer only the first of those. `initialized` was sent from
+`launch`, so that breakpoints bound against a real interpreter rather than
+against a guess about one, and every request that needed a session refused with
+*"nothing has been launched yet"* until one existed. the intellij platform sent
+its breakpoints first, was refused, dropped them, and the program ran to
+completion past the line the user was sitting at — measured twice, in the IDE's
+own log and against a hand written DAP client. worse, `configurationDone` before
+`launch` reached `self.configuration()` with nothing in it and **panicked**, so
+the adapter process died mid-handshake; from the client's side that is the
+debugger vanishing, which the intellij platform reports as *"the connection to
+the debug adapter closed unexpectedly"*
+
+so `initialized` now goes out from `initialize`, where the protocol puts it, and
+the adapter can be configured with no program in it:
+
+- a breakpoint set before there is a program is **held**, not refused. it is
+    answered with `bpd_core::Resolved::without_a_program` — unbound, `pending`,
+    with the reason — and armed for real the moment a session exists, which the
+    client hears as a `breakpoint` event with reason `changed`. that is the same
+    path a breakpoint waiting for its module already took, one step earlier: the
+    file is not loaded because there is no interpreter to load it
+- **nothing is claimed to be armed.** a pre-launch answer is `verified: false`,
+    because at that moment nothing is watching anything. this is the rule the
+    whole debugger is arranged around and it does not bend for a handshake — an
+    answer never says more than is known, and a solid red dot on a line the
+    interpreter is not watching is exactly the lie it forbids
+- the same holds for `setExceptionBreakpoints`: the filters are held and armed
+    with the breakpoints, and every one of them answers `verified: false` until
+    they are
+- `configurationDone` before `launch` is **recorded**, and the program is let go
+    at whichever of the two arrives second — `Adapter::begin`, reached from both
+
+the word for the state is in the core, not here: `bpd_core::Unbound::NoProgram`,
+beside `NotLoaded` and answering `true` to `will_bind_later` for the same
+reason. "there is no session on this connection" is a fact about the connection
+rather than about the program, which is why the adapter may state it at all —
+what a breakpoint in that state is *called* stays the core's, so both front ends
+read one story
+
+`crates/bpd/tests/dap.rs` drives the intellij order end to end against a real
+interpreter, over both transports: the breakpoint is set before the program
+exists, comes back `pending`, binds when the program starts, and fires
+
 ### DAP replaces one file's breakpoints, and the core replaces the set
 
 `setBreakpoints` is about a **file**: it carries every breakpoint that file
@@ -564,6 +625,53 @@ a second thread stopping while a first is held arrives on the connection rather
 than as the answer to anything, so the adapter compares what the session is
 holding against what it has told the client after every request — and a stop
 nobody asked about gets its own `stopped` event
+
+### a disconnect answers what it overtook
+
+the reader answering `disconnect` without going through the session is what
+makes it answerable at all while a program runs — and it means the answer
+**overtakes** every request already queued for the session. the loop serving the
+session stops at its next turn, and what was behind the disconnect was never
+taken
+
+those used to go away with the process. that is not a small thing on this
+protocol: a DAP client holds a future per request, and a stream that ends with
+them outstanding is a client completing them with "the connection closed"
+instead of with an answer — which, from where it stands, is indistinguishable
+from the debugger having died. so every one of them is refused, with why, before
+the connection goes. a refusal is an answer: the client learns its request was
+received and not acted on
+
+it is the same rule the deferred queue follows. a client is entitled to send
+whatever it likes; what it is not entitled to is having it silently disappear.
+`crates/bpd_dap/tests/disconnect.rs` holds one request open inside the session,
+sends another behind it, disconnects, and checks that both are answered
+
+#### and bpd still goes away, which is what the spec asks for
+
+the question this came from is whether bpd's ending is too abrupt — whether it
+should wait for the client to close, or send `exited` before `terminated`. read
+rather than guessed at, the spec says no to all of it:
+
+- *"the `disconnect` request asks the debug adapter to disconnect from the
+    debuggee (thus ending the debug session) and then to shut down itself (the
+    debug adapter)"*. shutting itself down is the adapter's own job, and under
+    `by run` bpd **is** `$PYTHON`, so an adapter that lingered waiting to be
+    closed is a whole run that lingers
+- *"in all situations where a debug adapter wants to end the debug session, a
+    `terminated` event must be fired"*, and `exited` is optional and *"returns
+    its exit code"*. an ended debuggee has no exit code bpd read, so sending one
+    would be inventing the single field that event exists for — the same rule
+    `ended.rs` already holds the adapter to
+
+and the intellij notification is not raised by that ending. reading the
+platform's own `DapDebugSessionImpl`: its connection monitor shows *"the
+connection to the debug adapter closed unexpectedly"* only when the stream ends
+while the session state is **not** `Stopped`, and both routes into stopping —
+the stop button, and a `terminated` event — set that state before anything else
+happens. so a close after a `disconnect` cannot raise it, and what can is the
+adapter dying while the platform still believes the session is live. which is
+exactly what the `configurationDone` panic above did
 
 ### the program's own output
 

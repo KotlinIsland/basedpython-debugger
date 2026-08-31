@@ -136,6 +136,18 @@ is running. the client is told both times. this is the same path that binds code
 built by `exec`, because from the agent's point of view nothing distinguishes
 them
 
+**there is a step before that one**, and it is the front end's rather than the
+agent's: a breakpoint can be set before a debuggee exists at all. DAP's
+handshake is built that way — `initialized` is the adapter asking for the
+client's configuration, and a client is entitled to send every breakpoint it has
+and only then ask for a program. so `Unbound::NoProgram` sits beside `NotLoaded`
+in the same vocabulary and answers `true` to `will_bind_later` for the same
+reason: the difference between them is a file the interpreter has not read and
+an interpreter that does not exist yet, and both bind when the missing thing
+arrives. the agent never sees one — nothing has been asked of it — and the front
+end that holds it says so with the core's word rather than one of its own. see
+[the configuration phase](dap.md#the-configuration-phase-happens-before-there-is-a-program)
+
 a django template is the other thing that binds late, and by the same rule: it
 binds the first time django parses the template, which for a template reached
 through `{% include %}` happens in the middle of a render. everything about that
