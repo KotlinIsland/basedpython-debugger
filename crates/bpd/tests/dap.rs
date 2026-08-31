@@ -75,6 +75,7 @@ over_each_transport!(
     a_breakpoint_is_hit_a_local_is_written_and_the_program_sees_the_write,
     a_running_program_can_be_paused_while_the_adapter_is_waiting_for_it,
     a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so,
+    a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set,
     an_editor_can_run_a_whole_investigation_the_way_an_agent_can,
     an_editor_can_ask_what_changed_between_two_stops,
     an_editor_can_move_where_the_program_carries_on_from,
@@ -384,6 +385,93 @@ fn a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so(tran
         &serde_json::json!({ "threadId": stopped["body"]["threadId"] }),
     );
     client.event("exited");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+fn a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set(
+    transport: Transport,
+) {
+    // the other half of DAP's handshake, and the one bpd used to have no answer
+    // for. the spec orders `launch` against nothing — a client sends it "at any
+    // point after the client receives the capabilities" — so the two real
+    // clients sit at the two ends of that: vs code launches first and
+    // configures afterwards, which every other scenario in this file drives,
+    // and the **intellij platform configures first and launches last**, which
+    // is this one
+    //
+    // what it used to get was `setBreakpoints` refused with "nothing has been
+    // launched yet". the client dropped the breakpoint, the program ran to the
+    // end past the line the user was sitting at, and nothing anywhere said a
+    // breakpoint had been thrown away
+    let fixture = Fixture::new("configured_first", PROGRAM);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+
+    // the invitation arrives **before** there is a program, because that is
+    // what the event means: "the debug adapter is ready to accept configuration
+    // requests". an adapter that held it back until a `launch` would leave a
+    // client that waits for it, and launches last, waiting for ever
+    client.event("initialized");
+
+    let line = line_of(PROGRAM, "doubled = total * 2");
+    let set = client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line } ],
+        }),
+    );
+    assert_eq!(set["success"], true, "the breakpoint was refused: {set}");
+    let held = &set["body"]["breakpoints"][0];
+
+    // held, and **not** claimed to be armed. there is no interpreter yet, so
+    // there is nothing watching that line, and a solid red dot here is the
+    // debugger telling a person it will stop somewhere it cannot
+    assert_eq!(
+        held["verified"], false,
+        "there is no program to bind it in yet: {set}"
+    );
+    assert_eq!(
+        held["reason"], "pending",
+        "it binds when the program starts, so an editor has no reason to stop \
+         hoping about it: {set}"
+    );
+    assert!(
+        held["message"]
+            .as_str()
+            .expect("a breakpoint that did not bind says why")
+            .contains("no program has been started yet"),
+        "the reason was {held}"
+    );
+
+    client.request("configurationDone", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+
+    // and now it is bound for real, against the interpreter rather than a guess
+    // about one — reported the way any breakpoint that binds later is
+    let changed = client.event("breakpoint");
+    assert_eq!(changed["body"]["reason"], "changed", "{changed}");
+    assert_eq!(
+        changed["body"]["breakpoint"]["verified"], true,
+        "the held breakpoint never bound: {changed}"
+    );
+    assert_eq!(changed["body"]["breakpoint"]["line"], line);
+
+    // the part no answer can stand in for: it fires
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    let thread = stopped["body"]["threadId"].clone();
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    assert_eq!(stack["body"]["stackFrames"][0]["line"], line, "{stack}");
+
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    client.event("exited");
+    client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));
     client.finish();
 }
@@ -2183,6 +2271,19 @@ fn admitted(endpoint: SocketAddr, token: &str, seq: i64) -> (Bystander, serde_js
         ),
     );
     let answered = connection.next_message();
+
+    // and the invitation behind it, which every connection gets as soon as it
+    // has been told the capabilities — this one has no program and is not going
+    // to be given one, and it is still entitled to be asked for its
+    // configuration. taken off the stream here so what a caller reads next is
+    // the answer to what it sends next
+    let invited = connection.next_message();
+    assert_eq!(
+        invited["event"], "initialized",
+        "a served connection is asked for its configuration straight after \
+         `initialize`, and got {invited}"
+    );
+
     (connection, answered)
 }
 

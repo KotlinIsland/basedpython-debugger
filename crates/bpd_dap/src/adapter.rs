@@ -30,8 +30,42 @@
 //! a request that arrives while the program is running therefore waits for the
 //! next stop. that is the model rather than a shortcut: the agent cannot bind a
 //! breakpoint or read a frame without a python thread to do it on
+//!
+//! ## the configuration phase, which happens before there is a program
+//!
+//! DAP's handshake is not "launch, then configure". the adapter answers
+//! `initialize`, sends `initialized` — which the spec defines as "the debug
+//! adapter is ready to accept configuration requests" — and the client then
+//! sends `setBreakpoints`, `setExceptionBreakpoints` and `configurationDone`.
+//! **`launch` is ordered against none of that.** the spec says only that the
+//! client sends it "at any point after the client receives the capabilities",
+//! and the two real clients sit at the two ends of that: vs code sends `launch`
+//! immediately and configures afterwards, and the intellij platform configures
+//! first and sends `launch` last
+//!
+//! so the adapter has to be able to be configured with no program in it, and
+//! this is what that costs:
+//!
+//! - **a breakpoint set before there is a program is held, not refused.** it is
+//!   answered with [`bpd_core::Resolved::without_a_program`] — unbound,
+//!   `pending`, with the reason — and armed for real the moment a session
+//!   exists, which the client hears as a `breakpoint` event. refusing it
+//!   instead is what made every intellij breakpoint vanish: the request was
+//!   answered `nothing has been launched yet`, the client dropped it, and the
+//!   program ran to the end past a line the user was waiting at
+//! - **nothing is claimed to be armed.** a pre-launch answer says `verified:
+//!   false`, because at that moment there is no interpreter watching anything.
+//!   this is the whole rule the debugger exists for and it does not bend for a
+//!   handshake: an answer never says more than is known
+//! - **`configurationDone` may arrive before `launch`.** it is recorded and the
+//!   program is let go at whichever of the two comes second — see [`Adapter::begin`]
+//!
+//! what the adapter is *not* doing here is deciding anything about the program.
+//! "there is no session on this connection" is a fact about the connection, and
+//! the word for what a breakpoint is then is [`bpd_core::Unbound::NoProgram`],
+//! in the core, where both front ends read the same one
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -125,6 +159,20 @@ pub fn serve(
 
     let mut adapter = Adapter::new(output, interrupt, stopping, reachable.clone());
     let served = adapter.run(launcher, &commands);
+
+    // whatever the client sent and has not been answered, before the connection
+    // goes. a `disconnect` is answered by the reader thread the moment it
+    // arrives — which is the whole point of there being a reader thread — so it
+    // overtakes every request already queued for the session, and those would
+    // otherwise reach the end of this function unanswered
+    //
+    // an unanswered request is not a small thing on this protocol: a DAP client
+    // holds a future per request, and a stream that ends with them outstanding
+    // is a client completing them with "the connection closed" rather than with
+    // an answer. it is the same rule the deferred queue follows — a client is
+    // entitled to send whatever it likes; what it is not entitled to is having
+    // it silently disappear
+    adapter.refuse_what_is_left(&commands);
 
     // the reader owns the client's input and ends when the client hangs up.
     // joining it means the answer to a `disconnect` is written before this
@@ -321,12 +369,22 @@ struct Adapter {
     deferred: Vec<Incoming>,
     session: Option<Box<dyn Session>>,
     configuration: Option<Configuration>,
-    /// whether the client has finished sending its configuration
+    /// whether the client has sent `configurationDone`
     ///
-    /// nothing is announced before it: a `stopped` event for the entry stop
-    /// sent while the client is still setting breakpoints is a stop it is not
-    /// ready to render
+    /// on its own it says nothing about whether there is a program: a client
+    /// may finish configuring before it asks for one. what it decides is
+    /// whether [`Self::begin`] can run yet, and the other half of that is
+    /// [`Self::session`]
     configured: bool,
+    /// whether the program has been armed and let go
+    ///
+    /// the gate that used to be [`Self::configured`], and it is not the same
+    /// question. nothing is announced before this: a `stopped` event for the
+    /// entry stop sent while the adapter is still arming the configuration is a
+    /// stop the client is not ready to render — and the arming itself asks the
+    /// session things, so a gate that was already open by then would announce
+    /// the entry stop of a program the client asked to run straight past
+    begun: bool,
     exited: bool,
     handles: Handles,
     threads: ThreadIds,
@@ -344,6 +402,33 @@ struct Adapter {
     /// the client threads are running that this stop is holding
     worlds: BTreeMap<u64, bool>,
     breakpoints: FileBreakpoints,
+    /// the ids answered while there was no program to bind them in
+    ///
+    /// what [`Self::arm_what_was_held`] has to go back and correct. the client
+    /// was told these are `pending` — true when it was said, and no longer true
+    /// once an interpreter exists — so each one gets a `breakpoint` event with
+    /// where it really went. an id that is not in here was answered against a
+    /// real session and needs no second answer
+    unarmed: BTreeSet<u32>,
+    /// the exception filters asked for while there was no program, if any
+    ///
+    /// held for the reason the breakpoints are. `setExceptionBreakpoints` is
+    /// part of the same configuration phase and arrives in the same place, and
+    /// an adapter that held one and dropped the other would be a debugger that
+    /// stops on breakpoints and not on exceptions depending on which client
+    /// asked
+    exceptions: Option<Filters>,
+}
+
+/// what one `setExceptionBreakpoints` asked for
+///
+/// the two bpd offers, as booleans rather than as the client's strings: the
+/// names are validated where the request arrives, and what is kept is the
+/// question [`Request::SetExceptionBreakpoints`] asks
+#[derive(Debug, Clone, Copy)]
+struct Filters {
+    raised: bool,
+    uncaught: bool,
 }
 
 impl Adapter {
@@ -363,6 +448,7 @@ impl Adapter {
             session: None,
             configuration: None,
             configured: false,
+            begun: false,
             exited: false,
             handles: Handles::default(),
             threads: ThreadIds::default(),
@@ -370,6 +456,8 @@ impl Adapter {
             reasons: BTreeMap::new(),
             worlds: BTreeMap::new(),
             breakpoints: FileBreakpoints::default(),
+            unarmed: BTreeSet::new(),
+            exceptions: None,
         }
     }
 
@@ -479,11 +567,16 @@ impl Adapter {
     /// whether the adapter should be waiting for the program rather than for
     /// the client
     ///
-    /// only when there is a program, it has been configured, nothing is held
-    /// and it has not ended. anything else and the next thing to happen is the
+    /// only when there is a program, it has been let go, nothing is held and it
+    /// has not ended. anything else and the next thing to happen is the
     /// client's move
+    ///
+    /// `begun` rather than `configured`, because the two came apart when a
+    /// client was allowed to configure before it launches: a `configurationDone`
+    /// with no program behind it must not put this adapter into a wait on a
+    /// session that is not there
     fn waiting(&self) -> bool {
-        self.session.is_some() && self.configured && !self.exited && self.announced.is_empty()
+        self.session.is_some() && self.begun && !self.exited && self.announced.is_empty()
     }
 
     fn handle(
@@ -611,6 +704,21 @@ impl Adapter {
         };
 
         self.respond(message, Some(capabilities()))?;
+
+        // **here**, and not after a `launch`. the spec's own words for this
+        // event are "the debug adapter is ready to accept configuration
+        // requests", and the request it is ready for is the one the client
+        // sends next — a client that waits for it before sending anything, and
+        // sends `launch` only after `configurationDone`, waits for ever if the
+        // adapter holds it back until there is a program
+        //
+        // it used to be sent from `launch`, so that breakpoints were bound
+        // against a real interpreter rather than against a guess about one.
+        // that reason has not been abandoned, it has been met somewhere it does
+        // not cost the handshake: a breakpoint sent now is held and bound
+        // against the real interpreter the moment there is one, and until then
+        // it is reported as unbound rather than guessed at
+        self.event("initialized", &serde_json::json!({}))?;
         Ok(())
     }
 
@@ -649,8 +757,7 @@ impl Adapter {
             |error| Aborted::Refuse(format!("the attach configuration is not usable: {error}")),
         )?);
         self.respond(message, None)?;
-        self.event("initialized", &serde_json::json!({}))?;
-        Ok(())
+        self.take_up_the_program()
     }
 
     fn launch(
@@ -700,11 +807,7 @@ impl Adapter {
                 self.session = Some(session);
                 self.configuration = Some(configuration);
                 self.respond(message, None)?;
-                // the program is held before its first statement, so the client
-                // can bind breakpoints against a real interpreter rather than
-                // against a guess about one
-                self.event("initialized", &serde_json::json!({}))?;
-                Ok(())
+                self.take_up_the_program()
             }
             Started::ExitedBeforeStopping { code } => {
                 // the program has already said what went wrong, on its own
@@ -846,10 +949,121 @@ impl Adapter {
         started.map_err(|error| failed(&error))
     }
 
+    /// a session has just arrived, so everything held for one is applied to it
+    ///
+    /// the second half of the configuration phase, and the moment the two
+    /// orders a client may use come back together. `initialized` has already
+    /// gone out — from `initialize`, where the protocol puts it — so what is
+    /// left is the configuration that was answered without an interpreter, and
+    /// the `configurationDone` that may already have arrived
+    ///
+    /// the arming happens **before** [`Self::begin`] and not inside it, because
+    /// the two are different questions and only one of them is the client's:
+    /// arming is owed the moment there is a program, and letting the program go
+    /// is owed when the client has finished configuring
+    fn take_up_the_program(&mut self) -> Answered {
+        let outcome = self
+            .arm_what_was_held()
+            .and_then(|()| if self.configured { self.begin() } else { Ok(()) });
+        // the `launch` or `attach` has **already been answered**, so a refusal
+        // from here has no request to be the answer to. it becomes an `output`
+        // event, which is the rule the waiting loop already follows — refusing
+        // the launch a second time would put two responses for one request on
+        // the wire, and end a session that really did start
+        self.finish(outcome).map_err(Aborted::Wire)
+    }
+
+    /// bind, for real, everything answered while there was no program
+    ///
+    /// what was said before was true when it was said and is not any more, and
+    /// DAP has the event for exactly that: `breakpoint` with reason `changed`,
+    /// which is already how this adapter reports a breakpoint that bound
+    /// because a module was imported. this is the same fact one step earlier —
+    /// the file was not loaded because there was no interpreter to load it —
+    /// so it is reported through the same path rather than a second one
+    ///
+    /// nothing is asked when nothing was held: a client that launched first and
+    /// configured afterwards has an empty set here, and a round trip to say so
+    /// would be a round trip for nothing
+    fn arm_what_was_held(&mut self) -> Answered {
+        if let Some(filters) = self.exceptions.take() {
+            self.arm_exception_filters(filters)?;
+        }
+
+        if self.unarmed.is_empty() {
+            return Ok(());
+        }
+        let held = std::mem::take(&mut self.unarmed);
+        let whole = self.breakpoints.all();
+        let resolved = match self.ask(Request::SetBreakpoints { breakpoints: whole })? {
+            Response::BreakpointsResolved { resolved } => resolved,
+            other => unreachable!("a breakpoint set was answered with {other:?}"),
+        };
+        let corrected: Vec<Resolved> = resolved
+            .into_iter()
+            .filter(|entry| held.contains(&entry.id))
+            .collect();
+        self.rebound(&corrected)
+    }
+
+    /// arm the exception filters a client asked for before there was a program
+    ///
+    /// no event follows it. DAP has no `breakpoint` event for an exception
+    /// filter — the `breakpoint` event carries a `Breakpoint`, which is a
+    /// source location — so there is nowhere to put a correction, and a client
+    /// that wants to know what is armed asks again. what this does guarantee is
+    /// that the filters really are armed on the program, which is the half a
+    /// client cannot check for itself
+    fn arm_exception_filters(&mut self, filters: Filters) -> Answered {
+        let armed = match self.ask(Request::SetExceptionBreakpoints {
+            raised: filters.raised,
+            uncaught: filters.uncaught,
+        })? {
+            Response::ExceptionBreakpoints(armed) => armed,
+            other => unreachable!("exception breakpoints were answered with {other:?}"),
+        };
+        // read back off the agent, the way the request itself reads it back. a
+        // client that asked for a filter the debuggee did not take is told
+        // here, because its `setExceptionBreakpoints` has long been answered
+        // and this is the only channel left
+        for (asked, took, name) in [
+            (filters.raised, armed.raised, "raised"),
+            (filters.uncaught, armed.uncaught, "uncaught"),
+        ] {
+            if asked && !took {
+                self.say(&format!(
+                    "the `{name}` exception filter was set before the program \
+                     started and the debuggee did not take it\n"
+                ))?;
+            }
+        }
+        Ok(())
+    }
+
     fn configuration_done(&mut self, message: &Incoming) -> Answered {
         self.configured = true;
         self.respond(message, None)?;
 
+        // a client is entitled to finish configuring before it asks for a
+        // program — the intellij platform does exactly that — and there is
+        // nothing to let go of yet. what this request says is recorded above,
+        // and `launch` or `attach` acts on it when it arrives
+        if self.session.is_none() {
+            return Ok(());
+        }
+        // answered above, so a refusal from here goes the same way one from a
+        // `launch` does: onto the console, because there is no longer a request
+        // for it to be the answer to
+        let begun = self.begin();
+        self.finish(begun).map_err(Aborted::Wire)
+    }
+
+    /// let the program go, now that there is one and the client has finished
+    ///
+    /// reached from whichever of `configurationDone` and `launch`/`attach` came
+    /// second, and it runs once: the two orders a DAP client may use end in the
+    /// same place rather than in two arrangements of the same steps
+    fn begin(&mut self) -> Answered {
         // before the program runs a line, because the handler that acts on it
         // runs inside `os.fork()` and a program can fork in its first statement.
         // only when it was asked for: the agent's default is off, and a request
@@ -869,6 +1083,13 @@ impl Adapter {
                 other => unreachable!("debugging children was answered with {other:?}"),
             }
         }
+
+        // from here the client hears about stops. everything above it is
+        // arrangement — arming what was configured, and turning on child
+        // debugging before anything can fork — and the entry stop announced in
+        // the middle of that would be a stop reported to a client that has
+        // asked for its program to run straight past it
+        self.begun = true;
 
         if self.configuration().stop_on_entry {
             self.announce()?;
@@ -931,6 +1152,33 @@ impl Adapter {
         }
 
         let mine = self.breakpoints.replace(&file, &wanted);
+
+        // no program on this connection yet, which in the standard handshake is
+        // the ordinary case rather than an error: the client is answering
+        // `initialized`, and `launch` comes after. the set is held and every
+        // one of these is answered as what it is — unbound, `pending`, with the
+        // reason — and bound for real by `arm_what_was_held` the moment there
+        // is an interpreter
+        if self.session.is_none() {
+            // recomputed from the whole set rather than added to, because this
+            // `replace` may have dropped breakpoints an earlier one minted, and
+            // an id nothing holds any more is an id no correction can name
+            self.unarmed = self
+                .breakpoints
+                .all()
+                .iter()
+                .map(|breakpoint| breakpoint.id)
+                .collect();
+            let answers: Vec<serde_json::Value> = mine
+                .iter()
+                .map(|breakpoint| {
+                    rendered_breakpoint(&Resolved::without_a_program(breakpoint), breakpoint)
+                })
+                .collect();
+            self.respond(message, Some(serde_json::json!({ "breakpoints": answers })))?;
+            return Ok(());
+        }
+
         let whole = self.breakpoints.all();
         let resolved = match self.ask(Request::SetBreakpoints { breakpoints: whole })? {
             Response::BreakpointsResolved { resolved } => resolved,
@@ -975,9 +1223,32 @@ impl Adapter {
             }
         }
 
-        let armed = match self.ask(Request::SetExceptionBreakpoints {
+        let filters = Filters {
             raised: named.contains(&"raised"),
             uncaught: named.contains(&"uncaught"),
+        };
+
+        // the same configuration phase `setBreakpoints` arrives in, and held
+        // the same way. `verified: false` for every filter, because it is: with
+        // no interpreter there is nothing watching for an exception, and the
+        // rule that what is armed is what the agent says is armed does not stop
+        // applying because there is no agent to ask
+        if self.session.is_none() {
+            self.exceptions = Some(filters);
+            let waiting: Vec<serde_json::Value> = named
+                .iter()
+                .map(|_| serde_json::json!({ "verified": false }))
+                .collect();
+            self.respond(
+                message,
+                Some(serde_json::json!({ "breakpoints": waiting })),
+            )?;
+            return Ok(());
+        }
+
+        let armed = match self.ask(Request::SetExceptionBreakpoints {
+            raised: filters.raised,
+            uncaught: filters.uncaught,
         })? {
             Response::ExceptionBreakpoints(armed) => armed,
             other => unreachable!("exception breakpoints were answered with {other:?}"),
@@ -2700,7 +2971,12 @@ impl Adapter {
         let answered = self
             .session
             .as_mut()
-            .ok_or("nothing has been launched yet")?
+            .ok_or(
+                "nothing has been launched yet, so there is no program to ask. \
+                 the configuration phase is the exception and does not come \
+                 through here: breakpoints and exception filters set before a \
+                 program exists are held and armed when one starts",
+            )?
             .dispatch(
                 Addressed::of(request, &held.unwrap_or_default()),
                 &mut events,
@@ -2712,7 +2988,12 @@ impl Adapter {
         // a request answered on one thread can arrive with another thread's stop
         // behind it. saying nothing about that one would leave a client
         // believing a thread is running that is not
-        if self.configured {
+        //
+        // `begun` rather than `configured`: the requests that arm the held
+        // configuration are asked *between* the two, with the entry stop
+        // already held, and announcing it there would tell a client that asked
+        // for its program to run that it is stopped at the first statement
+        if self.begun {
             self.announce()?;
         }
         Ok(answered)
@@ -2880,6 +3161,47 @@ impl Adapter {
         self.output.lock().expect(WRITING).refuse(message, reason)
     }
 
+    /// answer everything the client sent that this session will not get to
+    ///
+    /// the session is over — the client disconnected, the client vanished, or
+    /// the program ended — and what is in the queue is what it sent before that
+    /// and has not heard back about. each one is refused, with why, rather than
+    /// left to be completed by the connection closing: a client cannot tell
+    /// those two apart, and the second one is what "the connection to the debug
+    /// adapter closed unexpectedly" is made of
+    ///
+    /// a write that fails is dropped and not raised. the only thing left to
+    /// tell about a connection that has gone is the connection that has gone,
+    /// and turning it into an error would report a failure to nobody while
+    /// changing what `serve` returns
+    fn refuse_what_is_left(&mut self, commands: &Receiver<Incoming>) {
+        // what was set aside for a reverse request first, then what is still in
+        // the channel: the same order they would have been answered in
+        let left: Vec<Incoming> = std::mem::take(&mut self.deferred)
+            .into_iter()
+            .chain(commands.try_iter())
+            .collect();
+        for message in left {
+            // a response is the client answering **this adapter**, and there is
+            // nothing to refuse about one. the only reverse request that is
+            // waited for is taken off this channel by the launch that sent it,
+            // so anything here is an answer to a `startDebugging` — which needs
+            // no reply and never did
+            if message.kind != "request" {
+                continue;
+            }
+            drop(self.refuse(
+                &message,
+                "the debug session ended before bpd got to this. it was \
+                 received and not acted on, which is a different thing from \
+                 bpd never having heard it — a `disconnect` is answered by the \
+                 thread that reads the client rather than by the one holding \
+                 the program, so it overtakes whatever is already queued, and \
+                 a refused `launch` leaves a session that never began",
+            ));
+        }
+    }
+
     fn event(&self, event: &str, body: &serde_json::Value) -> Answered {
         self.output
             .lock()
@@ -2948,7 +3270,7 @@ struct ClientCan {
     /// empty until a client says otherwise, which is every client that has
     /// never heard of the request — so the default is the narration, and being
     /// quiet is the thing that has to be asked for
-    understands: std::collections::BTreeSet<String>,
+    understands: BTreeSet<String>,
 }
 
 /// the event carrying what a jump really did
