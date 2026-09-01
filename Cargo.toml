@@ -93,3 +93,35 @@ unused_peekable = "warn"
 [profile.release]
 lto = "fat"
 codegen-units = 1
+
+# a cold `cargo test --workspace` took eighty minutes at nineteen percent cpu.
+# almost none of that was compilation: the same suite against a fresh target
+# directory is 143 seconds, of which 140 are the tests themselves. the eighty
+# minutes was `target/debug/deps` holding 925,503 entries — around 138 stale
+# generations of object files, where one build needs 6,707. apfs degrades
+# superlinearly at that count, and every cargo, rustc and ld invocation pays it
+# on every file it touches. a bare `ls` of that directory took 55 seconds for 14
+# of cpu, which is the same low-cpu high-sys signature the build had
+#
+# they accumulate because `split-debuginfo` defaults to `unpacked` on macos:
+# rustc leaves one `.o` per codegen unit next to the binary and the linker
+# records only a debug map pointing at them, so nothing ever collects the
+# previous build's. `packed` gathers them into a `.dSYM` and retains none, which
+# buys a bounded directory for a slower cold build and a larger target
+[profile.dev]
+split-debuginfo = "packed"
+
+# `line-tables-only` keeps the file and line of every frame, which is what a
+# failing test's backtrace is read for. what it drops is the type and variable
+# dwarf, which nothing reads outside an lldb session on `bpd`'s own rust — and
+# that is recovered with `RUSTFLAGS="-C debuginfo=2"` for the one build that
+# wants it, rather than paid for by every build that does not
+debug = "line-tables-only"
+
+# and none at all for the hundred crates underneath. stepping into serde or
+# pyo3's internals is not something this project debugs, so their debug info was
+# generated, linked and never read. `*` is dependencies only — the workspace's
+# own crates keep the line tables set above, and must, because `debug = 0` drops
+# the `at file:line` from a backtrace without saying so
+[profile.dev.package."*"]
+debug = 0
