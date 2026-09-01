@@ -1711,45 +1711,7 @@ impl Adapter {
     /// given only "yes" cannot show what is now different about the process, and
     /// one given only "no" cannot show which of the user's edits to undo
     fn replace_code(&mut self, message: &Incoming) -> Answered {
-        // `files` or `file`, and one of them is required. the list is what this
-        // grew into — a basedpython build staged again can change several modules
-        // together and they go at once or not at all — while the single one is
-        // what every client already speaking this sends
-        let files: Vec<std::path::PathBuf> = match (
-            message.arguments.get("files"),
-            message.arguments.get("file"),
-        ) {
-            (Some(serde_json::Value::Array(named)), _) => {
-                let mut files = Vec::with_capacity(named.len());
-                for one in named {
-                    let Some(path) = one.as_str() else {
-                        return Err(Aborted::Refuse(format!(
-                            "`files` is a list of paths on the debuggee's own filesystem, \
-                                 and one of them was {one}"
-                        )));
-                    };
-                    files.push(std::path::PathBuf::from(path));
-                }
-                files
-            }
-            (_, Some(serde_json::Value::String(file))) => {
-                vec![std::path::PathBuf::from(file)]
-            }
-            _ => {
-                return Err(Aborted::Refuse(
-                    "a `bpd/replaceCode` needs `files`, the paths of the files whose code \
-                         to replace on the debuggee's own filesystem — or `file` for one"
-                        .to_string(),
-                ));
-            }
-        };
-        if files.is_empty() {
-            return Err(Aborted::Refuse(
-                "a `bpd/replaceCode` named no files. an empty list asks for nothing to change, \
-                 which is not something a replacement can answer"
-                    .to_string(),
-            ));
-        }
+        let files = files_to_replace(&message.arguments)?;
 
         // optional, defaulting off. it says whether `_by_sourcemap.py` was
         // rewritten beside the code being replaced, which is what decides whether
@@ -3736,6 +3698,53 @@ fn mapped_source_of(file: &str, mapping: Option<&bpd_core::Mapping>) -> serde_js
         source["origin"] = serde_json::Value::String(mapping.to_string());
     }
     source
+}
+
+/// the files a `bpd/replaceCode` named, in the order it named them
+///
+/// `files` or `file`, and one of them is required. the list is what this grew
+/// into — a basedpython build staged again can change several modules together
+/// and they go at once or not at all — while the single one is what every
+/// client already speaking this sends
+///
+/// an empty list is refused rather than answered: it asks for nothing to
+/// change, and a replacement that changed nothing because it was asked to is
+/// indistinguishable in the answer from one that changed nothing because
+/// nothing needed it
+fn files_to_replace(arguments: &serde_json::Value) -> Result<Vec<PathBuf>, Aborted> {
+    let files: Vec<PathBuf> = match (arguments.get("files"), arguments.get("file")) {
+        (Some(serde_json::Value::Array(named)), _) => {
+            let mut files = Vec::with_capacity(named.len());
+            for one in named {
+                let Some(path) = one.as_str() else {
+                    return Err(Aborted::Refuse(format!(
+                        "`files` is a list of paths on the debuggee's own filesystem, \
+                             and one of them was {one}"
+                    )));
+                };
+                files.push(PathBuf::from(path));
+            }
+            files
+        }
+        (_, Some(serde_json::Value::String(file))) => {
+            vec![PathBuf::from(file)]
+        }
+        _ => {
+            return Err(Aborted::Refuse(
+                "a `bpd/replaceCode` needs `files`, the paths of the files whose code \
+                     to replace on the debuggee's own filesystem — or `file` for one"
+                    .to_string(),
+            ));
+        }
+    };
+    if files.is_empty() {
+        return Err(Aborted::Refuse(
+            "a `bpd/replaceCode` named no files. an empty list asks for nothing to change, \
+             which is not something a replacement can answer"
+                .to_string(),
+        ));
+    }
+    Ok(files)
 }
 
 /// the program's own stdout and stderr, as the client sees them

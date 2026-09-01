@@ -1892,7 +1892,7 @@ impl Session for FakeSession {
                     }),
                 })
             }
-            Request::ReplaceCode { files, remap, .. } => {
+            Request::ReplaceCode { files, .. } => {
                 Response::Replaced(bpd_core::Replacements {
                     files: files
                         .into_iter()
