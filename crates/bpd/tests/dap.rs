@@ -389,9 +389,7 @@ fn a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so(tran
     client.finish();
 }
 
-fn a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set(
-    transport: Transport,
-) {
+fn a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set(transport: Transport) {
     // the other half of DAP's handshake, and the one bpd used to have no answer
     // for. the spec orders `launch` against nothing — a client sends it "at any
     // point after the client receives the capabilities" — so the two real

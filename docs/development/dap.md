@@ -374,9 +374,9 @@ none of that.** the spec says only that the client sends it "at any point after
 the client receives the capabilities", and the two clients bpd is driven by sit
 at the two ends of that range:
 
-| client              | what it sends                                                                       |
-| ------------------- | ------------------------------------------------------------------------------------ |
-| vs code             | `initialize`, `launch`, then the configuration when `initialized` arrives            |
+| client                | what it sends                                                                             |
+| --------------------- | ----------------------------------------------------------------------------------------- |
+| vs code               | `initialize`, `launch`, then the configuration when `initialized` arrives                 |
 | the intellij platform | `initialize`, the configuration when `initialized` arrives, `configurationDone`, `launch` |
 
 bpd used to answer only the first of those. `initialized` was sent from
