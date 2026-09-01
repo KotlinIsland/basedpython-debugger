@@ -26,8 +26,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use bpd_core::{
-    Addressed, Mode, Reported, Reporting, Request, Response, SessionId, Stop, StopReason,
-    Threads,
+    Addressed, Mode, Reported, Reporting, Request, Response, SessionId, Stop, StopReason, Threads,
 };
 use bpd_dap::{Configuration, Failed, Interrupt, Launcher, ProgramOutput, Session, Started};
 
@@ -258,8 +257,7 @@ fn ask(writes: &mut std::io::PipeWriter, seq: i64, command: &str) {
         },
     })
     .to_string();
-    write!(writes, "Content-Length: {}\r\n\r\n{body}", body.len())
-        .expect("the adapter is reading");
+    write!(writes, "Content-Length: {}\r\n\r\n{body}", body.len()).expect("the adapter is reading");
     writes.flush().expect("the adapter is reading");
 }
 

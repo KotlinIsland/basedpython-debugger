@@ -962,9 +962,13 @@ impl Adapter {
     /// arming is owed the moment there is a program, and letting the program go
     /// is owed when the client has finished configuring
     fn take_up_the_program(&mut self) -> Answered {
-        let outcome = self
-            .arm_what_was_held()
-            .and_then(|()| if self.configured { self.begin() } else { Ok(()) });
+        let outcome = self.arm_what_was_held().and_then(|()| {
+            if self.configured {
+                self.begin()
+            } else {
+                Ok(())
+            }
+        });
         // the `launch` or `attach` has **already been answered**, so a refusal
         // from here has no request to be the answer to. it becomes an `output`
         // event, which is the rule the waiting loop already follows — refusing
@@ -1239,10 +1243,7 @@ impl Adapter {
                 .iter()
                 .map(|_| serde_json::json!({ "verified": false }))
                 .collect();
-            self.respond(
-                message,
-                Some(serde_json::json!({ "breakpoints": waiting })),
-            )?;
+            self.respond(message, Some(serde_json::json!({ "breakpoints": waiting })))?;
             return Ok(());
         }
 
