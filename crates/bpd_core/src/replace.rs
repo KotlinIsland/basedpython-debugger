@@ -644,7 +644,7 @@ pub enum LiveFrame {
         /// the stop holding that thread, when `bpd` is holding it
         ///
         /// `None` is a thread that is running, and the sighting is then a
-        /// sample — see [`Replaced::mode`]
+        /// sample — see [`Replacements::mode`]
         held: Option<u64>,
     },
 

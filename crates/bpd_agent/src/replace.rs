@@ -1091,7 +1091,7 @@ impl Live {
     /// every frame on every thread's own chain
     ///
     /// a sample of the threads `bpd` is not holding, which is what
-    /// [`bpd_core::Replaced::mode`] qualifies. it is the conservative direction:
+    /// [`bpd_core::Replacements::mode`] qualifies. it is the conservative direction:
     /// a sighting refuses, and stopping the world first is what turns the
     /// absence of one into a reading of every thread
     fn walk_threads(&mut self, python: Python<'_>, wanted: &BTreeSet<usize>) -> PyResult<()> {
