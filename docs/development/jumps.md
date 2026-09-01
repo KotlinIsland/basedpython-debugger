@@ -307,9 +307,24 @@ destroyed frames for a reset that then did not happen
 two more fall out of the same walk. a frame whose line ends in a return leaves on
 its own and needs no forcing; one that does not have to be forced, which takes a
 clean exit, and `AFrameAboveHasNoCleanExit` is a frame that has none. and the
-**target** must reach another line after its call returns — `return helper()` is
-`NoLineFollowsTheCall`, because a frame that returns as soon as the one above it
-does is never executing again, so there is no moment at which it could be reset
+**target** must reach another line after its call returns — `return helper()`,
+and a body that is only `helper()`, are `NoLineFollowsTheCall`
+
+that last one is worth stating precisely, because the obvious reading of it is
+wrong. since a step out lands on an `INSTRUCTION` event in the caller — see
+[stepping](stepping.md) — bpd *does* get control in such a frame when the call
+comes back, before any of the tail runs. the moment exists. what does not exist
+is permission to **move** the frame from it: `frame_lineno_set_impl` in cpython's
+`Objects/frameobject.c` switches on `tstate->what_event` and allows an `f_lineno`
+jump only from `PY_RESUME`, `JUMP`, `BRANCH`, `BRANCH_LEFT`, `BRANCH_RIGHT`,
+`LINE` and `PY_YIELD`, with `INSTRUCTION` named in the arm that raises
+`can only jump from a 'line' trace event`. measured on 3.13, 3.14, free-threaded
+3.14 and 3.15
+
+a body with nothing after its call has none of those left in it — `POP_TOP` and
+`RETURN_CONST` are neither a line nor a branch — so the refusal is cpython's
+rather than bpd's, and the message says so. `a_frame_whose_call_is_its_last_statement_says_cpython_will_not_move_it`
+is the acceptance
 
 ## what a restart really is
 
