@@ -143,6 +143,17 @@ def noisy_outer(v):
     return "NO"
 
 
+def tail_middle(v):
+    deepest(v)  # nothing follows the call, so this frame returns when it does
+
+
+def tail_outer(v):
+    RAN.append(("tail outer", v))
+    got = tail_middle(v)
+    after = got
+    return "TO"
+
+
 def nested_call():
     return target(f2())
 
@@ -158,6 +169,7 @@ def main():
     outer("N")
     noisy_outer("Q")
     held_outer("H")
+    tail_outer("T")
     (HERE / "ran.txt").write_text(repr(RAN))
 
 
@@ -428,6 +440,52 @@ fn a_tail_that_would_write_a_global_refuses_the_whole_unwind() {
         ran.matches("'noisy outer'").count(),
         1,
         "the refused unwind ran nothing again: {ran}"
+    );
+}
+
+#[test]
+fn a_frame_whose_call_is_its_last_statement_says_cpython_will_not_move_it() {
+    let fixture = Fixture::new("reset_tail", PROGRAM);
+    let mut debuggee = launch(&fixture);
+    // held in `deepest`, called from `tail_middle`, whose whole body is that
+    // call — the shape a step out now lands in, and which a reset still cannot
+    // reach
+    let inside = line_of(PROGRAM, "    bottom = 1");
+    loop {
+        held_at(&mut debuggee, &fixture.path(), inside);
+        let stack = debuggee.the_stack(None).expect("the stack was answered");
+        if stack.frames[1].name() == "tail_middle" {
+            break;
+        }
+    }
+    let stack = debuggee.the_stack(None).expect("the stack was answered");
+    let call = line_of(PROGRAM, "nothing follows the call");
+
+    let error = debuggee
+        .restart_frame(stack.frames[1].id, Again::InPlace)
+        .expect_err("the reset had to be refused");
+    let said = error.to_string();
+
+    // the refusal names the line **and** the interpreter rule behind it. bpd
+    // does reach this frame — the `INSTRUCTION` event a step out lands on gets
+    // control here before the tail runs — and it is cpython that will not move
+    // a frame from one, so a message about line events alone would send someone
+    // to rewrite a call site that was never the problem
+    assert!(
+        said.contains(&call.to_string()),
+        "the refusal names the line the call is on: {said}"
+    );
+    assert!(
+        said.contains("f_lineno"),
+        "the refusal names the interpreter rule that forbids the move: {said}"
+    );
+    to_exit(&mut debuggee);
+
+    let ran = recorded(&fixture);
+    assert_eq!(
+        ran.matches("'tail outer'").count(),
+        1,
+        "the refused reset ran nothing again: {ran}"
     );
 }
 

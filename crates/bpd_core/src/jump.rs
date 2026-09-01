@@ -1178,9 +1178,26 @@ pub enum Unresettable {
 
     /// the frame asked about returns as soon as the one above it does
     ///
-    /// nothing follows the call in it, so no `LINE` event ever fires in it again
-    /// and there is no moment at which it could be reset — it simply returns
-    /// too. `return helper()` is the shape
+    /// nothing follows the call in it, so it returns as soon as the frame above
+    /// it does. `return helper()` and a body that is only `helper()` are the
+    /// shapes
+    ///
+    /// **the moment exists and the move is what is refused.** bpd does get
+    /// control in this frame after the call comes back — an `INSTRUCTION` event
+    /// on the caller, which is what a step out lands on, and it arrives before
+    /// any of the tail runs. what it cannot do there is move the frame:
+    /// `frame_lineno_set_impl` in cpython's `Objects/frameobject.c` switches on
+    /// `tstate->what_event` and permits a jump only from `PY_RESUME`, `JUMP`,
+    /// `BRANCH`, `BRANCH_LEFT`, `BRANCH_RIGHT`, `LINE` and `PY_YIELD`.
+    /// `INSTRUCTION` is named in the refusing arm, and the message it raises is
+    /// `can only jump from a 'line' trace event` — measured on 3.13, 3.14, the
+    /// free-threaded 3.14 and 3.15
+    ///
+    /// a body with nothing after the call has none of the permitted events left
+    /// in it: `POP_TOP` and `RETURN_CONST` are neither a line nor a branch. so
+    /// the refusal is the interpreter's rather than bpd's, and it is stated that
+    /// way — a message about line events alone reads as though rearranging the
+    /// call site would help
     NoLineFollowsTheCall {
         /// the line the call is on
         line: u32,
@@ -1267,8 +1284,10 @@ impl std::fmt::Display for Unresettable {
             Self::NoLineFollowsTheCall { line } => write!(
                 formatter,
                 "nothing follows the call on line {line}, so it returns as soon \
-                 as the frame above it does and there is no moment at which it \
-                 could be run again"
+                 as the frame above it does. bpd does reach the frame there, on \
+                 the instruction the call returns to, but cpython permits an \
+                 `f_lineno` move only from a line, a branch, a resume or a \
+                 yield — so there is nowhere in this frame it can be moved from"
             ),
             Self::FrameHasNoLine { function, lasti } => write!(
                 formatter,
