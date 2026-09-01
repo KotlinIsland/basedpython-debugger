@@ -180,7 +180,7 @@ pub(crate) fn replace(
         return Ok(refused);
     }
 
-    apply(python, prepared, &live, remap)
+    apply(python, &prepared, &live, remap)
 }
 
 /// the whole request, refused, or `None` when every file of it can be applied
@@ -290,7 +290,7 @@ fn prepare<'py>(
 /// debugger rather than of the client
 fn apply(
     python: Python<'_>,
-    prepared: Vec<Prepared<'_>>,
+    prepared: &[Prepared<'_>],
     live: &Live,
     remap: Option<Remapping>,
 ) -> PyResult<Replacements> {
@@ -315,7 +315,7 @@ fn apply(
     };
 
     let mut answers = Vec::with_capacity(prepared.len());
-    for one in &prepared {
+    for one in prepared {
         let mut changed = Vec::with_capacity(one.plan.changed.len());
         for (old, new) in &one.plan.changed {
             let holders = live.functions.get(&(old.as_ptr() as usize));

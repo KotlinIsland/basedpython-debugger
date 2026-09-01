@@ -159,7 +159,7 @@ pub enum Error {
     )]
     NotInTheBuild {
         /// the `.by` that was named
-        file: std::path::PathBuf,
+        file: PathBuf,
         /// what the map said about it
         reason: bpd_core::source_map::Unmapped,
     },
