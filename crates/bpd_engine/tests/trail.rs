@@ -373,17 +373,24 @@ fn a_step_that_kept_only_some_of_a_frames_names_says_so() {
         .went
         .iter()
         .filter(|step| step.function == "work")
-        .max_by_key(|step| step.held.kept.len() as u64 + step.held.dropped)
+        .max_by_key(|step| {
+            step.held
+                .as_ref()
+                .map_or(0, |held| held.kept.len() as u64 + held.dropped)
+        })
         .expect("the recording covered `work`");
 
     assert!(
-        deepest.held.cut(),
+        deepest.held.as_ref().is_some_and(bpd_core::Kept::cut),
         "this frame binds eighteen names and a step keeps sixteen, and the \
          answer says nothing was left out: {:#?}",
         deepest.held
     );
     assert!(
-        deepest.held.dropped > 0 && deepest.held.kept.len() <= 16,
+        deepest
+            .held
+            .as_ref()
+            .is_some_and(|held| held.dropped > 0 && held.kept.len() <= 16),
         "the cap is reported rather than applied silently: {:#?}",
         deepest.held
     );

@@ -61,7 +61,7 @@ struct Step {
     /// **an experiment.** text rather than references, so the window stays
     /// bounded in memory and nothing the program has finished with is kept
     /// alive by the recorder
-    held: bpd_core::Kept<(String, String)>,
+    held: Option<bpd_core::Kept<(String, String)>>,
 }
 
 #[derive(Default)]
@@ -204,7 +204,7 @@ pub(crate) fn went(python: Python<'_>, code: &Bound<'_, PyAny>, line: u32, threa
     // the shipped depth does none of this and pays for none of it: one relaxed
     // load, and then the same single write lock the trail has always taken
     let held = if DEPTH.load(Ordering::Relaxed) == 0 {
-        bpd_core::Kept::whole(Vec::new())
+        Some(bpd_core::Kept::whole(Vec::new()))
     } else {
         // outside the lock, because it calls into python: `sys._getframe`, then
         // `f_locals`, then a render per name. holding the recorder's lock
@@ -283,55 +283,54 @@ fn capture(
     python: Python<'_>,
     depth: Depth,
     getframe: Option<&Py<PyAny>>,
-) -> bpd_core::Kept<(String, String)> {
+) -> Option<bpd_core::Kept<(String, String)>> {
     if depth == Depth::Where {
-        return bpd_core::Kept::whole(Vec::new());
+        return Some(bpd_core::Kept::whole(Vec::new()));
     }
     let Some(getframe) = getframe else {
         // asked for a depth and given no way to reach a frame. an experiment
         // reports nothing rather than guessing, the same as the rest of this
-        return bpd_core::Kept::whole(Vec::new());
+        return None;
     };
 
     // `_getframe(0)` from inside a native callback is the **program's** frame:
     // a C function has no python frame of its own, so the innermost one is the
     // one whose line raised this event
     let Ok(frame) = getframe.bind(python).call1((0_u32,)) else {
-        return bpd_core::Kept::whole(Vec::new());
+        return None;
     };
     if depth == Depth::Frame {
-        return bpd_core::Kept::whole(Vec::new());
+        return Some(bpd_core::Kept::whole(Vec::new()));
     }
 
     let Ok(locals) = frame.getattr("f_locals") else {
-        return bpd_core::Kept::whole(Vec::new());
+        return None;
     };
     if depth == Depth::Locals {
-        return bpd_core::Kept::whole(Vec::new());
+        return Some(bpd_core::Kept::whole(Vec::new()));
     }
 
     let Ok(items) = locals.try_iter() else {
-        return bpd_core::Kept::whole(Vec::new());
+        return None;
     };
 
-    // read whole and then bounded, so what the cap left out is counted rather
-    // than walked away from. `Kept::of` is what makes that impossible to forget
     // **everything not kept is counted**, and that is the whole point of the
     // type: a name skipped because it could not be read looks exactly like a
-    // frame that never bound it. the first cut of this counted only what the cap
-    // cut and let the three failure arms drop names silently — which is the
-    // defect the type was introduced to make impossible, still in its only
-    // caller
+    // frame that never bound it
     //
-    // and only the kept ones are rendered. rendering the whole of `f_locals`
-    // and then truncating means a module-level line pays a render per global,
-    // every step, to throw all but sixteen away
+    // an iterator that fails part way is the one thing that cannot be counted —
+    // what is left in it is unknown, and `lost += 1; break` claimed the loss was
+    // one. so it answers `None`, which is the same thing every other unreadable
+    // frame answers, rather than a number nobody could stand behind
+    //
+    // and only the kept ones are rendered. rendering the whole of `f_locals` and
+    // then truncating means a module-level line pays a render per global, every
+    // step, to throw all but sixteen away
     let mut held = Vec::new();
     let mut lost = 0_u64;
     for name in items {
         let Ok(name) = name else {
-            lost += 1;
-            break;
+            return None;
         };
         let Ok(text) = name.extract::<String>() else {
             lost += 1;
@@ -347,7 +346,7 @@ fn capture(
             lost += 1;
         }
     }
-    bpd_core::Kept::counted(held, lost)
+    Some(bpd_core::Kept::counted(held, lost))
 }
 
 /// one value as text, **without running any of the program**

@@ -142,7 +142,6 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
                 return Ok(Some("a key of it".to_string()));
             }
         }
-        return Ok(None);
     }
 
     // a sequence, where the position is the answer
@@ -161,7 +160,6 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
                 return Ok(Some(format!("index {at}")));
             }
         }
-        return Ok(None);
     }
     if let Ok(items) = retainer.cast::<PyTuple>() {
         for (at, item) in items.iter().enumerate() {
@@ -169,7 +167,6 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
                 return Ok(Some(format!("index {at}")));
             }
         }
-        return Ok(None);
     }
 
     // a collection with no order, which is a different answer rather than the
@@ -183,21 +180,21 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
     // `__iter__` from running, and it is load bearing here in a way it is not
     // above. `try_iter` rather than `iter` because the latter's item unwrap
     // panics if the set is mutated mid-iteration, which a free-threaded build
-    // makes reachable — and a debugger that panics is worse than one that
-    // reports it could not read a container
+    // makes reachable — and this **fails the query**, naming the interpreter's
+    // own `RuntimeError`, rather than panicking or quietly answering `None`
     if retainer.is_exact_instance_of::<PySet>() || retainer.is_exact_instance_of::<PyFrozenSet>() {
         for item in retainer.try_iter()? {
             if item?.is(target) {
                 return Ok(Some("an element of it".to_string()));
             }
         }
-        return Ok(None);
     }
 
-    // and an ordinary object, through its own `__dict__`. asked for rather than
-    // walked with `dir`, because `dir` calls `__getattr__` and that runs the
-    // program's own code to answer a question about it
-    // and an ordinary object, through its own `__dict__`
+    // and an ordinary object, through its own `__dict__` — reached whether or not
+    // one of the branches above matched, because a `class Registry(list)` can
+    // hold the target on an attribute rather than in its list storage. those
+    // branches used to `return Ok(None)` when the storage did not have it, which
+    // said "shape unreadable" about a shape that had been read
     //
     // **this one does reach the program**, and saying so is the point:
     // `getattr` is `type(obj).__getattribute__`, which a class may override. it

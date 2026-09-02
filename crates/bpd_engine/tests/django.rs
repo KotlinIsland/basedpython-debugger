@@ -13,6 +13,12 @@
 //! render and another after it, so a stop is proved by the second marker
 //! **not** being there while the engine is told the program is stopped
 
+// **unix.** the reloader fixture arms `signal.alarm`, which does not exist on
+// windows. the sweep that gated the `os.fork()` files twice over missed this,
+// because it looked for one construct rather than for the rule: a test fixture
+// may use anything the platform has, and this platform is not every platform
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 
 use bpd_core::python::Capabilities;

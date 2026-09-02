@@ -964,23 +964,17 @@ pub fn trail(went: &bpd_core::Trail) -> serde_json::Value {
                 went.dropped
             )
         },
-        // what each step carries about the frame, which depends on the depth
-        // the recording was started at. this used to say a trail *never* says
-        // what anything was — which stopped being true when `depth` was built,
-        // and was being said in the same object that carried the values
-        "values": if went
-            .went
-            .iter()
-            .any(|step| !step.held.kept.is_empty() || step.held.dropped > 0)
-        {
-            "each step carries what the frame held, rendered as text and read \
-             without running any of the program. `held.dropped` above zero is a \
-             frame with more names than one step keeps"
-        } else {
-            "the steps carry no values: this recording was started at a depth \
-             that keeps only the location. `depth: \"values\"` on `record` keeps \
-             what the frame held as well, and costs more per name"
-        },
+        // what a step's `held` means, stated **without inferring which depth was
+        // used**. `Trail` does not carry the depth, and the first cut of this
+        // guessed it from whether any values had turned up — so an empty trail,
+        // or one whose frames could not be read, told an agent to re-record at
+        // the depth it was already using
+        "values": "each step carries `held`: absent when the recording keeps only \
+                   the location, `null` when that step's frame could not be read, \
+                   and otherwise the names it bound with `dropped` counting what \
+                   one step does not keep. the text is read without running any \
+                   of the program, so it is weaker than a repr and cannot be \
+                   wrong",
     })
 }
 

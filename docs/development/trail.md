@@ -8,7 +8,9 @@ stepping backwards, for the half of it that can be afforded honestly
 ```
 
 a trail is where the program has been — file, line, function, thread — over a
-window of the last hundred thousand steps. it says **where** and never **what**
+window of the last hundred thousand steps, and at a depth that asks for it, what
+each frame held. **where** is the default and the cheap one; **what** is asked
+for, because it is paid per name
 
 ## the two halves have very different prices
 
@@ -39,9 +41,14 @@ so "where did it go" fits a fixed ring of small entries, and "what was this
 variable" costs several times that again — and stored as live objects it is
 unbounded in memory and perturbs the heap it copies from
 
-a trail that says where the program went and refuses to say what anything was is
-a debugger reporting what it has. one that filled the values in afterwards would
-be inventing history
+a trail that says where the program went and asks before saying what anything
+was is a debugger reporting what it has. one that filled the values in
+afterwards would be inventing history — which is why the values half reads them
+at the moment the line runs, or answers `null` for that step and says it could
+not
+
+this page said "never what" for a while after `depth` was built, twice, on the
+page documenting `depth`
 
 ## asking for the values half
 
