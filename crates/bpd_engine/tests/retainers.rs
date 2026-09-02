@@ -348,15 +348,27 @@ const LYING: &str = r"class Registry(list):
 
 
 class Watchful(set):
+    def __init__(self, thing):
+        super().__init__()
+        self.stashed = thing
+
     def __iter__(self):
-        raise AssertionError('the walk asked a set to iterate itself')
+        raise AssertionError('the walk asked a set subclass to iterate itself')
+
+
+class Stashing(list):
+    def __init__(self, thing):
+        super().__init__([])
+        self.stashed = thing
 
 
 def main():
     target = ['the object being asked about']
     registry = Registry([1, target, 3])
+    watchful = Watchful(target)
+    stashing = Stashing(target)
     here = 1              # the breakpoint
-    return registry
+    return registry, watchful, stashing
 
 
 main()
@@ -410,5 +422,38 @@ fn a_container_that_lies_about_its_contents_is_read_through_its_storage() {
         Some("index 1"),
         "a list subclass is answered from `PyList_GET_ITEM`, which is where the \
          interpreter itself looks: {registry:#?}"
+    );
+
+    // the set half, which was written and never reached: `Watchful` is a set
+    // **subclass** whose `__iter__` raises, and it holds the target on an
+    // attribute rather than as an element. so the walk must not ask it to
+    // iterate — pyo3 has no storage iterator for a set, so an inexact check
+    // here would run that `__iter__` and fail the whole query — and having not
+    // found it in the storage it must go on to the attributes rather than
+    // answering "shape unreadable"
+    assert!(
+        found
+            .found
+            .iter()
+            .any(|retainer| retainer.kind == "Watchful"),
+        "the set subclass holds it and the walk survived: {:#?}",
+        found.found
+    );
+
+    // and a **list** subclass that holds the target on an attribute rather than
+    // in its storage. this is the branch that is subclass-inclusive, so it does
+    // enter the list arm, finds nothing there, and must go on to the attributes
+    // — it used to `return Ok(None)`, saying "shape unreadable" about a shape it
+    // had just read
+    let stashing = found
+        .found
+        .iter()
+        .find(|retainer| retainer.kind == "Stashing")
+        .unwrap_or_else(|| panic!("the list subclass holds it: {:#?}", found.found));
+    assert_eq!(
+        stashing.through.as_deref(),
+        Some("attribute `stashed`"),
+        "a list subclass whose storage does not hold it still has attributes: \
+         {stashing:#?}"
     );
 }

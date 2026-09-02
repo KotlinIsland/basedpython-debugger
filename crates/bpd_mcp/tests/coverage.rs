@@ -1417,7 +1417,7 @@ impl Session for FakeSession {
                     line: 12,
                     function: "handle".to_string(),
                     thread: THREAD,
-                    held: bpd_core::Kept::whole(Vec::new()),
+                    held: Some(bpd_core::Kept::whole(Vec::new())),
                 }],
                 dropped: 12,
                 recording: true,

@@ -255,13 +255,19 @@ fn a_recording_at_depth_says_what_the_frame_held() {
     // the names the loop binds, at some step of it
     let named: Vec<&str> = inside
         .iter()
-        .flat_map(|step| step.held.kept.iter().map(|(name, _)| name.as_str()))
+        .flat_map(|step| {
+            step.held
+                .as_ref()
+                .map_or(&[][..], |held| &held.kept[..])
+                .iter()
+                .map(|(name, _)| name.as_str())
+        })
         .collect();
     for wanted in ["total", "label", "index"] {
         assert!(
             named.contains(&wanted),
             "`{wanted}` is a local of that loop and no step recorded it: {:#?}",
-            inside.first().map(|step| &step.held.kept)
+            inside.first().map(|step| &step.held)
         );
     }
 
@@ -269,7 +275,12 @@ fn a_recording_at_depth_says_what_the_frame_held() {
     // makes this worth having over the location alone
     let labels: Vec<&str> = inside
         .iter()
-        .flat_map(|step| step.held.kept.iter())
+        .flat_map(|step| {
+            step.held
+                .as_ref()
+                .map_or(&[][..], |held| &held.kept[..])
+                .iter()
+        })
         .filter(|(name, _)| name == "label")
         .map(|(_, text)| text.as_str())
         .collect();
@@ -304,7 +315,9 @@ fn the_shipped_depth_keeps_nothing_of_the_frame() {
 
     let went = debuggee.trail().expect("the trail was answered");
     assert!(
-        went.went.iter().all(|step| step.held.kept.is_empty()),
+        went.went
+            .iter()
+            .all(|step| step.held.as_ref().is_none_or(|held| held.kept.is_empty())),
         "the shipped depth records where and nothing else"
     );
 }

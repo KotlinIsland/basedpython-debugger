@@ -609,15 +609,20 @@ impl Unbound {
             //
             // the file is not there, or is not a file at all
             Self::Unresolvable { .. } => false,
-            // django has parsed the template and no node renders at that line —
-            // and it can still bind, which is why this is `true`. the agent
-            // keeps `Template.__init__` armed for exactly this reason
-            // (`templates::watching_parses` lists it beside `NotLoaded`), and a
-            // template re-read after an edit is parsed under a new identity, so
-            // the set is resolved again. the core saying `failed` while the
-            // agent pays to watch for the binding was the two of them
-            // disagreeing about the same fact
-            Self::NoRenderedNode { .. } => true,
+            // django has parsed the template already and no node renders at
+            // that line. **the rule**: temporary means it binds as the program
+            // keeps running, without the source changing. `NotLoaded` does —
+            // an import is the program running. this needs the file itself to
+            // be edited, which is not, and it is why `NoExecutableLine` below
+            // is `false` on exactly the same argument — the doc on this variant
+            // calls the two analogues, and they now answer alike
+            //
+            // this was briefly `true`, on the grounds that
+            // `templates::watching_parses` keeps a parse hook armed for it. that
+            // predicate is an `any()` over the whole breakpoint set and includes
+            // ones already bound, so it says the hook is worth keeping — not
+            // that this breakpoint can bind
+            Self::NoRenderedNode { .. } => false,
             // only part of the file is visible, and nothing answers from a
             // partial view — see the variant's own doc
             Self::PartiallyLoaded { .. } => false,
@@ -1059,7 +1064,7 @@ mod tests {
                     requested: 3,
                     last_rendered: Some(9),
                 },
-                true,
+                false,
             ),
             (
                 Unbound::ConditionInvalid {

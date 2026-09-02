@@ -338,14 +338,6 @@ pub struct Kept<T> {
 }
 
 impl<T> Kept<T> {
-    /// keep at most `most`, and count what that left out
-    #[must_use]
-    pub fn of(mut all: Vec<T>, most: usize) -> Self {
-        let dropped = all.len().saturating_sub(most) as u64;
-        all.truncate(most);
-        Self { kept: all, dropped }
-    }
-
     /// a whole list, nothing left out
     #[must_use]
     pub const fn whole(kept: Vec<T>) -> Self {
@@ -355,9 +347,9 @@ impl<T> Kept<T> {
     /// what was kept, and a count of everything that was not — including what
     /// was lost for reasons other than a cap
     ///
-    /// [`Self::of`] counts only what a bound cut. a caller that also skips
-    /// entries it could not read has to say so, and this is where it does:
-    /// a list of four from a frame of forty reads as a frame that binds four
+    /// a caller that skips entries it could not read has to say so, and this is
+    /// where it does: a list of four from a frame of forty otherwise reads as a
+    /// frame that binds four
     #[must_use]
     pub const fn counted(kept: Vec<T>, dropped: u64) -> Self {
         Self { kept, dropped }
@@ -380,10 +372,9 @@ impl<T> Kept<T> {
 /// user saw when the answer was incomplete sent them to change their code in a
 /// way that could not have helped
 ///
-/// the honest reasons a record is missing are that the task was made before the
-/// hook was armed — a program already running when bpd attached, or a task
-/// created during asyncio's own import — or that its creating stack could not
-/// be read
+/// the const below names the reasons, and this doc used to name a shorter list
+/// of its own — two where the string says four. one sentence, in one place, is
+/// the whole point of the const
 pub const TASK_NOT_SEEN: &str = "this stack is inside an asyncio task and bpd did not see \
                                  that task created. the four stdlib routes — `create_task`, \
                                  `ensure_future`, `loop.create_task` and a task group's own \
@@ -394,12 +385,14 @@ pub const TASK_NOT_SEEN: &str = "this stack is inside an asyncio task and bpd di
                                  at all: `asyncio.Task(coro)` built directly, or a loop \
                                  that is not cpython's own";
 
-/// where the program went, over a bounded window
+/// where the program went, over a bounded window — and, at a depth that asks for
+/// it, what each frame held
 ///
-/// deliberately **only** where. what a variable was at each step costs five
-/// times as much again and is unbounded — it is a copy of live objects per line,
-/// which perturbs the heap it copies from — so a trail says where and refuses to
-/// say what, which is a debugger reporting what it has
+/// this said "deliberately **only** where … refuses to say what" long after
+/// [`Depth::Values`] was built, directly above a [`Visited::held`] that carries
+/// the values. what remains true is the shape of the price: the location fits a
+/// fixed ring of small entries, and what a variable was costs per **name**, so
+/// it is asked for rather than assumed
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Trail {
     /// the steps the window still holds, oldest first
@@ -439,5 +432,12 @@ pub struct Visited {
     /// a [`Kept`] rather than a `Vec`, because the per-step name cap used to cut
     /// with a bare `break` — a frame with forty locals read exactly like one
     /// with sixteen
-    pub held: Kept<(String, String)>,
+    ///
+    /// and an `Option`, because a read that **failed** is not a frame that held
+    /// nothing. every failure path used to answer with an empty list and
+    /// `dropped: 0`, which says "this frame bound no names" about a frame whose
+    /// names could not be reached at all. `None` is that case, and it is the
+    /// only honest answer available: what was lost cannot be counted, because
+    /// counting it is the thing that failed
+    pub held: Option<Kept<(String, String)>>,
 }
