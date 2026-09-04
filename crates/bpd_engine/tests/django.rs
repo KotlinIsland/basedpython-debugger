@@ -737,6 +737,11 @@ fn ask(
     }
 }
 
+/// `#[cfg(unix)]`: this one asks for child debugging, and bpd refuses that on
+/// windows by name — no `fork`, nothing to inherit a session, and the `exec`
+/// half never built or run there. every other test in this file drives django
+/// on both platforms
+#[cfg(unix)]
 #[test]
 #[expect(
     clippy::too_many_lines,

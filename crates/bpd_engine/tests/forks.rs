@@ -25,6 +25,13 @@
 // so nobody had found out
 #![cfg(unix)]
 
+//! ## `#![cfg(unix)]`
+//!
+//! there is no `fork` on windows, so there is nothing here for a test to be
+//! about: every fixture in this file calls `os.fork`, and bpd refuses child
+//! debugging there by name for the same reason
+#![cfg(unix)]
+
 use std::time::Duration;
 
 use bpd_core::python::Capabilities;

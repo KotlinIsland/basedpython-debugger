@@ -15,6 +15,21 @@
 //!
 //! everything here drives a real interpreter and a real `subprocess`, because
 //! what is under test is what cpython does at another interpreter's startup
+//!
+//! ## `#![cfg(unix)]`, and what that costs
+//!
+//! bpd **refuses** child debugging on windows, by name: there is no `fork`
+//! there, so nothing inherits a session and there is no `os.register_at_fork`
+//! to hand one over in. the `exec` half needs neither of those — it is
+//! `PYTHONPATH` and a `sitecustomize`, which windows has — and it has never
+//! been built or run on that platform, so the refusal says it is for want of
+//! evidence rather than because it cannot work
+//!
+//! so every test here asks for a setting windows turns down, and the file is
+//! excluded rather than each test in it. what that costs is written in the
+//! refusal itself, which is where somebody meets it
+
+#![cfg(unix)]
 
 use std::time::Duration;
 
@@ -380,7 +395,6 @@ signal.alarm(300)
 pathlib.Path(__file__).parent.joinpath("grandchild").write_text("reached")
 "#;
 
-#[cfg(unix)]
 #[test]
 fn a_child_that_is_not_python_is_inert_and_a_python_grandchild_is_not() {
     let fixture = Fixture::new("shelling", THROUGH_A_SHELL);
