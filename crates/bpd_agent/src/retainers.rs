@@ -91,7 +91,7 @@ pub(crate) fn holding(
     let gc = python.import("gc")?;
     let referrers = gc.getattr("get_referrers")?.call1((target,))?;
 
-    let mut found = Vec::new();
+    let mut holders: Vec<Bound<'_, PyAny>> = Vec::new();
     for retainer in referrers.try_iter()? {
         let retainer = retainer?;
         // the list `get_referrers` just built holds every retainer, and holds
@@ -100,6 +100,25 @@ pub(crate) fn holding(
         if retainer.is(&referrers) {
             continue;
         }
+
+        // an instance's attribute table is the **instance**, in the terms the
+        // program is written in
+        let retainer = match retainer.cast::<PyDict>() {
+            Ok(table) => owner_of(python, table)?.unwrap_or_else(|| retainer.clone()),
+            Err(_) => retainer,
+        };
+
+        // the same holder can be reached twice — as itself and through the
+        // table it keeps its attributes in — and naming it twice would read as
+        // two holders
+        if holders.iter().any(|seen| seen.is(&retainer)) {
+            continue;
+        }
+        holders.push(retainer);
+    }
+
+    let mut found = Vec::new();
+    for retainer in holders {
         found.push(Retainer {
             kind: retainer.get_type().name()?.extract()?,
             described: described(&retainer)?,
@@ -116,6 +135,53 @@ pub(crate) fn holding(
             mode,
         },
     })
+}
+
+/// the object whose attribute table this dict is, when it is one
+///
+/// **a version difference the answer must not carry.** on 3.13 a subclass of a
+/// builtin keeps its attributes in a separate `dict`, and that dict is what
+/// `gc.get_referrers` answers with; from 3.14 the instance itself is the
+/// referrer. measured on both, with the same program: 3.13 named two retainers
+/// `a dict holding 1` and 3.14 named the two objects that own them
+///
+/// a dict is not what the program holds the object in — an object is — and
+/// "a dict holding 1" names nothing anybody can go and look at. so the table is
+/// resolved to its owner on every release, and the version the interpreter
+/// happens to be stops being visible in the answer
+///
+/// the match is by **identity** against the candidate's own table, read through
+/// `object.__getattribute__` rather than `getattr`: that is object's own
+/// implementation, so a class that overrides `__getattribute__` cannot decide
+/// what the debugger reports here. a class that defines `__dict__` as a
+/// property of its own still runs, and a failure is no owner rather than a
+/// failed walk
+fn owner_of<'py>(
+    python: Python<'py>,
+    table: &Bound<'py, PyDict>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let generic = python
+        .import("builtins")?
+        .getattr("object")?
+        .getattr("__getattribute__")?;
+
+    let referrers = python
+        .import("gc")?
+        .getattr("get_referrers")?
+        .call1((table,))?;
+
+    for candidate in referrers.try_iter()? {
+        let candidate = candidate?;
+        if candidate.is(&referrers) || candidate.is(table) {
+            continue;
+        }
+        if let Ok(theirs) = generic.call1((&candidate, "__dict__"))
+            && theirs.is(table)
+        {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
 }
 
 /// where inside a retainer the target sits, when that is knowable

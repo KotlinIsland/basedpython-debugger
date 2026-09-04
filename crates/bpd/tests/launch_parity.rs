@@ -1179,9 +1179,82 @@ finish.set()
 thread.join()
 ";
 
+/// a program that stops its own thread before forking, exactly as bpd does
+///
+/// what it measures is **cpython's**, and there is no debugger in it. an
+/// interpreter that counts the process's threads before it runs the
+/// `os.register_at_fork(before=…)` handlers warns about a thread the program no
+/// longer has when it forks
+#[cfg(unix)]
+const COUNTS_PROBE: &str = r"import os
+import threading
+import warnings
+
+started, finish = threading.Event(), threading.Event()
+thread = threading.Thread(target=lambda: (started.set(), finish.wait()))
+thread.start()
+started.wait()
+
+
+def stop():
+    finish.set()
+    thread.join()
+
+
+os.register_at_fork(before=stop)
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always')
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    os.waitpid(pid, 0)
+print('counted early:', bool(caught))
+";
+
+/// whether this interpreter counts threads **before** the before-fork handlers
+///
+/// cpython did, and it is [python/cpython#137109]: a program that stops its
+/// threads in a `before` handler — which is the one thing that handler is for —
+/// was still warned about forking with threads it no longer had. it is fixed in
+/// main and backported to 3.13 and 3.14
+///
+/// bpd joins its reader thread in exactly such a handler and for exactly this
+/// reason, so on an interpreter without the fix the debuggee is warned about a
+/// thread that was gone before `fork` was called, and there is nothing bpd can
+/// do about it: the count happens before any code the agent can run except the
+/// audit hook, and taking the reader thread off the process there — killing and
+/// respawning it around every fork — would be a worse debugger for a warning
+///
+/// so the difference is **measured** rather than tolerated. when an interpreter
+/// gets the fix this probe flips and the parity below is required exactly as it
+/// was before, which is what stops this becoming a licence
+///
+/// [python/cpython#137109]: https://github.com/python/cpython/issues/137109
+#[cfg(unix)]
+fn counts_threads_before_the_handlers() -> bool {
+    let fixture = Fixture::new("counts", COUNTS_PROBE);
+    let output = Command::new(&interpreter().executable)
+        .current_dir(fixture.directory())
+        .arg(fixture.path())
+        .output()
+        .expect("the interpreter runs");
+    let said = String::from_utf8(output.stdout).expect("the probe writes utf8");
+    match said.trim() {
+        "counted early: True" => true,
+        "counted early: False" => false,
+        other => panic!(
+            "the probe has to say which way this interpreter counts, and it \
+             said `{other}`:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_program_that_forks_records_exactly_the_warnings_it_would_have() {
+    let counted_early = counts_threads_before_the_handlers();
     for form in EVERY_FORM {
         let fixture = Fixture::new("forker", FORK_PROBE);
         let (bare, debugged) = both(&fixture, form, &[]);
@@ -1195,22 +1268,37 @@ fn a_program_that_forks_records_exactly_the_warnings_it_would_have() {
             debugged.exit_code,
             debugged.stderr
         );
-        assert_eq!(
-            debugged.stdout, bare.stdout,
-            "the program recorded a different set of warnings for its own fork \
-             under bpd than without it, as {form:?}. a debugger whose reader \
-             thread is on the process while it forks changes what the program \
-             can see about itself"
-        );
         assert!(
             bare.stdout.contains("as launched: []")
                 && bare
                     .stdout
                     .contains("with a thread of its own: ['DeprecationWarning']"),
             "this interpreter no longer tells a single-threaded fork from a \
-             multi-threaded one, so the comparison above is vacuous. it \
+             multi-threaded one, so the comparison below is vacuous. it \
              printed:\n{}",
             bare.stdout
+        );
+
+        // what the debugged run is allowed to say. on an interpreter that
+        // counts before the handlers it is the bare run plus the one warning
+        // the agent's joined reader thread was counted as — spelled out, so
+        // that any *other* difference still fails
+        let allowed = if counted_early {
+            bare.stdout
+                .replace("as launched: []", "as launched: ['DeprecationWarning']")
+        } else {
+            bare.stdout.clone()
+        };
+        assert_eq!(
+            debugged.stdout,
+            allowed,
+            "the program recorded a different set of warnings for its own fork \
+             under bpd than without it, as {form:?}. a debugger whose reader \
+             thread is on the process while it forks changes what the program \
+             can see about itself — and this interpreter counts \
+             {} the before-fork handlers, so the agent's thread {} be counted",
+            if counted_early { "before" } else { "after" },
+            if counted_early { "will" } else { "will not" }
         );
     }
 }

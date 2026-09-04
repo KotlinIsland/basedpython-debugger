@@ -167,6 +167,33 @@ follow that a front end has to be told rather than left to assume:
     `terminate` that quietly did nothing is one a client reads as a program that
     has been ended
 
+## how a session ends, and how windows says it
+
+a session ends when the control connection ends **between frames**. that is the
+one shutdown that is not an error: a frame that stops half way is a peer that
+died, and it is reported as a truncation rather than as an end
+
+unix and windows say the same thing differently. a process that exits leaves its
+sockets closed on unix, so the reader sees `Ok(0)`; on windows it leaves them
+**reset**, so the reader sees `ECONNRESET`. read as an io failure, that turned
+every windows session into
+
+```text
+error: the control connection to the agent failed
+  caused by: the control connection failed
+  caused by: An existing connection was forcibly closed by the remote host. (os error 10054)
+```
+
+after the program had run to the end and printed everything it was going to
+print — measured on every windows job in ci, the first time the agent had ever
+been built for that platform
+
+so a reset is the peer being gone, and it is answered where it happened rather
+than by its errno: the end of the stream between frames, a truncation part way
+through one. `a_peer_that_reset_between_frames_is_the_end_of_the_stream` and
+`a_peer_that_reset_inside_a_frame_is_a_truncation` hold both halves, so a
+debuggee that really did die mid-frame is not quietly turned into a clean exit
+
 ## what is not built
 
 - **a session cannot be joined by hand.** there is no command that opens a
