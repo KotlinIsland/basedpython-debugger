@@ -865,6 +865,26 @@ not asked. and because a waiting breakpoint really is bound, it comes back
 ordinary breakpoint would leave somebody at a line the interpreter is not
 watching, having been told it was set
 
+## a session beside the first one ends when the first does
+
+every connection after the first is a session of the same debuggee, on a thread
+of its own, and all of them go when the first client does — a session nothing
+can reach is a program nobody can resume
+
+`shutdown` is what ends the read those threads are blocked in, and **on windows
+it does not wake one**. the first client would disconnect, `bpd dap` would shut
+every extra connection down, and the threads serving them stayed in a read that
+never returned: the adapter never exited. measured on every windows job, where
+the suite's watchdog killed it and reported the exit code a kill produces —
+`1`, with nothing on stderr, which is why it took three runs to find
+
+so a later connection's socket carries a read timeout, and its reader answers a
+timeout by looking at whether the session is over: while it is not, the read is
+retried and nothing is lost, because a timeout takes nothing off the stream.
+once it is, the reader reports the end of the stream, which is what the wire
+already treats as a session ending cleanly. it is **not** a deadline on the
+session — a connection with something to say is answered the moment it says it
+
 ## what is not built
 
 - **`attach`**, which is PEP 768 and needs 3.14
