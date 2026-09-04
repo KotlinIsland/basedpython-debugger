@@ -45,6 +45,14 @@ jobs:
     name: test ${{ matrix.os }} / python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      # pyo3 watches this, and nothing else here can stand in for it:
+      # `PYO3_PYTHON` is the string `python` in every entry of this matrix, so a
+      # build script that watches the variable cannot tell 3.13 from 3.15 and
+      # cargo keeps whichever agent the target directory already held. this
+      # changes with the interpreter, which is what the agent is compiled
+      # against
+      PYO3_ENVIRONMENT_SIGNATURE: ${{ matrix.python }}
     strategy:
       fail-fast: false
       matrix:
@@ -77,7 +85,16 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      # **keyed by the interpreter**, because the agent is. every entry of this
+      # matrix runs the same job name with `PYO3_PYTHON: python`, so without
+      # this they share one cache — and one entry's `target/` restored into
+      # another gives cargo an agent built for a different interpreter with
+      # nothing in its fingerprint to say so. the whole of `agents.rs` failed
+      # that way, on every unix job, the first run that got far enough to reach
+      # it
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: ${{ matrix.python }}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python }}
