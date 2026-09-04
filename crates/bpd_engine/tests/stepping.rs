@@ -143,6 +143,16 @@ twice(2)
 /// **one** line table entry, so a frame returning into one of these produces no
 /// further line event in the caller. a step that waited for a line rather than
 /// for the return followed every caller out in turn and let the program finish
+/// a call chain whose innermost frame ends in a builtin
+///
+/// the builtin is `len` rather than `print`, and that is not arbitrary:
+/// **`print` enters python on windows.** writing to a console there goes
+/// through `encodings/cp1252.py`, so a step in on it lands in the codec — which
+/// is bpd stepping into the code that really was called, and a fixture claiming
+/// "a step in has nothing to enter" that is only true on unix. measured: the
+/// step landed in `Lib\encodings\cp1252.py` line 19
+///
+/// `len` calls no python at all on any platform, which is what this needs
 const TAIL: &str = r#"import pathlib
 
 HERE = pathlib.Path(__file__).parent
@@ -155,7 +165,7 @@ def note(name):
 def deepest():
     reached = 1
     note("deepest_ran")
-    print("deepest")  # a builtin, so a step in has nothing to enter
+    len("deepest")  # a builtin, so a step in has nothing to enter
 
 
 def middle():
