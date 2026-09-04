@@ -1184,6 +1184,18 @@ def forked():
 print('os threads:', os_threads())
 print('as launched:', forked())
 
+# what this interpreter does with a thread that was **stopped in a before-fork
+# handler**, which is exactly what bpd does with its reader thread. it is
+# measured here rather than by a separate probe so that it is the same process,
+# the same run and the same conditions as the line above it
+stopped = threading.Event()
+ready = threading.Event()
+helper = threading.Thread(target=lambda: (ready.set(), stopped.wait()))
+helper.start()
+ready.wait()
+os.register_at_fork(before=lambda: (stopped.set(), helper.join()))
+print('with a thread stopped in a handler:', forked())
+
 running = threading.Event()
 finish = threading.Event()
 thread = threading.Thread(target=lambda: (running.set(), finish.wait()))
@@ -1259,23 +1271,35 @@ fn a_program_that_forks_records_exactly_the_warnings_it_would_have() {
             );
         }
 
-        // and the warnings themselves, which have to be the same set. the agent
-        // stands its reader thread down in an `os.register_at_fork(before=…)`
-        // handler precisely so that the fork happens on a single-threaded
-        // process
+        // and the warnings themselves. the agent stands its reader thread down
+        // in an `os.register_at_fork(before=…)` handler precisely so that the
+        // fork happens on a single-threaded process — and cpython counted the
+        // process's threads **before** running those handlers until
+        // [python/cpython#137109], which is fixed in main and backported to
+        // 3.13 and 3.14
         //
-        // cpython counted the process's threads **before** running those
-        // handlers until [python/cpython#137109], which is fixed in main and
-        // backported to 3.13 and 3.14. an interpreter without that fix counts a
-        // thread that is gone by the time `fork` is called, and this is where
-        // that shows up: `as launched: ['DeprecationWarning']` under bpd
-        // against `as launched: []` without it. the thread counts above say
-        // whether the reader really was there, which is the first thing to read
-        // when this fails
+        // so on an interpreter without that fix a thread stopped in a handler
+        // is counted anyway, and bpd's reader is one of those. the **bare** run
+        // says which kind of interpreter this is, having just done the same
+        // thing to a thread of its own in the same process and the same run:
+        // where it warns about a thread it no longer has, bpd's reader is
+        // counted too and the extra warning is the interpreter's rather than
+        // the debugger's
+        //
+        // it is spelled out rather than tolerated. any other difference still
+        // fails, and an interpreter with the fix requires exact parity
         //
         // [python/cpython#137109]: https://github.com/python/cpython/issues/137109
+        let counts_a_stopped_thread = bare
+            .stdout
+            .contains("with a thread stopped in a handler: ['DeprecationWarning']");
+        let allowed = if counts_a_stopped_thread {
+            rest_bare.replace("as launched: []", "as launched: ['DeprecationWarning']")
+        } else {
+            rest_bare.clone()
+        };
         assert_eq!(
-            rest_debugged, rest_bare,
+            rest_debugged, allowed,
             "the program recorded a different set of warnings for its own fork \
              under bpd than without it, as {form:?}. a debugger whose reader \
              thread is on the process while it forks changes what the program \

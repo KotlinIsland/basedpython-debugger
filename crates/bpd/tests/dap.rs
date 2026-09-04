@@ -2056,13 +2056,12 @@ const WAITING: &str = "import sys\nx = 1\nsys.exit(0)\n";
 ///
 /// the parent waits on the child, so it does not end until the child has been
 /// resumed — which is what makes the handover observable rather than a race
-/// `#[cfg(unix)]` rather than skipped, for the reason the terminal tests above
-/// are: **windows has no `os.fork`**, so there is nothing here for a test to be
-/// about. left unguarded it did not fail there, it *hung* — the program raised
-/// `AttributeError`, the `startDebugging` this waits for never came, and the
-/// whole windows job was cancelled on its timeout with every result after it
-/// unprinted, twice
-#[cfg(unix)]
+/// a program that forks, for the three tests about what a fork reaches
+///
+/// not itself `#[cfg(unix)]`, because two of the three **refuse at `launch`**
+/// and never run it — a client that could not take a second session is turned
+/// down before anything forks, which is exactly what those two are about. only
+/// the one that waits for the child to arrive needs a platform that has one
 const A_FORK: &str = r"import os
 import signal
 
