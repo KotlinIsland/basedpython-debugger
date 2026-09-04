@@ -1176,10 +1176,21 @@ fn a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds(transport: 
     // and the guard: an empty stdin is still a stdin. `sys.stdin` being `None`
     // — which is what closing the descriptor gives — would make `input()` raise
     // `RuntimeError` instead, and every assertion above would still pass
+    //
+    // **`isatty` is not the guard on windows.** `Stdio::null()` there is the
+    // `NUL` device, which is a character device, and windows reports every
+    // character device as a terminal — so a debuggee with exactly the right
+    // stdin says `isatty True`. the `EOFError` above is what carries the
+    // guarantee on both: a `None` stdin cannot raise it
+    let terminal = if cfg!(windows) {
+        "isatty True"
+    } else {
+        "isatty False"
+    };
     assert!(
-        said.contains("isatty False"),
-        "the debuggee has a real stdin object that reports it is not a \
-         terminal: {said:?}"
+        said.contains(terminal),
+        "the debuggee has a real stdin object, and this platform reports `NUL` \
+         or `/dev/null` as `{terminal}`: {said:?}"
     );
 
     client.request("disconnect", &serde_json::json!({}));
