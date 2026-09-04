@@ -525,6 +525,38 @@ fn a_program_on_a_terminal_is_still_on_one_under_bpd() {
 }
 
 #[test]
+fn the_program_is_run_by_the_interpreter_bpd_was_given() {
+    // bpd probes the interpreter it is handed and records two things: the path
+    // it was named by, and what that interpreter says `sys.executable` is. it
+    // used to **start** the second one, and on a macos framework build those
+    // differ — naming `…/Versions/3.13/bin/python3.13` probes as
+    // `…/Resources/Python.app/Contents/MacOS/Python`
+    //
+    // the debuggee then reports an executable nobody mentioned, and cpython
+    // prints that name in front of its own errors, so
+    // `a_script_that_cannot_be_opened_is_refused_in_the_interpreters_own_words`
+    // failed on every macos runner with two spellings of the same interpreter.
+    // this is the same claim without the error message in the way
+    let fixture = Fixture::new("unused", "print('never runs')\n");
+    let (bare, debugged) = both_ways(
+        fixture.directory(),
+        &[
+            "-c".to_string(),
+            "import sys; print(sys.executable)".to_string(),
+        ],
+        &[],
+    );
+
+    assert_eq!(
+        debugged.stdout, bare.stdout,
+        "the program's own `sys.executable` is not the one it would have had. \
+         a debuggee that names a different interpreter than the bare run is one \
+         whose children, whose error messages and whose `sys.executable` all \
+         say bpd was there"
+    );
+}
+
+#[test]
 fn a_script_that_cannot_be_opened_is_refused_in_the_interpreters_own_words() {
     // cpython says "No such file or directory" and exits 2. rust's own io error
     // says "entity not found", and an uncaught exception exits 1 — getting
@@ -1022,22 +1054,29 @@ fn child_reasons() -> String {
         .join("\n")
 }
 
-/// the audit event `bpd` watches a `subprocess` child by, on this interpreter
+/// the audit events `bpd` watches a child by, on this interpreter
 ///
-/// it is not one name. `_posixsubprocess.fork_exec` only became an audit event
-/// in **3.14**, so below that `bpd` watches `subprocess.Popen` instead — see
-/// [child processes](../../../docs/development/subprocesses.md). the guard
-/// below has to name the one that is really watched here, or on the other
-/// interpreter it is either vacuous or a failure about nothing
-fn watched_event() -> &'static str {
+/// it is a **list**, and it is the agent's own — taken from
+/// [`bpd_core::spawn::making_a_process`] rather than restated, because a
+/// restatement of it is what this guard used to be. it named
+/// `_posixsubprocess.fork_exec` on 3.14 and later, and which event an ordinary
+/// `subprocess.run` raises is the interpreter's choice on the day: cpython
+/// reaches for `posix_spawn` where it can, so on a machine that took that path
+/// the guard failed a run in which nothing at all was wrong
+///
+/// what the guard is for is making sure the fixture reached bpd's hook. any
+/// event on the list is bpd's hook — see
+/// [child processes](../../../docs/development/subprocesses.md)
+fn watched_events() -> Vec<&'static str> {
     let version = interpreter().version;
-    if cfg!(windows) {
-        "_winapi.CreateProcess"
-    } else if (version.major, version.minor) >= (3, 14) {
-        "_posixsubprocess.fork_exec"
-    } else {
-        "subprocess.Popen"
-    }
+    bpd_core::spawn::making_a_process(version.major, version.minor)
+        .iter()
+        .map(|event| {
+            event
+                .to_str()
+                .expect("every audit event bpd watches is written in ascii")
+        })
+        .collect()
 }
 
 #[test]
@@ -1071,12 +1110,13 @@ fn a_program_that_watches_its_own_audit_events_sees_exactly_the_ones_it_would_ha
              bpd than without it, as {form:?}. a hook the program can detect is \
              a program that can behave differently under the debugger"
         );
-        let watched = watched_event();
+        let watched = watched_events();
         assert!(
-            bare.stdout.contains(watched),
-            "the fixture has to reach the event bpd watches on *this* \
+            watched.iter().any(|event| bare.stdout.contains(event)),
+            "the fixture has to reach an event bpd watches on *this* \
              interpreter, or this compared two runs of a program that proves \
-             nothing. it was looking for `{watched}` and the program saw:\n{}",
+             nothing. it was looking for any of {watched:?} and the program \
+             saw:\n{}",
             bare.stdout
         );
         assert!(

@@ -87,6 +87,13 @@ jobs:
           # 3.15 ships rather than being left as a standing licence to test
           # against whatever is newest
           allow-prereleases: true
+      # `bpd_test::django` installs django 6.1 with `uv pip install` — the
+      # django tests refuse to run rather than skip when it is missing, which
+      # is how six of them failed here on the first push. it is not in the
+      # runner image
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
       # the agent is a cdylib nothing links, so `cargo test` never builds it —
       # it has to be built explicitly or the suite finds no agent to stage. on a
       # fresh checkout that fails loudly; on a machine that has built before it
@@ -330,6 +337,13 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.14"
+      # `bpd_test::django` installs django 6.1 with `uv pip install` — the
+      # django tests refuse to run rather than skip when it is missing, which
+      # is how six of them failed here on the first push. it is not in the
+      # runner image
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: cargo-llvm-cov
