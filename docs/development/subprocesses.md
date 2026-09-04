@@ -364,9 +364,19 @@ under bpd  as launched: ['DeprecationWarning']
 there is nothing bpd can do about that from inside the fork: the only thing that
 runs before the count is the audit hook, and killing and respawning the reader
 thread around every fork would be a worse debugger than the warning is a
-problem. what bpd does instead is join it in the handler and require parity —
+problem. `attach::stand_down` **joins** the thread rather than signalling it and
+leaving it, because `pthread_join` returning is the only thing that says the
+operating system thread has gone — which is what cpython counts, when it counts
+late enough to see it
+
 `a_program_that_forks_records_exactly_the_warnings_it_would_have` compares the
-two runs and fails when they differ
+two runs, and asks the interpreter which kind it is **in the same process and
+the same run**: the program stops a thread of its own in a before-fork handler
+and forks again. where that warns, the interpreter counts a thread nobody has
+any more, bpd's reader is one of those, and the extra warning is allowed and
+named. where it does not, parity is exact and required. an earlier cut asked a
+separate program in a separate process and got different answers on two
+consecutive runs of the same job
 
 that test also **asserts the reader thread is there**, out of
 `/proc/self/status`: one thread bare, two under bpd. without it a debuggee that
