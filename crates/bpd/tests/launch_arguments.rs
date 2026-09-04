@@ -68,9 +68,18 @@ fn everything_after_a_module_belongs_to_the_program() {
         String::from_utf8_lossy(&ran.stderr)
     );
     assert_eq!(
-        String::from_utf8_lossy(&ran.stdout),
+        printed(&ran.stdout),
         "['-c', 'print()', '--python', 'nothing']\n"
     );
+}
+
+/// what the program printed, with the line ending the platform gave it
+///
+/// `print()` writes `\r\n` on windows and `\n` everywhere else, and what these
+/// compare is an **argument vector** — the newline underneath it is python's
+/// business. the parity suite normalises the same way and for the same reason
+fn printed(written: &[u8]) -> String {
+    String::from_utf8_lossy(written).replace("\r\n", "\n")
 }
 
 #[test]
@@ -91,8 +100,5 @@ fn everything_after_a_command_belongs_to_the_program() {
         "stderr:\n{}",
         String::from_utf8_lossy(&ran.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&ran.stdout),
-        "['-c', '--python', '-m', '-c']\n"
-    );
+    assert_eq!(printed(&ran.stdout), "['-c', '--python', '-m', '-c']\n");
 }
