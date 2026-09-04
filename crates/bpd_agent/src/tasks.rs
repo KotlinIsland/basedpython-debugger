@@ -153,7 +153,7 @@ pub(crate) fn notice(code: &Bound<'_, PyAny>) -> PyResult<bool> {
         return Ok(false);
     }
     let filename: String = code.getattr("co_filename")?.extract()?;
-    if !filename.ends_with("asyncio/base_events.py") {
+    if !is_base_events(&filename) {
         return Ok(false);
     }
 
@@ -162,6 +162,24 @@ pub(crate) fn notice(code: &Bound<'_, PyAny>) -> PyResult<bool> {
     };
     write().hook = Some(found.unbind());
     Ok(true)
+}
+
+/// whether a `co_filename` is the `base_events.py` inside an `asyncio`
+///
+/// **compared as a path rather than as text.** the suffix `asyncio/base_events.py`
+/// never matches on windows, where a `co_filename` is
+/// `…\Lib\asyncio\base_events.py` — so the hook was never installed there,
+/// `create_task` was never noticed, and every stop inside a task reported no
+/// scheduling at all. it was silent: the feature simply produced nothing, which
+/// is the failure this project exists to not have
+fn is_base_events(filename: &str) -> bool {
+    let path = std::path::Path::new(filename);
+    path.file_name()
+        .is_some_and(|name| name == "base_events.py")
+        && path
+            .parent()
+            .and_then(std::path::Path::file_name)
+            .is_some_and(|directory| directory == "asyncio")
 }
 
 /// the code object of that qualified name, anywhere under this one
@@ -345,4 +363,30 @@ fn current(python: Python<'_>) -> Option<Bound<'_, PyAny>> {
         .call0()
         .ok()?;
     (!task.is_none()).then_some(task)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_base_events;
+
+    #[test]
+    fn the_loops_own_module_is_recognised_by_path_and_not_by_text() {
+        // the suffix `asyncio/base_events.py` never matches on windows, where a
+        // `co_filename` is `…\\Lib\\asyncio\\base_events.py`. the hook was never
+        // installed there, so `create_task` was never noticed and every stop
+        // inside a task reported no scheduling at all — silently, which is the
+        // shape of failure this project exists to not have
+        // the forward-slash form is a path on both platforms, so it is asserted
+        // on both. the backslash one is a path **only** on windows — on unix a
+        // file may legally be named `a\b.py`, and reading a separator into that
+        // would be this rule inventing one
+        assert!(is_base_events("/usr/lib/python3.14/asyncio/base_events.py"));
+        #[cfg(windows)]
+        assert!(is_base_events(r"C:\Python314\Lib\asyncio\base_events.py"));
+
+        // and it is that file in that directory, not either of them alone
+        assert!(!is_base_events("/usr/lib/python3.14/asyncio/tasks.py"));
+        assert!(!is_base_events("/somewhere/else/base_events.py"));
+        assert!(!is_base_events("base_events.py"));
+    }
 }
