@@ -666,6 +666,15 @@ impl Session {
                 // zero bytes is the agent having hung up, which `next_event`
                 // reports as the end of the session rather than as a timeout
                 Ok(_) => return Ok(true),
+                // and so is a peer that is gone, which is the same event said
+                // the way windows says it: a process that exits there leaves its
+                // socket reset rather than closed, and the peek is what reaches
+                // it first. read as a failure it ended every windows session of
+                // a program that had run to the end as a broken control
+                // connection — the read that follows this answers `None`, and
+                // that is the end of the session with the child's exit status
+                // beside it
+                Err(error) if frame::peer_is_gone(&error) => return Ok(true),
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -704,6 +713,8 @@ impl Session {
         let closed = match self.reading.peek(&mut first) {
             Ok(0) => Ok(true),
             Ok(_) => Ok(false),
+            // the same end, said the way windows says it — see `peek_until`
+            Err(error) if frame::peer_is_gone(&error) => Ok(true),
             Err(error)
                 if matches!(
                     error.kind(),
