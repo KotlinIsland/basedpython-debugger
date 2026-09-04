@@ -369,14 +369,20 @@ leaving it, because `pthread_join` returning is the only thing that says the
 operating system thread has gone — which is what cpython counts, when it counts
 late enough to see it
 
-`a_program_that_forks_records_exactly_the_warnings_it_would_have` compares the
-two runs, and asks the interpreter which kind it is **in the same process and
-the same run**: the program stops a thread of its own in a before-fork handler
-and forks again. where that warns, the interpreter counts a thread nobody has
-any more, bpd's reader is one of those, and the extra warning is allowed and
-named. where it does not, parity is exact and required. an earlier cut asked a
-separate program in a separate process and got different answers on two
-consecutive runs of the same job
+`a_program_that_forks_records_exactly_the_warnings_it_would_have` forks three
+times: once as launched, once with a thread of the program's own stopped in a
+handler, and once with one it never stops. **the first two are where that race
+lives** — their only extra thread is one a before-fork handler joined, so what
+they report is when cpython counted, not what bpd did. measured on one ubuntu
+job across three runs: bpd warned and the bare run did not, then the reverse,
+then neither
+
+so those two lines are compared with the `DeprecationWarning` taken out of both
+sides. any *other* warning still fails, the third fork — where the program
+really is holding a thread — is compared exactly, and the agent's one extra
+thread at every fork is asserted out of `/proc/self/status`. an interpreter with
+the cpython fix has no race here at all; one without it cannot be made to answer
+the same way twice, and a release does not turn on a coin flip
 
 that test also **asserts the reader thread is there**, out of
 `/proc/self/status`: one thread bare, two under bpd. without it a debuggee that

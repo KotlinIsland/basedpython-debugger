@@ -1314,18 +1314,36 @@ fn a_program_that_forks_records_exactly_the_warnings_it_would_have() {
         // fails, and an interpreter with the fix requires exact parity
         //
         // [python/cpython#137109]: https://github.com/python/cpython/issues/137109
-        let counts_a_stopped_thread = bare
-            .stdout
-            .contains("with a thread stopped in a handler: ['DeprecationWarning']");
+        // the two forks whose only extra thread was **joined in a before-fork
+        // handler** — bpd's reader in one run, the program's own helper in the
+        // other — say whether cpython counted before or after the handlers ran.
+        // that is [python/cpython#137109], it is fixed in main and backported
+        // to 3.13 and 3.14, and until an interpreter has the fix the answer
+        // moves: measured on the same ubuntu job, bpd warned and the bare run
+        // did not on one run, the reverse on the next, and neither on a third
+        //
+        // so the `DeprecationWarning` is taken out of those two lines on both
+        // sides and they are compared without it. what that still catches is
+        // any **other** warning, and what it stops is a race in cpython's
+        // bookkeeping failing a release. the third fork, where the program
+        // really is holding a thread it never stopped, keeps its exact
+        // comparison — and so does the agent's one extra thread at every fork,
+        // asserted above
+        //
+        // [python/cpython#137109]: https://github.com/python/cpython/issues/137109
         let comparable = |said: &str| -> String {
             said.lines()
-                .filter(|line| {
-                    !counts_a_stopped_thread
-                        || !(line.starts_with("as launched:")
-                            || line.starts_with("with a thread stopped in a handler:"))
+                .map(|line| {
+                    if line.starts_with("as launched:")
+                        || line.starts_with("with a thread stopped in a handler:")
+                    {
+                        line.replace("'DeprecationWarning'", "")
+                    } else {
+                        line.to_string()
+                    }
                 })
                 .fold(String::new(), |mut kept, line| {
-                    kept.push_str(line);
+                    kept.push_str(&line);
                     kept.push('\n');
                     kept
                 })
