@@ -196,16 +196,16 @@ impl Capabilities {
     ///
     /// not [`Capabilities::executable`], which is what that interpreter said
     /// `sys.executable` was when it was probed. the two are the same almost
-    /// everywhere and are not on a macos framework build: naming
-    /// `…/Versions/3.13/bin/python3.13` probes as
-    /// `…/Versions/3.13/Resources/Python.app/Contents/MacOS/Python`
+    /// everywhere, and on a macos framework build they are two different files:
+    /// measured on a runner, naming
+    /// `…/Versions/3.13/Resources/Python.app/Contents/MacOS/Python` probes as
+    /// `sys.executable = …/Versions/3.13/bin/python3.13`
     ///
-    /// starting the second is a debuggee whose own `sys.executable` names a
-    /// binary nobody mentioned, and cpython puts that name in front of its own
-    /// errors. measured on a runner: an unopenable script was refused as
-    /// `…/MacOS/Python: can't open file` under bpd and as
-    /// `…/bin/python3.13: can't open file` without it — the same program,
-    /// saying something different because a debugger was attached
+    /// starting the second is starting a **file nobody named**. everything the
+    /// debuggee then says about itself is that file's — its `sys.executable`,
+    /// the interpreter its own children are started with, and the name cpython
+    /// puts in front of its errors — so the program is not the program that
+    /// would have run
     ///
     /// [`Capabilities::executable`] stays what the interpreter says about
     /// itself, which is what the agent tag and the child-process verdicts are

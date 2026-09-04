@@ -288,11 +288,22 @@ fn forget_the_bootstraps_source(python: Python<'_>) -> PyResult<()> {
 /// report an unreadable script exactly as the interpreter would, and exit the
 /// way it would
 ///
-/// the wording is not reconstructed: the prefix is `sys.executable` and the
-/// description comes from `os.strerror`, which is the same source cpython uses.
-/// rust's own `io::Error` says "entity not found" where cpython says "No such
-/// file or directory", and a debugger that reworded this would send people
-/// looking for a different problem
+/// the wording is not reconstructed: the description comes from `os.strerror`,
+/// which is the same source cpython uses. rust's own `io::Error` says "entity
+/// not found" where cpython says "No such file or directory", and a debugger
+/// that reworded this would send people looking for a different problem
+///
+/// the prefix is `sys.orig_argv[0]` — the name the interpreter was **invoked
+/// by** — because that is what cpython puts there, and it is not
+/// `sys.executable`. cpython normalises the second and leaves the first alone,
+/// so an interpreter named `/…/bin/../bin/python3.13` refuses a missing script
+/// under that name and reports `/…/bin/python3.13` as its executable. the two
+/// are far apart on a macos framework build, which is where this was found: the
+/// invocation is `…/Resources/Python.app/Contents/MacOS/Python` and
+/// `sys.executable` is `…/Versions/3.13/bin/python3.13`
+///
+/// `an_interpreter_names_itself_the_way_it_was_invoked_and_not_the_way_it_resolves`
+/// is the test, and it reaches the same difference without a framework build
 ///
 /// the exit code is 2, which is what cpython uses for a script it cannot open —
 /// not the 1 that an uncaught exception produces
@@ -308,11 +319,14 @@ fn unopenable(
         let strerror = PyModule::import(python, "os")?
             .getattr("strerror")?
             .call1((errno,))?;
-        let executable = sys.getattr("executable")?;
+        // an interpreter always has an argv, and a debuggee bpd launched always
+        // has `[<the interpreter>, "-c", <the bootstrap>]`. if that is somehow
+        // empty this raises rather than inventing a name for the program
+        let invoked = sys.getattr("orig_argv")?.get_item(0)?;
         sys.getattr("stderr")?.call_method1(
             "write",
             (format!(
-                "{executable}: can't open file '{displayed}': [Errno {errno}] {strerror}\n"
+                "{invoked}: can't open file '{displayed}': [Errno {errno}] {strerror}\n"
             ),),
         )?;
         Ok(())
