@@ -58,6 +58,25 @@ pub fn binary_name() -> String {
     format!("bpd{}", std::env::consts::EXE_SUFFIX)
 }
 
+/// a path as the manifest and the wheel write one
+///
+/// **always `/`, on every platform.** a manifest is a document: it is read back
+/// by `verify`, compared against by a person with `sha256sum`, and it is where
+/// the tags a layout carries are recovered from — by stripping `agents/` off
+/// the front. windows joins with `\`, so a layout assembled there recorded
+/// `agents\3.13\bpd_agent.dll`, `verify` recovered **no tags at all**, and
+/// `wheel` writes one agent per tag: it would have assembled cleanly, verified
+/// cleanly, and produced a wheel carrying no agents whatsoever
+///
+/// a zip's entry names are `/` by the format's own rule as well, so the same
+/// answer is the right one in both places
+pub(crate) fn as_written(path: &Path) -> String {
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// where an agent for one tag lives, under the layout root
 ///
 /// **the name is not the one the file was built under.** `bpd_engine::agent`
@@ -387,7 +406,7 @@ pub fn assemble(
     for (tag, path) in agents {
         let at = agent_at(*tag);
         copy(path, &out.join(&at))?;
-        files.insert(at.to_string_lossy().into_owned(), digest_of(path)?);
+        files.insert(as_written(&at), digest_of(path)?);
     }
 
     let manifest = Manifest {

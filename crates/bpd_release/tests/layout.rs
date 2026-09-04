@@ -39,6 +39,45 @@ fn inputs(at: &Path) -> (PathBuf, BTreeMap<InterpreterTag, PathBuf>) {
 }
 
 #[test]
+fn the_manifest_names_a_file_the_same_way_on_every_platform() {
+    // a manifest is a **document**: `verify` reads it back, a person checks it
+    // with `sha256sum`, and the tags a layout carries are recovered out of it by
+    // stripping `agents/` off the front. windows joins with `\`, so a layout
+    // assembled there recorded `agents\3.13\…`, no tag was recovered from it,
+    // and `wheel` writes one agent per tag — it would have assembled cleanly,
+    // verified cleanly, and shipped a wheel with no agents in it at all
+    let held = tempfile::tempdir().expect("a temporary directory");
+    let (binary, agents) = inputs(held.path());
+    let out = held.path().join("layout");
+    let manifest = assemble(&binary, &agents, &out).expect("the layout was assembled");
+
+    for file in manifest.files.keys() {
+        assert!(
+            !file.contains('\\'),
+            "a manifest names its files with `/` on every platform: {file}"
+        );
+    }
+    assert!(
+        manifest.files.contains_key("agents/3.13/bpd_agent.so")
+            || manifest
+                .files
+                .keys()
+                .any(|file| file.starts_with("agents/3.13/")),
+        "and the agents are under `agents/<tag>/`: {:#?}",
+        manifest.files
+    );
+
+    // which is what makes the tags recoverable, on the machine that assembled
+    // it and on any other
+    let read = verify(&out).expect("the layout verifies");
+    assert_eq!(
+        read.tags,
+        vec![tag("3.13"), tag("3.14t")],
+        "the tags come back out of the paths the manifest carries"
+    );
+}
+
+#[test]
 fn a_layout_carries_the_binary_and_an_agent_per_tag_and_verifies_against_its_own_manifest() {
     let held = tempfile::tempdir().expect("a temporary directory");
     let (binary, agents) = inputs(held.path());
