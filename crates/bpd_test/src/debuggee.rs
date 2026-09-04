@@ -50,6 +50,41 @@ pub struct Fixture {
     source: String,
 }
 
+/// a canonical path in the form a program reports it
+///
+/// **windows `canonicalize` returns the verbatim form** — `\\?\C:\Users\…` —
+/// and no interpreter ever says that about itself: `os.getcwd()` and
+/// `sys.path[0]` are `C:\Users\…`. a fixture that hands the first to a test
+/// comparing against the second fails for a reason that has nothing to do with
+/// the debugger, which is what every path assertion in the parity suite did the
+/// first time it ran there
+///
+/// only the drive form is unwrapped. `\\?\UNC\server\share` is a different
+/// path from `\\server\share` to some apis, and this is not the place to
+/// decide that
+fn plainly(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+
+        let mut parts = path.components();
+        if let Some(Component::Prefix(prefix)) = parts.next()
+            && let Prefix::VerbatimDisk(letter) = prefix.kind()
+        {
+            let rest = path
+                .to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .to_string();
+            debug_assert!(
+                rest.starts_with(&format!("{}:", letter as char)),
+                "the verbatim prefix is all that came off"
+            );
+            return PathBuf::from(rest);
+        }
+    }
+    path
+}
+
 impl Fixture {
     /// write `source` as `<module>.py` in a fresh directory
     ///
@@ -69,10 +104,12 @@ impl Fixture {
         // the temporary directory sits under a symlink on macos
         // (`/var` -> `/private/var`). comparing the two spellings would fail
         // for a reason that has nothing to do with launch parity
-        let canonical = directory
-            .path()
-            .canonicalize()
-            .expect("the directory was just created");
+        let canonical = plainly(
+            directory
+                .path()
+                .canonicalize()
+                .expect("the directory was just created"),
+        );
 
         Self {
             _directory: directory,
