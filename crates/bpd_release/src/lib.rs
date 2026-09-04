@@ -9,8 +9,9 @@
 //! nothing here uploads, tags, signs or contacts anything. it takes files that
 //! already exist and produces a directory and a manifest, and
 //! [`verify`] reads that directory back and says whether it is still what the
-//! manifest claims. what to do with it afterwards is a decision this crate does
-//! not make
+//! manifest claims. the release workflow is what carries one to pypi, by
+//! running these same commands on every platform and uploading the wheels —
+//! `docs/development/releasing.md` is where that is written down
 //!
 //! ## why it refuses rather than does its best
 //!
@@ -43,7 +44,19 @@ pub mod wheel;
 pub use wheel::{Wheel, wheel};
 
 /// what `bpd` is called in a layout
-pub const BINARY: &str = "bpd";
+///
+/// **not a constant**, because windows runs a file by its extension. a layout
+/// carrying the binary as `bpd` installs to `Scripts/bpd`, which windows cannot
+/// execute and pip will not complain about — the same class of failure as an
+/// agent under a name nothing looks for, and invisible in exactly the same way
+///
+/// it is the shape [`bpd_engine::agent::cargo_artifact_name`] has and for the
+/// same reason: the name belongs to the platform the layout is **for**, and a
+/// layout is assembled natively on it
+#[must_use]
+pub fn binary_name() -> String {
+    format!("bpd{}", std::env::consts::EXE_SUFFIX)
+}
 
 /// where an agent for one tag lives, under the layout root
 ///
@@ -83,6 +96,36 @@ pub enum Refused {
     PlatformTag {
         /// the tag as it was given
         tag: String,
+    },
+
+    /// the version is not one a wheel filename can carry
+    ///
+    /// the same rule as the platform tag, and the one the cargo version of this
+    /// workspace fails: `0.0.1-a1` written into a filename makes a field pip
+    /// reads as a build tag on the version `0.0.1`
+    #[error(
+        "`{given}` is not a version a wheel filename can carry. it joins its \
+         fields with `-`, so a version with one in it becomes two fields and \
+         installs as some other version — write it the way pep 440 does, \
+         `0.0.1a1` rather than `0.0.1-a1`"
+    )]
+    Version {
+        /// the version as it was given
+        given: String,
+    },
+
+    /// the distribution is not a name
+    ///
+    /// it is refused rather than escaped into something acceptable, because
+    /// what escaping produces is a perfectly good name for a different project
+    #[error(
+        "`{given}` is not a distribution name. it is alphanumeric at both ends \
+         with `-`, `_` and `.` the only punctuation between — anything else is \
+         a name pip reads back out of the filename as some other distribution"
+    )]
+    DistributionName {
+        /// the name as it was given
+        given: String,
     },
 
     /// the zip underneath the wheel refused something
@@ -337,8 +380,9 @@ pub fn assemble(
     }
 
     let mut files = BTreeMap::new();
-    copy(binary, &out.join(BINARY))?;
-    files.insert(BINARY.to_string(), digest_of(binary)?);
+    let name = binary_name();
+    copy(binary, &out.join(&name))?;
+    files.insert(name, digest_of(binary)?);
 
     for (tag, path) in agents {
         let at = agent_at(*tag);

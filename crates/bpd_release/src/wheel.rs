@@ -26,6 +26,14 @@
 //! `data/agents/` produces exactly the layout that resolution already expects.
 //! nothing in the engine knows a wheel exists
 //!
+//! ## the name in the filename is not the name in the metadata
+//!
+//! pip reads the distribution back **out of the filename**, whose fields are
+//! joined with `-` — so a name with one in it is a name pip reads as some other
+//! distribution at some other version. the packaging specs answer that by
+//! escaping the name for the filename and carrying the real one in `METADATA`,
+//! and so does this
+//!
 //! ## there is no sdist
 //!
 //! and there will not be one. building this from source needs cargo and **one
@@ -43,6 +51,17 @@ use crate::{Manifest, Refused, verify};
 
 /// the metadata version every field below is written to
 const METADATA_VERSION: &str = "2.1";
+
+/// the distribution this project publishes under
+///
+/// it is the name in `pyproject.toml`, and
+/// `crates/bpd_release/tests/naming.rs` fails when the two disagree — a wheel
+/// built under a name pypi holds for somebody else does not upload, and one
+/// built under a name nobody knows uploads and is never installed
+pub const DISTRIBUTION: &str = "basedpython-debugger";
+
+/// the project this is, for the metadata a published wheel carries
+const REPOSITORY: &str = "https://github.com/KotlinIsland/basedpython-debugger";
 
 /// the interpreter floor, which is the debugger's own and not the wheel's
 ///
@@ -83,7 +102,8 @@ pub struct Wheel {
 /// # errors
 ///
 /// when the layout does not verify, when the output cannot be written, or when
-/// the platform tag is not one pip could parse
+/// any of the three fields pip reads back out of the filename could not survive
+/// the trip
 pub fn wheel(
     layout: &Path,
     distribution: &str,
@@ -91,6 +111,18 @@ pub fn wheel(
     platform: &str,
     out: &Path,
 ) -> Result<Wheel, Refused> {
+    // a wheel filename is fields joined with `-`, and pip reads the
+    // distribution, the version and the platform back out of it by splitting on
+    // that. so a `-` inside any one of the three is not a cosmetic problem: it
+    // makes a name that parses cleanly as a **different** distribution at a
+    // different version, which installs and is then the wrong thing. all three
+    // are checked, and this is the whole of why
+    named(distribution)?;
+    if version.is_empty() || version.contains('-') {
+        return Err(Refused::Version {
+            given: version.to_string(),
+        });
+    }
     if platform.is_empty() || platform.contains('-') {
         return Err(Refused::PlatformTag {
             tag: platform.to_string(),
@@ -101,8 +133,9 @@ pub fn wheel(
     // anything can check it
     let manifest = verify(layout)?;
 
+    let escaped = escaped(distribution);
     let tag = format!("py3-none-{platform}");
-    let name = format!("{distribution}-{version}-{tag}.whl");
+    let name = format!("{escaped}-{version}-{tag}.whl");
     std::fs::create_dir_all(out).map_err(|source| Refused::File {
         what: "creating",
         path: out.to_path_buf(),
@@ -115,7 +148,17 @@ pub fn wheel(
         path: path.clone(),
         source,
     })?;
-    let contents = write_into(file, layout, &manifest, distribution, version, &tag)?;
+    let contents = write_into(
+        file,
+        layout,
+        &manifest,
+        Named {
+            distribution,
+            escaped: &escaped,
+            version,
+        },
+        &tag,
+    )?;
 
     Ok(Wheel {
         path,
@@ -133,27 +176,47 @@ struct Recorded {
     length: u64,
 }
 
+/// what a wheel is named, in both of the two names it has
+///
+/// they are carried together because every path inside the archive is built
+/// from the escaped one and `METADATA` is built from the other, and passing one
+/// where the other belongs is a wheel pip installs under the wrong name
+#[derive(Clone, Copy)]
+struct Named<'a> {
+    /// the distribution as the project spells it
+    distribution: &'a str,
+    /// and as a filename can carry it
+    escaped: &'a str,
+    /// the version, which is spelled one way
+    version: &'a str,
+}
+
 /// everything except opening the file, so a test can write into memory
 fn write_into<W: Write + Seek>(
     into: W,
     layout: &Path,
     manifest: &Manifest,
-    distribution: &str,
-    version: &str,
+    named: Named<'_>,
     tag: &str,
 ) -> Result<Vec<String>, Refused> {
     let mut zip = zip::ZipWriter::new(into);
     let mut recorded: Vec<Recorded> = Vec::new();
 
-    let data = format!("{distribution}-{version}.data");
-    let dist_info = format!("{distribution}-{version}.dist-info");
+    let Named {
+        distribution,
+        escaped,
+        version,
+    } = named;
+    let data = format!("{escaped}-{version}.data");
+    let dist_info = format!("{escaped}-{version}.dist-info");
 
     // the binary goes to `scripts`, which pip installs into `<prefix>/bin` — and
     // it has to keep its executable bit or what lands there cannot be run
-    let binary = layout.join(crate::BINARY);
+    let name = crate::binary_name();
+    let binary = layout.join(&name);
     recorded.push(add(
         &mut zip,
-        &format!("{data}/scripts/{}", crate::BINARY),
+        &format!("{data}/scripts/{name}"),
         &std::fs::read(&binary).map_err(|source| Refused::File {
             what: "reading",
             path: binary.clone(),
@@ -272,7 +335,56 @@ fn urlsafe(digest: &[u8]) -> String {
     out
 }
 
+/// a distribution name a wheel filename can carry it back out of
+///
+/// the rule is the packaging specs': a name is alphanumeric at both ends, and
+/// `-`, `_` and `.` are the only punctuation allowed between. it is checked
+/// here rather than left to pypi's upload because a name this rejects is one
+/// that would be **escaped** below into something else entirely — and the
+/// wheel that produces installs perfectly, under a distribution nobody meant
+fn named(distribution: &str) -> Result<(), Refused> {
+    let alphanumeric = |at: Option<char>| at.is_some_and(|one| one.is_ascii_alphanumeric());
+    let inside = distribution
+        .chars()
+        .all(|one| one.is_ascii_alphanumeric() || matches!(one, '-' | '_' | '.'));
+    if inside
+        && alphanumeric(distribution.chars().next())
+        && alphanumeric(distribution.chars().next_back())
+    {
+        return Ok(());
+    }
+    Err(Refused::DistributionName {
+        given: distribution.to_string(),
+    })
+}
+
+/// the name as every path inside the wheel spells it
+///
+/// each run of `-`, `_` or `.` becomes a single `_`, which is what the binary
+/// distribution format says and what pip's own escaping does. `METADATA` keeps
+/// the name itself, because that is the one pypi matches a project on
+fn escaped(distribution: &str) -> String {
+    let mut out = String::with_capacity(distribution.len());
+    let mut separated = false;
+    for one in distribution.chars() {
+        if matches!(one, '-' | '_' | '.') {
+            separated = true;
+            continue;
+        }
+        if separated && !out.is_empty() {
+            out.push('_');
+        }
+        separated = false;
+        out.push(one.to_ascii_lowercase());
+    }
+    out
+}
+
 /// the `METADATA` a wheel carries
+///
+/// `distribution` is the name as the project spells it rather than the escaped
+/// one: this is the field pypi reads to decide which project an upload belongs
+/// to, and the escaped spelling is a different project
 fn metadata(distribution: &str, version: &str) -> String {
     format!(
         "Metadata-Version: {METADATA_VERSION}\n\
@@ -280,6 +392,9 @@ fn metadata(distribution: &str, version: &str) -> String {
          Version: {version}\n\
          Summary: a debugger for python and basedpython\n\
          Requires-Python: {}\n\
+         License: MIT\n\
+         Project-URL: repository, {REPOSITORY}\n\
+         Description-Content-Type: text/plain\n\
          \n\
          `bpd` is a native binary. this wheel carries it and one agent per\n\
          interpreter it can debug, and pip is only how they arrive — nothing in\n\
@@ -319,13 +434,59 @@ mod tests {
     }
 
     #[test]
+    fn a_name_is_escaped_the_way_the_packaging_specs_escape_one() {
+        // runs of `-`, `_` and `.` collapse to a single `_`, lowercased. pip
+        // computes this itself when it looks for a wheel it has already built,
+        // so a different answer here is a file pip does not recognise as the
+        // one it is holding
+        assert_eq!(escaped("basedpython-debugger"), "basedpython_debugger");
+        assert_eq!(escaped("Based.Python__Debugger"), "based_python_debugger");
+        assert_eq!(escaped("bpd"), "bpd");
+    }
+
+    #[test]
+    fn a_version_with_a_dash_in_it_is_refused() {
+        // the cargo version of this workspace is `0.0.1-a1` and the python one
+        // is `0.0.1a1`. handing the first of those straight to `--version`
+        // writes `…-0.0.1-a1-py3-none-…`, which pip reads as the version
+        // `0.0.1` with a build tag — a wheel that installs as a version nobody
+        // released
+        let refused = wheel(
+            Path::new("/tmp/nothing"),
+            DISTRIBUTION,
+            "0.0.1-a1",
+            "macosx_11_0_arm64",
+            Path::new("/tmp/nowhere"),
+        );
+        assert!(
+            matches!(refused, Err(Refused::Version { .. })),
+            "a dash in the version has to be refused, got {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_distribution_that_is_not_a_name_is_refused() {
+        // it is checked before the escaping rather than after, because the
+        // escaping would turn most of these into a perfectly good name for
+        // something else
+        for given in ["", "-bpd", "bpd-", "based python", "bpd/../etc"] {
+            let refused = named(given);
+            assert!(
+                matches!(refused, Err(Refused::DistributionName { .. })),
+                "`{given}` is not a distribution name, got {refused:?}"
+            );
+        }
+        named(DISTRIBUTION).expect("the name this project publishes under is one");
+    }
+
+    #[test]
     fn a_platform_tag_with_a_dash_in_it_is_refused() {
         // the filename joins its fields with dashes, so a dash inside one makes
         // a name pip parses as different fields entirely — and the wheel
         // installs as some other version of something else
         let refused = wheel(
             Path::new("/tmp/nothing"),
-            "basedpythondebugger",
+            DISTRIBUTION,
             "0.1.0",
             "macosx-11-0-arm64",
             Path::new("/tmp/nowhere"),

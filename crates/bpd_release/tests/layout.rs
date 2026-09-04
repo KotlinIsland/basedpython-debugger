@@ -25,8 +25,12 @@ fn file(at: &Path, name: &str, contents: &str) -> PathBuf {
 }
 
 /// a binary and two agents, which is what a release carries
+///
+/// none of the three inputs is named what the layout calls it. that is the
+/// whole point of the fixture: a copy that keeps the input's name is a release
+/// bpd cannot launch, and it is the mistake this crate was written around
 fn inputs(at: &Path) -> (PathBuf, BTreeMap<InterpreterTag, PathBuf>) {
-    let binary = file(at, "bpd", "the debugger");
+    let binary = file(at, "the-built-binary", "the debugger");
     let agents = BTreeMap::from([
         (tag("3.13"), file(at, "agent-3.13.so", "for 3.13")),
         (tag("3.14t"), file(at, "agent-3.14t.so", "for 3.14t")),
@@ -49,7 +53,12 @@ fn a_layout_carries_the_binary_and_an_agent_per_tag_and_verifies_against_its_own
     // launch: the inputs are named `agent-3.13.so`, the scan joins
     // `libbpd_agent.so`, and a copy that kept the input's name is a release
     // that assembles, verifies, and carries an agent bpd never finds
-    assert!(out.join("bpd").is_file(), "the binary is not in the layout");
+    assert!(
+        out.join(bpd_release::binary_name()).is_file(),
+        "the binary is not in the layout under the name this platform runs it \
+         by — on windows that name has an extension, and a `Scripts/bpd` with \
+         no `.exe` installs from a wheel and cannot be executed"
+    );
     for named in [tag("3.13"), tag("3.14t")] {
         let at = out.join(bpd_release::agent_at(named));
         assert!(

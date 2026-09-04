@@ -36,11 +36,12 @@ compatibility layer holding it back:
 
 ## status
 
-early, and **nothing is published**: a layout and a wheel are both built and
-driven in CI, and nothing uploads, signs or tags them, so there is nowhere to
-install it from yet. the design lives under
-[development](development/architecture.md), and the order of work is in
-`ROADMAP.md`
+early, and **nothing is published yet**: [the release path](development/releasing.md)
+is armed rather than run. a `v*` tag builds a wheel per platform, installs each
+one and debugs five interpreters through it, and uploads to pypi once a person
+approves — and until the first tag is pushed there is nothing there to install.
+the design lives under [development](development/architecture.md), and the order
+of work is in `ROADMAP.md`
 
 what exists today is five subcommands — `bpd doctor`, which reports whether an
 interpreter can be debugged; `bpd launch`, which runs a program with the agent

@@ -1,0 +1,248 @@
+name: release
+
+# a tag is the whole trigger, and the tag is the version. `v0.0.1a1` publishes
+# `0.0.1a1` — there is no input to disagree with the tree and no dispatch that
+# builds a release nobody can point at a commit for
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  version:
+    name: the version, and whether this commit passed
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # to read the conclusion of `ci` on this commit, below
+      actions: read
+    outputs:
+      version: ${{ steps.said.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      # the tag against what the tree says it is. `pyproject.toml` is tied to
+      # the crates' version by `crates/bpd_release/tests/naming.rs`, so this one
+      # comparison pins all three — and a wheel whose `bpd --version` disagrees
+      # with the filename it arrived in is the one number every bug report
+      # carries
+      - id: said
+        name: the tag is the version the tree declares
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          declared=$(python3 - <<'PY'
+          import tomllib, pathlib
+          print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])
+          PY
+          )
+          if [ "$version" != "$declared" ]; then
+            echo "the tag is $GITHUB_REF_NAME and pyproject.toml declares $declared." >&2
+            echo "one of the two is wrong, and a release built from both ships a" >&2
+            echo "wheel whose version is not the version it says it is" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # a tag can be pushed at any commit, including one whose suite never ran
+      # or never passed. the wheel jobs below launch every interpreter through
+      # an installed wheel, which is a great deal — and it is not the test
+      # suite, on five platforms, against five interpreters
+      - name: ci passed on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          conclusion=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&status=completed" \
+            --jq '[.workflow_runs[] | select(.name == "ci")] | first | .conclusion // "nothing"')
+          if [ "$conclusion" != "success" ]; then
+            echo "ci on $GITHUB_SHA is \`$conclusion\`, and a release is built" >&2
+            echo "from a commit whose suite passed. wait for ci on that commit," >&2
+            echo "then move the tag onto it and push again" >&2
+            exit 1
+          fi
+
+  linux:
+    name: wheel for ${{ matrix.platform }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+            platform: manylinux_2_17_x86_64
+          # native arm rather than emulated: an agent built under qemu is one
+          # nobody has run a debugger through at the speed it will be run at
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            platform: manylinux_2_17_aarch64
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      # what glibc a linux wheel may claim is a fact about the toolchain that
+      # built it, and the only honest way to claim 2.17 is to build against
+      # 2.17. so the whole build happens inside pypa's own image, which is where
+      # that number comes from — and which carries every interpreter an agent is
+      # built for, in `/opt/python`
+      #
+      # it is `docker run` rather than a job `container:`, because the image is
+      # centos 7 and the node the actions runner needs does not run on it. the
+      # checkout above happened on the host and is mounted in
+      - name: build, install and debug, inside manylinux
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            -e VERSION -e PLATFORM \
+            "quay.io/pypa/manylinux2014_${{ matrix.arch }}" \
+            bash -euo pipefail -c '
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --no-modify-path
+              export PATH="$HOME/.cargo/bin:$PATH"
+              bash scripts/build_release.sh "$VERSION" "$PLATFORM" \
+                3.13=/opt/python/cp313-cp313/bin/python \
+                3.14=/opt/python/cp314-cp314/bin/python \
+                3.14t=/opt/python/cp314-cp314t/bin/python \
+                3.15=/opt/python/cp315-cp315/bin/python \
+                3.15t=/opt/python/cp315-cp315t/bin/python
+            '
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  native:
+    name: wheel for ${{ matrix.platform }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            platform: macosx_11_0_arm64
+            # the floor apple silicon has, and the floor the tag claims. they
+            # are the same number in two places on purpose: a binary built
+            # against a newer sdk default than the tag says installs and then
+            # will not load
+            deployment: "11.0"
+          # the last x86_64 macos image github offers, and it retires in august
+          # 2027. when it goes, so does this entry — a wheel for a platform
+          # nothing builds is worse than none
+          - runner: macos-15-intel
+            platform: macosx_10_12_x86_64
+            deployment: "10.12"
+          - runner: windows-latest
+            platform: win_amd64
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      # one at a time, each with an id, because the path of each interpreter is
+      # needed by name. installing all five at once leaves only the last of them
+      # answering to `python`, and windows has no `python3.13` at all
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        id: p313
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        id: p314
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        id: p314t
+        with:
+          python-version: "3.14t"
+      # 3.15 is a release candidate until october 2026, and this comes off with
+      # the same line in `ci.yaml` when it ships
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        id: p315
+        with:
+          python-version: "3.15"
+          allow-prereleases: true
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        id: p315t
+        with:
+          python-version: "3.15t"
+          allow-prereleases: true
+      - name: build, install and debug
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment }}
+        # `bash …` rather than executing it, because whether a checkout on
+        # windows carries the executable bit is a git configuration rather than
+        # a fact about the file
+        run: |
+          bash scripts/build_release.sh \
+            "${{ needs.version.outputs.version }}" "${{ matrix.platform }}" \
+            "3.13=${{ steps.p313.outputs.python-path }}" \
+            "3.14=${{ steps.p314.outputs.python-path }}" \
+            "3.14t=${{ steps.p314t.outputs.python-path }}" \
+            "3.15=${{ steps.p315.outputs.python-path }}" \
+            "3.15t=${{ steps.p315t.outputs.python-path }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: publish to pypi
+    needs: [version, linux, native]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # the gate. every wheel is built, installed and debugged through before
+    # anything reaches here, and then a person approves the upload — because a
+    # version on pypi cannot be replaced, only yanked, and the whole point of
+    # this project is that a wrong answer is worse than an error
+    environment:
+      name: pypi
+      url: https://pypi.org/project/basedpython-debugger/${{ needs.version.outputs.version }}
+    permissions:
+      # trusted publishing: github mints a short-lived token pypi verifies
+      # against the publisher configured for this repository and workflow. there
+      # is no api token in this repository to leak, expire, or be used by
+      # anything else
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      # what is about to be published, named, before it is. a release whose
+      # contents nobody can read out of the log is one nobody can check
+      - name: the five wheels, and no sdist
+        run: |
+          set -euo pipefail
+          ls -l dist
+          built=$(ls dist/*.whl | wc -l)
+          if [ "$built" -ne 5 ]; then
+            echo "$built wheels were built and a release is five: one per" >&2
+            echo "platform. a missing one is a platform that silently gets no" >&2
+            echo "release at all, and pip falls back to nothing" >&2
+            exit 1
+          fi
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist
+          # already true by default, and written down because it is the check
+          # that would catch metadata this repository generates itself
+          verify-metadata: true

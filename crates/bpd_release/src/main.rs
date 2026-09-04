@@ -6,8 +6,10 @@
 //! every person who ever installs one, describing something only this
 //! repository's release ever does
 //!
-//! **nothing here publishes.** it reads files that exist and writes a directory,
-//! and what happens to that directory afterwards is not a decision this makes
+//! **nothing here publishes.** it reads files that exist and writes a directory.
+//! uploading one is `.github/workflows/release.yaml`, which runs this on five
+//! platforms and takes what it produced — there is no network call in this
+//! program to reach for
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -53,7 +55,11 @@ enum Command {
         layout: PathBuf,
 
         /// the distribution name pip will know it by
-        #[arg(long, default_value = "basedpythondebugger")]
+        ///
+        /// the default is the name in `pyproject.toml`, which is the project
+        /// pypi holds — it is an argument at all so that a fork publishing
+        /// under its own name does not have to patch the tree to do it
+        #[arg(long, default_value = bpd_release::wheel::DISTRIBUTION)]
         distribution: String,
 
         /// the version to ship it as
