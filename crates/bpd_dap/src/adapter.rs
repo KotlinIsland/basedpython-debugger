@@ -4015,10 +4015,27 @@ mod tests {
 
     use super::*;
 
+    /// a directory a program on **this** platform could really be in
+    ///
+    /// `source_of` claims a path only when the name is one, and what a name is
+    /// is the platform's answer: `/tmp/app/main.py` is not an absolute path on
+    /// windows, and a `co_filename` there would not look like that. these tests
+    /// are about the *rule*, so their files are shaped the way the platform
+    /// shapes one
+    const HERE: &str = if cfg!(windows) { r"C:\tmp" } else { "/tmp" };
+
+    /// one of those files, named the way this platform names one
+    fn under(name: &str) -> String {
+        let mut path = PathBuf::from(HERE);
+        path.extend(name.split('/'));
+        path.display().to_string()
+    }
+
     #[test]
     fn a_source_is_only_given_a_path_when_the_name_is_one() {
-        let real = source_of("/tmp/app/main.py");
-        assert_eq!(real["path"], "/tmp/app/main.py");
+        let main = under("app/main.py");
+        let real = source_of(&main);
+        assert_eq!(real["path"], main);
         assert_eq!(real["name"], "main.py");
 
         // code the interpreter has under a name that is not a file: a string
@@ -4084,7 +4101,7 @@ mod tests {
     fn a_breakpoint_that_moved_says_so_and_one_that_did_not_bind_says_why() {
         use bpd_core::{Evaluation, Site};
 
-        let requested = SourceBreakpoint::at(4, "/tmp/app.py", 7);
+        let requested = SourceBreakpoint::at(4, under("app.py"), 7);
         let moved = rendered_breakpoint(
             &Resolved {
                 waiting_for: None,
@@ -4117,7 +4134,7 @@ mod tests {
                 id: 4,
                 binding: Binding::Unbound {
                     reason: Unbound::NotLoaded {
-                        file: PathBuf::from("/tmp/app.py"),
+                        file: PathBuf::from(under("app.py")),
                         templates_available: false,
                     },
                 },
@@ -4150,7 +4167,7 @@ mod tests {
         // file is imported later"
         let requested = SourceBreakpoint::at(4, "/src/main.by", 5);
         let generated = || Located {
-            file: PathBuf::from("/tmp/build/main.py"),
+            file: PathBuf::from(under("build/main.py")),
             line: 86,
         };
         let wrapped = |reason: Unbound| {
@@ -4172,7 +4189,7 @@ mod tests {
         };
 
         let pending = wrapped(Unbound::NotLoaded {
-            file: PathBuf::from("/tmp/build/main.py"),
+            file: PathBuf::from(under("build/main.py")),
             templates_available: false,
         });
         assert_eq!(
@@ -4196,7 +4213,7 @@ mod tests {
         );
 
         let no_line = wrapped(Unbound::NoExecutableLine {
-            file: PathBuf::from("/tmp/build/main.py"),
+            file: PathBuf::from(under("build/main.py")),
             requested: 86,
             last_executable: Some(40),
         });
@@ -4224,7 +4241,7 @@ mod tests {
                 binding: Binding::BoundInSource {
                     line: 7,
                     generated: Located {
-                        file: PathBuf::from("/tmp/build/app.py"),
+                        file: PathBuf::from(under("build/app.py")),
                         line: 19,
                     },
                     sites: vec![Site {
@@ -4247,7 +4264,7 @@ mod tests {
         let said = rendered["message"]
             .as_str()
             .expect("a mapped breakpoint says where it really is");
-        assert!(said.contains("/tmp/build/app.py"), "said {said}");
+        assert!(said.contains(&under("build/app.py")), "said {said}");
         assert!(said.contains("line 19"), "said {said}");
     }
 }
