@@ -1171,7 +1171,11 @@ def os_threads():
     return None
 
 
-def forked():
+def forked(label):
+    # the thread count **at this fork**, which is what cpython is deciding on.
+    # printed for every one of them because the interesting difference turned
+    # out to be between the first fork and the later ones
+    print('os threads at', label + ':', os_threads())
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         pid = os.fork()
@@ -1181,8 +1185,7 @@ def forked():
     return [warning.category.__name__ for warning in caught]
 
 
-print('os threads:', os_threads())
-print('as launched:', forked())
+print('as launched:', forked('the first'))
 
 # what this interpreter does with a thread that was **stopped in a before-fork
 # handler**, which is exactly what bpd does with its reader thread. it is
@@ -1194,33 +1197,44 @@ helper = threading.Thread(target=lambda: (ready.set(), stopped.wait()))
 helper.start()
 ready.wait()
 os.register_at_fork(before=lambda: (stopped.set(), helper.join()))
-print('with a thread stopped in a handler:', forked())
+print('with a thread stopped in a handler:', forked('the second'))
 
 running = threading.Event()
 finish = threading.Event()
 thread = threading.Thread(target=lambda: (running.set(), finish.wait()))
 thread.start()
 running.wait()
-print('with a thread of its own:', forked())
+print('with a thread of its own:', forked('the third'))
 print('threads:', threading.active_count(), sorted(t.name for t in threading.enumerate()))
 finish.set()
 thread.join()
 ";
 
-/// the thread count the fixture reported, and everything it said after it
+/// every thread count the fixture reported, and everything else it said
 ///
-/// `None` where there is no `/proc` to read one from, which is every platform
-/// but linux. the count is not a comparison there, and the rest of the output
-/// is the same question either way
+/// the counts come out of the comparison because they are a difference bpd is
+/// **entitled** to: the reader thread is on the process while the program runs,
+/// and is joined for each fork and put back after. what the program can *see*
+/// is the rest, and that has to match
+///
+/// they are `None` where there is no `/proc` to read one from, which is every
+/// platform but linux
 #[cfg(unix)]
-fn threads_and_rest(said: &str) -> (Option<usize>, String) {
-    let (first, rest) = said
-        .split_once('\n')
-        .unwrap_or_else(|| panic!("the fixture prints its thread count first, and said:\n{said}"));
-    let counted = first
-        .strip_prefix("os threads: ")
-        .unwrap_or_else(|| panic!("the fixture prints its thread count first, and said:\n{said}"));
-    (counted.parse().ok(), rest.to_string())
+fn threads_and_rest(said: &str) -> (Vec<Option<usize>>, String) {
+    let mut counts = Vec::new();
+    let mut rest = String::new();
+    for line in said.lines() {
+        if let Some(counted) = line
+            .split_once(": ")
+            .and_then(|(what, count)| what.starts_with("os threads at").then_some(count))
+        {
+            counts.push(counted.parse().ok());
+        } else {
+            rest.push_str(line);
+            rest.push('\n');
+        }
+    }
+    (counts, rest)
 }
 
 #[cfg(unix)]
@@ -1260,14 +1274,24 @@ fn a_program_that_forks_records_exactly_the_warnings_it_would_have() {
         // back after, and what the program can see is the whole question
         let (threads_bare, rest_bare) = threads_and_rest(&bare.stdout);
         let (threads_debugged, rest_debugged) = threads_and_rest(&debugged.stdout);
-        if let (Some(without), Some(with)) = (threads_bare, threads_debugged) {
+        assert_eq!(
+            threads_bare.len(),
+            threads_debugged.len(),
+            "both runs fork the same number of times, as {form:?}"
+        );
+        for (at, (without, with)) in threads_bare.iter().zip(&threads_debugged).enumerate() {
+            let (Some(without), Some(with)) = (without, with) else {
+                continue;
+            };
             assert_eq!(
-                (without, with),
-                (1, 2),
-                "the bare run has the program's thread and the debugged one has \
-                 that and the agent's reader. as {form:?} they were {without} \
-                 and {with}, and a debuggee with no debugger thread on it \
-                 proves nothing about forking beside one"
+                with - without,
+                1,
+                "at fork {at} the bare run had {without} thread(s) and the \
+                 debugged one {with}, as {form:?}. the difference is the agent's \
+                 reader, and it is one thread at every fork — more is a thread \
+                 bpd started and did not account for, and none is a debuggee \
+                 with no debugger on it, which proves nothing about forking \
+                 beside one"
             );
         }
 
