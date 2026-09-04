@@ -344,32 +344,35 @@ parent's own entries are untouched, and no FIN is sent while it still holds them
 `a_fork_leaves_the_parents_session_exactly_as_it_was`, which has the parent reach
 a breakpoint after the fork and read its own tool id back
 
-### the one thing the `before` handler cannot get in front of
+### what cpython counts, and when
 
 the reader thread is joined in the `before` handler so that a fork happens on a
-single-threaded process. cpython counts the process's threads **before** it runs
-those handlers, so on an interpreter without [python/cpython#137109][counts] the
-count includes a thread that is gone by the time `fork` is called, and the
-program records a `DeprecationWarning` it would not have recorded:
+single-threaded process. that is the whole point of the handler, and cpython
+counted the process's threads **before** running those handlers until
+[python/cpython#137109][counts] — so a program that stopped its threads there
+was warned about threads it no longer had. it is fixed in main and backported to
+3.13 and 3.14
+
+an interpreter without the fix counts the agent's reader thread and the debuggee
+records a `DeprecationWarning` a bare run does not:
 
 ```text
 bare       as launched: []
 under bpd  as launched: ['DeprecationWarning']
 ```
 
-measured on the ubuntu runners, and **not** on macos, where the interpreters
-already carry the fix. it is cpython's, it is fixed in main and backported to
-3.13 and 3.14, and there is nothing bpd can do about it in the meantime: the
-only thing that runs before the count is the audit hook, and killing and
-respawning the reader thread around every fork would be a worse debugger than
-the warning is a problem
+there is nothing bpd can do about that from inside the fork: the only thing that
+runs before the count is the audit hook, and killing and respawning the reader
+thread around every fork would be a worse debugger than the warning is a
+problem. what bpd does instead is join it in the handler and require parity —
+`a_program_that_forks_records_exactly_the_warnings_it_would_have` compares the
+two runs and fails when they differ
 
-`a_program_that_forks_records_exactly_the_warnings_it_would_have` asks the
-interpreter which way it counts, with a program of its own that stops a thread
-in a `before` handler and no debugger anywhere near it. where the count is late
-the parity is exact and required; where it is early the extra warning is spelled
-out, so any *other* difference still fails — and an interpreter that gets the
-fix flips the probe and takes the exemption away with it
+that test also **asserts the reader thread is there**, out of
+`/proc/self/status`: one thread bare, two under bpd. without it a debuggee that
+happened to be single-threaded would record the same warnings for a reason that
+has nothing to do with the debugger, and the comparison beside it would be a
+coincidence rather than a result
 
 [counts]: https://github.com/python/cpython/issues/137109
 
