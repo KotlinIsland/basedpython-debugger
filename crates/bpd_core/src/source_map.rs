@@ -1070,8 +1070,8 @@ DIGESTS = {
         let build = ordinary();
         std::fs::write(
             build.directory.path().join(MAP_FILENAME),
-            REAL.replace("<gen>", &build.generated.display().to_string())
-                .replace("<src>", &build.source.display().to_string())
+            REAL.replace("<gen>", &in_a_map(&build.generated))
+                .replace("<src>", &in_a_map(&build.source))
                 .replace(
                     "<byd>",
                     &format!("{ALGORITHM}:{}", digest_of(&read(&build.source))),
