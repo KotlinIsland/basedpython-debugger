@@ -553,6 +553,7 @@ const FORKING_WHILE_THREADS_STOP: &str = r#"import os
 import pathlib
 import signal
 import threading
+import time
 import warnings
 
 HERE = pathlib.Path(__file__).parent
@@ -580,10 +581,18 @@ workers = [threading.Thread(target=stopper) for _ in range(3)]
 for worker in workers:
     worker.start()
 
+# the loop forks until the **session** lets it go, rather than a fixed number of
+# times. a bound raced the debugger: on a runner where a fork costs less than a
+# stop round trip, two hundred forks finished before the session had driven two
+# hundred stops, the program ended, and the guard below refused a run in which
+# nothing was wrong. the bound that is left is a watchdog — reaching it stops
+# forking and waits, so a test that never releases is a slow failure and not a
+# fork bomb
 forks = 0
-while forks < 200:
-    if (HERE / "release").exists():
-        break
+while not (HERE / "release").exists():
+    if forks >= 2000:
+        time.sleep(0.01)
+        continue
     pid = os.fork()
     if pid == 0:
         signal.alarm(120)
@@ -607,6 +616,12 @@ if os.getpid() == PARENT:
 /// rather than a measurement: the loop is released by the test, so what this
 /// number decides is how long the two are in each other's way, not how long the
 /// test takes
+///
+/// the program forks until it is released rather than a fixed number of times,
+/// which is what makes that true on a machine other than this one. it used to
+/// fork two hundred times and stop, and on a runner where a fork costs less
+/// than a stop round trip it finished first — the program ended after 42 stops
+/// and the guard below refused a run in which nothing had gone wrong
 const ROUNDS: usize = 200;
 
 #[test]

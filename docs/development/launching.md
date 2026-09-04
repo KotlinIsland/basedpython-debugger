@@ -169,10 +169,9 @@ $ /…/bin/../bin/python3.14 -c 'import sys; print(sys.executable)'
 ```
 
 reading `sys.executable` there is a debuggee that names itself differently than
-it would have, and
-`an_interpreter_names_itself_the_way_it_was_invoked_and_not_the_way_it_resolves`
-is the test — it names the interpreter through its own parent, so it reaches the
-difference on any machine
+it would have, and every macos job in ci failed on it —
+`a_script_that_cannot_be_opened_is_refused_in_the_interpreters_own_words`
+compares the two runs word for word, which is where it showed up
 
 ## which agent is staged
 

@@ -534,7 +534,7 @@ impl Facts {
             linetable: code.getattr("co_linetable")?.extract()?,
             nested,
             instructions: instructions(python, code)?,
-            constants: marshal(python, &plain)?,
+            constants: marshal(python, &plain, "the constants of", code)?,
         })
     }
 
@@ -715,15 +715,31 @@ fn instructions(python: Python<'_>, code: &Bound<'_, PyAny>) -> PyResult<Vec<u8>
             stream.set_item(last, ("<the class's own source line>", python.None()))?;
         }
 
+        // `dis` resolves an operand to the object it means, and two kinds of
+        // object marshal cannot carry. a code object is one, and it becomes its
+        // name. **a class is the other**: since 3.15 the `__annotate__` body
+        // PEP 649 gives every annotated function loads `NotImplementedError`
+        // through `LOAD_COMMON_CONSTANT`, and `argval` there is the class
+        // itself. measured on 3.15.0rc1, where it made replacing any annotated
+        // module raise `ValueError: unmarshallable object` inside the debuggee
+        //
+        // it is named the way a code object is, and tagged, so that it cannot
+        // compare equal to a string operand that happens to spell the same name
         let key = if operand.is_instance(&kind)? {
             operand.getattr("co_qualname")?
+        } else if operand.is_instance_of::<pyo3::types::PyType>() {
+            let module: String = operand.getattr("__module__")?.extract()?;
+            let qualname: String = operand.getattr("__qualname__")?.extract()?;
+            ("<a class>", format!("{module}.{qualname}"))
+                .into_pyobject(python)?
+                .into_any()
         } else {
             operand
         };
         stream.append((name, key))?;
     }
 
-    marshal(python, &stream)
+    marshal(python, &stream, "the instructions of", code)
 }
 
 /// the exact bytes of a list of constants, type and all
@@ -731,11 +747,38 @@ fn instructions(python: Python<'_>, code: &Bound<'_, PyAny>) -> PyResult<Vec<u8>
 /// what a `.pyc` is compared with. `==` is not that comparison: `1 == 1.0` and
 /// `1 == True` in python, so a literal changed from one to the other would come
 /// back equal and a body that really moved would be called unchanged
-fn marshal(python: Python<'_>, value: &Bound<'_, PyList>) -> PyResult<Vec<u8>> {
+/// `what` and `code` name what could not be carried when it cannot be
+///
+/// marshal's own refusal is `ValueError: unmarshallable object` and says
+/// nothing about which object — and it surfaces **inside the debuggee**, at
+/// whatever line the program was stopped on, which is a place nobody would
+/// look for a packaging detail of the comparison. every kind cpython puts in an
+/// instruction stream is handled above, so reaching this is a new one, and it
+/// says so
+fn marshal(
+    python: Python<'_>,
+    value: &Bound<'_, PyList>,
+    what: &str,
+    code: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    let named = || -> String {
+        code.getattr("co_qualname")
+            .and_then(|name| name.extract::<String>())
+            .unwrap_or_else(|_| "a code object".to_string())
+    };
     python
         .import("marshal")?
         .getattr("dumps")?
-        .call1((value,))?
+        .call1((value,))
+        .map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "bpd could not encode {what} `{}` and so cannot say whether it \
+                 changed: {error}. an instruction operand or a constant of a \
+                 kind bpd has not met is what causes this, and replacing this \
+                 file is refused rather than guessed at",
+                named()
+            ))
+        })?
         .extract()
 }
 
