@@ -17,6 +17,8 @@ MANIFEST
 agents/3.13/libbpd_agent.so
 agents/3.14/libbpd_agent.so
 agents/3.14t/libbpd_agent.so
+agents/3.15/libbpd_agent.so
+agents/3.15t/libbpd_agent.so
 ```
 
 `bpd_engine::agent` scans `agents/` beside the binary and beside its parent,
@@ -37,11 +39,14 @@ bpd-release wheel --layout dist/bpd \
   --version 0.1.0 --platform macosx_11_0_arm64 --out dist/
 ```
 
-**nothing publishes.** there is no upload, no tag, no signature and no network
-call anywhere in this crate or in the CI job that drives it. it reads files that
-already exist, writes a directory, and reads that directory back. what happens
-to it afterwards is a decision nobody has made — and the roadmap says so rather
-than leaving a half-armed release workflow in the tree
+**nothing in this crate publishes.** there is no upload, no signature and no
+network call anywhere in it or in the `agents` CI job that drives it on every
+push. it reads files that already exist, writes a directory, and reads that
+directory back
+
+what publishes is [the release workflow](#publishing), which is a different
+thing in a different file — and it does it by running these same three commands
+on five machines and then uploading what they produced
 
 it is a separate binary from `bpd` on purpose. a `bpd package` subcommand would
 appear in `bpd --help` for every person who ever installs one, describing
@@ -101,7 +106,7 @@ it on. so a layout can also be written out as a wheel
 ### it is tagged for a **platform**, not for an interpreter
 
 ```text
-basedpythondebugger-0.1.0-py3-none-macosx_11_0_arm64.whl
+basedpython_debugger-0.1.0-py3-none-macosx_11_0_arm64.whl
 ```
 
 the `bpd` binary is not a python extension. it links nothing of cpython —
@@ -117,10 +122,10 @@ its packaging:
 
 |                             | wheels, over 5 platforms | copies of the binary |
 | --------------------------- | ------------------------ | -------------------- |
-| per interpreter (`cp313-…`) | 15                       | 15                   |
+| per interpreter (`cp313-…`) | 25                       | 25                   |
 | per platform (`py3-none-…`) | **5**                    | **5**                |
 
-three agents rather than four, because `3.13t` cannot be built at all — pyo3
+five agents rather than six, because `3.13t` cannot be built at all — pyo3
 refuses the free-threaded build of any cpython below 3.14, which
 [python support](python-support.md) records
 
@@ -137,14 +142,48 @@ environment's own scheme directories, where `scripts` is the first of those and
 `data` is the second:
 
 ```text
-basedpythondebugger-0.1.0.data/scripts/bpd            ->  <venv>/bin/bpd
-basedpythondebugger-0.1.0.data/data/agents/3.13/…     ->  <venv>/agents/3.13/…
-basedpythondebugger-0.1.0.data/data/agents/3.14/…     ->  <venv>/agents/3.14/…
-basedpythondebugger-0.1.0.data/data/agents/3.14t/…    ->  <venv>/agents/3.14t/…
+basedpython_debugger-0.1.0.data/scripts/bpd           ->  <venv>/bin/bpd
+basedpython_debugger-0.1.0.data/data/agents/3.13/…    ->  <venv>/agents/3.13/…
+basedpython_debugger-0.1.0.data/data/agents/3.14/…    ->  <venv>/agents/3.14/…
+basedpython_debugger-0.1.0.data/data/agents/3.14t/…   ->  <venv>/agents/3.14t/…
 ```
+
+on windows that first line is `…data/scripts/bpd.exe -> <venv>/Scripts/bpd.exe`,
+and the `.exe` is not decoration. windows runs a file by its extension, so a
+layout that carried the binary as `bpd` would install a `Scripts/bpd` that pip
+is perfectly happy with and windows cannot execute — the same shape of failure
+as an agent under a name nothing looks for, and invisible in the same way. so
+the name comes from `bpd_release::binary_name`, which is the platform's answer
+rather than a constant, and `the_binary_is_carried_under_the_name_the_platform_runs_it_by`
+is the test
 
 `Root-Is-Purelib: false` is the field with teeth. true would have pip put the
 payload in `site-packages`, and nothing looks for an agent there
+
+### the name in the filename is not the name in the metadata
+
+pip reads the distribution and the version back **out of the filename**, whose
+five fields are joined with `-`. so a `-` inside any one of them is not a
+cosmetic problem: it makes a filename that parses cleanly as a *different*
+distribution at a different version, installs, and is then the wrong thing
+
+the packaging specs answer that by escaping the name — every run of `-`, `_` or
+`.` becomes a single `_` — and carrying the real one in `METADATA`, which is the
+field pypi reads to decide which project an upload belongs to. `bpd-release`
+does both, and refuses anything it cannot do it for:
+
+| field        | as the project spells it | in the filename        |
+| ------------ | ------------------------ | ---------------------- |
+| distribution | `basedpython-debugger`   | `basedpython_debugger` |
+| version      | `0.0.1a1`                | `0.0.1a1`              |
+
+the version has no second spelling, and that is the point of checking it. the
+**cargo** version of this workspace is `0.0.1-a1`, because semver puts a dash
+before a prerelease and pep 440 does not. handing that to `--version` would
+write `…-0.0.1-a1-py3-none-…`, which pip reads as version `0.0.1` with a build
+tag — a wheel that installs as a version nobody released. so it is refused, and
+`the_python_version_is_the_crates_version` holds `pyproject.toml` to the crates
+so the two spellings can never be two numbers
 
 ### the platform tag is taken, not detected
 
@@ -176,3 +215,108 @@ the same job then writes that layout out as a wheel, installs it into a **3.14**
 venv with a real `pip`, and debugs **3.13** through it. the interpreter mismatch
 is the assertion: it is what a per-interpreter wheel would fail, and no
 assertion about the contents of a zip can stand in for it
+
+## publishing
+
+a **tag is the whole trigger**, and the tag is the version: pushing `v0.0.1a1`
+runs `.github/workflows/release.yaml`, which builds five wheels, installs every
+one of them, debugs five interpreters through each, and — after a person
+approves it — uploads them to pypi. there is no input to the workflow, because
+an input is a second place the version could come from
+
+### what a release is
+
+five wheels, each carrying five agents, and no sdist:
+
+| platform tag             | built on           | how                                         |
+| ------------------------ | ------------------ | ------------------------------------------- |
+| `manylinux_2_17_x86_64`  | `ubuntu-latest`    | inside `quay.io/pypa/manylinux2014_x86_64`  |
+| `manylinux_2_17_aarch64` | `ubuntu-24.04-arm` | inside `quay.io/pypa/manylinux2014_aarch64` |
+| `macosx_11_0_arm64`      | `macos-latest`     | natively                                    |
+| `macosx_10_12_x86_64`    | `macos-15-intel`   | natively                                    |
+| `win_amd64`              | `windows-latest`   | natively                                    |
+
+the linux builds happen **inside pypa's image** rather than on the runner, and
+that is the whole reason the tag can say `2_17`. what glibc a binary needs is a
+fact about the toolchain that compiled it, so the only honest way to claim 2.17
+is to compile against 2.17 — building on `ubuntu-latest` and writing `2_17` on
+the result is a wheel pip installs on a machine that cannot run it. the image is
+also where every interpreter comes from: `/opt/python/cp313-cp313`, `cp314-cp314`,
+`cp314-cp314t`, `cp315-cp315`, `cp315-cp315t`
+
+there is no windows-arm64 wheel, and its absence is deliberate: nothing in this
+repository has ever built or tested that target, and a wheel for a platform
+nobody has run the suite on is exactly the "probably right" this project does
+not ship
+
+### one script, five machines
+
+every one of those five runs `scripts/build_release.sh`, which is a script
+rather than steps in a workflow because the linux builds happen in a container
+and the others do not — two copies of it would be two copies that drift. it
+builds an agent per interpreter, builds `bpd`, assembles, verifies, writes the
+wheel, and then does the part that matters:
+
+```sh
+scripts/build_release.sh 0.0.1a1 macosx_11_0_arm64 \
+  3.13=/…/python3.13 3.14=/…/python3.14 3.14t=/…/python3.14t \
+  3.15=/…/python3.15 3.15t=/…/python3.15t
+```
+
+it makes a venv with the **oldest** interpreter carried, installs the wheel it
+just wrote with a real `pip`, and launches a program through the installed `bpd`
+on **every** interpreter — so a wheel that reaches pypi is one that has debugged
+five pythons from an install rather than from a checkout. it also asks each
+interpreter what it is before building an agent for it, because an agent filed
+under a tag it was not compiled against refuses at import on somebody else's
+machine, and that is the only moment both halves are in one place
+
+### what stops a wrong release
+
+| checked                                    | why                                                                                    |
+| ------------------------------------------ | -------------------------------------------------------------------------------------- |
+| the tag is `pyproject.toml`'s version      | and `pyproject.toml` is the crates' version, so one comparison pins all three          |
+| `ci` concluded `success` on this commit    | a tag can be pushed at any commit, including one whose suite never ran                 |
+| every interpreter says what its tag claims | an agent under the wrong tag imports and reads the wrong offsets                       |
+| the layout verifies before it is a wheel   | the last moment anything can check the digests                                         |
+| the installed wheel debugs every tag       | a layout that assembles, verifies and cannot launch is the failure this all exists for |
+| there are five wheels, not four            | a platform silently missing from a release gets no wheel and pip falls back to nothing |
+| a person approves the `pypi` environment   | a version on pypi can be yanked and never replaced                                     |
+
+### there is no api token
+
+the upload uses **trusted publishing**: github mints a short-lived token for the
+one workflow, and pypi verifies it against a publisher configured on the project.
+nothing in this repository holds a credential, so there is nothing here to leak
+or to rotate
+
+it is configured once, on pypi, under the project's *publishing* settings — or
+as a **pending publisher** before the first release, since the project does not
+exist there until something is uploaded:
+
+| field        | value                  |
+| ------------ | ---------------------- |
+| pypi project | `basedpython-debugger` |
+| owner        | `KotlinIsland`         |
+| repository   | `basedpython-debugger` |
+| workflow     | `release.yaml`         |
+| environment  | `pypi`                 |
+
+the environment is named on both sides on purpose: pypi will not accept a token
+that did not come from it, and github will not run the `publish` job until
+somebody approves it — **provided the environment has a required reviewer**. an
+environment with no protection rule on it does not pause for anything; it only
+labels the job. so it is created once, in the repository's settings, under
+*environments -> pypi -> required reviewers*, and without that the approval step
+in the table above is not a step at all
+
+### releasing
+
+1. `pyproject.toml` and the workspace `Cargo.toml` carry the version — the two
+    spellings of it, which `the_python_version_is_the_crates_version` holds
+    together
+1. push that, and let `ci` finish. the release refuses a commit whose suite did
+    not pass
+1. `git tag v0.0.1a1 && git push origin v0.0.1a1`
+1. the five wheels build, install, and debug five interpreters each
+1. approve the `pypi` environment, and it uploads

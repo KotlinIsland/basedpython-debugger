@@ -44,10 +44,13 @@ a debugger for python and [basedpython](https://github.com/KotlinIsland/basedpyt
 
 ## status
 
-early, and **nothing is published** — `bpd-release` assembles a layout and
-writes it out as a wheel `pip install` accepts, and CI drives both on every push,
-but nothing uploads, signs or tags, so there is nowhere to install it *from*. see
-[ROADMAP.md](ROADMAP.md) for what is being built and in what order, and
+early, and **nothing is published yet** — the release path is armed rather than
+run. a `v*` tag builds a wheel for each of five platforms, installs every one of
+them and debugs five interpreters through it, and uploads to pypi once a person
+approves the release; until the first tag is pushed there is nothing on pypi, so
+this is still a checkout. see
+[docs/development/releasing.md](docs/development/releasing.md) for what a release
+is, [ROADMAP.md](ROADMAP.md) for what is being built and in what order, and
 `docs/development/` for the design
 
 what exists today — five subcommands:

@@ -14,7 +14,8 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use bpd_core::python::InterpreterTag;
-use bpd_release::{Refused, assemble, wheel};
+use bpd_release::wheel::DISTRIBUTION;
+use bpd_release::{Refused, assemble, binary_name, wheel};
 
 fn tag(text: &str) -> InterpreterTag {
     InterpreterTag::parse(text).unwrap_or_else(|| panic!("`{text}` is a tag"))
@@ -77,7 +78,7 @@ fn the_payload_lands_where_agent_resolution_already_looks() {
     let held = tempfile::tempdir().expect("a temporary directory");
     let built = wheel(
         &layout(held.path()),
-        "basedpythondebugger",
+        DISTRIBUTION,
         "0.1.0",
         "macosx_11_0_arm64",
         &held.path().join("dist"),
@@ -86,7 +87,10 @@ fn the_payload_lands_where_agent_resolution_already_looks() {
 
     let names = entries(&built.path);
     assert!(
-        names.contains(&"basedpythondebugger-0.1.0.data/scripts/bpd".to_string()),
+        names.contains(&format!(
+            "basedpython_debugger-0.1.0.data/scripts/{}",
+            binary_name()
+        )),
         "the binary has to go to `scripts`, which is `<prefix>/bin`: {names:#?}"
     );
     // the filename comes from `agent_at`, which is what the layout and the
@@ -94,7 +98,7 @@ fn the_payload_lands_where_agent_resolution_already_looks() {
     // since that is what decides whether resolution ever finds it
     for tag_of in ["3.13", "3.14t"] {
         let at = format!(
-            "basedpythondebugger-0.1.0.data/data/{}",
+            "basedpython_debugger-0.1.0.data/data/{}",
             bpd_release::agent_at(tag(tag_of)).to_string_lossy()
         );
         assert!(
@@ -110,6 +114,88 @@ fn the_payload_lands_where_agent_resolution_already_looks() {
 }
 
 #[test]
+fn the_filename_carries_the_escaped_name_and_the_metadata_carries_the_real_one() {
+    // pip reads the distribution back out of the filename by splitting on `-`,
+    // so a name with one in it is a name it reads as a different project at a
+    // different version. the specs answer that by escaping the name for the
+    // filename — and pypi decides which project an upload belongs to from
+    // `METADATA`, so the two have to differ and both have to be right
+    let held = tempfile::tempdir().expect("a temporary directory");
+    let built = wheel(
+        &layout(held.path()),
+        DISTRIBUTION,
+        "0.1.0",
+        "macosx_11_0_arm64",
+        &held.path().join("dist"),
+    )
+    .expect("the wheel was written");
+
+    let filename = built
+        .path
+        .file_name()
+        .expect("a wheel has a filename")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        filename, "basedpython_debugger-0.1.0-py3-none-macosx_11_0_arm64.whl",
+        "the filename carries the escaped name, and exactly five dash-joined \
+         fields with it"
+    );
+    assert_eq!(
+        filename.matches('-').count(),
+        4,
+        "a wheel filename has five fields, and pip splits them on `-`: {filename}"
+    );
+
+    let metadata = String::from_utf8(read(
+        &built.path,
+        "basedpython_debugger-0.1.0.dist-info/METADATA",
+    ))
+    .expect("METADATA is utf8");
+    assert!(
+        metadata.contains(&format!("Name: {DISTRIBUTION}\n")),
+        "the metadata carries the name pypi holds the project under, not the \
+         escaped one: {metadata}"
+    );
+    assert!(
+        metadata.contains(&format!(
+            "Requires-Python: >={}\n",
+            bpd_core::python::MINIMUM_SUPPORTED
+        )),
+        "and the floor the debugger itself holds: {metadata}"
+    );
+}
+
+#[test]
+fn the_binary_is_carried_under_the_name_the_platform_runs_it_by() {
+    // windows runs a file by its extension. a wheel carrying `bpd` there
+    // installs `Scripts/bpd`, which pip is perfectly happy with and windows
+    // cannot execute — so the name comes from the same place the layout's does
+    let held = tempfile::tempdir().expect("a temporary directory");
+    let built = wheel(
+        &layout(held.path()),
+        DISTRIBUTION,
+        "0.1.0",
+        "win_amd64",
+        &held.path().join("dist"),
+    )
+    .expect("the wheel was written");
+
+    let at = format!("basedpython_debugger-0.1.0.data/scripts/{}", binary_name());
+    assert!(
+        entries(&built.path).contains(&at),
+        "the script entry is the name this platform executes: {:#?}",
+        entries(&built.path)
+    );
+    assert_eq!(
+        std::env::consts::EXE_SUFFIX.is_empty(),
+        !cfg!(windows),
+        "and that name is the platform's, which is what makes the line above a \
+         claim about windows rather than about this machine"
+    );
+}
+
+#[test]
 fn the_wheel_is_tagged_for_a_platform_and_not_for_an_interpreter() {
     // the decision this feature turns on. `bpd` links nothing of cpython and
     // drives interpreters it is handed, so a `cp313-cp313-…` wheel would ship a
@@ -118,7 +204,7 @@ fn the_wheel_is_tagged_for_a_platform_and_not_for_an_interpreter() {
     let held = tempfile::tempdir().expect("a temporary directory");
     let built = wheel(
         &layout(held.path()),
-        "basedpythondebugger",
+        DISTRIBUTION,
         "0.1.0",
         "macosx_11_0_arm64",
         &held.path().join("dist"),
@@ -151,7 +237,7 @@ fn the_wheel_is_tagged_for_a_platform_and_not_for_an_interpreter() {
 
     let metadata = String::from_utf8(read(
         &built.path,
-        "basedpythondebugger-0.1.0.dist-info/WHEEL",
+        "basedpython_debugger-0.1.0.dist-info/WHEEL",
     ))
     .expect("WHEEL is utf8");
     assert!(
@@ -173,7 +259,7 @@ fn record_names_every_file_with_a_digest_of_what_was_written() {
     let held = tempfile::tempdir().expect("a temporary directory");
     let built = wheel(
         &layout(held.path()),
-        "basedpythondebugger",
+        DISTRIBUTION,
         "0.1.0",
         "macosx_11_0_arm64",
         &held.path().join("dist"),
@@ -182,7 +268,7 @@ fn record_names_every_file_with_a_digest_of_what_was_written() {
 
     let record = String::from_utf8(read(
         &built.path,
-        "basedpythondebugger-0.1.0.dist-info/RECORD",
+        "basedpython_debugger-0.1.0.dist-info/RECORD",
     ))
     .expect("RECORD is utf8");
 
@@ -257,7 +343,7 @@ fn a_layout_that_no_longer_matches_its_manifest_is_not_shipped() {
 
     let refused = wheel(
         &at,
-        "basedpythondebugger",
+        DISTRIBUTION,
         "0.1.0",
         "macosx_11_0_arm64",
         &held.path().join("dist"),

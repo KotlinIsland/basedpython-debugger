@@ -144,9 +144,11 @@ jobs:
       # assembles cleanly, verifies cleanly, and is invisible at every launch.
       # so the release path is built and driven here too
       #
-      # **nothing is uploaded.** this produces a directory, checks it is what it
-      # says, and launches through it. what happens to a release afterwards is a
-      # decision nobody has made
+      # **nothing is uploaded here.** this produces a directory, checks it is
+      # what it says, and launches through it. uploading is `release.yaml`,
+      # which runs on a `v*` tag and drives the same two commands on five
+      # platforms — so what this job is really checking, on every push, is that
+      # the release path still works
       - run: cargo build --bin bpd-release
       - name: a release layout is assembled, verified, and launched through
         run: |
@@ -173,8 +175,8 @@ jobs:
       # `<prefix>/bin` and `data` becomes `<prefix>`, which are the two roots it
       # walks. a per-interpreter wheel would fail exactly this line
       #
-      # **nothing is uploaded.** it builds a file, installs it, and debugs
-      # through it
+      # **nothing is uploaded here** either. it builds a file, installs it, and
+      # debugs through it
       - name: the layout is delivered as a wheel, installed, and debugged through
         run: |
           set -euo pipefail
