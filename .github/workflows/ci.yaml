@@ -44,7 +44,11 @@ jobs:
   test:
     name: test ${{ matrix.os }} / python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # windows spawns interpreters far more slowly than the others and the suite
+    # spawns hundreds, so it needs the room. a cap that cancels a run mid-suite
+    # takes every result after it down as well: the failures that mattered were
+    # never printed, because cargo reports them when the run ends
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 30 }}
     env:
       # pyo3 watches this, and nothing else here can stand in for it:
       # `PYO3_PYTHON` is the string `python` in every entry of this matrix, so a
