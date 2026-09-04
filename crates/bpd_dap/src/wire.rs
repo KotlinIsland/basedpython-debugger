@@ -437,14 +437,26 @@ impl<W: Write> Writer<W> {
 
         let body = serde_json::to_vec(&message)
             .expect("a message built from json values and strings serialises");
-        write!(self.output, "Content-Length: {}\r\n\r\n", body.len())
-            .map_err(|source| Error::Connection { source })?;
-        self.output
-            .write_all(&body)
-            .map_err(|source| Error::Connection { source })?;
-        self.output
-            .flush()
-            .map_err(|source| Error::Connection { source })
+
+        // **a client that is gone is not a failed write.** on unix the last
+        // message to a client whose process has exited goes into a socket
+        // buffer nobody will ever read and this returns `Ok`; windows resets
+        // the socket instead, and the same write comes back `ECONNRESET`. read
+        // as a failure it ended the session in an error and `bpd dap` exited
+        // non-zero — after a session that had gone perfectly, every time,
+        // because hanging up is how a client ends one
+        //
+        // there is nothing to deliver and nowhere to deliver it, so this says
+        // what unix says. the session then ends the way it always does: the
+        // next read finds the client gone and answers `None`
+        let written = write!(self.output, "Content-Length: {}\r\n\r\n", body.len())
+            .and_then(|()| self.output.write_all(&body))
+            .and_then(|()| self.output.flush());
+        match written {
+            Ok(()) => Ok(()),
+            Err(gone) if bpd_core::peer_is_gone(&gone) => Ok(()),
+            Err(source) => Err(Error::Connection { source }),
+        }
     }
 }
 
@@ -502,6 +514,69 @@ mod tests {
         assert!(
             matches!(refused, Err(Error::NoContentLength { .. })),
             "a header block that stops half way is not a session ending: {refused:?}"
+        );
+    }
+
+    /// one request to answer, so the writer has something to write
+    const DISCONNECT: &str = r#"{"seq":1,"type":"request","command":"disconnect"}"#;
+
+    /// a client that has gone: every write to it is `ECONNRESET`
+    struct Gone;
+
+    impl Write for Gone {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
+        }
+    }
+
+    /// and one that is simply broken
+    struct Broken;
+
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn answering_a_client_that_has_gone_is_not_a_failed_session() {
+        // what windows gives for the last write of every session. unix puts the
+        // same bytes in a buffer nobody reads and calls it a success, and the
+        // session ends on the next read either way
+        let request = read(&format!(
+            "Content-Length: {}\r\n\r\n{DISCONNECT}",
+            DISCONNECT.len()
+        ))
+        .expect("the frame is well formed")
+        .expect("there is a message");
+        Writer::new(Gone)
+            .respond(&request, None)
+            .expect("a client that is gone is not a failed write");
+    }
+
+    #[test]
+    fn a_connection_that_is_broken_rather_than_gone_still_fails() {
+        // the half that must not go with it: an error that is not the peer
+        // having left is a connection that stopped working, and a session that
+        // swallowed it would answer nobody and say nothing
+        let request = read(&format!(
+            "Content-Length: {}\r\n\r\n{DISCONNECT}",
+            DISCONNECT.len()
+        ))
+        .expect("the frame is well formed")
+        .expect("there is a message");
+        let refused = Writer::new(Broken).respond(&request, None);
+        assert!(
+            matches!(refused, Err(Error::Connection { .. })),
+            "a broken connection is still a failure: {refused:?}"
         );
     }
 
