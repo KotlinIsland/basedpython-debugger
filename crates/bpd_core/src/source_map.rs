@@ -745,6 +745,14 @@ mod tests {
         generated: PathBuf,
     }
 
+    /// a path as a map carries one — see the escapes this module parses
+    fn in_a_map(path: &Path) -> String {
+        path.display()
+            .to_string()
+            .replace('\\', r"\\")
+            .replace('"', "\\\"")
+    }
+
     impl Build {
         fn new(by: &str, py: &str, lines: &[Option<u32>]) -> Self {
             let directory = tempfile::tempdir().expect("a temporary directory");
@@ -775,8 +783,13 @@ mod tests {
                 || format!("{ALGORITHM}:{}", digest_of(&read(&self.generated))),
                 ToOwned::to_owned,
             );
-            let generated = self.generated.display();
-            let source = self.source.display();
+            // escaped, because a map's strings take `\\` and `\"` and **a
+            // windows path is full of the first**: written raw, `C:\Users\…`
+            // reaches the parser as `\U` and is refused by name — which is this
+            // module's own parser doing its job about a map its own tests wrote
+            // badly
+            let generated = in_a_map(&self.generated);
+            let source = in_a_map(&self.source);
             std::fs::write(
                 self.directory.path().join(MAP_FILENAME),
                 format!(
@@ -1015,8 +1028,8 @@ mod tests {
     #[test]
     fn an_entry_with_no_digest_beside_it_is_refused() {
         let build = ordinary();
-        let generated = build.generated.display();
-        let source = build.source.display();
+        let generated = in_a_map(&build.generated);
+        let source = in_a_map(&build.source);
         std::fs::write(
             build.directory.path().join(MAP_FILENAME),
             format!(
