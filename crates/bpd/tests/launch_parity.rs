@@ -1182,7 +1182,6 @@ def forked():
 
 
 print('os threads:', os_threads())
-print('python threads:', threading.active_count())
 print('as launched:', forked())
 
 running = threading.Event()
@@ -1268,6 +1267,22 @@ fn counts_threads_before_the_handlers() -> bool {
     }
 }
 
+/// the thread count the fixture reported, and everything it said after it
+///
+/// `None` where there is no `/proc` to read one from, which is every platform
+/// but linux. the count is not a comparison there, and the rest of the output
+/// is the same question either way
+#[cfg(unix)]
+fn threads_and_rest(said: &str) -> (Option<usize>, String) {
+    let (first, rest) = said
+        .split_once('\n')
+        .unwrap_or_else(|| panic!("the fixture prints its thread count first, and said:\n{said}"));
+    let counted = first
+        .strip_prefix("os threads: ")
+        .unwrap_or_else(|| panic!("the fixture prints its thread count first, and said:\n{said}"));
+    (counted.parse().ok(), rest.to_string())
+}
+
 #[cfg(unix)]
 #[test]
 fn a_program_that_forks_records_exactly_the_warnings_it_would_have() {
@@ -1296,18 +1311,38 @@ fn a_program_that_forks_records_exactly_the_warnings_it_would_have() {
             bare.stdout
         );
 
+        // the debugger's reader thread really is on the process, and that is
+        // what makes the rest of this a result rather than a coincidence: a
+        // debuggee that happened to be single-threaded would record the same
+        // warnings for a reason that has nothing to do with bpd
+        //
+        // it is asserted rather than compared, because it is a difference bpd
+        // is **entitled** to. the thread is joined for the fork itself and put
+        // back after, and what the program can see is the whole question
+        let (threads_bare, rest_bare) = threads_and_rest(&bare.stdout);
+        let (threads_debugged, rest_debugged) = threads_and_rest(&debugged.stdout);
+        if let (Some(without), Some(with)) = (threads_bare, threads_debugged) {
+            assert_eq!(
+                (without, with),
+                (1, 2),
+                "the bare run has the program's thread and the debugged one has \
+                 that and the agent's reader. as {form:?} they were {without} \
+                 and {with}, and a debuggee with no debugger thread on it \
+                 proves nothing about forking beside one"
+            );
+        }
+
         // what the debugged run is allowed to say. on an interpreter that
         // counts before the handlers it is the bare run plus the one warning
         // the agent's joined reader thread was counted as — spelled out, so
         // that any *other* difference still fails
         let allowed = if counted_early {
-            bare.stdout
-                .replace("as launched: []", "as launched: ['DeprecationWarning']")
+            rest_bare.replace("as launched: []", "as launched: ['DeprecationWarning']")
         } else {
-            bare.stdout.clone()
+            rest_bare.clone()
         };
         assert_eq!(
-            debugged.stdout,
+            rest_debugged,
             allowed,
             "the program recorded a different set of warnings for its own fork \
              under bpd than without it, as {form:?}. a debugger whose reader \
