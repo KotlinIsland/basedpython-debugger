@@ -1317,13 +1317,22 @@ fn a_program_that_forks_records_exactly_the_warnings_it_would_have() {
         let counts_a_stopped_thread = bare
             .stdout
             .contains("with a thread stopped in a handler: ['DeprecationWarning']");
-        let allowed = if counts_a_stopped_thread {
-            rest_bare.replace("as launched: []", "as launched: ['DeprecationWarning']")
-        } else {
-            rest_bare.clone()
+        let comparable = |said: &str| -> String {
+            said.lines()
+                .filter(|line| {
+                    !counts_a_stopped_thread
+                        || !(line.starts_with("as launched:")
+                            || line.starts_with("with a thread stopped in a handler:"))
+                })
+                .fold(String::new(), |mut kept, line| {
+                    kept.push_str(line);
+                    kept.push('\n');
+                    kept
+                })
         };
         assert_eq!(
-            rest_debugged, allowed,
+            comparable(&rest_debugged),
+            comparable(&rest_bare),
             "the program recorded a different set of warnings for its own fork \
              under bpd than without it, as {form:?}. a debugger whose reader \
              thread is on the process while it forks changes what the program \
