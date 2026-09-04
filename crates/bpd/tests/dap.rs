@@ -1382,6 +1382,29 @@ fn variable<'a>(response: &'a serde_json::Value, name: &str) -> &'a serde_json::
         .unwrap_or_else(|| panic!("no variable named `{name}` in {response}"))
 }
 
+/// read a stream on a thread of its own, into a string anything can look at
+///
+/// a piped stream nothing reads fills its buffer and blocks the writer, so this
+/// is not optional once `stderr` is piped: an adapter blocked writing a message
+/// nobody wanted is a hang with no cause in it
+fn captured(mut stream: impl std::io::Read + Send + 'static) -> Arc<Mutex<String>> {
+    let said = Arc::new(Mutex::new(String::new()));
+    let filling = Arc::clone(&said);
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        while let Ok(read) = stream.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            filling
+                .lock()
+                .expect("nothing panics holding what the adapter said")
+                .push_str(&String::from_utf8_lossy(&buffer[..read]));
+        }
+    });
+    said
+}
+
 /// a DAP client, talking to a real `bpd dap`
 ///
 /// there is a **watchdog**, and it is not decoration. an adapter that stops
@@ -1392,6 +1415,13 @@ fn variable<'a>(response: &'a serde_json::Value, name: &str) -> &'a serde_json::
 struct Client {
     adapter: Arc<Mutex<Child>>,
     finished: Arc<AtomicBool>,
+    /// everything the adapter wrote to its stderr
+    ///
+    /// **captured rather than inherited**, so that a failure can say what the
+    /// adapter said. `bpd dap` exiting non-zero told nobody anything for three
+    /// rounds of ci: the exit code was in the panic and the reason was in a
+    /// stream nothing was reading
+    said: Arc<Mutex<String>>,
     writes: Box<dyn Write + Send>,
     reads: Box<dyn BufRead + Send>,
     /// the port this adapter bound, when it is listening on one
@@ -1422,6 +1452,8 @@ struct Client {
 struct Listener {
     process: Arc<Mutex<Child>>,
     finished: Arc<AtomicBool>,
+    /// everything this adapter wrote to its stderr — see [`captured`]
+    said: Arc<Mutex<String>>,
     endpoint: SocketAddr,
     token: String,
     /// the adapter's own stdout, held open
@@ -1447,9 +1479,11 @@ impl Listener {
             // it. see [`NOT_THE_DEBUGGEES`]
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("the binary was built by the same cargo invocation as this test");
         let mut stdout = BufReader::new(adapter.stdout.take().expect("stdout was asked for"));
+        let stderr = captured(adapter.stderr.take().expect("stderr was asked for"));
 
         // written and then closed. a debuggee that inherited this reads the
         // line and carries on, so the theft is a failed assertion naming what
@@ -1494,6 +1528,7 @@ impl Listener {
         Self {
             process,
             finished,
+            said: stderr,
             endpoint: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
             token,
             _stdout: stdout,
@@ -1507,6 +1542,7 @@ impl Listener {
         Client {
             adapter: Arc::clone(&self.process),
             finished: Arc::clone(&self.finished),
+            said: Arc::clone(&self.said),
             writes: Box::new(socket.try_clone().expect("a connected socket clones")),
             reads: Box::new(BufReader::new(socket)),
             token: Some(self.token.clone()),
@@ -1542,11 +1578,13 @@ impl Client {
             .arg("dap")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("the binary was built by the same cargo invocation as this test");
 
         let writes = adapter.stdin.take().expect("stdin was asked for");
         let reads = BufReader::new(adapter.stdout.take().expect("stdout was asked for"));
+        let stderr = captured(adapter.stderr.take().expect("stderr was asked for"));
 
         let adapter = Arc::new(Mutex::new(adapter));
         let finished = Arc::new(AtomicBool::new(false));
@@ -1555,6 +1593,7 @@ impl Client {
         Self {
             adapter,
             finished,
+            said: stderr,
             writes: Box::new(writes),
             reads: Box::new(reads),
             listening: None,
@@ -1836,7 +1875,13 @@ impl Client {
             match ended {
                 Some(status) => {
                     self.finished.store(true, Ordering::Relaxed);
-                    assert!(status.success(), "`bpd dap` exited with {status}");
+                    assert!(
+                        status.success(),
+                        "`bpd dap` exited with {status}. it said:\n{}",
+                        self.said
+                            .lock()
+                            .expect("nothing panics holding what the adapter said")
+                    );
                     return;
                 }
                 None => assert!(
