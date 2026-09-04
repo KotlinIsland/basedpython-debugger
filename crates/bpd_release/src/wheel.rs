@@ -237,7 +237,7 @@ fn write_into<W: Write + Seek>(
         })?;
         recorded.push(add(
             &mut zip,
-            &format!("{data}/data/{}", at.to_string_lossy()),
+            &format!("{data}/data/{}", crate::as_written(&at)),
             &bytes,
             0o644,
         )?);
