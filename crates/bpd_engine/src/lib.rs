@@ -753,7 +753,23 @@ impl Session {
 }
 
 fn write_to(writing: &mut Writing, request: &FromEngine) -> Result<()> {
-    message::write(&mut writing.stream, request)?;
+    // a write that fails because the peer is gone is **the peer being gone**,
+    // which the read side already reports as [`Error::AgentGone`]. it is one
+    // event arriving on whichever end reaches it first: unix takes the last
+    // write into a buffer nobody will read and says so on the next read, and
+    // windows resets the socket when the process exits, so the write is where
+    // it lands. reported as a transport failure it made a debuggee that had run
+    // to the end and printed everything come back as `the control connection
+    // failed`, on every windows job
+    if let Err(error) = message::write(&mut writing.stream, request) {
+        return Err(if error.is_peer_gone() {
+            Error::AgentGone {
+                expected: "the agent to still be there to take a request",
+            }
+        } else {
+            error.into()
+        });
+    }
     writing.requests += 1;
     Ok(())
 }

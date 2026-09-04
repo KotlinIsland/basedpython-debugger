@@ -27,6 +27,18 @@ pub const MAX_FRAME_LEN: u32 = 64 << 20;
 /// not a `bpd` peer fails immediately and by name
 const MAGIC: [u8; 4] = *b"bpd\x00";
 
+impl Error {
+    /// whether this is the peer being gone rather than a transport failure
+    ///
+    /// the same event a read reports as the end of the stream, arriving on a
+    /// **write** instead: the engine sends a resume to a debuggee that has
+    /// already exited, and on windows that write is where it lands
+    #[must_use]
+    pub fn is_peer_gone(&self) -> bool {
+        matches!(self, Error::Io(error) if peer_is_gone(error))
+    }
+}
+
 /// the result type for framing operations
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -237,18 +249,30 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<bool>
             // stream between frames, and a truncation part way through one. a
             // debuggee that died mid-frame is not turned into a clean end by
             // this, because the position is what decides, not the errno
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
-                ) =>
-            {
-                return gone(received, buffer.len());
-            }
+            Err(error) if peer_is_gone(&error) => return gone(received, buffer.len()),
             Err(error) => return Err(Error::Io(error)),
         }
     }
     Ok(true)
+}
+
+/// whether an io failure means the peer is **gone** rather than that something
+/// went wrong
+///
+/// a socket whose process has exited says so differently on each platform: unix
+/// closes it, and a reader sees `Ok(0)`; windows resets it, and a reader sees
+/// `ECONNRESET` while a writer sees the same. a pipe that nobody holds open is
+/// `BrokenPipe` on both. all three are one event — there is no peer any more —
+/// and reading them as transport failures is how a debuggee that ran to the end
+/// and printed everything gets reported as a broken connection
+#[must_use]
+pub fn peer_is_gone(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+    )
 }
 
 /// what the peer being gone means, at the position it went
@@ -288,6 +312,42 @@ mod tests {
             self.sent += taking;
             Ok(taking)
         }
+    }
+
+    #[test]
+    fn the_three_ways_a_peer_says_it_is_gone_are_one_event() {
+        // unix closes a socket when the process exits and windows resets it, and
+        // a pipe nobody holds open is broken on both. all three are the peer
+        // being gone, and the engine turns them into the end of a session rather
+        // than a transport failure — so this is the list, written down, and
+        // anything else stays an error
+        for kind in [
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::BrokenPipe,
+        ] {
+            let error = io::Error::from(kind);
+            assert!(peer_is_gone(&error), "{kind:?} is the peer being gone");
+            assert!(
+                Error::Io(io::Error::from(kind)).is_peer_gone(),
+                "{kind:?} is the peer being gone through a framing error too"
+            );
+        }
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::TimedOut,
+        ] {
+            let error = io::Error::from(kind);
+            assert!(
+                !peer_is_gone(&error),
+                "{kind:?} is something going wrong, not a session ending"
+            );
+        }
+        assert!(
+            !Error::WrongToken.is_peer_gone(),
+            "a peer that failed the handshake is present and wrong, not absent"
+        );
     }
 
     #[test]

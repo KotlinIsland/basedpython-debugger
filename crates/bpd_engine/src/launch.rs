@@ -522,7 +522,7 @@ impl Debuggee {
                 // the deadline bounds the wait rather than the whole request:
                 // the resume is answered on a thread that is already held, so
                 // it cannot be what a program with nothing to say delays
-                self.attached[at].let_go(Which::All, reporting)?;
+                self.attached[at].let_go_or_ended(reporting)?;
                 Ok(Response::Ran(self.wait_for(at, deadline, reporting)?))
             }
             Request::Wait { deadline } => {
@@ -2021,6 +2021,24 @@ impl Attached {
                 Some(answer) => return Ok(answer),
                 None => return Err(Error::AgentGone { expected }),
             }
+        }
+    }
+
+    /// let everything go, for a `Run` — where the agent being gone is an answer
+    ///
+    /// **a resume the agent was not there to take is not a failure.** the
+    /// program had already ended, and what it ended with is the answer to
+    /// `Run`: the wait that follows reads exactly that off the closed
+    /// connection and the child. propagating it instead reports a broken
+    /// connection over the top of an exit status, which is how every windows
+    /// job ended a debuggee that had run to the end and printed everything
+    ///
+    /// every other request keeps the error. a client that asked to resume a
+    /// thread and has no agent to resume it is being told something it needs
+    fn let_go_or_ended(&mut self, reporting: &mut dyn Reporting) -> Result<()> {
+        match self.let_go(Which::All, reporting) {
+            Ok(_) | Err(Error::AgentGone { .. }) => Ok(()),
+            Err(error) => Err(error),
         }
     }
 

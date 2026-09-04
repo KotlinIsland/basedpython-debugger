@@ -1156,6 +1156,21 @@ import threading
 import warnings
 
 
+def os_threads():
+    # what linux counts, read the way cpython reads it. it is `None` where there
+    # is no `/proc`, which is the same answer on both runs and so says nothing
+    # either way — and on linux it is the difference itself, in the output being
+    # compared, rather than something to go and find out afterwards
+    try:
+        with open('/proc/self/status') as status:
+            for line in status:
+                if line.startswith('Threads:'):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return None
+
+
 def forked():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
@@ -1166,6 +1181,8 @@ def forked():
     return [warning.category.__name__ for warning in caught]
 
 
+print('os threads:', os_threads())
+print('python threads:', threading.active_count())
 print('as launched:', forked())
 
 running = threading.Event()
