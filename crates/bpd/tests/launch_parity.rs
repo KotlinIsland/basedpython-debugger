@@ -1339,18 +1339,24 @@ fn a_program_that_forks_records_exactly_the_warnings_it_would_have() {
             threads_debugged.len(),
             "both runs fork the same number of times, as {form:?}"
         );
-        for (at, (without, with)) in threads_bare.iter().zip(&threads_debugged).enumerate() {
-            let (Some(without), Some(with)) = (without, with) else {
-                continue;
-            };
-            assert!(
-                with > without,
-                "at fork {at} the bare run had {without} thread(s) and the \
-                 debugged one {with}, as {form:?}. the debugger has to be on \
-                 the process for this to be about anything: a debuggee with no \
-                 debugger thread on it proves nothing about forking beside one"
-            );
-        }
+        // **at some fork**, rather than at every one. the reader thread is
+        // joined for each fork and started again after, so a count read from
+        // `/proc` while that is happening can catch either side of it — and
+        // 3.15 was measured with three threads on both runs at the third fork.
+        // what has to be true is that the debugger is on the process at all,
+        // because a debuggee with no debugger thread on it would pass every
+        // comparison below for the wrong reason
+        let counted: Vec<(usize, usize)> = threads_bare
+            .iter()
+            .zip(&threads_debugged)
+            .filter_map(|(without, with)| Some(((*without)?, (*with)?)))
+            .collect();
+        assert!(
+            counted.is_empty() || counted.iter().any(|(without, with)| with > without),
+            "the debugged run never had more threads than the bare one, as \
+             {form:?}: {counted:?}. the debugger has to be on the process for \
+             this to be about anything"
+        );
 
         // and the warnings themselves. the agent stands its reader thread down
         // in an `os.register_at_fork(before=…)` handler precisely so that the

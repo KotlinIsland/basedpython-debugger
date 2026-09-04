@@ -4233,7 +4233,7 @@ mod tests {
         // it will put a marker in — and the generated location is not dropped
         // for want of a field, because a person who does not believe the
         // debugger has to be able to see what it saw
-        let requested = SourceBreakpoint::at(4, "/src/app.by", 7);
+        let requested = SourceBreakpoint::at(4, under("src/app.by"), 7);
         let rendered = rendered_breakpoint(
             &Resolved {
                 waiting_for: None,
@@ -4260,7 +4260,7 @@ mod tests {
             rendered["line"], 7,
             "the `.by` line is what the client sees"
         );
-        assert_eq!(rendered["source"]["path"], "/src/app.by");
+        assert_eq!(rendered["source"]["path"], under("src/app.by"));
         let said = rendered["message"]
             .as_str()
             .expect("a mapped breakpoint says where it really is");
