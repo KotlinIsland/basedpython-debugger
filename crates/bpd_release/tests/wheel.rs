@@ -96,11 +96,14 @@ fn the_payload_lands_where_agent_resolution_already_looks() {
     // the filename comes from `agent_at`, which is what the layout and the
     // engine both use — the assertion here is the **directory** it sits in,
     // since that is what decides whether resolution ever finds it
+    //
+    // spelled with `/` rather than taken from `agent_at`, because a zip's entry
+    // names are `/` by the format's own rule and taking the separator from the
+    // platform is how a windows wheel came to carry `agents\3.13\…`. a test
+    // that asked `agent_at` would have agreed with that
     for tag_of in ["3.13", "3.14t"] {
-        let at = format!(
-            "basedpython_debugger-0.1.0.data/data/{}",
-            bpd_release::agent_at(tag(tag_of)).to_string_lossy()
-        );
+        let artifact = bpd_engine::agent::cargo_artifact_name();
+        let at = format!("basedpython_debugger-0.1.0.data/data/agents/{tag_of}/{artifact}");
         assert!(
             names.contains(&at),
             "the agent for {tag_of} has to go to `data`, which is `<prefix>`, \
@@ -338,7 +341,7 @@ fn a_layout_that_no_longer_matches_its_manifest_is_not_shipped() {
     // with pip's own RECORD then attesting to the wrong bytes
     let held = tempfile::tempdir().expect("a temporary directory");
     let at = layout(held.path());
-    std::fs::write(at.join("bpd"), "something else entirely")
+    std::fs::write(at.join(binary_name()), "something else entirely")
         .expect("the layout is writable in a test");
 
     let refused = wheel(
