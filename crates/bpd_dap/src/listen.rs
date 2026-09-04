@@ -47,6 +47,7 @@
 
 use std::io::{self, BufReader, Cursor, Read as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -74,6 +75,22 @@ const SERVING: &str = "nothing panics holding the open connections: every path \
 /// how often the thread watching for more connections checks whether the first
 /// client's session has ended
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
+
+/// how often a later connection's reader looks up to see whether the session it
+/// belongs to is over
+///
+/// **a `shutdown` does not reliably wake a blocking read on windows**, and that
+/// is what the sessions beside the first one were ended with: the first client
+/// disconnected, `bpd dap` shut every extra connection down, and the threads
+/// serving them stayed blocked in a read that never returned. the adapter then
+/// never exited — measured on every windows job, where the suite's watchdog
+/// killed it and reported the exit code that kill produces
+///
+/// so a later connection's socket carries a read timeout, and
+/// [`UntilTheSessionEnds`] turns a timeout into the end of the stream once the
+/// session is over. unix does not need it and is not harmed by it: the same
+/// wake happens, a few milliseconds after the `shutdown` that already worked
+const SESSION_POLL: Duration = Duration::from_millis(50);
 
 /// listening could not start, or the client connection failed
 #[derive(Debug, thiserror::Error)]
@@ -308,7 +325,7 @@ impl Listening {
                 source,
             })?;
 
-        let ended = AtomicBool::new(false);
+        let ended = Arc::new(AtomicBool::new(false));
         let reachable = self.reachable();
         // scoped, so `say` and `launcher` can be borrowed rather than owned:
         // what the later connections serve is a session of the **same**
@@ -345,6 +362,42 @@ impl Listening {
     }
 }
 
+/// a later connection's reading end, which stops when the session does
+///
+/// every read is bounded by [`SESSION_POLL`], and a timeout is answered by
+/// looking at whether the first client has gone: while it has not, the read is
+/// retried and nothing is lost — the timeout took nothing off the stream —
+/// and once it has, this reports the end of the stream, which is what the wire
+/// reader already treats as a session ending cleanly
+///
+/// it exists because `shutdown` is not enough on windows. it is **not** a
+/// deadline on the session: a connection with something to say is answered the
+/// moment it says it, exactly as before
+struct UntilTheSessionEnds {
+    reading: TcpStream,
+    ended: Arc<AtomicBool>,
+}
+
+impl io::Read for UntilTheSessionEnds {
+    fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.reading.read(into) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if self.ended.load(Ordering::Relaxed) {
+                        return Ok(0);
+                    }
+                }
+                answered => return answered,
+            }
+        }
+    }
+}
+
 /// a connection that presented this session's token
 struct Admitted {
     /// the first message's header bytes, exactly as they arrived
@@ -376,7 +429,7 @@ struct Admitted {
 fn admit_the_rest(
     listening: &Listening,
     listener: &TcpListener,
-    ended: &AtomicBool,
+    ended: &Arc<AtomicBool>,
     launcher: &(dyn Launcher + Sync),
     say: &(dyn Fn(&str) + Send + Sync),
     reachable: &Reachable,
@@ -434,7 +487,36 @@ fn admit_the_rest(
                                 return;
                             }
                         };
-                        let input = Cursor::new(admitted.headers).chain(admitted.buffered);
+
+                        // this connection's reads are bounded so that the end
+                        // of the **first** client's session can reach a thread
+                        // blocked in one. `shutdown` alone does not do that on
+                        // windows, and the adapter never exited
+                        // **whatever was read past the headers comes with it.**
+                        // `into_inner` drops a `BufReader`'s buffer, and the
+                        // first message's body is usually in it — one segment
+                        // carries the whole message. taken out first, replayed
+                        // below, and the session reads exactly what arrived
+                        let waiting = admitted.buffered.buffer().to_vec();
+                        let reading = admitted.buffered.into_inner();
+                        if let Err(error) = reading.set_read_timeout(Some(SESSION_POLL)) {
+                            say(&turn_away(
+                                &stream,
+                                peer,
+                                &format!(
+                                    "the connection would not take a read timeout, so \
+                                     the session could not be ended with the first \
+                                     client's: {error}"
+                                ),
+                            ));
+                            return;
+                        }
+                        let input = Cursor::new(admitted.headers)
+                            .chain(Cursor::new(waiting))
+                            .chain(BufReader::new(UntilTheSessionEnds {
+                                reading,
+                                ended: Arc::clone(ended),
+                            }));
                         let served = crate::adapter::serve(
                             launcher,
                             Box::new(input),
