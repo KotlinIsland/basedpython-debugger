@@ -129,26 +129,50 @@ the one it was **named** by on the command line, and `sys.executable`, which is
 what it says it is. bpd starts the first
 
 they are the same almost everywhere, and on a macos framework build they are
-not. naming `…/Python.framework/Versions/3.13/bin/python3.13` probes as
-`…/Versions/3.13/Resources/Python.app/Contents/MacOS/Python`, and starting that
-second path produces a debuggee whose own `sys.executable` names a binary
-nobody mentioned — which cpython then prints in front of its own errors:
+two different files. measured on a runner:
 
 ```text
-bare      /…/3.13/bin/python3.13: can't open file '/…/absent.py'
-under bpd /…/Python.app/Contents/MacOS/Python: can't open file '/…/absent.py'
+named   /…/Versions/3.13/Resources/Python.app/Contents/MacOS/Python
+probed  sys.executable = /…/Versions/3.13/bin/python3.13
 ```
 
-measured on a runner, and it is the fingerprint
-[the one fingerprint that remains](#the-one-fingerprint-that-remains) is about:
-the same program said something different because a debugger was attached.
-`the_program_is_run_by_the_interpreter_bpd_was_given` is the test, and it
-compares the debuggee's own `sys.executable` rather than an error message, so
-what it fails on is the thing itself
+starting the second is starting **a file nobody named**, and everything the
+debuggee then says about itself is that file's: its own `sys.executable`, the
+interpreter its children are started with, and the name cpython prints in front
+of its errors. `the_program_is_run_by_the_interpreter_bpd_was_given` compares
+the debuggee's `sys.executable` against a bare run's, which is the difference
+itself rather than a symptom of it
 
 `sys.executable` is still what the agent tag and the child-process verdicts are
 read from — it is what the interpreter says about itself, and that is a
 different question from what to run
+
+### and the name it puts in front of its own errors
+
+a script the interpreter cannot open is refused by the agent rather than by
+cpython, because under bpd the program is reached through the `-c` bootstrap —
+so the agent writes that message, and it has to write the one cpython would:
+
+```text
+<name>: can't open file '<path>': [Errno 2] No such file or directory
+```
+
+`<name>` is **`sys.orig_argv[0]`**, the name the interpreter was invoked by, and
+not `sys.executable`. cpython normalises the second and leaves the first alone,
+which is visible without a framework build at all:
+
+```text
+$ /…/bin/../bin/python3.14 /absent.py
+/…/bin/../bin/python3.14: can't open file '/absent.py': [Errno 2] …
+$ /…/bin/../bin/python3.14 -c 'import sys; print(sys.executable)'
+/…/bin/python3.14
+```
+
+reading `sys.executable` there is a debuggee that names itself differently than
+it would have, and
+`an_interpreter_names_itself_the_way_it_was_invoked_and_not_the_way_it_resolves`
+is the test — it names the interpreter through its own parent, so it reaches the
+difference on any machine
 
 ## which agent is staged
 
