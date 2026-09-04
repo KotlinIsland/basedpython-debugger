@@ -26,6 +26,13 @@ node_modules/
 /editors/intellij/.intellijPlatform
 /editors/intellij/build
 
+# the module file, which is one checkout's rather than the project's. the
+# scaffold commit tracked `.idea/misc.xml` and `vcs.xml` on purpose — those are
+# the project's settings — and `.idea/.gitignore` already covers the workspace
+# and the shelf. the `.iml` was the one gap, and it left every intellij checkout
+# permanently dirty with a file nobody can act on
+/.idea/*.iml
+
 .DS_Store
 *.pyc
 __pycache__/
