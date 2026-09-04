@@ -2,10 +2,10 @@
 site_name = "basedpythondebugger"
 site_description = "a debugger for python and basedpython, built on PEP 669"
 site_author = "KotlinIsland"
-site_url = "https://kotlinisland.github.io/basedpythondebugger/"
+site_url = "https://kotlinisland.github.io/basedpython-debugger/"
 docs_dir = "docs"
-repo_url = "https://github.com/KotlinIsland/basedpythondebugger"
-repo_name = "KotlinIsland/basedpythondebugger"
+repo_url = "https://github.com/KotlinIsland/basedpython-debugger"
+repo_name = "KotlinIsland/basedpython-debugger"
 edit_uri = "edit/main/docs"
 
 [project.theme]
@@ -50,8 +50,8 @@ toggle.name = "Switch to light mode"
 
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
-link = "https://github.com/KotlinIsland/basedpythondebugger"
-name = "basedpythondebugger on GitHub"
+link = "https://github.com/KotlinIsland/basedpython-debugger"
+name = "basedpython-debugger on GitHub"
 
 [[project.nav]]
 basedpythondebugger = "index.md"
