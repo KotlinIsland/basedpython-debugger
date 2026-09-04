@@ -256,24 +256,10 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<bool>
     Ok(true)
 }
 
-/// whether an io failure means the peer is **gone** rather than that something
-/// went wrong
-///
-/// a socket whose process has exited says so differently on each platform: unix
-/// closes it, and a reader sees `Ok(0)`; windows resets it, and a reader sees
-/// `ECONNRESET` while a writer sees the same. a pipe that nobody holds open is
-/// `BrokenPipe` on both. all three are one event — there is no peer any more —
-/// and reading them as transport failures is how a debuggee that ran to the end
-/// and printed everything gets reported as a broken connection
-#[must_use]
-pub fn peer_is_gone(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::ConnectionReset
-            | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::BrokenPipe
-    )
-}
+/// the one definition of what "the peer is gone" means, from
+/// [`bpd_core::peer_is_gone`] — the DAP wire needs the same answer and is in
+/// another crate, so it lives in the one they both depend on
+pub use bpd_core::peer_is_gone;
 
 /// what the peer being gone means, at the position it went
 ///

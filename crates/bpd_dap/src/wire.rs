@@ -190,9 +190,22 @@ fn read_header_block<R: BufRead>(input: &mut R, raw: &mut Vec<u8>) -> Result<Opt
 
     loop {
         let start = raw.len();
-        let read = input
-            .read_until(b'\n', raw)
-            .map_err(|source| Error::Connection { source })?;
+        let read = match input.read_until(b'\n', raw) {
+            Ok(read) => read,
+            // **the client is gone, said the way windows says it.** a process
+            // that exits closes its socket on unix and the read below sees
+            // `0`; windows resets it, and the same event arrives here as
+            // `ECONNRESET`. read as a failure, the session ended in an error
+            // and `bpd dap` exited non-zero every time a client hung up —
+            // which is how every session on that platform ends
+            //
+            // it becomes `0` rather than an answer of its own, so the `start`
+            // check below decides what it means: between messages it is the
+            // end of the session, and part way through the headers it is the
+            // truncation it already was
+            Err(error) if bpd_core::peer_is_gone(&error) => 0,
+            Err(source) => return Err(Error::Connection { source }),
+        };
         if read == 0 {
             // the peer hung up between messages, which is how a session ends.
             // hanging up part way through the headers is not, and is what the
@@ -441,6 +454,55 @@ mod tests {
 
     fn read(bytes: &str) -> Result<Option<Incoming>, Error> {
         Reader::new(bytes.as_bytes()).next_message()
+    }
+
+    /// a client that serves what it has and is then gone, the way windows says
+    /// it: `ECONNRESET` rather than a closed socket
+    struct Reset {
+        sends: Vec<u8>,
+        sent: usize,
+    }
+
+    impl Read for Reset {
+        fn read(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
+            if self.sent == self.sends.len() {
+                return Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+            }
+            let taking = into.len().min(self.sends.len() - self.sent);
+            into[..taking].copy_from_slice(&self.sends[self.sent..self.sent + taking]);
+            self.sent += taking;
+            Ok(taking)
+        }
+    }
+
+    #[test]
+    fn a_client_that_reset_between_messages_ended_its_session() {
+        // what every `bpd dap` session on windows does when the client hangs
+        // up. read as a failure it made the adapter exit non-zero at the end of
+        // a session that had gone perfectly
+        let ended = Reader::new(Reset {
+            sends: Vec::new(),
+            sent: 0,
+        })
+        .next_message()
+        .expect("a client that is gone between messages ended its session");
+        assert!(ended.is_none(), "and there is no message to answer");
+    }
+
+    #[test]
+    fn a_client_that_reset_inside_its_headers_is_not_an_ending() {
+        // the half that must not go with it: a header block that stops half way
+        // is a client that died mid-message, and saying the session ended
+        // cleanly would lose the one it was sending
+        let refused = Reader::new(Reset {
+            sends: b"Content-Length: 12\r\n".to_vec(),
+            sent: 0,
+        })
+        .next_message();
+        assert!(
+            matches!(refused, Err(Error::NoContentLength { .. })),
+            "a header block that stops half way is not a session ending: {refused:?}"
+        );
     }
 
     #[test]

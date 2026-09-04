@@ -2334,12 +2334,21 @@ fn a_second_client_that_presents_the_token_is_served_beside_the_first() {
     // and it reached the **same** launcher, which is the point of it being a
     // second connection rather than a second adapter: this debuggee is already
     // launched, and a second program on it is refused by name
+    // built with `serde_json` rather than written out, because a path goes in
+    // it: on windows that is `\\?\C:\Users\…`, and every one of those
+    // backslashes has to be escaped to be a json string at all. hand-written,
+    // it reached the adapter as `invalid escape at line 1 column 74` and the
+    // session failed for a reason that had nothing to do with what is under
+    // test
     second.send(
         "",
-        &format!(
-            r#"{{"seq":2,"type":"request","command":"launch","arguments":{{"program":"{}"}}}}"#,
-            fixture.path().display()
-        ),
+        &serde_json::json!({
+            "seq": 2,
+            "type": "request",
+            "command": "launch",
+            "arguments": { "program": fixture.path() },
+        })
+        .to_string(),
     );
     let refused = second.next_message();
     assert_eq!(refused["success"], false, "{refused}");

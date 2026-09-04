@@ -55,20 +55,57 @@ jobs:
       # or never passed. the wheel jobs below launch every interpreter through
       # an installed wheel, which is a great deal — and it is not the test
       # suite, on five platforms, against five interpreters
+      #
+      # it **waits** rather than refusing outright, because tagging a commit as
+      # you push it is the ordinary way to do this: the first cut checked once,
+      # found ci queued forty seconds behind it, and refused a release that was
+      # about to be perfectly good. what it will not do is wait for a run that
+      # does not exist — a tag on a commit that was never pushed to `main` has
+      # nothing to wait for, and says so
       - name: ci passed on this commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          conclusion=$(gh api \
-            "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&status=completed" \
-            --jq '[.workflow_runs[] | select(.name == "ci")] | first | .conclusion // "nothing"')
-          if [ "$conclusion" != "success" ]; then
-            echo "ci on $GITHUB_SHA is \`$conclusion\`, and a release is built" >&2
-            echo "from a commit whose suite passed. wait for ci on that commit," >&2
-            echo "then move the tag onto it and push again" >&2
-            exit 1
-          fi
+          deadline=$(( $(date +%s) + 60 * 60 ))
+          while :; do
+            run=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA" \
+              --jq '[.workflow_runs[] | select(.name == "ci")] | first')
+            if [ -z "$run" ] || [ "$run" = "null" ]; then
+              echo "no ci run exists for $GITHUB_SHA." >&2
+              echo "a release is built from a commit whose suite passed, and this" >&2
+              echo "commit has not been pushed to \`main\` — ci runs there, not on" >&2
+              echo "a tag. push the branch, let it finish, then move the tag" >&2
+              exit 1
+            fi
+
+            status=$(echo "$run" | jq -r .status)
+            conclusion=$(echo "$run" | jq -r '.conclusion // ""')
+            url=$(echo "$run" | jq -r .html_url)
+
+            case "$status:$conclusion" in
+              completed:success)
+                echo "ci passed on $GITHUB_SHA: $url"
+                break
+                ;;
+              completed:*)
+                echo "ci on $GITHUB_SHA finished as \`$conclusion\`: $url" >&2
+                echo "a release is built from a commit whose suite passed. fix" >&2
+                echo "what it found, and move the tag onto the commit that fixes it" >&2
+                exit 1
+                ;;
+              *)
+                if [ "$(date +%s)" -ge "$deadline" ]; then
+                  echo "ci on $GITHUB_SHA is still \`$status\` an hour later: $url" >&2
+                  echo "nothing is being released on a suite that has not answered" >&2
+                  exit 1
+                fi
+                echo "ci is $status on $GITHUB_SHA — waiting: $url"
+                sleep 60
+                ;;
+            esac
+          done
 
   linux:
     name: wheel for ${{ matrix.platform }}
