@@ -182,6 +182,21 @@ fn is_base_events(filename: &str) -> bool {
             .is_some_and(|directory| directory == "asyncio")
 }
 
+/// whether a `co_filename` is inside an `asyncio` directory
+///
+/// by component, so that it is true of `/usr/lib/python3.14/asyncio/tasks.py`
+/// and of `C:\Python314\Lib\asyncio\tasks.py` — and false of a program's own
+/// `asyncio_helpers.py`, which a substring test would have caught
+fn under_asyncio(filename: &str) -> bool {
+    std::path::Path::new(filename)
+        .parent()
+        .is_some_and(|directory| {
+            directory
+                .components()
+                .any(|part| part.as_os_str() == "asyncio")
+        })
+}
+
 /// the code object of that qualified name, anywhere under this one
 ///
 /// a method is nested twice — the module holds the class body and the class body
@@ -263,7 +278,13 @@ pub(crate) fn record(python: Python<'_>, returned: &Bound<'_, PyAny>) -> PyResul
         // while they are *leading*: a program with a file of its own under an
         // `asyncio/` directory keeps every frame once the first one has been
         // taken, because by then the record has reached the program
-        if frames.is_empty() && file.contains("/asyncio/") {
+        //
+        // asked of the **path** rather than of the text. `/asyncio/` is never
+        // in a windows `co_filename` — `…\Lib\asyncio\tasks.py` — so none of
+        // asyncio's frames were dropped there and the innermost creating frame
+        // this reported was `create_task` itself, which is the machinery rather
+        // than the program
+        if frames.is_empty() && under_asyncio(&file) {
             frame = one.getattr("f_back").ok().filter(|back| !back.is_none());
             continue;
         }
@@ -367,7 +388,7 @@ fn current(python: Python<'_>) -> Option<Bound<'_, PyAny>> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_base_events;
+    use super::{is_base_events, under_asyncio};
 
     #[test]
     fn the_loops_own_module_is_recognised_by_path_and_not_by_text() {
@@ -388,5 +409,20 @@ mod tests {
         assert!(!is_base_events("/usr/lib/python3.14/asyncio/tasks.py"));
         assert!(!is_base_events("/somewhere/else/base_events.py"));
         assert!(!is_base_events("base_events.py"));
+    }
+
+    #[test]
+    fn asyncios_own_frames_are_recognised_by_path_and_not_by_text() {
+        // `/asyncio/` is never in a windows `co_filename`, so none of the
+        // machinery's frames were dropped there and the scheduling record began
+        // at `create_task` — asyncio's own function rather than the program's
+        assert!(under_asyncio("/usr/lib/python3.14/asyncio/tasks.py"));
+        #[cfg(windows)]
+        assert!(under_asyncio(r"C:\Python314\Lib\asyncio\tasks.py"));
+
+        // and a program's own file is not asyncio's because its name starts the
+        // same way, which a substring test would have got wrong
+        assert!(!under_asyncio("/home/someone/app/asyncio_helpers.py"));
+        assert!(!under_asyncio("/home/someone/app/worker.py"));
     }
 }
