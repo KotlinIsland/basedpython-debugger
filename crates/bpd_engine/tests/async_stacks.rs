@@ -69,6 +69,22 @@ fn stack_at_the_stop(debuggee: &mut Debuggee, line: u32, file: &std::path::Path)
     debuggee.the_stack(None).expect("the stack was answered")
 }
 
+/// whether a recorded file is inside an `asyncio` directory
+///
+/// the same question `bpd_agent::tasks` asks when it drops the machinery's
+/// leading frames, asked the same way: **by component**. `/asyncio/` is not in
+/// a windows path, and a test that looked for it would agree with a bug rather
+/// than with the agent
+fn under_asyncio(file: &str) -> bool {
+    std::path::Path::new(file)
+        .parent()
+        .is_some_and(|directory| {
+            directory
+                .components()
+                .any(|part| part.as_os_str() == "asyncio")
+        })
+}
+
 #[test]
 fn a_stop_inside_a_task_says_where_the_task_was_created() {
     let fixture = Fixture::new("program", PROGRAM);
@@ -180,7 +196,7 @@ fn a_task_made_by_another_route_is_recorded_the_same_way() {
     // the stack the task was made on — dropping it would be bpd truncating a
     // real stack because it found it uninteresting
     assert!(
-        !stack.scheduled_by[0].file.contains("/asyncio/"),
+        !under_asyncio(&stack.scheduled_by[0].file),
         "the record still begins in asyncio: {:#?}",
         stack.scheduled_by
     );
@@ -188,7 +204,7 @@ fn a_task_made_by_another_route_is_recorded_the_same_way() {
         stack
             .scheduled_by
             .iter()
-            .any(|frame| frame.file.contains("/asyncio/")),
+            .any(|frame| under_asyncio(&frame.file)),
         "the event loop really was under `main`, and a record without it would \
          be a stack bpd had edited: {:#?}",
         stack.scheduled_by
