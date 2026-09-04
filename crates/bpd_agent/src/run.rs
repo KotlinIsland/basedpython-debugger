@@ -324,10 +324,22 @@ fn unopenable(
         // has `[<the interpreter>, "-c", <the bootstrap>]`. if that is somehow
         // empty this raises rather than inventing a name for the program
         let invoked = sys.getattr("orig_argv")?.get_item(0)?;
+
+        // **the path goes in as `repr`, because that is what cpython does.** it
+        // formats the filename with `%R`, so a path with a backslash in it
+        // comes out escaped — on windows every path has them, and a bare run
+        // says `'\\?\\C:\\Users\\…'` where quoting it here said
+        // `'\?\C:\Users\…'`. the two coincide on unix, which is why this
+        // stood until the suite ran on windows
+        //
+        // it is the same reason the rest of this message is taken from the
+        // interpreter rather than written: a debugger that rewords a refusal
+        // sends people looking for a different problem
+        let displayed = pyo3::types::PyString::new(python, displayed).repr()?;
         sys.getattr("stderr")?.call_method1(
             "write",
             (format!(
-                "{invoked}: can't open file '{displayed}': [Errno {errno}] {strerror}\n"
+                "{invoked}: can't open file {displayed}: [Errno {errno}] {strerror}\n"
             ),),
         )?;
         Ok(())

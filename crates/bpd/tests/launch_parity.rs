@@ -101,11 +101,27 @@ fn finished(command: &mut Command) -> Run {
         .output()
         .expect("the interpreter runs, and the binary was built by the same cargo invocation");
 
+    // **the line ending is the platform's, and it is never what any of this is
+    // about.** cpython writes `\r\n` on windows, and these tests compare what a
+    // program said — its argv, its `__name__`, its search path, the words of
+    // its own refusal — against what it says without a debugger, or against a
+    // line written out here
+    //
+    // both runs get the same treatment, so every comparison between them is
+    // unchanged: a bare run and a debugged one that differed in their line
+    // endings would still differ after this, because only `\r\n` becomes `\n`
+    // and it becomes that on both sides
+    let ending = |written: Vec<u8>, what: &str| -> String {
+        String::from_utf8(written)
+            .unwrap_or_else(|_| panic!("a program's {what} is utf8"))
+            .replace("\r\n", "\n")
+    };
+
     Run {
         exit_code: output.status.code(),
         success: output.status.success(),
-        stdout: String::from_utf8(output.stdout).expect("the program writes utf8"),
-        stderr: String::from_utf8(output.stderr).expect("cpython writes utf8 to stderr"),
+        stdout: ending(output.stdout, "stdout"),
+        stderr: ending(output.stderr, "stderr"),
     }
 }
 
