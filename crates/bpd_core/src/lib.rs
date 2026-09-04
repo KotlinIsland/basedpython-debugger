@@ -29,6 +29,7 @@ pub mod fact;
 pub mod frame;
 pub mod jump;
 pub mod parity;
+pub mod peer;
 pub mod python;
 pub mod query;
 pub mod refusal;
@@ -58,6 +59,7 @@ pub use jump::{
     Whose,
 };
 pub use parity::{Carried, Facet, Naming, Reach, Told, ran, ran_as, say, surface};
+pub use peer::peer_is_gone;
 pub use query::{
     Answer, Appeared, Changed, Difference, FrameState, Frames, Moved, NotCompared, NotRead,
     QueryPart, ScopeState, Seen, Side, Snapshot, SnapshotId, Source, State, StateQuery, Subject,
