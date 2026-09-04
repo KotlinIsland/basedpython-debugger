@@ -20,8 +20,14 @@ fn skill() -> PathBuf {
 
 fn source() -> String {
     let file = skill();
-    std::fs::read_to_string(&file)
-        .unwrap_or_else(|error| panic!("{} is the shipped skill: {error}", file.display()))
+    let text = std::fs::read_to_string(&file)
+        .unwrap_or_else(|error| panic!("{} is the shipped skill: {error}", file.display()));
+
+    // **read with the line endings this checkout has.** git hands a windows
+    // working tree `\r\n`, and every test here splits the skill on `\n` — the
+    // frontmatter fence, the headings, the backticked runs. what they are
+    // about is what the skill *says*, which is the same file either way
+    text.replace("\r\n", "\n")
 }
 
 /// every backticked run in the text
