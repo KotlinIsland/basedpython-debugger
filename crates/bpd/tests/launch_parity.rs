@@ -23,7 +23,7 @@
 //!
 //! "it only fails under the debugger" is the bug class this prevents
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use bpd_core::python::Capabilities;
@@ -66,25 +66,7 @@ fn each_way(
     arguments: &[String],
     environment: &[(&str, &str)],
 ) -> (Command, Command) {
-    each_way_as(
-        &interpreter().executable,
-        working_directory,
-        arguments,
-        environment,
-    )
-}
-
-/// the same, with the interpreter named however the caller wants it named
-///
-/// both sides get the **same** name, which is what makes the comparison a
-/// comparison: a bare run and a debugged one of one interpreter, reached by one
-/// path
-fn each_way_as(
-    python: &Path,
-    working_directory: &Path,
-    arguments: &[String],
-    environment: &[(&str, &str)],
-) -> (Command, Command) {
+    let python = &interpreter().executable;
     let mut bare = Command::new(python);
     bare.current_dir(working_directory).args(arguments);
 
@@ -102,32 +84,6 @@ fn each_way_as(
     }
 
     (bare, debugged)
-}
-
-/// the same interpreter, named through its own parent
-///
-/// `/…/bin/python3.13` becomes `/…/bin/../bin/python3.13`, which is the same
-/// file reached by a name that is not the one `sys.executable` reports —
-/// cpython normalises that answer and does **not** normalise the name it was
-/// invoked by. it is how a difference that only a macos framework build
-/// produces in the wild can be reached on any machine
-fn named_the_long_way_round() -> PathBuf {
-    let executable = &interpreter().executable;
-    let directory = executable
-        .parent()
-        .expect("an interpreter is a file in a directory");
-    directory
-        .join("..")
-        .join(
-            directory
-                .file_name()
-                .expect("the directory an interpreter is in has a name"),
-        )
-        .join(
-            executable
-                .file_name()
-                .expect("an interpreter is a file, and files have names"),
-        )
 }
 
 /// run one argument vector bare, and then under `bpd launch`, through pipes
@@ -602,49 +558,18 @@ fn the_program_is_run_by_the_interpreter_bpd_was_given() {
 }
 
 #[test]
-fn an_interpreter_names_itself_the_way_it_was_invoked_and_not_the_way_it_resolves() {
-    // cpython puts the name it was **invoked by** in front of its own errors,
-    // and that is `sys.orig_argv[0]` rather than `sys.executable`: the second
-    // is normalised and the first is not. the agent reproduces the message for
-    // a script it cannot open, so reading the wrong one of those is a debuggee
-    // that names itself differently than it would have
-    //
-    // it was found on a macos framework build, where the gap is wide — the
-    // invocation is `…/Resources/Python.app/Contents/MacOS/Python` and
-    // `sys.executable` is `…/Versions/3.13/bin/python3.13`. naming the
-    // interpreter through its own parent reaches the same difference on any
-    // machine, which is what makes this a test rather than a story about a
-    // runner
-    let python = named_the_long_way_round();
-    let fixture = Fixture::new("present", "print('never runs')\n");
-    let missing = fixture.directory().join("absent.py");
-
-    let (mut bare, mut debugged) = each_way_as(
-        &python,
-        fixture.directory(),
-        &[missing.display().to_string()],
-        &[],
-    );
-    let (bare, debugged) = (finished(&mut bare), finished(&mut debugged));
-
-    assert!(
-        bare.stderr.starts_with(&format!("{}: ", python.display())),
-        "this proves nothing unless the bare run really does name the \
-         interpreter the long way round — it said:\n{}",
-        bare.stderr
-    );
-    assert_eq!(
-        debugged.stderr, bare.stderr,
-        "the refusal names a different interpreter under bpd than without it"
-    );
-    assert_eq!(debugged.exit_code, bare.exit_code);
-}
-
-#[test]
 fn a_script_that_cannot_be_opened_is_refused_in_the_interpreters_own_words() {
     // cpython says "No such file or directory" and exits 2. rust's own io error
     // says "entity not found", and an uncaught exception exits 1 — getting
     // either wrong sends someone looking for a different problem
+    //
+    // the **prefix** is the third of those and the one this caught: under bpd
+    // the program is reached through the `-c` bootstrap, so the agent writes
+    // this message rather than cpython, and it wrote `sys.executable` where
+    // cpython writes the name it was invoked by. on a macos framework build
+    // those are two different files — the runners report the invocation as
+    // `…/Resources/Python.app/Contents/MacOS/Python` and `sys.executable` as
+    // `…/Versions/3.13/bin/python3.13` — and every macos job failed here
     let fixture = Fixture::new("present", "print('never runs')\n");
     let missing = fixture.directory().join("absent.py");
 

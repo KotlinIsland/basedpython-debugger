@@ -302,8 +302,9 @@ fn forget_the_bootstraps_source(python: Python<'_>) -> PyResult<()> {
 /// invocation is `…/Resources/Python.app/Contents/MacOS/Python` and
 /// `sys.executable` is `…/Versions/3.13/bin/python3.13`
 ///
-/// `an_interpreter_names_itself_the_way_it_was_invoked_and_not_the_way_it_resolves`
-/// is the test, and it reaches the same difference without a framework build
+/// `a_script_that_cannot_be_opened_is_refused_in_the_interpreters_own_words`
+/// is the test — it compares this message against the one a bare run writes,
+/// which is where the framework build's two names showed up
 ///
 /// the exit code is 2, which is what cpython uses for a script it cannot open —
 /// not the 1 that an uncaught exception produces

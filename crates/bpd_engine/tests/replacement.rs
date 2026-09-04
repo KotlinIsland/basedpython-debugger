@@ -864,6 +864,52 @@ fn a_class_body_carries_its_own_source_line_and_it_is_the_only_thing_masked() {
 }
 
 #[test]
+fn a_function_that_carries_annotations_is_replaced_like_any_other() {
+    // every annotated function has an `__annotate__` code object since PEP 649,
+    // and **on 3.15 that body loads `NotImplementedError` through
+    // `LOAD_COMMON_CONSTANT`** — an operand `dis` resolves to the class itself.
+    // bpd compares instruction streams by marshalling them and marshal cannot
+    // carry a class, so before it was named this raised `ValueError:
+    // unmarshallable object` *inside the debuggee*, at whatever line the
+    // program was stopped on
+    //
+    // measured on 3.15.0rc1, against 3.13 and 3.14 where the same source has no
+    // such operand. annotations are ordinary python, so a debugger that cannot
+    // replace a file with them can hardly replace anything
+    // the same module every other test here replaces, with the one signature
+    // annotated. everything the program reads out of it is unchanged, so what
+    // this adds to the suite is the `__annotate__` body and nothing else
+    let annotated = VICTIM.replace(
+        "def plain(value):\n",
+        "def plain(value: int) -> tuple[str, int]:\n",
+    );
+    let edited = EDITED.replace(
+        "def plain(value):\n",
+        "def plain(value: int) -> tuple[str, int]:\n",
+    );
+    assert_ne!(annotated, VICTIM, "the signature this annotates has moved");
+    assert_ne!(edited, EDITED, "the signature this annotates has moved");
+
+    let (fixture, victim) = laid_out(&annotated);
+    let mut debuggee = launch(&fixture);
+    held_before_the_report(&mut debuggee, &fixture);
+
+    std::fs::write(&victim, &edited).expect("the fixture directory is writable");
+    let replaced = debuggee
+        .replace_code(&victim)
+        .expect("the replacement was answered");
+
+    let (changed, _) = applied(&replaced);
+    assert!(
+        changed.iter().any(|one| one.function == "plain"),
+        "the annotated function's body changed, so it is one that was \
+         replaced: {changed:#?}"
+    );
+
+    to_exit(&mut debuggee);
+}
+
+#[test]
 fn a_breakpoint_in_the_replaced_file_is_bound_again_and_fires_where_the_code_is_now() {
     let (fixture, victim) = laid_out(VICTIM);
     let mut debuggee = launch(&fixture);
