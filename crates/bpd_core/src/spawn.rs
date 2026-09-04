@@ -24,7 +24,87 @@
 //! of, and one that stayed silent about `uv run python` would be the silence
 //! this exists to remove
 
+use std::ffi::CStr;
 use std::fmt;
+
+/// the audit events a child process is recognised through
+///
+/// they live here rather than in the agent that installs the hook because two
+/// things need the same answer: the agent, which compares an event name against
+/// this on every audit event a program raises, and
+/// `a_program_that_watches_its_own_audit_events_sees_exactly_the_ones_it_would_have`,
+/// which has to know the fixture actually reached one of them or it compared
+/// two runs of a program and proved nothing
+///
+/// that test restated the list as a single event, and picked
+/// `_posixsubprocess.fork_exec`. which of these an ordinary `subprocess.run`
+/// raises is the interpreter's choice on the day — cpython uses `posix_spawn`
+/// where it can — so the restatement was true on one machine and false on the
+/// next, and the test refused a run in which nothing was wrong. a list that is
+/// written twice is a list that disagrees with itself eventually
+/// the audit events that make a process, on 3.14 and later
+///
+/// `subprocess.Popen` is deliberately absent: the event beneath it fires for
+/// the same child, so watching both reports every ordinary subprocess twice.
+/// `os.system` is absent for a different reason — it hands a whole command line
+/// to a shell, and what a shell does with one is not knowable from the vector
+#[cfg(not(windows))]
+pub const MAKING_A_PROCESS: &[&CStr] = &[
+    c"_posixsubprocess.fork_exec",
+    c"os.posix_spawn",
+    c"os.exec",
+    c"os.fork",
+];
+
+/// the same on 3.13, where `_posixsubprocess.fork_exec` raises nothing
+///
+/// `subprocess.Popen` takes its place, because there it is the only event a
+/// `subprocess` child raises at all. `import` is watched for one reason and one
+/// only — the agent's `announce_blindspot`, which needs to know when `multiprocessing`
+/// arrives
+#[cfg(not(windows))]
+pub const MAKING_A_PROCESS_BEFORE_314: &[&CStr] = &[
+    c"subprocess.Popen",
+    c"os.posix_spawn",
+    c"os.exec",
+    c"os.fork",
+    c"import",
+];
+
+/// the events that make a process on windows, on every supported release
+///
+/// the list is per platform because the events are: nothing on windows raises
+/// `_posixsubprocess.fork_exec`, and nothing on posix raises
+/// `_winapi.CreateProcess`. there is no `os.fork` here and there cannot be one,
+/// and `subprocess.Popen` is absent for the reason it is on posix — windows
+/// raises it beside `_winapi.CreateProcess` for the same child
+///
+/// it does not change with the release, because `_winapi.CreateProcess` has
+/// been an audit event since PEP 578 landed in 3.8 — long before this project's
+/// minimum. `multiprocessing`'s spawn method goes through it here, so the 3.13
+/// blind spot below is a posix one
+#[cfg(windows)]
+pub const MAKING_A_PROCESS: &[&CStr] = &[c"_winapi.CreateProcess", c"os.exec"];
+
+/// the same on 3.13, which on windows is the same list
+#[cfg(windows)]
+pub const MAKING_A_PROCESS_BEFORE_314: &[&CStr] = MAKING_A_PROCESS;
+
+/// the events to watch on an interpreter of this version
+///
+/// the split is at 3.14, where `_posixsubprocess.fork_exec` became an audit
+/// event. below it that event is silent, so `subprocess.Popen` is watched in
+/// its place — which covers `subprocess` and does **not** cover
+/// `multiprocessing`, because `multiprocessing` never goes near `subprocess`.
+/// the agent turns that into a [`Blindspot`] it announces rather than a silence
+#[must_use]
+pub fn making_a_process(major: u8, minor: u8) -> &'static [&'static CStr] {
+    if (major, minor) < (3, 14) {
+        MAKING_A_PROCESS_BEFORE_314
+    } else {
+        MAKING_A_PROCESS
+    }
+}
 
 /// a child process the debuggee started while it ran
 ///

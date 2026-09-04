@@ -122,6 +122,34 @@ is a basedpython build that no longer matches its source map — see
 about it reaches the debuggee: the map is read and hashed out of process, and
 the agent never learns one exists
 
+## the interpreter that is started is the one that was named
+
+the probe asks an interpreter about itself, and two of the answers are paths:
+the one it was **named** by on the command line, and `sys.executable`, which is
+what it says it is. bpd starts the first
+
+they are the same almost everywhere, and on a macos framework build they are
+not. naming `…/Python.framework/Versions/3.13/bin/python3.13` probes as
+`…/Versions/3.13/Resources/Python.app/Contents/MacOS/Python`, and starting that
+second path produces a debuggee whose own `sys.executable` names a binary
+nobody mentioned — which cpython then prints in front of its own errors:
+
+```text
+bare      /…/3.13/bin/python3.13: can't open file '/…/absent.py'
+under bpd /…/Python.app/Contents/MacOS/Python: can't open file '/…/absent.py'
+```
+
+measured on a runner, and it is the fingerprint
+[the one fingerprint that remains](#the-one-fingerprint-that-remains) is about:
+the same program said something different because a debugger was attached.
+`the_program_is_run_by_the_interpreter_bpd_was_given` is the test, and it
+compares the debuggee's own `sys.executable` rather than an error message, so
+what it fails on is the thing itself
+
+`sys.executable` is still what the agent tag and the child-process verdicts are
+read from — it is what the interpreter says about itself, and that is a
+different question from what to run
+
 ## which agent is staged
 
 the agent is a cpython extension and is **not** `abi3`: it reads

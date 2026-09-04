@@ -2353,7 +2353,7 @@ fn start(
     let endpoint = listener.endpoint()?;
 
     let mut arguments = vec![
-        OsString::from(&interpreter.executable),
+        OsString::from(interpreter.to_start()),
         OsString::from("-c"),
         OsString::from(BOOTSTRAP),
     ];
@@ -2410,7 +2410,7 @@ fn start(
                 // the command somewhere else would run a different program for
                 // a relative path, and resolve a different `sys.path[0]`
                 directory: std::env::current_dir().map_err(|source| Error::Spawn {
-                    interpreter: interpreter.executable.clone(),
+                    interpreter: interpreter.to_start().to_path_buf(),
                     source,
                 })?,
             };
@@ -2435,7 +2435,7 @@ fn spawned_here(
     listener: Listener,
     map: Option<bpd_core::SourceMap>,
 ) -> Result<Launched> {
-    let mut command = Command::new(&interpreter.executable);
+    let mut command = Command::new(interpreter.to_start());
     command.args(&arguments[1..]);
     for (name, value) in environment {
         command.env(name, value);
@@ -2469,7 +2469,7 @@ fn spawned_here(
     }
 
     let mut child = command.spawn().map_err(|source| Error::Spawn {
-        interpreter: interpreter.executable.clone(),
+        interpreter: interpreter.to_start().to_path_buf(),
         source,
     })?;
 
@@ -2488,7 +2488,7 @@ fn spawned_here(
 
     let session = listener.accept(|| {
         let exited = child.try_wait().map_err(|source| Error::Spawn {
-            interpreter: interpreter.executable.clone(),
+            interpreter: interpreter.to_start().to_path_buf(),
             source,
         })?;
         Ok(exited.map(|status| status.to_string()))
@@ -2509,7 +2509,7 @@ fn spawned_here(
         Ok(stop) => stop,
         Err(Error::AgentGone { .. }) => {
             let status = child.wait().map_err(|source| Error::Spawn {
-                interpreter: interpreter.executable.clone(),
+                interpreter: interpreter.to_start().to_path_buf(),
                 source,
             })?;
             // the same rule as a program that exits after running: what it said

@@ -192,6 +192,29 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
+    /// the interpreter to **start**, which is the one that was named
+    ///
+    /// not [`Capabilities::executable`], which is what that interpreter said
+    /// `sys.executable` was when it was probed. the two are the same almost
+    /// everywhere and are not on a macos framework build: naming
+    /// `…/Versions/3.13/bin/python3.13` probes as
+    /// `…/Versions/3.13/Resources/Python.app/Contents/MacOS/Python`
+    ///
+    /// starting the second is a debuggee whose own `sys.executable` names a
+    /// binary nobody mentioned, and cpython puts that name in front of its own
+    /// errors. measured on a runner: an unopenable script was refused as
+    /// `…/MacOS/Python: can't open file` under bpd and as
+    /// `…/bin/python3.13: can't open file` without it — the same program,
+    /// saying something different because a debugger was attached
+    ///
+    /// [`Capabilities::executable`] stays what the interpreter says about
+    /// itself, which is what the agent tag and the child-process verdicts are
+    /// read from. this is what to run
+    #[must_use]
+    pub fn to_start(&self) -> &Path {
+        &self.interpreter
+    }
+
     /// the agent build this interpreter can load
     ///
     /// taken from what the interpreter said about itself when it was probed,

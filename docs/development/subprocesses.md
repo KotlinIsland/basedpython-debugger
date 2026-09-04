@@ -96,6 +96,17 @@ watch list is chosen from the running interpreter's version:
 | 3.13           | `subprocess.Popen`, `os.posix_spawn`, `os.exec`, `os.fork`           |
 | windows, any   | `_winapi.CreateProcess`, `os.exec`                                   |
 
+the list lives in `bpd_core::spawn::making_a_process`, not in the agent that
+installs the hook, because the parity suite needs the same answer. it used to
+be written in both places, and the copy in the test named a single event —
+`_posixsubprocess.fork_exec` on 3.14 and later. **which of these an ordinary
+`subprocess.run` raises is the interpreter's choice on the day**: cpython
+reaches for `posix_spawn` whenever the call allows it, so the same fixture
+raises `os.posix_spawn` on one machine and `_posixsubprocess.fork_exec` on the
+next. both are watched and either is a child seen, so nothing was ever missed —
+but the test's copy of the list was true on a mac and false on a linux runner,
+and it failed a run in which nothing was wrong
+
 that is **not** a capability ladder, and this project does not ship one. it is
 one capability reached through the name the interpreter raises it under — the
 same kind of release-to-release change as 3.14 splitting `BRANCH` into

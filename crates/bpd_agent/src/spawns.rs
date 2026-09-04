@@ -104,54 +104,6 @@ use pyo3::types::{PyBytes, PyString};
 use crate::attach;
 use crate::cells::ForkCell;
 
-/// the audit events that make a process, on 3.14 and later
-///
-/// `subprocess.Popen` is deliberately absent: the event beneath it fires for
-/// the same child, so watching both reports every ordinary subprocess twice.
-/// `os.system` is absent for a different reason — it hands a whole command line
-/// to a shell, and what a shell does with one is not knowable from the vector
-#[cfg(not(windows))]
-const MAKING_A_PROCESS: &[&CStr] = &[
-    c"_posixsubprocess.fork_exec",
-    c"os.posix_spawn",
-    c"os.exec",
-    c"os.fork",
-];
-
-/// the same on 3.13, where `_posixsubprocess.fork_exec` raises nothing
-///
-/// `subprocess.Popen` takes its place, because there it is the only event a
-/// `subprocess` child raises at all. `import` is watched for one reason and one
-/// only — [`announce_blindspot`], which needs to know when `multiprocessing`
-/// arrives
-#[cfg(not(windows))]
-const MAKING_A_PROCESS_BEFORE_314: &[&CStr] = &[
-    c"subprocess.Popen",
-    c"os.posix_spawn",
-    c"os.exec",
-    c"os.fork",
-    c"import",
-];
-
-/// the events that make a process on windows, on every supported release
-///
-/// the list is per platform because the events are: nothing on windows raises
-/// `_posixsubprocess.fork_exec`, and nothing on posix raises
-/// `_winapi.CreateProcess`. there is no `os.fork` here and there cannot be one,
-/// and `subprocess.Popen` is absent for the reason it is on posix — windows
-/// raises it beside `_winapi.CreateProcess` for the same child
-///
-/// it does not change with the release, because `_winapi.CreateProcess` has
-/// been an audit event since PEP 578 landed in 3.8 — long before this project's
-/// minimum. `multiprocessing`'s spawn method goes through it here, so the 3.13
-/// blind spot below is a posix one
-#[cfg(windows)]
-const MAKING_A_PROCESS: &[&CStr] = &[c"_winapi.CreateProcess", c"os.exec"];
-
-/// the same on 3.13, which on windows is the same list
-#[cfg(windows)]
-const MAKING_A_PROCESS_BEFORE_314: &[&CStr] = MAKING_A_PROCESS;
-
 /// the events this interpreter is watched for, chosen once at attach
 static WATCHED: OnceLock<&'static [&'static CStr]> = OnceLock::new();
 
@@ -239,17 +191,18 @@ type AuditHook = unsafe extern "C" fn(
     user: *mut c_void,
 ) -> c_int;
 
-// pyo3-ffi does not declare this one. it is exported by every cpython build and
-// resolves the way every other interpreter symbol an extension module uses does
-#[expect(
-    unsafe_code,
-    reason = "the only interface cpython offers for a native audit hook is a C \
-              one, and a python callable in its place would be a python frame \
-              per audit event — which is every file the program opens"
-)]
-unsafe extern "C" {
-    fn PySys_AddAuditHook(hook: AuditHook, user: *mut c_void) -> c_int;
-}
+// pyo3-ffi does not declare this one, so the agent declares it — and **which
+// library it is declared against** is a fact about the interpreter this build
+// is for, so `build.rs` writes the declaration rather than this file holding
+// one. see `declare_the_audit_hook` there
+//
+// the version that lived here named no library at all. unix does not care, and
+// windows refused to link every agent: the symbol is in `python3xx.dll`, and an
+// extern block that names nothing is a symbol the linker has nowhere to look
+// for. the assumption in the comment it replaces — that it "resolves the way
+// every other interpreter symbol does" — was wrong precisely because every
+// other one comes through pyo3-ffi, which carries the attribute this now does
+include!(concat!(env!("OUT_DIR"), "/audit_hook.rs"));
 
 /// start watching for child processes
 ///
@@ -285,25 +238,22 @@ pub(crate) fn install(python: Python<'_>) -> PyResult<()> {
     Ok(())
 }
 
-/// choose the watch list, and the blind spot that comes with it
+/// take the watch list for this interpreter, and the blind spot that comes with
+/// it
 ///
-/// the split is at 3.14, where `_posixsubprocess.fork_exec` became an audit
-/// event. below it that event is silent, so `subprocess.Popen` is watched in
-/// its place — which covers `subprocess` and does **not** cover
-/// `multiprocessing`, because `multiprocessing` never goes near `subprocess`
+/// the list itself is [`bpd_core::spawn::making_a_process`], because the parity
+/// suite needs the same answer and a list written in two places is one that
+/// disagrees with itself eventually. what is here is the consequence of the
+/// choice rather than the choice
 ///
-/// the blind spot that leaves is recorded here rather than discovered later, so
-/// that the thing which says it cannot see a child is set up at the same moment
-/// as the thing that sees them
+/// the blind spot is recorded here rather than discovered later, so that the
+/// thing which says it cannot see a child is set up at the same moment as the
+/// thing that sees them
 fn watch_what_this_interpreter_raises(major: u8, minor: u8) {
     let before_314 = (major, minor) < (3, 14);
 
     WATCHED
-        .set(if before_314 {
-            MAKING_A_PROCESS_BEFORE_314
-        } else {
-            MAKING_A_PROCESS
-        })
+        .set(bpd_core::spawn::making_a_process(major, minor))
         .unwrap_or_else(|_| unreachable!("the agent installs the audit hook once"));
 
     // windows reaches a `multiprocessing` spawn child through
