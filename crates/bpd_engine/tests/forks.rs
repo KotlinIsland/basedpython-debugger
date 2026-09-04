@@ -588,8 +588,12 @@ for worker in workers:
 # nothing was wrong. the bound that is left is a watchdog — reaching it stops
 # forking and waits, so a test that never releases is a slow failure and not a
 # fork bomb
+# a floor **and** a release, because either alone depends on which of the two
+# machines is faster: two hundred forks finished before the session had driven
+# two hundred stops on one runner, and on another the release arrived after a
+# single fork. so it forks at least this many, and then until it is let go
 forks = 0
-while not (HERE / "release").exists():
+while forks < 50 or not (HERE / "release").exists():
     if forks >= 2000:
         time.sleep(0.01)
         continue
