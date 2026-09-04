@@ -223,22 +223,44 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<bool>
     let mut received = 0;
     while received < buffer.len() {
         match reader.read(&mut buffer[received..]) {
-            Ok(0) => {
-                return if received == 0 {
-                    Ok(false)
-                } else {
-                    Err(Error::Truncated {
-                        expected: buffer.len(),
-                        received,
-                    })
-                };
-            }
+            Ok(0) => return gone(received, buffer.len()),
             Ok(read) => received += read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            // **the peer is gone, and windows says so differently.** a process
+            // that exits there leaves its sockets reset rather than closed, so
+            // the end of stream that arrives on unix as `Ok(0)` arrives here as
+            // `ECONNRESET` — and a debuggee that ran to the end and exited was
+            // reported as a failed control connection, on every windows job,
+            // after the program had printed everything it was going to print
+            //
+            // it is the same event and is answered the same way: the end of the
+            // stream between frames, and a truncation part way through one. a
+            // debuggee that died mid-frame is not turned into a clean end by
+            // this, because the position is what decides, not the errno
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                return gone(received, buffer.len());
+            }
             Err(error) => return Err(Error::Io(error)),
         }
     }
     Ok(true)
+}
+
+/// what the peer being gone means, at the position it went
+///
+/// nothing yet is the end of the stream; part of something is a frame that
+/// stops half way, which is not a frame
+fn gone(received: usize, expected: usize) -> Result<bool> {
+    if received == 0 {
+        Ok(false)
+    } else {
+        Err(Error::Truncated { expected, received })
+    }
 }
 
 #[cfg(test)]
@@ -246,6 +268,69 @@ mod tests {
     use super::*;
 
     const TOKEN: [u8; TOKEN_LEN] = [7; TOKEN_LEN];
+
+    /// a reader that serves what it has and then says the peer is gone
+    ///
+    /// which is what a windows socket does when the process on the other end
+    /// exits: `ECONNRESET` rather than a clean close
+    struct Reset {
+        sends: Vec<u8>,
+        sent: usize,
+    }
+
+    impl Read for Reset {
+        fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+            if self.sent == self.sends.len() {
+                return Err(io::Error::from(io::ErrorKind::ConnectionReset));
+            }
+            let taking = into.len().min(self.sends.len() - self.sent);
+            into[..taking].copy_from_slice(&self.sends[self.sent..self.sent + taking]);
+            self.sent += taking;
+            Ok(taking)
+        }
+    }
+
+    #[test]
+    fn a_peer_that_reset_between_frames_is_the_end_of_the_stream() {
+        // the windows shape of a debuggee that ran to the end and exited. read
+        // as an io failure it made every windows session end in "the control
+        // connection failed" after the program had already printed everything
+        let mut reader = Reset {
+            sends: Vec::new(),
+            sent: 0,
+        };
+        let mut buffer = Vec::new();
+        let read =
+            read_frame_into(&mut reader, &mut buffer).expect("a reset between frames is an end");
+        assert!(!read, "a peer that is gone between frames ended the stream");
+    }
+
+    #[test]
+    fn a_peer_that_reset_inside_a_frame_is_a_truncation() {
+        // and the half that must not be swallowed with it: a frame was
+        // announced and never delivered, which is a peer that died rather than
+        // one that finished
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &[1, 2, 3, 4, 5, 6, 7, 8]).expect("writing to a vec cannot fail");
+        wire.truncate(4 + 3);
+
+        let mut reader = Reset {
+            sends: wire,
+            sent: 0,
+        };
+        let mut buffer = Vec::new();
+        let refused = read_frame_into(&mut reader, &mut buffer);
+        assert!(
+            matches!(
+                refused,
+                Err(Error::Truncated {
+                    expected: 8,
+                    received: 3
+                })
+            ),
+            "a frame that stopped half way is not an end of stream: {refused:?}"
+        );
+    }
 
     #[test]
     fn a_handshake_round_trips() {
