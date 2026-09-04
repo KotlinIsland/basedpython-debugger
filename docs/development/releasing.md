@@ -92,6 +92,18 @@ a tool they already have. it is sorted, so assembling the same inputs twice
 produces the same manifest byte for byte; a release nobody can rebuild is one
 whose contents are an assertion
 
+**the paths in it are written with `/` on every platform**, because it is a
+document rather than a filesystem call: `verify` reads it back, a person reads it
+with `sha256sum`, and the tags a layout carries are recovered out of it by
+stripping `agents/` off the front of each name. windows joins with `\`, so a
+layout assembled there recorded `agents\3.13\bpd_agent.dll` and `verify`
+recovered no tags at all — and since `wheel` writes one agent per tag, that
+layout would have assembled cleanly, verified cleanly, and produced a wheel with
+**no agents in it whatsoever**. that is the failure this crate exists to prevent,
+reached by a road nobody had walked: every test of it ran where the separator was
+already `/`. a zip's entry names are `/` by the format's own rule, so one answer
+serves both
+
 `verify` reads it back and compares every digest. that is the same discipline
 `bpd_core::SourceMap` holds and for the same reason: a digest that is written and
 never checked says nothing at all. a file that changed is named with both
