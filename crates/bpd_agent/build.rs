@@ -56,6 +56,27 @@ fn main() {
     );
     println!("cargo::rerun-if-env-changed=PYO3_PYTHON");
 
+    // **and on the interpreter itself**, so that upgrading the python at that
+    // path rebuilds the agent that was compiled against the old one. the
+    // variable holding the same text is not the same interpreter, and pyo3
+    // emits only `rerun-if-env-changed` triggers
+    //
+    // what this catches is the interpreter's own file changing. what it cannot
+    // catch is the **name** resolving somewhere else — a symlink repointed, or
+    // `PYO3_PYTHON=python` meaning 3.13 in one ci job and 3.15 in the next —
+    // because cargo compares the mtime of whatever the path leads to now, and
+    // another interpreter that was installed last week is not newer. measured:
+    // building against 3.13 through a symlink, repointing it at 3.14 and
+    // building again leaves the artifact stamped `3.13`
+    //
+    // `PYO3_ENVIRONMENT_SIGNATURE` is what covers that, and it is the
+    // interpreter's tag in `ci.yaml`. the agent refuses at import either way,
+    // which is the design working — but a build that produces an artifact
+    // saying one thing and being another has already wasted somebody's day
+    if let Some(executable) = config.executable() {
+        println!("cargo::rerun-if-changed={executable}");
+    }
+
     declare_the_audit_hook(config);
 }
 
