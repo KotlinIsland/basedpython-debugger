@@ -69,7 +69,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -516,13 +516,30 @@ impl Adapter {
             // what was set aside while the adapter waited for a client's answer
             // to a reverse request, in the order it arrived. before the channel,
             // because a message that arrived first is answered first
-            let message = if self.deferred.is_empty() {
+            let message = if !self.deferred.is_empty() {
+                self.deferred.remove(0)
+            } else if self.session.is_some() && !self.exited {
+                // a stop holds one thread and the rest of the program runs on,
+                // so a second thread can stop while the client is saying
+                // nothing — and it arrives on the connection rather than as
+                // the answer to anything. the client is looked at in slices so
+                // that the session is looked at between them: a `stopped` the
+                // client learns of at its next request is a thread it thinks
+                // is running for as long as it stays quiet
+                match commands.recv_timeout(WAIT_SLICE) {
+                    Ok(message) => message,
+                    Err(RecvTimeoutError::Timeout) => {
+                        let looked = self.look_at_the_program();
+                        self.finish(looked)?;
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return Ok(Ended::WithTheClient),
+                }
+            } else {
                 let Ok(message) = commands.recv() else {
                     return Ok(Ended::WithTheClient);
                 };
                 message
-            } else {
-                self.deferred.remove(0)
             };
             let handled = self.handle(launcher, &message, commands);
             match handled {
@@ -560,6 +577,51 @@ impl Adapter {
                     }
                 }
                 Err(Aborted::Wire(error)) => return Err(error),
+            }
+        }
+    }
+
+    /// read whatever the program has said while the client was quiet
+    ///
+    /// a wait is where the engine reads a session's connection, and a stop
+    /// that nobody asked about — a second thread reaching a breakpoint while
+    /// a first is held — is on that connection until something reads it. so a
+    /// wait with no time in it: everything already there is read and
+    /// reported, and nothing is waited for, because the client's next message
+    /// is what this loop is otherwise for
+    fn look_at_the_program(&mut self) -> Answered {
+        let mut events = Events::new(&self.output);
+        let looked = self
+            .session
+            .as_mut()
+            .expect("the program is only looked at once one has been launched")
+            .dispatch(
+                Addressed::unnamed(Request::Wait {
+                    deadline: Some(Duration::ZERO),
+                }),
+                &mut events,
+            );
+        let written = events.finish();
+        match (looked, written) {
+            (_, Err(error)) => Err(Aborted::Wire(error)),
+            (Ok(Response::Ran(running)), Ok(joined)) => self
+                .tell_the_client_to_start(&joined)
+                .and_then(|()| self.report(running)),
+            (Ok(other), Ok(_)) => unreachable!("a wait was answered with {other:?}"),
+            (Err(error), Ok(_)) => {
+                // the same account the waiting loop gives: the program is
+                // gone, no request is outstanding, and the client is told in
+                // the only channel that is left. a disconnect in flight is
+                // the loop's to notice at its next turn
+                if self.stopping.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                self.exited = true;
+                self.say(&format!(
+                    "bpd stopped waiting for the program: {}\n",
+                    describe(error.as_ref())
+                ))
+                .and_then(|()| self.event("terminated", &serde_json::json!({})))
             }
         }
     }
@@ -909,13 +971,13 @@ impl Adapter {
                 // problem: one is a client that is still there
                 let arrived = commands.recv_timeout(left).map_err(|why| {
                     Failed::from(match why {
-                        std::sync::mpsc::RecvTimeoutError::Timeout => format!(
+                        RecvTimeoutError::Timeout => format!(
                             "the client was asked to run the program in a terminal \
                              and did not answer within {}s, so bpd cannot tell \
                              whether it was ever started",
                             TERMINAL_PATIENCE.as_secs()
                         ),
-                        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                        RecvTimeoutError::Disconnected => {
                             "the client hung up while it was being asked to run the \
                              program in a terminal, so bpd cannot tell whether it \
                              was ever started"

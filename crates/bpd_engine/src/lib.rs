@@ -649,14 +649,25 @@ impl Session {
         readable
     }
 
+    /// one look at the connection even when the deadline has already passed
+    ///
+    /// a wait with no time in it is a poll: what the agent has already said is
+    /// in the receive buffer, and a stop that arrived while nobody was reading
+    /// is exactly what a front end looking between its client's messages is
+    /// looking for. a socket timeout cannot be zero, so the look is bounded
+    /// by the smallest one the platforms agree on
+    const A_LOOK: Duration = Duration::from_millis(1);
+
     fn peek_until(&mut self, deadline: Instant) -> Result<bool> {
+        let mut looked = false;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            if left.is_zero() && looked {
                 return Ok(false);
             }
+            looked = true;
             self.reading
-                .set_read_timeout(Some(left))
+                .set_read_timeout(Some(left.max(Self::A_LOOK)))
                 .map_err(|source| Error::Control {
                     source: frame::Error::Io(source),
                 })?;

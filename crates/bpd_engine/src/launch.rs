@@ -1139,7 +1139,9 @@ impl Debuggee {
     /// giving up leaves nothing outstanding on the wire. a wait is not a request
     /// the agent is answering — it is the engine reading the connection — so
     /// stopping reading it costs nothing and whatever the program says next is
-    /// still there for the next wait
+    /// still there for the next wait. a deadline of nothing at all is one look
+    /// at what is already there: a stop that arrived while nobody was reading
+    /// is read and answered, and nothing is waited for
     ///
     /// the **listener is watched alongside the connection**, which is why this
     /// is a poll rather than a blocking read. a wait is where a session spends

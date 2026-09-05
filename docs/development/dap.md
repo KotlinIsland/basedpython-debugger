@@ -624,7 +624,12 @@ fact shapes the whole adapter:
 a second thread stopping while a first is held arrives on the connection rather
 than as the answer to anything, so the adapter compares what the session is
 holding against what it has told the client after every request — and a stop
-nobody asked about gets its own `stopped` event
+nobody asked about gets its own `stopped` event. it does not wait for the
+request: while a program exists the client's channel is read in slices, and
+the session is looked at between them, so a thread that stops while the client
+is saying nothing is announced within a slice rather than at the client's next
+move. `a_second_thread_stopping_while_the_first_is_held_is_announced_unasked`
+holds one thread and sends nothing until the other's `stopped` arrives
 
 ### a disconnect answers what it overtook
 

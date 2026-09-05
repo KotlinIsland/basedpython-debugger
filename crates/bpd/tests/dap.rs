@@ -72,6 +72,7 @@ macro_rules! over_each_transport {
 }
 
 over_each_transport!(
+    a_second_thread_stopping_while_the_first_is_held_is_announced_unasked,
     a_breakpoint_is_hit_a_local_is_written_and_the_program_sees_the_write,
     a_running_program_can_be_paused_while_the_adapter_is_waiting_for_it,
     a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so,
@@ -256,6 +257,93 @@ fn a_breakpoint_is_hit_a_local_is_written_and_the_program_sees_the_write(transpo
          the old value"
     );
 
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+/// a program with two threads that each reach a breakpoint, the main one first
+///
+/// the worker sleeps before its line so that the main thread is held first and
+/// is still held when the worker arrives. the second stop then happens while
+/// the client is saying nothing at all, which is the shape under test
+const TWO_THREADS: &str = r#"import threading
+import time
+
+
+def worker():
+    time.sleep(0.5)
+    inner = 1
+    later = inner + 1
+    return later
+
+
+def main():
+    thread = threading.Thread(target=worker)
+    thread.start()
+    total = 1
+    doubled = total * 2
+    thread.join()
+    return doubled
+
+
+main()
+"#;
+
+fn a_second_thread_stopping_while_the_first_is_held_is_announced_unasked(transport: Transport) {
+    let fixture = Fixture::new("two_threads", TWO_THREADS);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+        }),
+    );
+    client.event("initialized");
+    let in_main = line_of(TWO_THREADS, "doubled = total * 2");
+    let in_worker = line_of(TWO_THREADS, "later = inner + 1");
+    let set = client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": in_main }, { "line": in_worker } ],
+        }),
+    );
+    assert_eq!(set["body"]["breakpoints"][0]["verified"], true, "{set}");
+    assert_eq!(set["body"]["breakpoints"][1]["verified"], true, "{set}");
+    client.request("configurationDone", &serde_json::json!({}));
+
+    // the main thread stops first, and is held. nothing is asked after this:
+    // the worker's stop has to arrive on its own, because a client that is
+    // shown it only at its next request is one rendering a thread as running
+    // for as long as the person looks at the first
+    let first = client.event("stopped");
+    assert_eq!(first["body"]["reason"], "breakpoint");
+    let requests_before = client.seq;
+    let second = client.event("stopped");
+    assert_eq!(second["body"]["reason"], "breakpoint");
+    assert_ne!(
+        second["body"]["threadId"], first["body"]["threadId"],
+        "the second stop is the other thread's: {second}"
+    );
+    assert_eq!(
+        client.seq, requests_before,
+        "the second stop was only announced after the client asked something"
+    );
+
+    // both are held, and both can be let go
+    client.request(
+        "continue",
+        &serde_json::json!({ "threadId": second["body"]["threadId"] }),
+    );
+    client.request(
+        "continue",
+        &serde_json::json!({ "threadId": first["body"]["threadId"] }),
+    );
+    client.event("exited");
+    client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));
     client.finish();
 }
