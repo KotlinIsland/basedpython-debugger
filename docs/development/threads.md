@@ -153,7 +153,13 @@ the performance model of this debugger, reset. the program pays it back as those
 lines disable themselves again afterwards
 
 the world is released when the stop that asked for it is resumed. two held
-threads can both ask, and it is released when the last of them goes
+threads can both ask, and it is released when the last of them goes. the parked
+threads are woken **whatever putting the instrumentation back says**: they are
+waiting on that one notification and nothing else can give it, so a disarm
+that failed and returned first would leave every one of them parked for the
+rest of the process, inside a line callback, holding whatever the program had
+locked. `a_disarm_that_fails_still_lets_the_parked_threads_go` refuses the
+disarm and requires the thread back
 
 ### a thread in a C call cannot be stopped, and is never counted as held
 

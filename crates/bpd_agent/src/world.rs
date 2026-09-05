@@ -90,17 +90,34 @@ pub(crate) fn mode() -> Mode {
 /// the GIL is released first, so parking a thread does not stop the ones that
 /// have not arrived yet from getting here
 pub(crate) fn park(python: Python<'_>, thread: u64) {
-    python.detach(|| {
-        let mut held = state();
-        held.parked.push(thread);
-        ARRIVED.notify_all();
-        while PARKING.load(Ordering::Relaxed) {
-            held = RELEASED
-                .wait(held)
-                .expect("the world lock is only ever held to add a thread to a list or read one");
-        }
-        held.parked.retain(|parked| *parked != thread);
-    });
+    python.detach(|| wait_parked(thread));
+}
+
+/// the wait itself, with nothing of the interpreter in it
+///
+/// what a parked thread is waiting for is [`let_go`], and nothing else can
+/// wake it — which is why that is called on every path out of a release,
+/// whatever else the release ran into
+fn wait_parked(thread: u64) {
+    let mut held = state();
+    held.parked.push(thread);
+    ARRIVED.notify_all();
+    while PARKING.load(Ordering::Relaxed) {
+        held = RELEASED
+            .wait(held)
+            .expect("the world lock is only ever held to add a thread to a list or read one");
+    }
+    held.parked.retain(|parked| *parked != thread);
+}
+
+/// wake every parked thread, and stop new arrivals parking
+fn let_go() {
+    PARKING.store(false, Ordering::Relaxed);
+    // taken and dropped so that a thread between its check of `PARKING` and
+    // its wait cannot miss the notification: it holds the lock for both, and
+    // this cannot be sent while it does
+    drop(state());
+    RELEASED.notify_all();
 }
 
 /// what stopping the world managed to stop
@@ -134,12 +151,8 @@ pub(crate) fn stop(
     // that line again
     PARKING.store(true, Ordering::Relaxed);
     if let Err(error) = arm(python) {
-        let mut held = state();
-        held.requesters.retain(|asked| *asked != requester);
-        if held.requesters.is_empty() {
-            PARKING.store(false, Ordering::Relaxed);
-            drop(held);
-            RELEASED.notify_all();
+        if last_to_leave(requester) {
+            let_go();
         }
         return Err(error);
     }
@@ -189,20 +202,78 @@ pub(crate) fn release(
     stop: u64,
     disarm: impl FnOnce(Python<'_>) -> PyResult<()>,
 ) -> PyResult<()> {
-    {
-        let mut held = state();
-        let Some(index) = held.requesters.iter().position(|asked| *asked == stop) else {
-            return Ok(());
-        };
-        held.requesters.remove(index);
-        if !held.requesters.is_empty() {
-            return Ok(());
-        }
-        held.native.clear();
-    }
+    release_with(stop, || disarm(python))
+}
 
-    PARKING.store(false, Ordering::Relaxed);
-    disarm(python)?;
-    RELEASED.notify_all();
-    Ok(())
+/// the release, with nothing of the interpreter in it
+///
+/// **the parked threads are let go whatever the disarm says.** they are
+/// waiting on that one notification and nothing else can give it, so a disarm
+/// that fails and returns before it would leave every one of them parked for
+/// the rest of the process — inside a line callback, holding whatever locks
+/// the program had. the failure is still the answer; it is just not allowed
+/// to take the program with it
+fn release_with<E>(stop: u64, disarm: impl FnOnce() -> Result<(), E>) -> Result<(), E> {
+    if !last_to_leave(stop) {
+        return Ok(());
+    }
+    let disarmed = disarm();
+    let_go();
+    disarmed
+}
+
+/// take one requester out, and say whether it was the last one holding the
+/// world
+///
+/// a stop that never asked for the world is not a requester and leaves nothing
+fn last_to_leave(stop: u64) -> bool {
+    let mut held = state();
+    let Some(index) = held.requesters.iter().position(|asked| *asked == stop) else {
+        return false;
+    };
+    held.requesters.remove(index);
+    if !held.requesters.is_empty() {
+        return false;
+    }
+    held.native.clear();
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use super::*;
+
+    #[test]
+    fn a_disarm_that_fails_still_lets_the_parked_threads_go() {
+        // the interpreter is not needed to park a thread or to release the
+        // world: the wait and the wake are the condvar's, and the only thing
+        // the interpreter is asked for is the disarm, which here refuses
+        state().requesters.push(41);
+        PARKING.store(true, Ordering::Relaxed);
+
+        let (woke, woken) = mpsc::channel();
+        let parked = std::thread::spawn(move || {
+            wait_parked(7);
+            woke.send(()).expect("the test is waiting on this");
+        });
+        // parked for real before the release, or the release could win a race
+        // that is not what is under test
+        let arrived = Instant::now() + Duration::from_secs(5);
+        while !state().parked.contains(&7) {
+            assert!(Instant::now() < arrived, "the thread never parked");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let outcome = release_with(41, || Err("the interpreter refused the disarm"));
+        assert_eq!(outcome, Err("the interpreter refused the disarm"));
+        assert!(
+            woken.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the disarm failed and the parked thread was left parked for ever"
+        );
+        parked.join().expect("the parked thread returned");
+        assert!(state().parked.is_empty());
+        assert!(state().requesters.is_empty());
+    }
 }
