@@ -154,9 +154,33 @@ fn interpreter() -> &'static Capabilities {
     bpd_test::agent::matching_interpreter()
 }
 
+/// the same program, in a process whose audit hook refuses code replacement
+///
+/// `object.__setattr__` for `__code__` is the event PEP 578 names as the
+/// reason the event exists, and cpython raises it before it assigns. the hook
+/// is installed before `victim` is imported, so nothing else about the
+/// process differs
+const SEALED_PROGRAM: &str = r#"import sys
+
+
+def refuse(event, args):
+    if event == "object.__setattr__" and args[1] == "__code__":
+        raise RuntimeError("code is sealed here")
+
+
+sys.addaudithook(refuse)
+
+import victim  # noqa: E402
+"#;
+
 /// a fixture whose `victim.py` holds `source`
 fn laid_out(source: &str) -> (Fixture, PathBuf) {
-    let fixture = Fixture::new("replacing", PROGRAM);
+    laid_out_as(PROGRAM, source)
+}
+
+/// a fixture running `program`, whose `victim.py` holds `source`
+fn laid_out_as(program: &str, source: &str) -> (Fixture, PathBuf) {
+    let fixture = Fixture::new("replacing", program);
     let victim = fixture.sibling("victim", source);
     (fixture, victim)
 }
@@ -966,4 +990,50 @@ fn a_breakpoint_in_the_replaced_file_is_bound_again_and_fires_where_the_code_is_
 
     to_exit(&mut debuggee);
     assert!(recorded(&fixture).contains("('after', 10)"));
+}
+
+#[test]
+fn a_process_whose_audit_hook_refuses_the_assignment_is_refused_by_name_and_nothing_is_applied() {
+    // the program's own condition on the assignment, beside cpython's: an
+    // audit hook that raises at `object.__setattr__` for `__code__`. it is
+    // raised with the exact arguments before anything is written, so the
+    // refusal names the hook's own exception and the process is left exactly
+    // as it was — where finding it on the first write would have been a
+    // partial application, which is the one outcome this feature exists to
+    // prevent
+    let program = SEALED_PROGRAM.to_string()
+        + PROGRAM.trim_start_matches("import pathlib\n\nimport victim\n");
+    let (fixture, victim) = laid_out_as(&format!("import pathlib\n{program}"), VICTIM);
+    let mut debuggee = launch(&fixture);
+    held_before_the_report(&mut debuggee, &fixture);
+
+    std::fs::write(&victim, EDITED).expect("the fixture directory is writable");
+    let replaced = debuggee
+        .replace_code(&victim)
+        .expect("the replacement was answered");
+
+    let because = refused(&replaced);
+    let named = because
+        .iter()
+        .find_map(|reason| match reason {
+            Unreplaceable::RefusedByTheProcess { function, error } if function == "plain" => {
+                Some(error)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no reason named the hook: {because:#?}"));
+    assert_eq!(named.kind, "RuntimeError");
+    assert_eq!(named.message, "code is sealed here");
+    let said = because
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(said.contains("audit hook"), "{said}");
+
+    to_exit(&mut debuggee);
+    assert!(
+        recorded(&fixture).contains("('before', 1)"),
+        "a refusal has to leave the process exactly as it was"
+    );
 }

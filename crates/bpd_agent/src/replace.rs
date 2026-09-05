@@ -321,14 +321,18 @@ fn apply(
             let holders = live.functions.get(&(old.as_ptr() as usize));
             for holder in holders.into_iter().flatten() {
                 // every way this can fail was checked before anything was
-                // written: cpython's only condition on the assignment is that
+                // written: cpython's own condition on the assignment is that
                 // the code's free variable count matches the function's cells,
-                // which `Plan::check` refuses on. a partial application is the
-                // one outcome this whole feature exists to prevent
-                holder
-                    .bind(python)
-                    .setattr("__code__", new)
-                    .expect("a replacement writes only assignments it proved cpython accepts");
+                // and the program's is an audit hook, which was raised with
+                // these exact arguments — `Plan::check` refuses on either. a
+                // partial application is the one outcome this whole feature
+                // exists to prevent, and a hook that accepted the audit a
+                // moment ago and refuses the same arguments now is a hook that
+                // has changed its mind between two statements of one message
+                holder.bind(python).setattr("__code__", new).expect(
+                    "a replacement writes only assignments cpython and the program's audit \
+                     hooks accepted a moment ago, with the same arguments",
+                );
             }
             changed.push(Rebound {
                 function: new.getattr("co_qualname")?.extract()?,
@@ -1004,6 +1008,7 @@ impl<'py> Plan<'py> {
             // cpython's own condition on the assignment, checked here so that it
             // can never be found half way through applying one
             let wanted = new.getattr("co_freevars")?.len()?;
+            let audit = python.import("sys")?.getattr("audit")?;
             for holder in live.functions.get(&address).into_iter().flatten() {
                 let closure = holder.bind(python).getattr("__closure__")?;
                 let cells = if closure.is_none() { 0 } else { closure.len()? };
@@ -1013,6 +1018,20 @@ impl<'py> Plan<'py> {
                         cells: u32::try_from(cells).expect("a closure is not four billion cells"),
                         wanted: u32::try_from(wanted)
                             .expect("a code object has not four billion free variables"),
+                    });
+                }
+                // the program's own condition: `func_set_code` audits
+                // `object.__setattr__` with exactly these arguments before it
+                // assigns, and a hook is free to raise there. raised here, with
+                // the same arguments, so that a refusal is found before anything
+                // is written rather than half way through — the same reason the
+                // closure check is here
+                if let Err(error) =
+                    audit.call1(("object.__setattr__", holder.bind(python), "__code__", new))
+                {
+                    found.push(Unreplaceable::RefusedByTheProcess {
+                        function: function.clone(),
+                        error: capture(python, &error),
                     });
                 }
             }

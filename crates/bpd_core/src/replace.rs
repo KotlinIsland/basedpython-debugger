@@ -530,6 +530,21 @@ pub enum Unreplaceable {
         /// the generated python the build has for it
         generated: PathBuf,
     },
+
+    /// the process refuses the assignment of `__code__`
+    ///
+    /// cpython audits `object.__setattr__` before it assigns a function's
+    /// code, and an audit hook the program installed is free to raise there —
+    /// PEP 578 names `__code__` as the case the event exists for. the
+    /// assignment is audited with its exact arguments **before anything is
+    /// written**, so a hook that refuses refuses the whole replacement and
+    /// nothing of the process was touched
+    RefusedByTheProcess {
+        /// `co_qualname` of the function whose assignment was refused
+        function: String,
+        /// what the hook raised
+        error: PythonError,
+    },
 }
 
 /// what is different about a body that has to be identical
@@ -813,6 +828,15 @@ impl std::fmt::Display for Unreplaceable {
                  closure runs. give them names by making them `def`s, or restart \
                  the process"
             ),
+            Self::RefusedByTheProcess { function, error } => write!(
+                formatter,
+                "the process refused to have `{function}`'s code replaced: an \
+                 audit hook raised {}: {} at `object.__setattr__` for \
+                 `__code__`. cpython audits that assignment before it makes \
+                 it, and the hook is the program's own — nothing was written, \
+                 and nothing can be until the hook allows it",
+                error.kind, error.message
+            ),
             Self::ClosureChanged {
                 function,
                 cells,
@@ -896,6 +920,22 @@ mod tests {
     #[test]
     fn a_refusal_names_the_thing_that_blocked_it_and_what_to_do_about_it() {
         let cases = [
+            (
+                Unreplaceable::RefusedByTheProcess {
+                    function: "plain".to_string(),
+                    error: PythonError {
+                        kind: "RuntimeError".to_string(),
+                        message: "code is sealed here".to_string(),
+                        traceback: Vec::new(),
+                    },
+                },
+                vec![
+                    "plain",
+                    "audit hook",
+                    "RuntimeError: code is sealed here",
+                    "nothing was written",
+                ],
+            ),
             (
                 Unreplaceable::TopLevelChanged {
                     file: PathBuf::from("/tmp/victim.py"),

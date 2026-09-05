@@ -128,7 +128,19 @@ times
 | the file was compiled more than once                          | which copy a live function belongs to is unanswerable |
 | a changed function holds two nested code objects of one name  | nothing says which replaces which                     |
 | a live function's closure does not fit the new code           | cpython refuses that assignment                       |
+| an audit hook of the program refuses the assignment           | the process refuses it, and says so before any write  |
 | live objects run a nested function the file no longer defines | they would run code in no version of the file         |
+
+the last two conditions on the assignment are cpython's and the program's, and
+both are asked **before anything is written**, for the reason above. cpython's
+is the closure check. the program's is an audit hook: `func_set_code` raises
+`object.__setattr__` for `__code__` before it assigns — the case PEP 578 names
+as the reason the event exists — so the plan raises the same event with the
+same arguments through `sys.audit` first, and a hook that refuses refuses the
+whole replacement by name.
+`a_process_whose_audit_hook_refuses_the_assignment_is_refused_by_name_and_nothing_is_applied`
+installs one. finding it on the first write instead would have been a partial
+application, which is the one outcome this feature exists to prevent
 
 ### re-running the top level is not a reload
 
