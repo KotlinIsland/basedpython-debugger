@@ -138,10 +138,10 @@ fn until_sessions(debuggee: &mut Debuggee, at: SessionId, wanted: usize, seen: &
     }
     panic!(
         "the debuggee holds {:?} and an `exec`'d child was supposed to have \
-         joined it. the child is entered through a staged `sitecustomize` on the \
-         end of its `PYTHONPATH` — if it did not arrive, either the variables \
-         did not reach it or the agent would not import into it, and its own \
-         stderr says which",
+         joined it. the child is entered through a staged `sitecustomize` at \
+         the front of its `PYTHONPATH` — if it did not arrive, either the \
+         variables did not reach it or the agent would not import into it, and \
+         its own stderr says which",
         debuggee.sessions()
     );
 }
@@ -369,6 +369,138 @@ fn a_child_that_execs_opens_a_session_of_its_own_and_stops_on_a_breakpoint() {
         std::fs::read_to_string(fixture.directory().join("served"))
             .expect("the child did its work"),
         "the child did the work"
+    );
+}
+
+/// a program whose own `PYTHONPATH` already names a directory holding a
+/// `sitecustomize`
+///
+/// written into the environment by the program before child debugging is asked
+/// for, which is what an inherited variable looks like from where the channel
+/// is opened: the agent reads `PYTHONPATH` at that moment and puts its own
+/// directory in front of whatever is there
+const WITH_ITS_OWN_SITECUSTOMIZE: &str = r#"import os
+import pathlib
+import subprocess
+import sys
+
+HERE = pathlib.Path(__file__).parent
+os.environ["PYTHONPATH"] = str(HERE / "own")
+
+
+def start():
+    finished = subprocess.run([sys.executable, str(HERE / "worker.py")])
+    raise SystemExit(finished.returncode)
+
+
+start()
+"#;
+
+/// the program's own `sitecustomize`, which writes down that it ran
+const OWN_SITECUSTOMIZE: &str = r#"import pathlib
+
+(pathlib.Path(__file__).parent.parent / "own_ran").write_text("ran")
+"#;
+
+/// the child, which writes down which `sitecustomize` it ended up with
+const WORKER_ASKING_SITE: &str = r#"import pathlib
+import sys
+
+HERE = pathlib.Path(__file__).parent
+(HERE / "seen").write_text(sys.modules["sitecustomize"].__file__)
+"#;
+
+#[test]
+fn a_child_whose_program_has_its_own_sitecustomize_is_entered_and_runs_it_too() {
+    // `site` imports one `sitecustomize` — the first on the path — and a
+    // program is free to have one of its own on the `PYTHONPATH` it was
+    // started with. bpd's has to be the one `site` finds, or the child is
+    // never entered and nothing says so; and the program's has to run all the
+    // same, or a debugged child is a child running a different program. so
+    // bpd's goes first and runs the program's own itself, and the child ends
+    // up with the program's under the name, exactly as it would have
+    let fixture = Fixture::new("own_site", WITH_ITS_OWN_SITECUSTOMIZE);
+    fixture.beside("own/sitecustomize.py", OWN_SITECUSTOMIZE);
+    fixture.sibling("worker", WORKER_ASKING_SITE);
+    let mut debuggee = launch(&fixture);
+    let parent = the_only_session(&debuggee);
+    let mut seen = Children::default();
+
+    // the setting is asked for once the program has written its own
+    // `PYTHONPATH`, which is where the channel is opened against
+    let at = line_of(WITH_ITS_OWN_SITECUSTOMIZE, "finished = subprocess.run(");
+    match ask(
+        &mut debuggee,
+        parent,
+        Request::SetBreakpoints {
+            breakpoints: vec![SourceBreakpoint::at(1, fixture.path(), at)],
+        },
+        &mut seen,
+    ) {
+        Response::BreakpointsResolved { .. } => {}
+        other => panic!("the breakpoints were answered with {other:?}"),
+    }
+    match run_in(&mut debuggee, parent, &mut seen) {
+        Running::Stopped { .. } => {}
+        other => panic!("the parent was supposed to stop before starting its child: {other:?}"),
+    }
+    assert!(
+        debuggee
+            .debug_children(true)
+            .expect("the debuggee took the setting"),
+        "the agent has to say the setting took"
+    );
+
+    match ask(
+        &mut debuggee,
+        parent,
+        Request::Run {
+            deadline: Some(A_MOMENT),
+        },
+        &mut seen,
+    ) {
+        Response::Ran(Running::StillRunning { .. }) => {}
+        other => panic!("the parent waits on its child: {other:?}"),
+    }
+    until_sessions(&mut debuggee, parent, 2, &mut seen);
+    let child = the_new_one(&debuggee, &[parent]);
+
+    match ask(
+        &mut debuggee,
+        child,
+        Request::Wait {
+            deadline: Some(LONG_ENOUGH),
+        },
+        &mut seen,
+    ) {
+        Response::Ran(Running::Stopped { stop, .. }) => assert!(
+            matches!(stop.reason, StopReason::Started { .. }),
+            "the child was supposed to arrive held at its start: {:?}",
+            stop.reason
+        ),
+        other => panic!("the child was supposed to arrive held: {other:?}"),
+    }
+    match run_in(&mut debuggee, child, &mut seen) {
+        Running::Ended { .. } => {}
+        other => panic!("the child did not end: {other:?}"),
+    }
+    match wait_in(&mut debuggee, parent, &mut seen) {
+        Running::Exited { status, .. } => assert!(status.success(), "the parent exited with {status}"),
+        other => panic!("the parent did not end: {other:?}"),
+    }
+
+    // the program's own ran, and it is the one the child holds under the name
+    assert_eq!(
+        std::fs::read_to_string(fixture.directory().join("own_ran"))
+            .expect("the program's own sitecustomize ran in the child"),
+        "ran"
+    );
+    let named = std::fs::read_to_string(fixture.directory().join("seen"))
+        .expect("the child wrote which sitecustomize it holds");
+    assert_eq!(
+        std::path::Path::new(named.trim()),
+        fixture.directory().join("own").join("sitecustomize.py"),
+        "the child holds bpd's hook under the name rather than its own program's"
     );
 }
 

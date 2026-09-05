@@ -84,11 +84,14 @@ const WINDOWS_SUFFIX: &str = ".pyd";
 /// four lines that find the agent and one that calls it. everything a `.py`
 /// file in a debuggee's path could get wrong is a decision that belongs in the
 /// agent, where it is rust and is tested — so this holds no decisions at all:
-/// it reads three variables, imports one module, and calls one function
+/// it reads three variables, imports one module, calls one function, and then
+/// runs the program's own `sitecustomize` if it has one, which is why it is
+/// first on a child's path rather than last — see [`crate::cache`] for where
+/// it lives and `bpd_agent::children` for why
 ///
 /// it is **not** basedpython under `python/`, and the architecture invariant is
 /// what says so: a python layer goes there when it is more than about a dozen
-/// lines, and this is eleven. it is also the one file in the tree that has to
+/// lines, and this is under that. it is also the one file in the tree that has to
 /// be readable by an interpreter bpd did not build for — a child could be any
 /// python, and the message it prints when the agent will not import into one is
 /// the whole of what a user has to act on

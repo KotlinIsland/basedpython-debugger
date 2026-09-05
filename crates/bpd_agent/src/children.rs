@@ -21,34 +21,55 @@
 //! ## what that costs, stated rather than hidden
 //!
 //! this is the one feature in bpd that a program **can** see. with it on, the
-//! debuggee's environment holds `PYTHONPATH` ending in a directory of bpd's and
-//! the three names in [`bpd_protocol::env::CHILD`], and its `sys.path` ends in
-//! that same directory. the mirrors in `crates/bpd/tests/launch_parity.rs`
-//! enumerate exactly that and fail on a fourth thing
+//! debuggee's environment holds `PYTHONPATH` beginning with a directory of
+//! bpd's and the three names in [`bpd_protocol::env::CHILD`], and its
+//! `sys.path` ends in that same directory. the mirrors in
+//! `crates/bpd/tests/launch_parity.rs` enumerate exactly that and fail on a
+//! fourth thing
 //!
 //! **off is the default and stays the default.** debugpy defaults its
 //! equivalent to on, and that is the one thing in its design not to copy: a
 //! child that is debugged *stops*, and a setting that produced stopped processes
 //! without being asked for would be a debugger that hangs programs by default
 //!
-//! ## appended, never prepended
+//! ## first on `PYTHONPATH`, and it steps aside
 //!
-//! the agent's own staged directory is *prepended* to `PYTHONPATH` at launch,
-//! and `a_program_that_reads_its_own_import_path_finds_no_debugger_on_it` exists
-//! because a directory searched before everything else is the debugger deciding
-//! what the program imports. this one goes on the **end**, where it cannot
-//! shadow a module of the program's own — and the directory holds one file, so
-//! there is nothing in it to shadow with but `sitecustomize` itself
+//! `site` imports **one** `sitecustomize`: the first the path finds. a program
+//! can have one of its own — on the `PYTHONPATH` it was started with, in its
+//! venv's `site-packages`, in a distribution's stdlib — and whichever of the
+//! two comes first is the only one that runs. so bpd's goes **first**, where it
+//! is certain to run, and then runs the program's own itself: it takes its
+//! directory off the path for one import and imports `sitecustomize` again,
+//! which reaches exactly what the interpreter would have reached without bpd.
+//! `a_child_whose_program_has_its_own_sitecustomize_is_entered_and_runs_it_too`
+//! puts one on the parent's `PYTHONPATH` and requires both
+//!
+//! the directory holds one file, so being first shadows nothing but
+//! `sitecustomize` itself — and that one is run rather than shadowed. the
+//! agent's own staged directory is the other thing prepended at launch, and
+//! `a_program_that_reads_its_own_import_path_finds_no_debugger_on_it` is what
+//! keeps that one out of the program's sight
+//!
+//! what this cannot reach is a child whose program **builds** a `PYTHONPATH`
+//! of its own with a `sitecustomize` ahead of bpd's, rather than inheriting
+//! the variable. nothing bpd writes into an environment can come before what
+//! the program writes into it afterwards, and such a child runs as it would
+//! have and is reported and not debugged
 //!
 //! ## `sys.path` moves with `PYTHONPATH`
 //!
-//! the directory is appended to *both*. `PYTHONPATH` is a statement about where
-//! this interpreter and its children import from, and one naming a directory
-//! this interpreter's `sys.path` does not have is a lie about this process —
+//! the directory goes on *both*. `PYTHONPATH` is a statement about where this
+//! interpreter and its children import from, and one naming a directory this
+//! interpreter's `sys.path` does not have is a lie about this process —
 //! programs read it back, and several rebuild the variable out of `sys.path`,
 //! which would drop the channel on the way to a child. it also makes
 //! `import sitecustomize` in the debuggee reach the real file rather than
 //! nothing, and that import is a no-op because [`entered`] is idempotent
+//!
+//! on `sys.path` it is **appended**: this interpreter's `site` has already run,
+//! so where the directory sits in its own path decides nothing about which
+//! `sitecustomize` ran here — and anywhere else would be a directory searched
+//! before something of the program's own for the rest of the process
 //!
 //! ## a non-python child, and a python grandchild
 //!
@@ -185,11 +206,14 @@ pub(crate) fn announce(python: Python<'_>, on: bool) -> PyResult<()> {
             .extract()?;
         (*restoring()).clone_from(&inherited);
 
-        let appended = inherited.map_or_else(
+        // first, so that a `sitecustomize` of the program's own further along
+        // the path is one bpd's hook runs rather than one that runs instead of
+        // it — see the module docs
+        let channelled = inherited.map_or_else(
             || channel.site.clone(),
-            |inherited| format!("{inherited}{SEPARATOR}{}", channel.site),
+            |inherited| format!("{}{SEPARATOR}{inherited}", channel.site),
         );
-        environ.set_item("PYTHONPATH", appended)?;
+        environ.set_item("PYTHONPATH", channelled)?;
         environ.set_item(bpd_protocol::env::CHILD_ENDPOINT, &channel.endpoint)?;
         environ.set_item(bpd_protocol::env::CHILD_TOKEN, &channel.token)?;
         environ.set_item(bpd_protocol::env::CHILD_AGENT, &channel.agent)?;

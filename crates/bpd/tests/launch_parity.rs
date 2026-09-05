@@ -807,9 +807,11 @@ const ALLOWED_WITH_CHILD_DEBUGGING: &[(&str, &str)] = &[
          that has not started yet reads nothing bpd could write but this and \
          the files it opens at startup, and a child that was `exec`'d is a \
          fresh interpreter with none of this process's memory in it. the \
-         directory is **appended**, where it cannot shadow a module of the \
-         program's own — the agent's own staged directory is prepended, and \
-         that is what the off case above exists to catch",
+         directory goes **first**, because `site` imports one `sitecustomize` \
+         and it has to be bpd's — which then runs the program's own itself. it \
+         holds one file, so it shadows nothing else; the agent's own staged \
+         directory is the other thing prepended, and that is what the off case \
+         above exists to catch",
     ),
     (
         "BPD_CHILD_ENDPOINT",
@@ -1067,7 +1069,9 @@ fn only_the_enumerated_channel(form: Form, bare: &Seen, on: &Seen) {
     }
 
     // the two halves have to agree: what `PYTHONPATH` gained is what
-    // `sys.path` gained, and it is the **last** entry of both
+    // `sys.path` gained. it is the **first** entry of the variable, which is
+    // what a child's `site` reads, and the **last** of this interpreter's own
+    // path, whose `site` has already run
     let gained: Vec<&String> = on
         .path
         .iter()
@@ -1083,20 +1087,24 @@ fn only_the_enumerated_channel(form: Form, bare: &Seen, on: &Seen) {
     assert_eq!(
         on.path.last(),
         Some(added),
-        "as {form:?} the entry is **appended**. anywhere else and it is a \
-             directory searched before something of the program's own, which is \
-             the debugger deciding what the program imports"
+        "as {form:?} the entry is **appended** to this interpreter's own path. \
+             anywhere else and it is a directory searched before something of \
+             the program's own for the rest of the process, which is the \
+             debugger deciding what the program imports"
     );
     let separator = if cfg!(windows) { ';' } else { ':' };
     assert_eq!(
         on.environment["PYTHONPATH"]
-            .rsplit(separator)
+            .split(separator)
             .next()
-            .expect("a split has a last part"),
+            .expect("a split has a first part"),
         added.as_str(),
-        "as {form:?} `PYTHONPATH` and `sys.path` name different directories. \
-             a variable saying this interpreter imports from somewhere it does \
-             not is a lie about this process, and programs read it back"
+        "as {form:?} `PYTHONPATH` does not begin with the directory `sys.path` \
+             gained. a child's `site` imports the first `sitecustomize` on its \
+             path and no other, so anywhere but first is a child a program's own \
+             `sitecustomize` keeps out of the debugger — and a variable naming a \
+             directory this interpreter's `sys.path` does not have is a lie about \
+             this process, which programs read back"
     );
     assert_ne!(
         on.environment["BPD_CHILD_AGENT"], *added,

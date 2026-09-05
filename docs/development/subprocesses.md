@@ -853,10 +853,11 @@ different decision about a different process rather than a change of mind
 
 ### what the file is, and where it lives
 
-eleven lines, in a directory of its own holding nothing else, cached under
+a few dozen lines, in a directory of its own holding nothing else, cached under
 `~/.cache/bpd/children/<sha-256 of its bytes>/`. it reads three variables,
-imports the agent, and calls one function. every decision it could contain
-belongs in the agent, where it is rust and is tested
+imports the agent, calls one function, and then runs the program's own
+`sitecustomize` if it has one. every decision it could contain belongs in the
+agent, where it is rust and is tested
 
 that is a second staging cache, pruned by nothing, and it is `bpd cache`'s to
 report and to clear along with the agents' — see
@@ -873,13 +874,28 @@ interpreter bpd was not built for, because a program can start any python — an
 what it prints when the agent will not import into one is the whole of what a
 user has to act on
 
-it is **appended** to `PYTHONPATH` and never prepended. the agent's own staged
-directory is prepended at launch, and
-`a_program_that_reads_its_own_import_path_finds_no_debugger_on_it` exists
-because a directory searched before everything else is the debugger deciding
-what the program imports. appended, it cannot shadow a module of the program's
-own — and the directory holds one file, so there is nothing in it to shadow with
-but `sitecustomize` itself
+it goes **first** on `PYTHONPATH`, and it steps aside. `site` imports one
+`sitecustomize` — the first the path finds — and a program can have one of its
+own: on the `PYTHONPATH` it was started with, in its venv's `site-packages`, in
+a distribution's stdlib. whichever of the two comes first is the only one that
+runs, so bpd's is put where it is certain to run, and then it runs the
+program's own itself: it takes its directory off the path for one import and
+imports `sitecustomize` again, which reaches exactly what the interpreter would
+have reached without bpd, and leaves that module under the name.
+`a_child_whose_program_has_its_own_sitecustomize_is_entered_and_runs_it_too`
+puts one on the parent's `PYTHONPATH` and requires both to have happened
+
+the directory holds one file, so being first shadows nothing but
+`sitecustomize` itself, and that one is run rather than shadowed. the agent's
+own staged directory is the other thing prepended at launch, and
+`a_program_that_reads_its_own_import_path_finds_no_debugger_on_it` is what keeps
+that one out of the program's sight
+
+what this cannot reach is a child whose program **builds** a `PYTHONPATH` of
+its own with a `sitecustomize` ahead of bpd's, rather than inheriting the
+variable. nothing bpd writes into an environment can come before what the
+program writes into it afterwards. such a child runs as it would have, and is
+reported and not debugged — the same shape as a child started with `-S`
 
 it is idempotent. the same directory is on the **parent's** `sys.path` too, so a
 program that does `import sitecustomize` by hand reaches the child entry point in
@@ -909,7 +925,7 @@ holding
 at its own interpreter startup, from `site`, before `__main__` exists and before
 a line of its program has been compiled. that is `StopReason::Started`, carrying
 the pid of the process that started it, and it carries **no file and no line** —
-the only python running is bpd's own eleven, and reporting those as the program's
+the only python running is bpd's own hook, and reporting that as the program's
 location would be the debugger pointing at itself. the stack is **empty** for the
 same reason, and that is the truth about a process that has not begun its program
 
@@ -950,10 +966,10 @@ this is the one feature in bpd that a program can notice, and the rule is writte
 into the tests in both directions rather than into a paragraph:
 
 > a program run under `bpd` cannot tell it is being debugged. a program run under
-> `bpd` **with child debugging asked for** can — it has `PYTHONPATH` ending in a
-> directory holding a `sitecustomize`, three `BPD_CHILD_*` names, and exactly one
-> extra `sys.path` entry, which is the last one. it can see nothing else, and off
-> is the default
+> `bpd` **with child debugging asked for** can — it has `PYTHONPATH` beginning
+> with a directory holding a `sitecustomize`, three `BPD_CHILD_*` names, and
+> exactly one extra `sys.path` entry, which is the last one. it can see nothing
+> else, and off is the default
 
 - the **off** case is `a_program_that_reads_its_own_environment_finds_no_debugger_in_it`
     and `a_program_that_reads_its_own_import_path_finds_no_debugger_on_it` in
@@ -964,11 +980,15 @@ into the tests in both directions rather than into a paragraph:
     beside them, with an enumerated list of four names and a reason each. a fifth
     name fails there
 
-`sys.path` gains the directory as well as `PYTHONPATH`, and it is appended so it
-is the **last** entry. the two have to agree: a `PYTHONPATH` naming a directory
-this interpreter's `sys.path` does not have is a lie about this process, and
-programs read it back — several rebuild the variable out of `sys.path`, which
-would drop the channel on the way to a child
+`sys.path` gains the directory as well as `PYTHONPATH`. the two have to agree: a
+`PYTHONPATH` naming a directory this interpreter's `sys.path` does not have is a
+lie about this process, and programs read it back — several rebuild the variable
+out of `sys.path`, which would drop the channel on the way to a child. where it
+sits differs, and for a reason each: **first** in the variable, because a
+child's `site` imports the first `sitecustomize` it finds and it has to be
+bpd's; **last** in this interpreter's own path, whose `site` has already run,
+because anywhere else would be a directory searched before something of the
+program's own for the rest of the process
 
 turning it **off** puts all of it back, exactly: `PYTHONPATH` as it was, absent
 if it was absent, which is not the same as set and empty
