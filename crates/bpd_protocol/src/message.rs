@@ -718,6 +718,43 @@ pub enum FromEngine {
     },
 }
 
+impl FromEngine {
+    /// what the request asks for, as a refusal names it
+    ///
+    /// one arm per request rather than the request's own debug form, which
+    /// carries its payload — a breakpoint set, an expression — and a refusal is
+    /// read by a person. the enum is `non_exhaustive` for everything outside
+    /// this crate, so this is the one place a match over it is required to be
+    /// complete, and a new request that has no name here does not compile
+    #[must_use]
+    pub const fn wanted(&self) -> &'static str {
+        match self {
+            Self::Resume { .. } => "the resume",
+            Self::Step { .. } => "the step",
+            Self::Pause => "the pause",
+            Self::SetExceptionBreakpoints { .. } => "the exception breakpoints",
+            Self::DebugChildren { .. } => "the child debugging setting",
+            Self::SetBreakpoints { .. } => "the breakpoints to resolve",
+            Self::MapSources { .. } => "the source maps to install",
+            Self::Threads { .. } => "the threads",
+            Self::StopTheWorld { .. } => "stopping the world",
+            Self::Stack { .. } => "the stack",
+            Self::Variables { .. } => "the variables",
+            Self::Facts { .. } => "the facts",
+            Self::TemplateContext { .. } => "the template context",
+            Self::Evaluate { .. } => "the evaluation",
+            Self::Source { .. } => "the source",
+            Self::SetNextStatement { .. } => "the move of the next statement",
+            Self::RestartFrame { .. } => "the frame's restart",
+            Self::ReplaceCode { .. } => "the code replacement",
+            Self::Record { .. } => "the recording setting",
+            Self::Trail => "the trail",
+            Self::Retainers { .. } => "the retainers",
+            Self::SetVariable { .. } => "the variable's write",
+        }
+    }
+}
+
 /// encode a message and write it as one frame
 pub fn write<W: Write, M: serde::Serialize>(writer: &mut W, message: &M) -> Result<()> {
     let encoded = serde_json::to_vec(message).map_err(|source| frame::Error::Undecodable {

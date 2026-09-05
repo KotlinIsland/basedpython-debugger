@@ -37,8 +37,8 @@ use bpd_protocol::message::{FromAgent, FromEngine};
 use pyo3::prelude::*;
 
 use crate::{
-    armed, attach, breakpoints, events, exceptions, frames, pause, replace, restarts, sources,
-    steps, stops, templates, threads, unwinds, world,
+    armed, attach, breakpoints, conditions, events, exceptions, frames, pause, replace, restarts,
+    sources, steps, stops, templates, threads, unwinds, world,
 };
 
 /// tell the engine what a logpoint had to say, and carry straight on
@@ -321,15 +321,27 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
             stops::Command::Answer(request) => request,
         };
 
-        match answer(python, &mut stopped, &ticket, thread, request)? {
-            Answered::StayHeld => {}
+        let wanted = request.wanted();
+        match answer(python, &mut stopped, &ticket, thread, request) {
+            Ok(Answered::StayHeld) => {}
             // the thread let itself go rather than being told to: the restart is
             // already armed on it, and there is nothing more this stop can be
             // asked
-            Answered::Restarting => {
+            Ok(Answered::Restarting) => {
                 restarting = true;
                 break;
             }
+            // an error answering is handed back as one, and the stop goes on.
+            // it must not leave this function: this is a monitoring callback,
+            // and an exception leaving one is raised into the program at the
+            // line it is stopped on — as though the program had raised it — with
+            // the stop's registry entry and the world's parking left behind
+            Err(error) => attach::send(&FromAgent::Refused {
+                reason: bpd_core::Refusal::CouldNotAnswer {
+                    wanted: wanted.to_string(),
+                    error: conditions::capture(python, &error),
+                },
+            }),
         }
     }
 

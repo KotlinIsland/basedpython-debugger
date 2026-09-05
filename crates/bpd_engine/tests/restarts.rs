@@ -3395,3 +3395,73 @@ fn a_tail_that_writes_a_cell_the_closure_shares_is_refused() {
     assert!(run.success, "the fixture runs on its own: {}", run.stderr);
     assert_eq!(recorded(&fixture), recorded(&bare));
 }
+
+/// a program that has blocked `dis`, which reading a frame's bytecode imports
+///
+/// `None` in `sys.modules` is cpython's own way of refusing an import, and a
+/// program is free to use it. the frame is otherwise the easiest one there is
+/// to restart
+const BLOCKED_DIS: &str = r#"import pathlib
+import sys
+
+HERE = pathlib.Path(__file__).parent
+sys.modules["dis"] = None
+RAN = []
+
+
+def plain(seed):
+    total = seed + 1
+    return total
+
+
+def main():
+    RAN.append(("plain", plain(1)))
+    (HERE / "ran.txt").write_text(repr(RAN))
+
+
+main()
+"#;
+
+#[test]
+fn an_error_answering_a_request_is_a_refusal_and_never_reaches_the_program() {
+    // answering a restart reads the frame's bytecode, which imports `dis`, and
+    // this program has made that import raise. the exception has to come back
+    // as the answer: the request is answered on the held thread, inside a
+    // monitoring callback, and an exception leaving that callback is raised
+    // into the program at the line it is stopped on — with the stop's registry
+    // entry left behind it
+    let fixture = Fixture::new("blocked_dis", BLOCKED_DIS);
+    let mut debuggee = launch(&fixture);
+    held_at(
+        &mut debuggee,
+        &fixture.path(),
+        line_of(BLOCKED_DIS, "    total = seed + 1"),
+    );
+    let frame = top(&mut debuggee);
+
+    let error = debuggee
+        .restart_frame(frame, Again::Either)
+        .expect_err("reading the bytecode raised, and the restart had to be refused");
+    let said = error.to_string();
+    match error {
+        bpd_engine::Error::Session(bpd_core::Error::Refused {
+            reason: Refusal::CouldNotAnswer { wanted, error },
+        }) => {
+            assert_eq!(wanted, "the frame's restart");
+            assert_eq!(error.kind, "ModuleNotFoundError", "{said}");
+            assert!(error.message.contains("dis"), "{said}");
+        }
+        other => panic!("expected the refusal that names the error, got {other:?}"),
+    }
+    assert!(said.contains("still held"), "{said}");
+
+    // still held, and still answerable: the stop went on
+    assert_eq!(top(&mut debuggee), frame);
+    let stack = debuggee.the_stack(None).expect("the stack was answered");
+    assert_eq!(stack.frames[0].name(), "plain");
+
+    // and let go, the program does exactly what it would have. an exception
+    // raised into it here would have ended it at `total = seed + 1`
+    to_exit(&mut debuggee);
+    assert_eq!(recorded(&fixture), "[('plain', 2)]");
+}

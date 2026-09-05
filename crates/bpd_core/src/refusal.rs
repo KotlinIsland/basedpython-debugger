@@ -173,6 +173,23 @@ pub enum Refusal {
         /// what the map said, which names the file and the line
         reason: crate::source_map::Unmapped,
     },
+
+    /// answering the request raised inside the agent
+    ///
+    /// nothing about what was asked was wrong, and nothing about the program
+    /// changed: the thread is held exactly where it was. what happened is that
+    /// the agent met something it did not foresee while answering — an import
+    /// the program had blocked, an object shaped in a way a reader did not
+    /// expect — and the exception is handed back here. the alternative is where
+    /// an exception leaving a monitoring callback goes, which is into the
+    /// program at the line it is stopped on, as though the program had raised
+    /// it
+    CouldNotAnswer {
+        /// what was asked for
+        wanted: String,
+        /// what answering it raised
+        error: crate::PythonError,
+    },
 }
 
 impl std::fmt::Display for Refusal {
@@ -274,6 +291,15 @@ impl std::fmt::Display for Refusal {
                 formatter,
                 "{frame} is reported as basedpython source and cannot be moved \
                  to that line of it: {reason}"
+            ),
+            Self::CouldNotAnswer { wanted, error } => write!(
+                formatter,
+                "bpd could not answer {wanted}: answering it raised {}: {}. \
+                 nothing about the program changed and the thread is still held \
+                 where it was — the exception was handed back here rather than \
+                 raised into the program. what it names is what answering ran \
+                 into, and it is the thing to look at",
+                error.kind, error.message
             ),
             Self::NotATemplateFrame { frame, function } => write!(
                 formatter,
@@ -457,6 +483,26 @@ mod tests {
                     "has no `fork`",
                     "bpd does have the other mechanism",
                     "for want of evidence",
+                ],
+            ),
+            (
+                // the one refusal that is about bpd rather than about the
+                // request, and it has to say so: the reader is looking for what
+                // they did wrong, and the answer is nothing
+                Refusal::CouldNotAnswer {
+                    wanted: "the frame's restart".to_string(),
+                    error: crate::PythonError {
+                        kind: "ImportError".to_string(),
+                        message: "import of dis halted; None in sys.modules".to_string(),
+                        traceback: Vec::new(),
+                    },
+                },
+                vec![
+                    "could not answer the frame's restart",
+                    "ImportError",
+                    "None in sys.modules",
+                    "still held",
+                    "rather than raised into the program",
                 ],
             ),
         ];

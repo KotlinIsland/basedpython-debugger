@@ -304,6 +304,18 @@ the split is what the failure *describes*:
     interval that does not fit the wire. the engine carries a core error
     transparently rather than restating it
 
+one refusal is about the agent rather than about the request, and it exists
+because of where a request is answered. a held thread answers inside a
+monitoring callback, and an exception leaving that callback is raised **into
+the program** at the line it is stopped on — as though the program had raised
+it — with the stop's registry entry and the world's parking left behind. so an
+error answering a request never leaves the stop: it comes back as
+`could_not_answer`, naming what was asked and the exception, and the thread
+stays held exactly where it was.
+`an_error_answering_a_request_is_a_refusal_and_never_reaches_the_program` asks
+for a restart in a program that has put `None` in `sys.modules["dis"]`, which
+makes reading the bytecode raise, and then lets the program run to its end
+
 this is the mechanism behind the promise that an agent can do everything a
 human can. it is not a policy anyone has to remember; it falls out of there
 being one implementation
