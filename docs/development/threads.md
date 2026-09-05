@@ -216,9 +216,11 @@ pretending to handle it
 - **a thread bpd is not holding has no stack request.** its frames are moving,
     and a stack read off one would be a description of a moment that had already
     gone. where it is, stated as the sample it is, is the thread census
-- **there is no cli surface.** the thread model reaches a user through the
-    adapters, which are not built. the capability is `Debuggee::held`,
-    `Debuggee::resume`, `Debuggee::threads` and `Debuggee::stop_the_world`
+- **there is no cli surface of its own.** the thread model reaches a user
+    through the two adapters — DAP's `threads`, `continue` and `pause`, and
+    MCP's `threads`, `resume` and `stop_the_world` — over the same capability:
+    `Debuggee::held`, `Debuggee::resume`, `Debuggee::threads` and
+    `Debuggee::stop_the_world`
 
 ## stepping is one thread's, and it is built
 
@@ -229,6 +231,20 @@ another would never be offered again. while any step is armed anywhere, nothing
 disables a line — and `a_step_is_offered_a_line_another_thread_would_have_
 disabled` holds a step open while a second thread runs the same function
 throughout
+
+there is a window in that on a **free-threaded** build, stated rather than
+left to be found. a line callback decides `DISABLE` from what is armed and
+returns; cpython applies it after the return. a step armed on another thread
+in between calls `restart_events()`, which re-instruments every executing code
+object under a stop-the-world — and if the disabling thread is parked at a
+safe point inside that window, the `DISABLE` lands **after** the restart and
+that line is one the step is never offered. the only safe point in the window
+is the code object's own critical section, contended only by another thread
+disabling a line of the same code object at the same moment. nothing bpd can
+do closes it: the decision and its application are on either side of a
+return the callback does not control, and a `restart_events()` cannot be
+ordered after an application it cannot see. it has not been reproduced, and
+that is what is claimed — not that it cannot happen
 
 a **pause** is the one request made with nothing held at all, and it holds one
 thread like every other stop: whichever reaches a line first. see

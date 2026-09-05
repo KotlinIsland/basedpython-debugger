@@ -513,6 +513,13 @@ fn on_line<'py>(
         // again before something arms it. `DISABLE` is process wide, so a line
         // forgotten here is one a step being made on another thread would never
         // be offered — which is why a step anywhere is enough to keep it
+        //
+        // the decision is made here and applied by cpython after the return,
+        // and on a free-threaded build a step armed on another thread between
+        // the two — its `restart_events()` under a stop-the-world, with this
+        // thread parked in the code object's critical section — is applied
+        // before this `DISABLE` and so undone by it. the window is written up
+        // in the threads doc; it is not closable from here
         return Ok(events::disable(python));
     }
 
