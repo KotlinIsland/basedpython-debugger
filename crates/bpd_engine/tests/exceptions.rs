@@ -102,6 +102,96 @@ ready = 1
 run_it = main()
 "#;
 
+/// one exception object, raised by three `raise` statements and once through
+/// C code that swallows it
+///
+/// `again` raises the same object in a loop and catches it each time.
+/// `Missing.__getattr__` raises it into `hasattr`, which swallows an
+/// `AttributeError` in C without any python handler running, and the function
+/// then raises it once more by hand. every one of those is a `raise` statement
+/// of the program's
+const CACHED: &str = r#"import pathlib
+
+HERE = str(pathlib.Path(__file__).parent)
+
+
+def note(name):
+    with open(HERE + "/" + name, "w") as handle:
+        handle.write("x")
+
+
+KEPT = AttributeError("kept")
+
+
+def again():
+    for _ in range(3):
+        try:
+            raise KEPT  # in the loop
+        except AttributeError:
+            pass
+
+
+class Missing:
+    def __getattr__(self, name):
+        raise KEPT  # into hasattr
+
+
+def swallowed_then_raised():
+    hasattr(Missing(), "absent")
+    raise KEPT  # by hand
+
+
+def main():
+    again()
+    note("again_done")
+    try:
+        swallowed_then_raised()
+    except AttributeError:
+        pass
+    note("swallowed_done")
+
+
+ready = 1
+run_it = main()
+"#;
+
+/// an exception a coroutine raises, which C code stores and raises again
+///
+/// `asyncio`'s task is implemented in C: it catches what the coroutine raised
+/// without a python handler running, keeps it, and raises the same object into
+/// the awaiting coroutine from C when that coroutine is resumed. no `raise`
+/// statement of the program raises it the second time
+const STORED: &str = r#"import asyncio
+import pathlib
+
+HERE = str(pathlib.Path(__file__).parent)
+
+
+def note(name):
+    with open(HERE + "/" + name, "w") as handle:
+        handle.write("x")
+
+
+STORED = ValueError("stored")
+
+
+async def failing():
+    raise STORED
+
+
+async def main():
+    task = asyncio.ensure_future(failing())
+    try:
+        await task
+    except ValueError as error:
+        if error is STORED:
+            note("same_object")
+
+
+ready = 1
+asyncio.run(main())
+"#;
+
 fn interpreter() -> &'static Capabilities {
     bpd_test::agent::matching_interpreter()
 }
@@ -159,6 +249,45 @@ fn next_stop(debuggee: &mut Debuggee) -> StopReason {
     {
         Running::Stopped { stop, .. } => stop.reason,
         other => panic!("expected a stop, got {other:?}"),
+    }
+}
+
+/// every raise in one file the program is stopped for until it ends, as
+/// `(kind, line)`
+///
+/// raises elsewhere — a library's own, caught by itself — are stops too, and
+/// are let go without being counted
+fn raises_in(debuggee: &mut Debuggee, file: &Path) -> Vec<(String, u32)> {
+    let mut raised = Vec::new();
+    loop {
+        match debuggee
+            .run(&mut bpd_test::reporting::Unreported)
+            .expect("the debuggee was resumed")
+        {
+            Running::Stopped { stop, .. } => match stop.reason {
+                StopReason::Raised {
+                    error,
+                    line,
+                    file: raised_in,
+                } => {
+                    if Path::new(&raised_in) == file {
+                        raised.push((error.kind, line));
+                    }
+                }
+                other => panic!("expected a raise, got {other:?}"),
+            },
+            Running::Exited { status, .. } => {
+                assert!(status.success());
+                return raised;
+            }
+            Running::StillRunning { waited, .. } => unreachable!(
+                "this wait carries no deadline and was answered after {waited:?} \
+                 with the program still running"
+            ),
+            other @ (Running::Ended { .. } | Running::Finishing { .. }) => {
+                panic!("expected a raise or the end, got {other:?}")
+            }
+        }
     }
 }
 
@@ -466,5 +595,64 @@ fn clearing_a_code_objects_local_events_undoes_its_disables() {
     assert_eq!(
         cleared, first,
         "taking the local events to zero and setting them again does"
+    );
+}
+
+#[test]
+fn a_raise_statement_raising_an_object_the_thread_has_raised_before_is_a_new_raise() {
+    let fixture = Fixture::new("cached", CACHED);
+    let mut debuggee = armed(&fixture, CACHED, true, false);
+
+    // one object, five `raise` statements, five stops. the three in the loop
+    // are each caught before the next, and a debugger that remembered the
+    // object rather than the raise would report the first and miss the rest.
+    // the fourth goes into `hasattr`, which swallows it in C with no python
+    // handler running, and the fifth is raised by hand straight after — which
+    // is what tells a new `raise` apart from the same exception propagating:
+    // the instruction that raised it is a `raise` statement
+    let raise_in_loop = line_of(CACHED, "raise KEPT  # in the loop");
+    let raise_in_getattr = line_of(CACHED, "raise KEPT  # into hasattr");
+    let raise_by_hand = line_of(CACHED, "raise KEPT  # by hand");
+    assert_eq!(
+        raises_in(&mut debuggee, &fixture.path()),
+        vec![
+            ("AttributeError".to_string(), raise_in_loop),
+            ("AttributeError".to_string(), raise_in_loop),
+            ("AttributeError".to_string(), raise_in_loop),
+            ("AttributeError".to_string(), raise_in_getattr),
+            ("AttributeError".to_string(), raise_by_hand),
+        ],
+        "every `raise` statement is a stop, however many times the object has \
+         been raised before"
+    );
+    assert!(ran(&fixture, "again_done"));
+    assert!(ran(&fixture, "swallowed_done"));
+}
+
+#[test]
+fn an_object_c_code_raises_again_is_reported_as_the_same_exception_propagating() {
+    // the limit of "a new raise is a `raise` statement", pinned rather than
+    // left to be discovered: when C code raises an object this thread has
+    // already been stopped for, there is no `raise` statement to point at, and
+    // what the interpreter reports looks exactly like the exception propagating
+    // into the frame. asyncio's C task is the everyday case — it stores what
+    // the coroutine raised and raises the same object into the awaiting
+    // coroutine, and that arrival is one `RAISE` event at an `await`
+    let fixture = Fixture::new("stored", STORED);
+    let mut debuggee = armed(&fixture, STORED, true, false);
+
+    // asyncio itself raises and catches on the way — a `KeyError` or two in
+    // its bookkeeping — and those are stops of their own. what is measured is
+    // what happens in the program's file
+    assert_eq!(
+        raises_in(&mut debuggee, &fixture.path()),
+        vec![("ValueError".to_string(), line_of(STORED, "raise STORED"))],
+        "the raise in the coroutine is the one stop; C raising the object again \
+         into the awaiting coroutine is not told apart from propagation"
+    );
+    assert!(
+        ran(&fixture, "same_object"),
+        "the fixture no longer raises the same object twice, so it no longer \
+         measures what this test is about"
     );
 }

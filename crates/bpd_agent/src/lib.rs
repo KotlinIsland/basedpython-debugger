@@ -1002,18 +1002,20 @@ fn on_py_unwind<'py>(
 /// the `RAISE` callback, armed for the program while the exception breakpoint is
 ///
 /// cpython raises this **again in every frame the exception propagates into**,
-/// with the same object, so what is reported is the first sighting of it on
-/// this thread — the frame it was raised in, with the whole stack still standing
+/// with the same object, so what is reported is where it was raised — the
+/// frame with the `raise` in it, with the whole stack still standing — and the
+/// instruction the event names is what tells a `raise` statement from the
+/// exception arriving in a caller. see [`exceptions::newly_raised`]
 #[pyfunction]
 fn on_raise<'py>(
     python: Python<'py>,
     code: &Bound<'py, PyAny>,
-    _offset: i32,
+    offset: i32,
     exception: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
     if conditions::evaluating()
         || !exceptions::raised()
-        || !exceptions::newly_raised(python, exception)
+        || !exceptions::newly_raised(python, code, offset, exception)?
     {
         return Ok(python.None().into_bound(python));
     }

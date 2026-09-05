@@ -218,16 +218,32 @@ wrong
 with the same exception object, as it looks for a handler. one `raise` two calls
 deep produces three `RAISE` events, which
 `the_interpreter_raises_an_exception_event_in_every_frame_it_passes_through`
-measures in a bare interpreter. what `bpd` reports is the **first sighting** of
-an exception on a thread, so one exception is one stop
+measures in a bare interpreter. what `bpd` reports is where the exception is
+**raised**, so one `raise` is one stop
+
+the same object can be raised more than once. a program that keeps an exception
+and raises it in a loop raises it every time round, and a debugger that
+remembered the object rather than the raise would report the first and miss the
+rest — `a_raise_statement_raising_an_object_the_thread_has_raised_before_is_a_new_raise`
+is that program. so the event is read together with the instruction it names:
+the object a thread was last stopped for arriving at a `RAISE_VARARGS` is a
+`raise` statement and a new stop, and arriving anywhere else is the exception
+propagating into the call that ran the frame it came out of. a bare `raise` is a
+`RERAISE` event, which is not an exception being raised and is not listened for.
+the opcode number is read from the interpreter the agent is built for, in the
+agent's build script, rather than imported from `dis` inside the program
 
 the exception a thread last reported is held by a strong reference for as long
 as it is the last one. a pointer would be cheaper and wrong, for the same reason
 a step does not compare frame addresses
 
-what follows from "first sighting", stated rather than discovered: re-raising an
-object a thread has just been stopped for is a continuation of that exception as
-far as `bpd` is concerned, not a new one
+what that cannot tell apart, stated rather than discovered: **C code raising a
+kept object again**. asyncio's task is written in C — it keeps what a coroutine
+raised and raises the same object into the coroutine awaiting it, and that
+arrival is one `RAISE` event at the `await`, with no `raise` statement to point
+at. it is reported as the exception propagating, which is to say not reported
+again. `an_object_c_code_raises_again_is_reported_as_the_same_exception_propagating`
+pins it
 
 ### uncaught
 
