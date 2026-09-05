@@ -266,7 +266,7 @@ fn a_breakpoint_is_hit_a_local_is_written_and_the_program_sees_the_write(transpo
 /// the worker sleeps before its line so that the main thread is held first and
 /// is still held when the worker arrives. the second stop then happens while
 /// the client is saying nothing at all, which is the shape under test
-const TWO_THREADS: &str = r#"import threading
+const TWO_THREADS: &str = r"import threading
 import time
 
 
@@ -287,7 +287,7 @@ def main():
 
 
 main()
-"#;
+";
 
 fn a_second_thread_stopping_while_the_first_is_held_is_announced_unasked(transport: Transport) {
     let fixture = Fixture::new("two_threads", TWO_THREADS);

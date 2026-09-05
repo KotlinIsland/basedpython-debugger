@@ -486,7 +486,7 @@ fn a_child_whose_program_has_its_own_sitecustomize_is_entered_and_runs_it_too() 
     }
     match wait_in(&mut debuggee, parent, &mut seen) {
         Running::Exited { status, .. } => {
-            assert!(status.success(), "the parent exited with {status}")
+            assert!(status.success(), "the parent exited with {status}");
         }
         other => panic!("the parent did not end: {other:?}"),
     }
