@@ -275,13 +275,23 @@ class Key:
         return self is other
 
 
+class Guarded:
+    def __init__(self, thing):
+        self.thing = thing
+
+    def __getattribute__(self, name):
+        called.append('getattribute ' + name)
+        return object.__getattribute__(self, name)
+
+
 def main():
     target = ['the object being asked about']
     watchful = Watchful(target)
     keyed = {Key(): target}
+    guarded = Guarded(target)
     called.clear()
     here = 1              # the breakpoint
-    return watchful, keyed
+    return watchful, keyed, guarded
 
 
 main()
@@ -334,6 +344,15 @@ fn asking_what_holds_an_object_runs_none_of_the_program_to_answer() {
         "[]",
         "the walk ran the program's own code to describe it — {called} — while \
          answering: {:#?}",
+        found.found
+    );
+
+    // and the one whose `__getattribute__` is its own is still described by
+    // what it holds: its dictionary is read off the object, not as `__dict__`
+    assert!(
+        found.found.iter().any(|retainer| retainer.kind == "Guarded"
+            && retainer.through.as_deref() == Some("attribute `thing`")),
+        "the object holding the target on an attribute was not named: {:#?}",
         found.found
     );
 }

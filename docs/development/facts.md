@@ -109,10 +109,14 @@ one. everything comes out of an object's storage or its type's slots:
     the `isinstance` builtin would ask `EnumMeta.__instancecheck__`, which is
     python, and `.name` is a `DynamicClassAttribute`, which is a descriptor call.
     a program that never imported `enum` is never asked
-- **a dotted path** one instance dictionary at a time. a segment the type has a
-    **data descriptor** for is refused rather than read, because a data descriptor
-    wins over the instance dictionary and reading it means calling its `__get__`.
-    that is what `self.mode` hit in the example above
+- **a dotted path** one instance dictionary at a time, each read off the object
+    through `PyObject_GenericGetDict` rather than as `__dict__` — an attribute
+    read is the class's `__getattribute__`, and
+    `proving_facts_runs_none_of_the_programs_own_code` holds a class that
+    records every call to its own. a segment the type has a **data descriptor**
+    for is refused rather than read, because a data descriptor wins over the
+    instance dictionary and reading it means calling its `__get__`. that is what
+    `self.mode` hit in the example above
 
 ## a name that proves nothing says why
 

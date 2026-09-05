@@ -705,6 +705,15 @@ class Talkative:
         return "<talkative>"
 
 
+class Proxied:
+    def __init__(self):
+        self.held = 1
+
+    def __getattribute__(self, name):
+        (HERE / "getattribute_ran").write_text(name)
+        return object.__getattribute__(self, name)
+
+
 class Disguised(list):
     def __getitem__(self, index):
         raise AssertionError("bpd read an item through __getitem__")
@@ -723,6 +732,7 @@ def inspect_me():
     slotted = Slotted()
     talkative = Talkative()
     disguised = Disguised([1, 2, 3])
+    proxied = Proxied()
     text = "x" * 5000
     wide = "\u65e5" * 100
     undecodable = "name\udcff"
@@ -850,6 +860,24 @@ fn an_object_is_read_from_its_instance_dictionary_and_repr_is_never_run_unasked(
     assert!(
         !ran.exists(),
         "`__repr__` is user code and nothing asked for it, and it ran anyway"
+    );
+
+    // the instance dictionary is read off the object, not as `__dict__`: that
+    // is an attribute, and an attribute read is the class's `__getattribute__`
+    let Content::Object {
+        attributes,
+        omitted,
+    } = &held(&locals, "proxied").content
+    else {
+        panic!("expected an object")
+    };
+    assert_eq!(*omitted, None);
+    assert_eq!(attributes[0].name, "held");
+    let reached = fixture.directory().join("getattribute_ran");
+    assert!(
+        !reached.exists(),
+        "reading the object's attributes ran its `__getattribute__`, for `{}`",
+        std::fs::read_to_string(&reached).unwrap_or_default()
     );
 
     // asked for, it runs — and the answer says it is what `__repr__` said

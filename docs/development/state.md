@@ -191,13 +191,17 @@ a few of those are decisions rather than mechanics:
 
 ### the two ways program code can run, and both are in the request
 
-- `attributes`, **on by default**, reads an object's `__dict__`. this is
-    storage: for an ordinary object it is a slot read that reaches no
-    `__getattr__`, no property and no descriptor. a type is free to make
-    `__dict__` its own code, and then this runs it — which is why it can be
-    turned off for a program full of proxies or mocks. a type that keeps no
-    instance dictionary at all, a `__slots__` class or one implemented in C, is
-    reported as having none rather than as being empty
+- `attributes`, **on by default**, reads an object's instance dictionary. this
+    is storage, and it is read as storage: off the object's own slot through
+    `PyObject_GenericGetDict`, never as the attribute `__dict__` — which is
+    `type(obj).__getattribute__`, and a class is free to make that its own code.
+    a class that makes `__dict__` a property is read the same way, and what is
+    reported is what the object holds rather than what the property would have
+    said. `an_object_is_read_from_its_instance_dictionary_and_repr_is_never_run_unasked`
+    holds a class that writes down every `__getattribute__` it is asked. the
+    switch is still there for a program whose objects are better left unopened.
+    a type that keeps no instance dictionary at all, a `__slots__` class or one
+    implemented in C, is reported as having none rather than as being empty
 - `repr`, **off by default**, calls `__repr__`. that is arbitrary user code: it
     can hang, mutate the program, or reach the network, and the result is
     labelled as having come from `__repr__` rather than being presented as the

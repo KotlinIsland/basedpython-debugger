@@ -31,7 +31,6 @@
 use std::fmt::Write as _;
 
 use bpd_core::{Content, Detail, Entry, Omitted, Pair, Value};
-use pyo3::exceptions::PyAttributeError;
 use pyo3::prelude::*;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet, PyString,
@@ -39,7 +38,7 @@ use pyo3::types::{
 };
 
 use crate::conditions::capture;
-use crate::events;
+use crate::{events, storage};
 
 /// what one value costs the budget before any text it carries
 ///
@@ -390,12 +389,13 @@ impl<'py> Reader<'py> {
             });
         }
 
-        let stored = match object.getattr("__dict__") {
-            Ok(stored) => stored,
-            // this is exactly what cpython raises for an object that has no
-            // instance dictionary, which is a `__slots__` class or a type
-            // implemented in C — not a failure, an absence
-            Err(error) if error.is_instance_of::<PyAttributeError>(self.python) => {
+        // off the object, not as `__dict__`: that is an attribute read, and an
+        // attribute read is the program's `__getattribute__` whenever a class
+        // has one. an object with no instance dictionary — a `__slots__` class
+        // or a type implemented in C — is an absence rather than a failure
+        let stored = match storage::instance_dict(object) {
+            Ok(Some(stored)) => stored,
+            Ok(None) => {
                 return Ok(Content::Object {
                     attributes: Vec::new(),
                     omitted: Some(Omitted::NoAttributes),
@@ -409,12 +409,6 @@ impl<'py> Reader<'py> {
                     }),
                 });
             }
-        };
-        let Ok(stored) = stored.cast::<PyDict>() else {
-            return Ok(Content::Object {
-                attributes: Vec::new(),
-                omitted: Some(Omitted::NoAttributes),
-            });
         };
 
         self.enter(object, path);

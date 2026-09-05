@@ -45,6 +45,7 @@ mod sources;
 mod spawns;
 mod steps;
 mod stops;
+mod storage;
 mod tasks;
 mod templates;
 mod threads;

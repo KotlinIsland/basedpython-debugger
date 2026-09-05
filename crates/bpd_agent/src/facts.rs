@@ -44,7 +44,6 @@ use std::fmt::Write as _;
 use bpd_core::fact::{Class, Fact, Limit, Mutation, Observed, Silence, Stability};
 use bpd_core::frame::Scope;
 use pyo3::PyTypeInfo;
-use pyo3::exceptions::PyAttributeError;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{
@@ -52,7 +51,7 @@ use pyo3::types::{
     PyTuple, PyType,
 };
 
-use crate::events;
+use crate::{events, storage};
 
 /// the builtin types whose storage is their value
 ///
@@ -268,10 +267,7 @@ impl<'py> Prover<'py> {
             return Ok(None);
         }
 
-        let Ok(stored) = value.getattr("__dict__") else {
-            return Ok(None);
-        };
-        let Ok(stored) = stored.cast::<PyDict>() else {
+        let Some(stored) = storage::instance_dict(value)? else {
             return Ok(None);
         };
         let Some(name) = stored.get_item("_name_")? else {
@@ -314,7 +310,7 @@ impl<'py> Prover<'py> {
                     owner,
                 }));
             }
-            let Some(next) = self.stored(&value, segment)? else {
+            let Some(next) = Self::stored(&value, segment)? else {
                 return Ok(Err(Silence::Missing {
                     segment: (*segment).to_string(),
                 }));
@@ -325,21 +321,12 @@ impl<'py> Prover<'py> {
     }
 
     /// what the object's own dictionary holds for a name
-    fn stored(
-        &self,
-        object: &Bound<'py, PyAny>,
-        name: &str,
-    ) -> PyResult<Option<Bound<'py, PyAny>>> {
-        let stored = match object.getattr("__dict__") {
-            Ok(stored) => stored,
-            // exactly what cpython raises for an object with no instance
-            // dictionary — a `__slots__` class, or a type implemented in C
-            Err(error) if error.is_instance_of::<PyAttributeError>(self.python) => {
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
-        let Ok(stored) = stored.cast::<PyDict>() else {
+    ///
+    /// read off the object rather than as `__dict__`, which is an attribute and
+    /// so `type(obj).__getattribute__` — the program's, for a class that
+    /// overrides it. an object with no instance dictionary holds nothing
+    fn stored(object: &Bound<'py, PyAny>, name: &str) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let Some(stored) = storage::instance_dict(object)? else {
             return Ok(None);
         };
         stored.get_item(name)
@@ -359,7 +346,7 @@ impl<'py> Prover<'py> {
         object: &Bound<'py, PyAny>,
         name: &str,
     ) -> PyResult<Option<Class>> {
-        for class in self.mro(&object.get_type()) {
+        for class in storage::mro(&object.get_type()) {
             let Some(found) = self.own_dict(&class).get_item(name)? else {
                 continue;
             };
@@ -381,7 +368,7 @@ impl<'py> Prover<'py> {
     /// which is cpython's definition of a data descriptor, and therefore of the
     /// thing that takes priority over an instance dictionary
     fn is_data_descriptor(&self, found: &Bound<'py, PyAny>) -> PyResult<bool> {
-        for class in self.mro(&found.get_type()) {
+        for class in storage::mro(&found.get_type()) {
             let dict = self.own_dict(&class);
             if dict.contains("__set__")? || dict.contains("__delete__")? {
                 return Ok(true);
@@ -390,24 +377,9 @@ impl<'py> Prover<'py> {
         Ok(false)
     }
 
-    /// a type's own `__mro__`, read off the type's slot
-    ///
-    /// a type that has not been readied yet has no `tp_mro`, and the only entry
-    /// that can be claimed for it is the type itself
-    fn mro(&self, class: &Bound<'py, PyType>) -> Vec<Bound<'py, PyType>> {
-        mro_slot(self.python, class).map_or_else(
-            || vec![class.clone()],
-            |mro| {
-                mro.iter()
-                    .filter_map(|entry| entry.cast_into::<PyType>().ok())
-                    .collect()
-            },
-        )
-    }
-
     /// a type's own dictionary, read off the type rather than through it
     fn own_dict(&self, class: &Bound<'py, PyType>) -> Bound<'py, PyDict> {
-        type_dict(self.python, class).unwrap_or_else(|| PyDict::new(self.python))
+        storage::type_dict(class).unwrap_or_else(|| PyDict::new(self.python))
     }
 }
 
@@ -524,45 +496,4 @@ fn is_heap_type(class: &Bound<'_, PyType>) -> bool {
 )]
 fn is_subtype(class: &Bound<'_, PyType>, base: &Bound<'_, PyType>) -> bool {
     unsafe { ffi::PyType_IsSubtype(class.as_type_ptr(), base.as_type_ptr()) == 1 }
-}
-
-/// a type's `tp_mro`, when it has been readied
-///
-/// SAFETY: `as_type_ptr` on a live `Bound<PyType>` is a valid `PyTypeObject`.
-/// `tp_mro` is a borrowed reference the type owns, and `from_borrowed_ptr`
-/// takes its own — so the tuple outlives the binding returned here regardless
-/// of what happens to the type
-#[expect(
-    unsafe_code,
-    reason = "`__mro__` read as an attribute goes through the metaclass, which \
-              is what this is avoiding — see above"
-)]
-fn mro_slot<'py>(python: Python<'py>, class: &Bound<'py, PyType>) -> Option<Bound<'py, PyTuple>> {
-    let mro = unsafe { (*class.as_type_ptr()).tp_mro };
-    if mro.is_null() {
-        return None;
-    }
-    unsafe { Bound::from_borrowed_ptr(python, mro) }
-        .cast_into::<PyTuple>()
-        .ok()
-}
-
-/// a type's own `__dict__`, without going through the type
-///
-/// SAFETY: `PyType_GetDict` returns a new reference or null, and
-/// `from_owned_ptr` takes exactly that ownership. it is only called on the
-/// non-null branch
-#[expect(
-    unsafe_code,
-    reason = "reading `__dict__` off the type as an attribute reaches the \
-              metaclass, and this is the C accessor that does not — see above"
-)]
-fn type_dict<'py>(python: Python<'py>, class: &Bound<'py, PyType>) -> Option<Bound<'py, PyDict>> {
-    let dict = unsafe { ffi::PyType_GetDict(class.as_type_ptr()) };
-    if dict.is_null() {
-        return None;
-    }
-    unsafe { Bound::from_owned_ptr(python, dict) }
-        .cast_into::<PyDict>()
-        .ok()
 }

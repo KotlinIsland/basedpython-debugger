@@ -53,7 +53,7 @@ use pyo3::types::PyDict;
 use crate::conditions::{self, capture};
 use crate::facts::Prover;
 use crate::values::Reader;
-use crate::{bytecode, events, inplace, linetable, sources, templates, unwinds, world};
+use crate::{bytecode, events, inplace, linetable, sources, storage, templates, unwinds, world};
 
 /// `CO_OPTIMIZED` — the frame keeps its locals in slots the compiler assigned
 ///
@@ -1445,29 +1445,25 @@ fn what_dies_with_it(
 }
 
 /// whether releasing this value runs code of the program
+///
+/// nothing here runs code of the program, and that takes care: the MRO and
+/// each class's dictionary are read off the type's slots, because reading them
+/// as attributes is the metaclass's `__getattribute__`, and whether the value
+/// is a suspended generator is decided by its exact type before any attribute
+/// of it is read — `inspect.getgeneratorstate` reads `gi_running` off whatever
+/// it is handed, which for an object of the program's is the program's own
+/// `__getattr__`. see [`crate::storage`]
 fn runs_as_it_dies(value: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let python = value.py();
-    let kind = value.get_type();
-    for class in kind.getattr("__mro__")?.try_iter()? {
-        // `__dict__` of a **type**, so this is a dict lookup rather than an
-        // attribute access — a `__getattr__` of the program cannot see it
-        if class?.getattr("__dict__")?.contains("__del__")? {
+    for class in storage::mro(&value.get_type()) {
+        if let Some(own) = storage::type_dict(&class)
+            && own.contains("__del__")?
+        {
             return Ok(true);
         }
     }
     // a generator that has **started and not finished** is closed when its last
     // reference goes, and closing throws `GeneratorExit` into it
-    let inspect = python.import("inspect")?;
-    for asking in ["getgeneratorstate", "getcoroutinestate"] {
-        let Ok(state) = inspect.call_method1(asking, (value,)) else {
-            continue;
-        };
-        let state: String = state.extract()?;
-        if state.ends_with("_SUSPENDED") {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    storage::suspended(value)
 }
 
 /// the stack as a client sees it: the python frames, with template frames over
@@ -1718,11 +1714,11 @@ impl<'py> Place<'py> {
     /// `GeneratorExit` into it, which runs its `finally` and the `__exit__` of
     /// any `with` inside it
     ///
-    /// nothing here runs code of the program. `type(value)` is a read, walking
-    /// `__mro__` is a read, and `__del__ in cls.__dict__` is a dict lookup on a
-    /// **type**'s dict, which no `__getattr__` of the program can intercept.
-    /// asking `hasattr(value, "__del__")` would run a `__getattr__`, which is
-    /// the one thing this must not do
+    /// nothing here runs code of the program. `type(value)` is a slot read,
+    /// and so are the MRO and each class's dictionary — see [`runs_as_it_dies`]
+    /// for why they are not read as attributes. asking
+    /// `hasattr(value, "__del__")` would run a `__getattr__`, which is the one
+    /// thing this must not do
     ///
     /// only a frame that keeps its names in slots is scanned. a module or class
     /// body reads through a mapping that may be the program's own code, and

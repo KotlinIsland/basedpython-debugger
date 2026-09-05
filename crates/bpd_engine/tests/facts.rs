@@ -63,6 +63,21 @@ class Counted(list):
     pass
 
 
+class Watching(type):
+    def __getattribute__(cls, name):
+        TOUCHED.append("meta." + name)
+        return type.__getattribute__(cls, name)
+
+
+class Sneaky(metaclass=Watching):
+    def __init__(self):
+        self.limit = 9
+
+    def __getattribute__(self, name):
+        TOUCHED.append("sneaky." + name)
+        return object.__getattribute__(self, name)
+
+
 def inspect_me():
     small = 5
     words = "hello"
@@ -75,6 +90,7 @@ def inspect_me():
     plain = Plain()
     loud = Loud()
     subclassed = Counted([1, 2])
+    sneaky = Sneaky()
     marker = 1
     return marker
 
@@ -468,10 +484,31 @@ fn proving_facts_runs_none_of_the_programs_own_code() {
 
     // every one of these would call into `Loud` if the prover reached for the
     // abstract protocol: `loud` is where `__len__` and `__bool__` live, and
-    // `loud.mode` is a property
-    prove(
+    // `loud.mode` is a property. `sneaky` is the other way in: reading its
+    // `__dict__` as an attribute goes through `Sneaky.__getattribute__`, and
+    // reading its class's `__mro__` or `__dict__` as one goes through the
+    // metaclass — so both are read off the object and the type instead
+    let facts = prove(
         &mut debuggee,
-        &["loud", "loud.mode", "growing", "plain.limit"],
+        &[
+            "loud",
+            "loud.mode",
+            "growing",
+            "plain.limit",
+            "sneaky",
+            "sneaky.limit",
+        ],
+    );
+    // and the path is followed, rather than left unanswered to stay clean
+    assert_eq!(
+        observed(
+            &facts,
+            "sneaky.limit",
+            &Observed::IsInt {
+                text: "9".to_string()
+            }
+        ),
+        Stability::Permanent
     );
 
     to_exit(&mut debuggee);

@@ -303,9 +303,22 @@ class Finalised:
         RAN.append(("finalised", self.tag))
 
 
+class Peeking(type):
+    def __getattribute__(cls, name):
+        RAN.append(("touched", "meta." + name))
+        return type.__getattribute__(cls, name)
+
+
+class Peeked(metaclass=Peeking):
+    def __getattribute__(self, name):
+        RAN.append(("touched", name))
+        return object.__getattribute__(self, name)
+
+
 def holding_one(seed):
     RAN.append(("holding_one", seed))
     held = Finalised("held")
+    peeked = Peeked()
     summed = seed + 1
     return summed
 
@@ -2492,6 +2505,15 @@ fn what_a_restart_says_about_cleanup_admits_the_one_that_does_run() {
         2,
         "the forced-out frame's local was not finalised, so this test no longer \
          measures what it says: {said}"
+    );
+    // deciding what is finalised reads every local's type, and the frame holds
+    // one whose `__getattribute__` and whose metaclass's `__getattribute__`
+    // both write down being reached. neither may be: the MRO and the class
+    // dictionaries are read off the type, and whether a value is a suspended
+    // generator is decided by its exact type before any attribute of it is read
+    assert!(
+        !said.contains("touched"),
+        "deciding what a forced exit finalises ran the program's own code: {said}"
     );
 }
 

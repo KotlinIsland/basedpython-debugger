@@ -35,6 +35,8 @@ use bpd_core::{Coverage, Retainer, Retainers};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PySet, PyTuple};
 
+use crate::storage;
+
 /// what an untracked object costs the answer
 const UNTRACKED: &str = "objects the collector does not track never appear here. an int, a str, \
                          a float — anything without gc support — is invisible to the referent \
@@ -150,21 +152,15 @@ pub(crate) fn holding(
 /// resolved to its owner on every release, and the version the interpreter
 /// happens to be stops being visible in the answer
 ///
-/// the match is by **identity** against the candidate's own table, read through
-/// `object.__getattribute__` rather than `getattr`: that is object's own
-/// implementation, so a class that overrides `__getattribute__` cannot decide
-/// what the debugger reports here. a class that defines `__dict__` as a
-/// property of its own still runs, and a failure is no owner rather than a
-/// failed walk
+/// the match is by **identity** against the candidate's own table, read off
+/// the candidate rather than as `__dict__`: an attribute read is the class's
+/// `__getattribute__`, and a class that defines `__dict__` as a property of its
+/// own would answer the property. neither can decide what the debugger reports
+/// here — see [`crate::storage`]
 fn owner_of<'py>(
     python: Python<'py>,
     table: &Bound<'py, PyDict>,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
-    let generic = python
-        .import("builtins")?
-        .getattr("object")?
-        .getattr("__getattribute__")?;
-
     let referrers = python
         .import("gc")?
         .getattr("get_referrers")?
@@ -175,7 +171,7 @@ fn owner_of<'py>(
         if candidate.is(&referrers) || candidate.is(table) {
             continue;
         }
-        if let Ok(theirs) = generic.call1((&candidate, "__dict__"))
+        if let Some(theirs) = storage::instance_dict(&candidate)?
             && theirs.is(table)
         {
             return Ok(Some(candidate));
@@ -256,23 +252,21 @@ fn through(retainer: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<O
         }
     }
 
-    // and an ordinary object, through its own `__dict__` — reached whether or not
-    // one of the branches above matched, because a `class Registry(list)` can
-    // hold the target on an attribute rather than in its list storage. those
-    // branches used to `return Ok(None)` when the storage did not have it, which
-    // said "shape unreadable" about a shape that had been read
+    // and an ordinary object, through its own instance dictionary — reached
+    // whether or not one of the branches above matched, because a
+    // `class Registry(list)` can hold the target on an attribute rather than in
+    // its list storage. those branches used to `return Ok(None)` when the
+    // storage did not have it, which said "shape unreadable" about a shape that
+    // had been read
     //
-    // **this one does reach the program**, and saying so is the point:
-    // `getattr` is `type(obj).__getattribute__`, which a class may override. it
-    // is kept because the alternative is reporting `None` for the commonest
-    // retainer there is — an instance holding the target on an attribute — and
-    // a failure here is caught and becomes that same `None` rather than an
-    // error. what it cannot see is a `__slots__` class, which has no `__dict__`,
-    // and a class object, whose `__dict__` is a `mappingproxy` rather than a
-    // dict: both fall through to "shape unreadable", which is true of them
-    if let Ok(attributes) = retainer.getattr("__dict__")
-        && let Ok(attributes) = attributes.cast::<PyDict>()
-    {
+    // read off the object rather than as `__dict__`, for the reason
+    // [`owner_of`] gives. a class object's own dictionary is read the same way
+    // — the slot holds the real dict, where `cls.__dict__` would answer a
+    // `mappingproxy` — so a class holding the target as a class attribute is
+    // named too. what it cannot see is a `__slots__` class, which has no
+    // dictionary at all, and that falls through to "shape unreadable", which
+    // is true of it
+    if let Some(attributes) = storage::instance_dict(retainer)? {
         for (name, value) in attributes.iter() {
             if value.is(target) {
                 return Ok(Some(format!("attribute {}", short(&name)?)));
