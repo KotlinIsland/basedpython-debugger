@@ -29,8 +29,10 @@ breakpoint is not already solid
 - [x] `bpd` runs a script, a module (`-m`), and a package the same way the
         interpreter would: same `__main__` identity, same `sys.argv`, same
         `sys.path[0]`, same exit code, same stdout and stderr interleaving
-- [ ] it runs on cpython 3.13 and 3.14, on linux, macos and windows, on gil and
-        free-threaded builds
+- [x] it runs on cpython 3.13 and 3.14, on linux, macos and windows, on gil and
+        free-threaded builds — `ci.yaml` runs that matrix, and
+        `crates/bpd_engine/tests/interpreter_matrix.rs` refuses a checkout that
+        cannot reach every interpreter it names
 - [x] an unsupported interpreter is refused before anything is launched, by
         name. the refusal names the interpreter as given, the version it found
         and the minimum, and it comes from `bpd_engine::launch::start`, which

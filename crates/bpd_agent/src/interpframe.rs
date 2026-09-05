@@ -54,9 +54,9 @@
 //! left alone. an immortal, a deferred reference and a tagged int are all things
 //! `PyStackRef_CLOSE` does nothing to, and so is this
 //!
-//! ## the second `unsafe` in the workspace
+//! ## the other `unsafe` that writes
 //!
-//! the first is [`crate::linetable`], and this is held to the same standard: the
+//! [`crate::linetable`] is the first, and this is held to the same standard: the
 //! layout is not believed, it is **checked** against the code object the frame
 //! says it is running, immediately before any write, every time. a frame whose
 //! data does not hold its own code object is a refusal and not a write

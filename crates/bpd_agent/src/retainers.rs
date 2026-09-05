@@ -9,8 +9,9 @@
 //!
 //! - **it does not need `unsafe`.** the assumption was a native walk over the
 //!   referent graph, which means `tp_traverse`, which `unsafe_code = "deny"`
-//!   forbids workspace-wide. `gc.get_referrers` is C-implemented and reaches the
-//!   same graph from safe code
+//!   makes a per-function exception with a written reason rather than a
+//!   default. `gc.get_referrers` is C-implemented and reaches the same graph
+//!   from safe code
 //! - **it is not slow.** 0.7 ms on a 55,000-object heap, 2.5 ms on 205,000 and
 //!   9.8 ms on 805,000 — linear, and an interactive answer at every size
 //! - **it does not perturb the heap.** the object count was identical before and

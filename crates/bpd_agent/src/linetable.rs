@@ -36,10 +36,12 @@
 //! and on a free-threaded build nothing serialises the two. they are tens of
 //! bytes and there is one per forced exit
 //!
-//! ## the one `unsafe` in the workspace
+//! ## the `unsafe` here
 //!
 //! `unsafe_code` is denied for the whole tree and allowed here, for four writes
-//! and two reads of a single word. there is no safe way to reach the field:
+//! and two reads of a single word. it is not the only place — every one is a
+//! read cpython offers no safe spelling of, and each carries its own reason —
+//! but it is the one that **writes**. there is no safe way to reach the field:
 //! `pyo3-ffi` does not declare `PyCodeObject`, hand-writing the layout is the
 //! per-version table this project refuses everywhere else, and doing the same
 //! poke through `ctypes` would only move it out of the lint's sight — it is the
