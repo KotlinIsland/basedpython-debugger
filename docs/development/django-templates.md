@@ -89,6 +89,27 @@ and on a line after `{% endblock %}`, and the program runs to completion without
 stopping at any of them — which is what
 `crates/bpd_engine/tests/django.rs` pins
 
+## a node the parser did not build
+
+`Parser.extend_nodelist` is the only thing that gives a node an origin and a
+token. django's `Node` class carries `token = None` and no `origin` at all, and
+a tag's own code is free to build nodes — hand a `NodeList` it made itself to
+the node it returns, or render one outside any nodelist — that the parser never
+sees. those render through `Node.render_annotated` like any other node, and the
+walk reaches them through `child_nodelists` like any other node, and they have
+no file and no line
+
+so every reader asks one question of a node, `placed`, and a node with no
+origin, a `None` token or a token with no line is placed nowhere: the walk binds
+nothing to it, the render hook decides nothing at it, and the stack reports the
+`Node.render_annotated` frame rendering it as the python frame it is rather than
+synthesising a template frame with nowhere to be. reading `origin.name` or
+`token.lineno` off such a node as though the parser had been there was an
+`AttributeError` raised out of a hook into django's own frame — the program
+crashing on `get_template` with a traceback naming bpd nowhere.
+`a_node_a_tags_own_code_built_has_no_line_and_breaks_nothing` renders exactly
+that node, stops inside its render, and reads the stack
+
 ## the design doc was wrong about debug mode
 
 the previous version of this page said `node.token` and `node.origin` are only

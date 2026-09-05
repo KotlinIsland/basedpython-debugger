@@ -116,8 +116,22 @@ fn install(tree: &Path) {
 /// `DEBUG = True` turns on by default and which is the setting people expect to
 /// matter here. it is a parameter so a test can prove it does not
 pub fn preamble(debug: bool) -> String {
+    preamble_with_libraries(debug, &[])
+}
+
+/// the same preamble, with template tag libraries registered on the engine
+///
+/// each pair is the name a template loads and the module that holds the
+/// library, exactly as the engine's own `libraries` option takes them. the
+/// module is the fixture's to put beside the program
+pub fn preamble_with_libraries(debug: bool, libraries: &[(&str, &str)]) -> String {
     let django = installed().display().to_string();
     let debug = if debug { "True" } else { "False" };
+    let libraries: String = libraries
+        .iter()
+        .map(|(name, module)| format!("{name:?}: {module:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         r#"import pathlib
 import sys
@@ -140,7 +154,7 @@ settings.configure(
             "BACKEND": "django.template.backends.django.DjangoTemplates",
             "DIRS": [str(HERE / "templates")],
             "APP_DIRS": False,
-            "OPTIONS": {{"debug": {debug}}},
+            "OPTIONS": {{"debug": {debug}, "libraries": {{{libraries}}}}},
         }}
     ],
 )

@@ -404,6 +404,52 @@ enum Region {
     Extended,
 }
 
+/// where a node was parsed from, when the parser is what built it
+///
+/// `Parser.extend_nodelist` is what gives a node its `origin` and its `token`:
+/// django's `Node` class carries `token = None` and no `origin` at all. so a
+/// node a tag's own code built — handed a nodelist the tag made itself, or
+/// rendered outside one — has neither, and a `Token` built by hand can carry
+/// `lineno=None` too. none of those belongs to a file or has a line, and
+/// reading `origin.name` or `token.lineno` off one as though the parser had
+/// been there is an `AttributeError` raised out of a hook into django's own
+/// frame. it is not a node any breakpoint can name and not a frame a stack can
+/// place, and every reader asks this rather than the node.
+/// `a_node_a_tags_own_code_built_has_no_line_and_breaks_nothing` renders
+/// exactly that node
+fn placed(node: &Bound<'_, PyAny>) -> PyResult<Option<(String, u32)>> {
+    let Ok(origin) = node.getattr("origin") else {
+        return Ok(None);
+    };
+    let Ok(file) = origin.getattr("name")?.extract::<String>() else {
+        return Ok(None);
+    };
+    let Ok(token) = node.getattr("token") else {
+        return Ok(None);
+    };
+    if token.is_none() {
+        return Ok(None);
+    }
+    let Ok(line) = token.getattr("lineno") else {
+        return Ok(None);
+    };
+    Ok(line
+        .extract::<u32>()
+        .ok()
+        .filter(|line| *line > 0)
+        .map(|line| (file, line)))
+}
+
+/// where a node being rendered was parsed from, for the stack
+///
+/// `None` is a node the parser did not build, which is rendered through the
+/// same `Node.render_annotated` as any other and is not a template frame:
+/// there is no file and no line to report it at. the python frame rendering
+/// it is still in the stack, as it is for every node
+pub(crate) fn placed_in_template(node: &Bound<'_, PyAny>) -> PyResult<Option<(String, u32)>> {
+    placed(node)
+}
+
 /// collect every node of a nodelist and everything nested under it
 ///
 /// `child_nodelists` is django's own answer to "what is inside this node" — a
@@ -424,9 +470,6 @@ fn walk(
     for node in nodelist.try_iter()? {
         let node = node?;
 
-        let origin = node.getattr("origin")?.getattr("name")?;
-        let here = origin.extract::<String>().is_ok_and(|name| name == file);
-
         // `type(node).render_annotated is Node.render_annotated`. `TextNode`
         // overrides it, so a node of literal html renders through a code object
         // the hook is not on and reaches no event. reporting a breakpoint on
@@ -437,15 +480,12 @@ fn walk(
             .is(classes.inherited.as_any());
 
         if region == Region::Rendered
-            && here
             && renders
-            && let Ok(token) = node.getattr("token")
+            && let Some((origin, line)) = placed(&node)?
+            && origin == file
         {
-            let line: Option<u32> = token.getattr("lineno")?.extract().ok();
-            if let Some(line) = line.filter(|line| *line > 0) {
-                let class: String = node.get_type().getattr("__name__")?.extract()?;
-                parsed.lines.entry(line).or_default().push(class);
-            }
+            let class: String = node.get_type().getattr("__name__")?.extract()?;
+            parsed.lines.entry(line).or_default().push(class);
         }
 
         // `{% extends %}` puts everything below it out of reach, and a
@@ -554,21 +594,16 @@ pub(crate) fn rendering(python: Python<'_>) -> PyResult<Option<Hit>> {
         unreachable!("`Node.render_annotated` started without `self` in its frame");
     };
 
-    // a node built by a tag's own code and rendered outside a nodelist has no
-    // token. it is not a node any breakpoint is bound to — binding only ever
-    // sees nodes that came through `Parser.extend_nodelist` — so there is
+    // a node built by a tag's own code has no file and no line — see
+    // [`placed`]. it is not a node any breakpoint is bound to, so there is
     // nothing here to decide and nothing to guess
-    let Ok(token) = node.getattr("token") else {
-        return Ok(None);
-    };
-    let Ok(line) = token.getattr("lineno")?.extract::<u32>() else {
+    let Some((file, line)) = placed(&node)? else {
         return Ok(None);
     };
     if !read().lines.contains(&line) {
         return Ok(None);
     }
 
-    let file: String = node.getattr("origin")?.getattr("name")?.extract()?;
     let state = read();
     let Some(identity) = state.by_name.get(&file) else {
         return Ok(None);

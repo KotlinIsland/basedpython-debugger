@@ -132,6 +132,10 @@ pub(crate) enum Slot<'py> {
         context: Bound<'py, PyAny>,
         /// how far down the stack the `Node.render_annotated` frame is
         python: u32,
+        /// the template the node was parsed from
+        file: String,
+        /// the line of it the node was parsed from
+        line: u32,
     },
 }
 
@@ -1476,14 +1480,20 @@ fn stack_of(python: Python<'_>) -> PyResult<Vec<Slot<'_>>> {
     let mut slots = Vec::with_capacity(frames.len());
 
     for frame in frames {
+        // a node the parser did not build renders through the same frame and
+        // has no file or line to be placed at, so it is the python frame alone
         if templates::is_render_frame(&frame)? {
             let (node, context) = templates::rendered(&frame)?;
-            slots.push(Slot::Template {
-                node,
-                context,
-                python: u32::try_from(slots.len() + 1)
-                    .expect("a stack is not four billion frames deep"),
-            });
+            if let Some((file, line)) = templates::placed_in_template(&node)? {
+                slots.push(Slot::Template {
+                    node,
+                    context,
+                    python: u32::try_from(slots.len() + 1)
+                        .expect("a stack is not four billion frames deep"),
+                    file,
+                    line,
+                });
+            }
         }
         slots.push(Slot::Python(frame));
     }
@@ -1533,12 +1543,17 @@ fn describe(slot: &Slot<'_>, id: FrameId) -> PyResult<Frame> {
                 },
             })
         }
-        Slot::Template { node, python, .. } => {
-            let origin = node.getattr("origin")?;
+        Slot::Template {
+            node,
+            python,
+            file,
+            line,
+            ..
+        } => {
             Ok(Frame {
                 id,
-                file: origin.getattr("name")?.extract()?,
-                line: node.getattr("token")?.getattr("lineno")?.extract()?,
+                file: file.clone(),
+                line: *line,
                 // a django template is not compiled to python at all, so there
                 // is no generated line for a source map to be about
                 mapping: None,

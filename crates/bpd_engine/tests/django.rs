@@ -924,3 +924,141 @@ fn a_breakpoint_in_a_template_the_reloaders_child_renders_is_hit_in_the_child() 
     }
     assert_eq!(marks(&fixture), "after");
 }
+
+/// a tag library whose tag builds a node the parser never sees
+///
+/// `HandBuilt` is what the parser made, and was given an origin and a token.
+/// `Made` inside it was built by the tag's own code, so it has neither: `token`
+/// is the `None` the `Node` class carries and there is no `origin` at all.
+/// `child_nodelists` is how the binding walk reaches it, `Node.render_annotated`
+/// is how the render does, and `marker` is a line of python to stop on while
+/// it is being rendered
+const HANDMADE: &str = r#"from django import template
+
+register = template.Library()
+
+
+def marker(text):
+    seen = text
+    return seen
+
+
+class Made(template.Node):
+    def render(self, context):
+        return marker(context["who"])
+
+
+class HandBuilt(template.Node):
+    child_nodelists = ("nodelist",)
+
+    def __init__(self, nodelist):
+        self.nodelist = nodelist
+
+    def render(self, context):
+        return self.nodelist.render(context)
+
+
+@register.tag
+def hand(parser, token):
+    return HandBuilt(template.NodeList([Made()]))
+"#;
+
+/// a template that uses it, with an ordinary line after it to bind to
+const HAND: &str = r"{% load handmade %}{% hand %}
+{{ who }}
+";
+
+/// the program, which renders it and keeps what came out
+const HAND_PROGRAM: &str = r#"
+
+def main():
+    template = get_template("hand.html")
+    MARKS.write_text("before")
+    rendered = template.render({"who": "you"})
+    MARKS.write_text("after")
+    (HERE / "rendered").write_text(rendered)
+    return rendered
+
+
+main()
+"#;
+
+#[test]
+fn a_node_a_tags_own_code_built_has_no_line_and_breaks_nothing() {
+    // only the parser gives a node an origin and a token. a node a tag built by
+    // hand is reached three times: by the walk that binds breakpoints, through
+    // `child_nodelists`; by the render hook, through `Node.render_annotated`;
+    // and by the stack, when the program is stopped inside its render. reading
+    // `origin.name` or `token.lineno` off it as though the parser had been
+    // there is an `AttributeError` — out of a hook and into django's own frame
+    // for the first two, which is the program crashing on `get_template` with
+    // a traceback that names bpd nowhere
+    let fixture = Fixture::new(
+        "app",
+        &format!(
+            "{}{HAND_PROGRAM}",
+            bpd_test::django::preamble_with_libraries(true, &[("handmade", "handmade")])
+        ),
+    );
+    fixture.beside("handmade.py", HANDMADE);
+    fixture.beside("templates/hand.html", HAND);
+    let hand = template(&fixture, "hand.html");
+    let library = fixture.directory().join("handmade.py");
+    let at = line_of(HAND, "{{ who }}");
+    let inside = line_of(HANDMADE, "seen = text");
+    let mut debuggee = launch(&fixture);
+
+    set(
+        &mut debuggee,
+        vec![
+            SourceBreakpoint::at(1, &hand, at),
+            SourceBreakpoint::at(2, &library, inside),
+        ],
+    );
+
+    // the template loads, and the hand-built node renders first: the program
+    // stops inside its render, with the parsed node's frame in the stack and
+    // no template frame for the node that has nowhere to be placed
+    let (reason, rebound) = run_to_stop(&mut debuggee);
+    assert!(
+        matches!(&reason, StopReason::Breakpoint { breakpoints, .. } if breakpoints == &[2]),
+        "expected the python breakpoint inside the hand-built node's render, got {reason:?}"
+    );
+    assert_eq!(
+        rebound
+            .iter()
+            .filter(|(id, _)| *id == 1)
+            .map(|(id, binding)| (*id, in_template(binding)))
+            .collect::<Vec<_>>(),
+        [(1, (at, ["VariableNode".to_string()].as_slice()))]
+    );
+    let stack = debuggee.the_stack(None).expect("the stack was answered");
+    assert_eq!(
+        template_frames(&stack.frames),
+        [("hand.html".to_string(), 1, "HandBuilt".to_string())],
+        "the parsed node is a template frame and the hand-built one is not"
+    );
+    assert_eq!(
+        stack
+            .frames
+            .iter()
+            .filter(|frame| frame.name() == "Node.render_annotated")
+            .count(),
+        2,
+        "both nodes render through `Node.render_annotated`, and both frames are there"
+    );
+
+    // and then the line the parser did give a node
+    let (reason, _) = run_to_stop(&mut debuggee);
+    stopped_at(&reason, 1, &hand, at);
+    assert_eq!(marks(&fixture), "before");
+
+    to_exit(&mut debuggee);
+    assert_eq!(marks(&fixture), "after");
+    let rendered = std::fs::read_to_string(fixture.directory().join("rendered"))
+        .expect("the program wrote what it rendered");
+    assert_eq!(
+        rendered, "you\nyou\n",
+        "the hand-built node and the parsed one both rendered `who`"
+    );
+}
