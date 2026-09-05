@@ -130,6 +130,37 @@ fn a_python_child_is_reported_and_still_runs_exactly_as_it_would_have() {
     );
 }
 
+/// a child started with an argument that is not utf-8
+///
+/// `"\udcff"` is what `surrogateescape` makes of an undecodable byte in a
+/// filename, and an argument vector is where such names end up. it reaches the
+/// child intact — `os.fsencode` turns it back into the byte — so the program
+/// is not changed by it, and the report has to carry it in some form rather
+/// than lose the word
+const UNDECODABLE_ARGUMENT: &str = r#"import subprocess
+import sys
+
+subprocess.run([sys.executable, "-c", "pass", "\udcff"], check=True)
+"#;
+
+#[test]
+fn an_argument_that_is_not_utf8_is_reported_with_its_character_replaced() {
+    let started = children_of(UNDECODABLE_ARGUMENT).started;
+    assert_eq!(started.len(), 1, "{started:?}");
+
+    // the word is there, with the one character that has no utf-8 form
+    // replaced, exactly as a `bytes` argument that is not utf-8 would be
+    let arguments = &started[0].arguments;
+    assert_eq!(
+        arguments.len(),
+        4,
+        "the child was started with four words, and the report holds {arguments:?}"
+    );
+    assert_eq!(arguments[1], "-c");
+    assert_eq!(arguments[2], "pass");
+    assert_eq!(arguments[3], "\u{FFFD}");
+}
+
 /// the same program, with a child that is plainly not python
 const NOT_PYTHON: &str = r#"import subprocess
 

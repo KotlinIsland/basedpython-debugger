@@ -500,10 +500,30 @@ fn words(argument: Option<&Bound<'_, PyAny>>) -> Vec<String> {
 ///
 /// a path that is not utf-8 is a path all the same, so bytes are decoded
 /// lossily rather than dropped — a report naming a child with one character
-/// replaced is worth more than no report
+/// replaced is worth more than no report. a `str` gets the same treatment: an
+/// argument that came in through `surrogateescape` holds a lone surrogate,
+/// which is not utf-8 either, and dropping it would report a command line
+/// with a word missing from it. it is encoded back the way the child receives
+/// it — `os.fsencode` is `surrogateescape`, which turns the surrogate into the
+/// byte it stood for — and read lossily from there, so the report shows what
+/// a `bytes` argument holding that byte would have shown. a surrogate that
+/// did not come from a byte cannot be encoded that way, and is replaced as
+/// the encoder replaces it
+///
+/// `str.encode` unbound, rather than the method on the value: a `str`
+/// subclass is free to make `encode` its own code, and a spawn report is not
+/// a place the program's code runs
 fn text(value: &Bound<'_, PyAny>) -> Option<String> {
     if let Ok(string) = value.cast::<PyString>() {
-        return string.extract().ok();
+        let python = string.py();
+        let encode = python.get_type::<PyString>().getattr("encode").ok()?;
+        return match encode.call1((string, "utf-8", "surrogateescape")) {
+            Ok(encoded) => {
+                let bytes = encoded.cast::<PyBytes>().ok()?;
+                Some(String::from_utf8_lossy(bytes.as_bytes()).into_owned())
+            }
+            Err(_) => Some(string.to_string_lossy().into_owned()),
+        };
     }
     let bytes = value.cast::<PyBytes>().ok()?;
     Some(String::from_utf8_lossy(bytes.as_bytes()).into_owned())
