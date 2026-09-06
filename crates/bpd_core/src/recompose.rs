@@ -402,7 +402,7 @@ impl Location {
     /// it said about them — `None` when nothing in the build generated the
     /// file. it is built here, in the crate that defines [`Mapping`], because
     /// that enum is closed to everyone else and a reader that had to add a
-    /// catch-all arm to unpack it would be a reader that silently mis-filed a
+    /// catch-all arm to unpack it would be a reader that silently misfiled a
     /// mapping added later
     #[must_use]
     pub fn mapped(file: String, line: u32, mapping: Option<Mapping>) -> Self {
