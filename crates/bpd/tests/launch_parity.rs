@@ -625,10 +625,16 @@ fn a_program_that_reads_its_own_environment_finds_no_debugger_in_it() {
         // cargo's own `CARGO_BIN_EXE_bpd` — set for this test process and
         // inherited by both runs — arrives as `CARGO_BIN_EXE_BPD` and contains
         // them
+        //
+        // the test harness's own `BPD_TEST_…` — `BPD_TEST_PYTHONS`, which names
+        // the interpreters, and `BPD_TEST_BASEDPYTHON_UI`, which names a
+        // framework build — are set for this test process and inherited by
+        // both runs, so they are in `bare.stdout` too and the equality above
+        // already holds them to account. they are nothing bpd launches through
         let leaked: Vec<&str> = debugged
             .stdout
             .lines()
-            .filter(|line| line.starts_with("BPD_"))
+            .filter(|line| line.starts_with("BPD_") && !line.starts_with("BPD_TEST_"))
             .collect();
         assert!(
             leaked.is_empty(),
@@ -1123,22 +1129,23 @@ fn child_reasons() -> String {
         .join("\n")
 }
 
-/// the audit events `bpd` watches a child by, on this interpreter
+/// the audit events `bpd`'s hook recognises, on this interpreter
 ///
 /// it is a **list**, and it is the agent's own — taken from
-/// [`bpd_core::spawn::making_a_process`] rather than restated, because a
-/// restatement of it is what this guard used to be. it named
-/// `_posixsubprocess.fork_exec` on 3.14 and later, and which event an ordinary
-/// `subprocess.run` raises is the interpreter's choice on the day: cpython
-/// reaches for `posix_spawn` where it can, so on a machine that took that path
-/// the guard failed a run in which nothing at all was wrong
+/// [`bpd_core::audit::watched`] rather than restated, because a restatement of
+/// it is what this guard used to be. it named `_posixsubprocess.fork_exec` on
+/// 3.14 and later, and which event an ordinary `subprocess.run` raises is the
+/// interpreter's choice on the day: cpython reaches for `posix_spawn` where it
+/// can, so on a machine that took that path the guard failed a run in which
+/// nothing at all was wrong
 ///
 /// what the guard is for is making sure the fixture reached bpd's hook. any
-/// event on the list is bpd's hook — see
-/// [child processes](../../../docs/development/subprocesses.md)
+/// event on the list is bpd's hook — the process-making ones, see
+/// [child processes](../../../docs/development/subprocesses.md), and the ui
+/// runtime's trace event beside them
 fn watched_events() -> Vec<&'static str> {
     let version = interpreter().version;
-    bpd_core::spawn::making_a_process(version.major, version.minor)
+    bpd_core::audit::watched(version.major, version.minor)
         .iter()
         .map(|event| {
             event

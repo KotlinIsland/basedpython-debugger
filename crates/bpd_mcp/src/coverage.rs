@@ -72,6 +72,12 @@ pub const fn reach_of(request: &Request) -> Reach {
         Request::Retainers { .. } => Reach::Direct("retainers"),
         Request::ReplaceCode { .. } => Reach::Direct("replace_code"),
 
+        // an agent asking why a ui recomposed is the same reader an editor's
+        // badge is, and it reads the same ring: the records whole, with the
+        // count of what is not there beside them
+        Request::Recompositions => Reach::Direct("recompositions"),
+        Request::WatchRecompositions { .. } => Reach::Direct("watch_recompositions"),
+
         // the shape this front end exists for, in one call: an agent says what
         // it wants to know and is answered with it, instead of walking a tree
         Request::Query { .. } => Reach::Direct("state"),
@@ -240,6 +246,17 @@ pub const fn carriage_of(told: Told) -> Carried {
              nothing was told about is a hung program: the answer is what makes \
              it news, and the tool is what makes it learnable by an agent that \
              was not listening",
+        ),
+
+        // its own key, for the reason a child has one: an agent that found a
+        // trace record under `logged` would read it as a logpoint. bounded
+        // like the logs and counted, because a busy ui writes one per scope run
+        Told::Recomposed => Carried::Pulled(
+            "`recompositions.records` on the answer to the call the program was \
+             running during, each record whole, keeping at most two hundred \
+             between calls with the rest — and what the agent's queue dropped \
+             ahead of each, its `dropped_before` — counted in \
+             `recompositions.dropped`",
         ),
 
         Told::Stopped => Carried::Pulled(

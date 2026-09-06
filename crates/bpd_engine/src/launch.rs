@@ -29,10 +29,10 @@ use std::time::{Duration, Instant};
 use bpd_core::python::Capabilities;
 use bpd_core::{
     Addressed, Again, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, Exit,
-    Forwarded, FrameId, Joined, Jumped, LogRecord, Replacements, Reporting, Request, Resolved,
-    Response, Restarted, Running, Scope, Script, SessionId, Snapshot, SnapshotId, SourceBreakpoint,
-    Spawn, Stack, StateQuery, StepKind, Stop, TemplateContext, Threads, Transcript, Variables,
-    Which, WorldStopped,
+    Forwarded, FrameId, Joined, Jumped, LogRecord, Recomposed, Recompositions, Replacements,
+    Reporting, Request, Resolved, Response, Restarted, Running, Scope, Script, SessionId, Snapshot,
+    SnapshotId, SourceBreakpoint, Spawn, Stack, StateQuery, StepKind, Stop, TemplateContext,
+    Threads, Transcript, Variables, Which, WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine, Remapping};
@@ -57,6 +57,8 @@ struct Aside {
     blind: Vec<Blindspot>,
     /// the sessions that joined while it was
     joined: Vec<SessionId>,
+    /// the trace records the ui runtime wrote while it was
+    recomposed: Vec<Recomposed>,
 }
 
 impl Aside {
@@ -65,6 +67,7 @@ impl Aside {
             spawned: Vec::new(),
             blind: Vec::new(),
             joined: Vec::new(),
+            recomposed: Vec::new(),
         }
     }
 }
@@ -93,6 +96,14 @@ impl Reporting for Aside {
 
     fn attached(&mut self, session: SessionId) {
         self.joined.push(session);
+    }
+
+    /// collected rather than dropped, for the reason a child is: a record the
+    /// runtime wrote while a script was running is a record it wrote, and one
+    /// that went missing because of when it arrived would leave a client
+    /// reading a gap in the stream as a ui that stood still
+    fn recomposed(&mut self, recomposed: Recomposed) {
+        self.recomposed.push(recomposed);
     }
 }
 
@@ -174,6 +185,15 @@ struct Attached {
     /// front end that never learns of it has a stopped program nothing can
     /// resume
     pending_joined: Vec<SessionId>,
+    /// trace records the ui runtime wrote while the engine was waiting for an
+    /// answer
+    ///
+    /// the runtime announces a record on the thread that appended it and that
+    /// thread does not wait, so one can be in the socket ahead of the reply to
+    /// a request. kept for the next wait for the reason a log record is: a
+    /// client watching the stream reads a missing record as a scope that did
+    /// not run
+    pending_recomposed: Vec<Recomposed>,
     /// the verified source map this session's breakpoints go through
     ///
     /// `None` is the ordinary case — a program written in python has nothing to
@@ -430,6 +450,46 @@ impl Debuggee {
         Ok(Response::Trail(self.attached[at].taken_trail(reporting)?))
     }
 
+    /// the trace ring of the program's ui, and answer with it
+    fn recomposed(&mut self, at: usize, reporting: &mut dyn Reporting) -> Result<Response> {
+        Ok(Response::Recompositions(
+            self.attached[at].read_recompositions(reporting)?,
+        ))
+    }
+
+    /// start or stop forwarding the ui runtime's records
+    fn watching(&mut self, at: usize, on: bool, reporting: &mut dyn Reporting) -> Result<Response> {
+        Ok(Response::WatchingRecompositions {
+            on: self.attached[at].watch_recompositions(on, reporting)?,
+        })
+    }
+
+    /// the requests that observe the program without moving it
+    ///
+    /// the trail and its recording switch, the ui runtime's ring and its watch,
+    /// and what holds an object. lifted out of [`Self::dispatch`] as a group
+    /// for the reason [`Self::reading`] is: none of them resumes anything, so
+    /// none can produce a stop the caller has to handle
+    fn observing(
+        &mut self,
+        at: usize,
+        request: Request,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Response> {
+        match request {
+            Request::Record { on, depth } => self.recording(at, on, depth, reporting),
+            Request::Trail => self.taken(at, reporting),
+            Request::Recompositions => self.recomposed(at, reporting),
+            Request::WatchRecompositions { on } => self.watching(at, on, reporting),
+            Request::Retainers { frame, expression } => {
+                self.holds(at, frame, expression, reporting)
+            }
+            other => {
+                unreachable!("`observing` is only ever handed one of its five, and got {other:?}")
+            }
+        }
+    }
+
     /// what is holding an object, and answer with it
     ///
     /// lifted out of [`Self::dispatch`] for the reason the replacement arm was:
@@ -594,11 +654,14 @@ impl Debuggee {
                 remap,
                 even_under_a_live_frame,
             } => self.answer_a_replacement(at, files, remap, even_under_a_live_frame, reporting),
-            Request::Record { on, depth } => self.recording(at, on, depth, reporting),
-            Request::Trail => self.taken(at, reporting),
-            Request::Retainers { frame, expression } => {
-                self.holds(at, frame, expression, reporting)
-            }
+            // the five that observe the program without moving it — the trail
+            // and the ui runtime's ring, each with its switch, and what holds
+            // an object — lifted out together for the reason the three below are
+            Request::Record { .. }
+            | Request::Trail
+            | Request::Recompositions
+            | Request::WatchRecompositions { .. }
+            | Request::Retainers { .. } => self.observing(at, request, reporting),
             // the three that read state rather than moving the program, lifted
             // out together: this match is at the length where one more arm stops
             // being readable, and these three share a shape
@@ -668,6 +731,9 @@ impl Debuggee {
         self.attached[at].pending_spawns.extend(aside.spawned);
         self.attached[at].pending_blind.extend(aside.blind);
         self.attached[at].pending_joined.extend(aside.joined);
+        self.attached[at]
+            .pending_recomposed
+            .extend(aside.recomposed);
         answer
     }
 
@@ -958,6 +1024,39 @@ impl Debuggee {
         }
     }
 
+    /// why the program's ui recomposed — the trace ring, as it stands
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached, and when the agent refuses: the
+    /// program has not imported the runtime, every runtime has tracing off,
+    /// the runtime writes a format this bpd does not read, or a record has a
+    /// slot the layout does not allow. each is a [`bpd_core::Refusal`] by name
+    pub fn recompositions(&mut self) -> Result<Recompositions> {
+        match self.ask_for(Request::Recompositions)? {
+            Response::Recompositions(recompositions) => Ok(recompositions),
+            other => unreachable!("the trace ring was answered with {other:?}"),
+        }
+    }
+
+    /// forward every trace record the ui runtime writes, or stop
+    ///
+    /// what comes back is what the agent says is set. the records arrive
+    /// through [`Reporting::recomposed`] on the waits that follow, each with
+    /// the count of what the agent's own queue dropped before it. accepted
+    /// before the program has imported the runtime: watching is an interest
+    /// in records to come
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached
+    pub fn watch_recompositions(&mut self, on: bool) -> Result<bool> {
+        match self.ask_for(Request::WatchRecompositions { on })? {
+            Response::WatchingRecompositions { on } => Ok(on),
+            other => unreachable!("the recomposition watch was answered with {other:?}"),
+        }
+    }
+
     /// what is holding the object an expression names, and how
     ///
     /// # errors
@@ -1172,6 +1271,9 @@ impl Debuggee {
         for joined in self.attached[at].pending_joined.drain(..) {
             reporting.attached(joined);
         }
+        for recomposed in self.attached[at].pending_recomposed.drain(..) {
+            reporting.recomposed(recomposed);
+        }
         let mut rebound = std::mem::take(&mut self.attached[at].pending_rebinds);
 
         let started = Instant::now();
@@ -1239,6 +1341,16 @@ impl Debuggee {
                 // and the message that says a silence about one has stopped
                 // being evidence
                 Some(FromAgent::BlindTo { blindspot }) => reporting.blind_to(blindspot),
+                // the ui runtime wrote a record and a client is watching. it
+                // is already appended — the agent reads it off the runtime's
+                // own announcement, after the fact — so this is news
+                Some(FromAgent::Recomposed {
+                    record,
+                    dropped_before,
+                }) => reporting.recomposed(Recomposed {
+                    record,
+                    dropped_before,
+                }),
                 // the acknowledgement of a pause armed on an `Interrupt`. it
                 // arrives here because here is where the reading end is, and
                 // its `running` is what says whether a stop is coming at all
@@ -1304,6 +1416,7 @@ impl Attached {
             pending_spawns: Vec::new(),
             pending_blind: Vec::new(),
             pending_joined: Vec::new(),
+            pending_recomposed: Vec::new(),
             map: None,
             mapped: false,
             translated: std::collections::BTreeMap::new(),
@@ -1407,6 +1520,7 @@ impl Attached {
         self.pending_spawns.extend(aside.spawned);
         self.pending_blind.extend(aside.blind);
         self.pending_joined.extend(aside.joined);
+        self.pending_recomposed.extend(aside.recomposed);
 
         match answer {
             FromAgent::SourcesMapped { files } if files == sent => {
@@ -1799,6 +1913,36 @@ impl Attached {
         }
     }
 
+    /// the trace ring of the program's ui
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached, when the agent refuses by name, or
+    /// when it answers with something else
+    fn read_recompositions(&mut self, reporting: &mut dyn Reporting) -> Result<Recompositions> {
+        const EXPECTED: &str = "why the ui recomposed";
+
+        match self.ask(&FromEngine::Recompositions, EXPECTED, reporting)? {
+            FromAgent::Recompositions { recompositions } => Ok(recompositions),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// start or stop forwarding the ui runtime's records
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached, when the agent refuses by name, or
+    /// when it answers with something else
+    fn watch_recompositions(&mut self, on: bool, reporting: &mut dyn Reporting) -> Result<bool> {
+        const EXPECTED: &str = "whether the ui runtime's records are being forwarded";
+
+        match self.ask(&FromEngine::WatchRecompositions { on }, EXPECTED, reporting)? {
+            FromAgent::Watching { on } => Ok(on),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
     /// what is holding the object an expression names
     ///
     /// # errors
@@ -2001,6 +2145,13 @@ impl Attached {
                 Some(FromAgent::Logged { record }) => self.pending_logs.push(record),
                 Some(FromAgent::Spawned { child }) => self.pending_spawns.push(child),
                 Some(FromAgent::BlindTo { blindspot }) => self.pending_blind.push(blindspot),
+                Some(FromAgent::Recomposed {
+                    record,
+                    dropped_before,
+                }) => self.pending_recomposed.push(Recomposed {
+                    record,
+                    dropped_before,
+                }),
                 Some(FromAgent::BreakpointsResolved { resolved })
                     if !matches!(request, FromEngine::SetBreakpoints { .. }) =>
                 {

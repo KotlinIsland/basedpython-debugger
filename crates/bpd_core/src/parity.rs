@@ -36,6 +36,7 @@ use std::time::Duration;
 use crate::breakpoint::{LogRecord, SourceBreakpoint};
 use crate::frame::{FrameId, Scope};
 use crate::query::{SnapshotId, StateQuery, Wanted};
+use crate::recompose::{Cause, Location, Origin, Recomposed, TraceRecord};
 use crate::script::{Budget, Script, Step};
 use crate::session::{Forwarded, Reporting, Request, Running, SessionId, Threads};
 use crate::spawn::{Blindspot, Spawn, Verdict};
@@ -288,6 +289,9 @@ pub enum Told {
     /// a debugged fork joined as a session of its own — [`Reporting::attached`]
     Attached,
 
+    /// the ui runtime wrote a trace record while a client watched — [`Reporting::recomposed`]
+    Recomposed,
+
     /// a thread stopped — [`Running::Stopped`]
     Stopped,
 
@@ -306,12 +310,13 @@ pub enum Told {
 
 impl Told {
     /// every one of them, for a test that has to cover all of them
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Logged,
         Self::Pausing,
         Self::Spawned,
         Self::BlindSpot,
         Self::Attached,
+        Self::Recomposed,
         Self::Stopped,
         Self::Exited,
         Self::Finishing,
@@ -327,6 +332,7 @@ impl Told {
             Self::Spawned => "a child the program started",
             Self::BlindSpot => "a way of starting a child this interpreter hides",
             Self::Attached => "a debugged fork joining as a session of its own",
+            Self::Recomposed => "a trace record the ui runtime wrote while watched",
             Self::Stopped => "a thread stopping",
             Self::Exited => "the program exiting",
             Self::Finishing => "the program ending with threads still held",
@@ -341,7 +347,12 @@ impl Told {
     /// what [`say`] makes, as against what [`ran`] makes
     pub const fn unasked(self) -> bool {
         match self {
-            Self::Logged | Self::Pausing | Self::Spawned | Self::BlindSpot | Self::Attached => true,
+            Self::Logged
+            | Self::Pausing
+            | Self::Spawned
+            | Self::BlindSpot
+            | Self::Attached
+            | Self::Recomposed => true,
             Self::Stopped | Self::Exited | Self::Finishing | Self::Ended | Self::StillRunning => {
                 false
             }
@@ -455,6 +466,14 @@ pub mod mark {
 
     /// how long [`super::ran`]'s deadline was waited out for
     pub const WAITED_MS: u64 = 505_050;
+
+    /// the composable the trace record [`super::say`] makes says ran
+    ///
+    /// a run record, because that is the kind a front end with no data channel
+    /// narrates, and the one an editor draws a badge for. the name is what
+    /// turns up whichever way it is carried: in the record as data, and in the
+    /// sentence the record renders to
+    pub const RECOMPOSED: &str = "WhyDidThisRerender";
 }
 
 /// what a report is called, worked out by being handed one
@@ -497,6 +516,55 @@ impl Reporting for Naming {
     fn attached(&mut self, session: SessionId) {
         self.heard.push((Told::Attached, session.to_string()));
     }
+
+    fn recomposed(&mut self, recomposed: Recomposed) {
+        // the sentence rather than the record, because the sentence is what a
+        // front end with no data channel shows, and the name is in both
+        self.heard
+            .push((Told::Recomposed, recomposed.record.to_string()));
+    }
+}
+
+/// the trace record [`say`] hands over
+///
+/// a run record with a state cause, which is the whole of what the feature
+/// is for: a scope ran because a named cell was written somewhere, and the
+/// record names the scope, the cell and the site
+fn recomposed() -> TraceRecord {
+    let at = |line: u32| Location {
+        file: "/app/counter.by".to_string(),
+        line,
+        generated: None,
+        reason: None,
+    };
+    TraceRecord::Run {
+        runtime: 0,
+        frame: 3,
+        scope: 5,
+        parent: Some(0),
+        name: mark::RECOMPOSED.to_string(),
+        defined: at(9),
+        called: Some(at(24)),
+        key: None,
+        origin: Origin::Itself,
+        causes: vec![Cause::State {
+            cell: 4401,
+            kind: "state".to_string(),
+            op: "set".to_string(),
+            at: None,
+            old: "0".to_string(),
+            new: "2".to_string(),
+            declared: Some(at(12)),
+            declared_name: Some("count".to_string()),
+            written: at(14),
+            thread: mark::RUNNING,
+            posted: false,
+            readers: 1,
+        }],
+        skipped: Vec::new(),
+        disposed: Vec::new(),
+        elapsed_ns: 12_345,
+    }
 }
 
 /// hand a front end one report of every kind [`Reporting`] carries
@@ -536,6 +604,13 @@ pub fn say(to: &mut dyn Reporting) {
     to.attached(SessionId::new(
         NonZeroU64::new(mark::JOINED).expect("the joined session is not zero"),
     ));
+    // with a gap ahead of it, because the gap is the half of the stream a
+    // front end can drop with nothing failing — the way the trail and the ring
+    // `ran` hands over come with records counted out of them
+    to.recomposed(Recomposed {
+        record: recomposed(),
+        dropped_before: 3,
+    });
 }
 
 /// one outcome of every kind a resumed program has
@@ -736,14 +811,15 @@ pub fn surface() -> Vec<Request> {
     .collect()
 }
 
-/// the four that ask a question about a running program rather than steer it
+/// the ones that ask a question about a running program rather than steer it
 ///
 /// lifted out because `surface` is at clippy's line bound, and grouped because
-/// they are the four that were **missing** from it. every parity assertion
+/// the first four of them were **missing** from it. every parity assertion
 /// iterates that list, so while they were absent `Facts`, `Record`, `Trail` and
 /// `Retainers` sat outside the comparison between the two front ends, outside
 /// the `JUSTIFIED` check, and outside the one that makes a gap say what stands
-/// in the way — with all of it passing green
+/// in the way — with all of it passing green. the trace ring and its watch are
+/// here beside them because they are the same shape of question
 fn asked_about_a_program(frame: FrameId) -> Vec<Request> {
     vec![
         Request::Facts {
@@ -760,6 +836,10 @@ fn asked_about_a_program(frame: FrameId) -> Vec<Request> {
             frame,
             expression: "x".to_string(),
         },
+        Request::Recompositions,
+        // on, because that is the half a front end can drop with nothing
+        // failing: a watch that is never turned on is a stream nobody sees
+        Request::WatchRecompositions { on: true },
     ]
 }
 
@@ -900,6 +980,25 @@ mod tests {
         assert!(
             blind.contains(mark::BLIND_TO),
             "the blind spot said {blind}"
+        );
+
+        // the record is carried as data by one front end and as a sentence by
+        // the other, so the mark has to be in both — and the sentence is what
+        // `Naming` keeps
+        let (_, recomposed) = naming
+            .heard
+            .iter()
+            .find(|(told, _)| *told == Told::Recomposed)
+            .unwrap_or_else(|| unreachable!("`say` makes one report of every kind"));
+        assert!(
+            recomposed.contains(mark::RECOMPOSED),
+            "the trace record said {recomposed}"
+        );
+        assert!(
+            serde_json::to_string(&super::recomposed())
+                .expect("serde is derived")
+                .contains(mark::RECOMPOSED),
+            "the mark has to survive the record being carried as data"
         );
     }
 

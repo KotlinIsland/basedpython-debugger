@@ -618,6 +618,40 @@ pub enum Request {
         /// how much one fact may cost
         limit: crate::fact::Limit,
     },
+
+    /// why the program's ui recomposed — the trace ring of basedpython-ui
+    ///
+    /// the runtime keeps a bounded record of why every scope ran, what every
+    /// state write did and what every frame cost, and this reads it: through
+    /// the runtime's own storage, on a held thread, running none of the
+    /// program. it is about the program rather than a held thread, because the
+    /// ring is process state — see [`crate::Recompositions`]
+    ///
+    /// a program that has not imported the runtime, one whose runtime has
+    /// tracing off, and one whose runtime writes a format this `bpd` does not
+    /// read are each refused by name rather than answered with an empty ring
+    Recompositions,
+
+    /// forward every record the ui runtime writes, as it writes it
+    ///
+    /// the runtime announces every record it appends as an audit event, and
+    /// the agent's native hook already sees every audit event the process
+    /// raises. with this on, a record is read off the event on the thread that
+    /// appended it and handed to a bounded queue that a thread of the agent's
+    /// own writes to the connection — [`Reporting::recomposed`] — so the ui
+    /// thread never waits on the debugger; with it off, the hook compares one
+    /// name and moves on. off by default, because a busy ui writes a record
+    /// per scope run and a client that did not ask for that stream should not
+    /// be paying for it
+    ///
+    /// accepted before the program has imported the runtime: watching is an
+    /// interest in records to come, and a program that imports the runtime
+    /// later is watched from then on. only [`Self::Recompositions`] needs the
+    /// runtime to exist
+    WatchRecompositions {
+        /// whether to forward records
+        on: bool,
+    },
 }
 
 impl Request {
@@ -646,7 +680,7 @@ impl Request {
     /// four variants, and every parity assertion that iterates it — the
     /// comparison between the two front ends, the `JUSTIFIED` check, the
     /// "says what stands in the way" check — silently skipped those four
-    pub const KINDS: usize = 25;
+    pub const KINDS: usize = 27;
 
     /// where this variant sits in the enumeration
     ///
@@ -681,6 +715,8 @@ impl Request {
             Self::ReplaceCode { .. } => 22,
             Self::SetNextStatement { .. } => 23,
             Self::RestartFrame { .. } => 24,
+            Self::Recompositions => 25,
+            Self::WatchRecompositions { .. } => 26,
         }
     }
 
@@ -717,6 +753,8 @@ impl Request {
             Self::ReplaceCode { .. } => "replacing a file's code",
             Self::SetNextStatement { .. } => "setting the next statement",
             Self::RestartFrame { .. } => "restarting a frame",
+            Self::Recompositions => "why the ui recomposed",
+            Self::WatchRecompositions { .. } => "watching the ui recompose",
         }
     }
 
@@ -750,6 +788,10 @@ impl Request {
             // answered on a held thread, like everything the agent answers, and
             // which one makes no difference to the answer
             | Self::ReplaceCode { .. }
+            // the trace ring is process state, and the watch is a setting of
+            // the process's hook — neither is one thread's
+            | Self::Recompositions
+            | Self::WatchRecompositions { .. }
             | Self::Diff { .. } => None,
 
             Self::Step { stop, .. }
@@ -827,6 +869,19 @@ pub trait Reporting {
     /// reach, which is a hung program. that is why there is no default body
     /// here any more than on the others
     fn attached(&mut self, session: SessionId);
+
+    /// the program's ui runtime wrote a trace record, and the client is
+    /// watching
+    ///
+    /// what [`Request::WatchRecompositions`] produces: the runtime announces
+    /// every record it appends, the agent reads it off the announcement on the
+    /// thread that appended it and queues it for a thread of its own to write,
+    /// and it arrives here as it gets through. a busy ui writes one per scope
+    /// run, so a front end with no event stream keeps a bounded number between
+    /// answers and counts the rest — and what the agent's own queue dropped is
+    /// in the report as `dropped_before`, for the front end to carry beside
+    /// its own count rather than instead of it
+    fn recomposed(&mut self, recomposed: crate::recompose::Recomposed);
 }
 
 /// what a session answered a [`Request`] with
@@ -938,6 +993,18 @@ pub enum Response {
 
     /// what changed between two of them
     Difference(Difference),
+
+    /// the trace ring of the program's ui, as it stood
+    Recompositions(crate::recompose::Recompositions),
+
+    /// whether the ui runtime's records are being forwarded now
+    ///
+    /// read back off the agent rather than echoed from the request, for the
+    /// reason every other setting is
+    WatchingRecompositions {
+        /// whether records are forwarded as they are written
+        on: bool,
+    },
 }
 
 /// whether everything a program wrote had arrived by the time it was reported

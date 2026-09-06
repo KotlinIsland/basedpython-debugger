@@ -201,6 +201,18 @@ impl bpd_core::Reporting for Watching {
              and is held before it has run anything"
         );
     }
+
+    /// the ui runtime wrote a trace record
+    ///
+    /// `bpd launch` sends no [`bpd_core::Request::WatchRecompositions`], so
+    /// the agent's hook forwards nothing — a record arriving anyway is a state
+    /// this command has no account of, and it says so rather than handling it
+    fn recomposed(&mut self, recomposed: bpd_core::Recomposed) {
+        unreachable!(
+            "`bpd launch` was not asked to watch the ui recompose, and the agent \
+             sent {recomposed:?}"
+        )
+    }
 }
 
 impl Watching {

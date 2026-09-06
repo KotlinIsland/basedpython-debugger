@@ -134,6 +134,16 @@ pub const fn reach_of(request: &Request) -> Reach {
         Request::Trail => Reach::Direct("bpd/trail, a custom request"),
         Request::Retainers { .. } => Reach::Direct("bpd/retainers, a custom request"),
         Request::ReplaceCode { .. } => Reach::Direct("bpd/replaceCode, a custom request"),
+
+        // DAP has no request about a ui framework's own record of itself and
+        // will not grow one, so both are extensions: the ring comes back whole
+        // in the body, and the watch is a boolean that switches the
+        // `bpd/recomposition` event on — an event, because a record arrives
+        // while the program runs and nothing is asking
+        Request::Recompositions => Reach::Direct("bpd/recompositions, a custom request"),
+        Request::WatchRecompositions { .. } => {
+            Reach::Direct("bpd/watchRecompositions, a custom request")
+        }
     }
 }
 
@@ -318,6 +328,19 @@ pub const fn carriage_of(told: Told) -> Carried {
              line saying the child is held. it is the spec's own answer to a \
              second debuggee, rather than debugpy's `debugpyAttach` event, which \
              predates the spec having one",
+        ),
+
+        // the record as data for a client that reads it, and the sentence for
+        // one that does not — the `bpd/restarting` shape. only a run is
+        // narrated: a write and a frame are the ring's own bookkeeping, and a
+        // console line per state write would be the debugger shouting
+        Told::Recomposed => Carried::Pushed(
+            "a `bpd/recomposition` event carrying the record whole and \
+             `dropped_before`, the count the agent's queue lost ahead of it, \
+             when the client named it in `bpd/understands`; otherwise an \
+             `output` event on the `console` category per **run** record, \
+             carrying the sentence the record renders to, nothing for a write \
+             or a frame, and one on `important` whenever the count is above zero",
         ),
 
         Told::Stopped => Carried::Pushed(

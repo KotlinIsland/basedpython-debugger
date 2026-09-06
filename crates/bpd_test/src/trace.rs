@@ -20,7 +20,9 @@
 
 use std::fmt;
 
-use bpd_core::{Blindspot, LogRecord, Reporting, Running, SessionId, Spawn, StepKind, Stop};
+use bpd_core::{
+    Blindspot, LogRecord, Recomposed, Reporting, Running, SessionId, Spawn, StepKind, Stop,
+};
 use bpd_engine::Debuggee;
 
 /// one thing that happened, as it is rendered in the sequence
@@ -211,5 +213,12 @@ impl Reporting for Trace {
 
     fn attached(&mut self, session: SessionId) {
         self.refuse(&format!("{session} joined this debuggee"))
+    }
+
+    fn recomposed(&mut self, recomposed: Recomposed) {
+        self.refuse(&format!(
+            "the ui runtime wrote a trace record: {}",
+            recomposed.record
+        ))
     }
 }

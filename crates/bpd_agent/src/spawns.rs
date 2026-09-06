@@ -105,7 +105,11 @@ use crate::attach;
 use crate::cells::ForkCell;
 
 /// the events this interpreter is watched for, chosen once at attach
-static WATCHED: OnceLock<&'static [&'static CStr]> = OnceLock::new();
+///
+/// the process-making events of the release and the ui runtime's trace event
+/// beside them — [`bpd_core::audit::watched`] — because one hook sees every
+/// audit event and one comparison is what it costs
+static WATCHED: OnceLock<Vec<&'static CStr>> = OnceLock::new();
 
 /// the process the agent attached to
 ///
@@ -241,10 +245,11 @@ pub(crate) fn install(python: Python<'_>) -> PyResult<()> {
 /// take the watch list for this interpreter, and the blind spot that comes with
 /// it
 ///
-/// the list itself is [`bpd_core::spawn::making_a_process`], because the parity
-/// suite needs the same answer and a list written in two places is one that
-/// disagrees with itself eventually. what is here is the consequence of the
-/// choice rather than the choice
+/// the list itself is [`bpd_core::audit::watched`] — the process-making events
+/// of [`bpd_core::spawn::making_a_process`] and the ui runtime's trace event —
+/// because the parity suite needs the same answer and a list written in two
+/// places is one that disagrees with itself eventually. what is here is the
+/// consequence of the choice rather than the choice
 ///
 /// the blind spot is recorded here rather than discovered later, so that the
 /// thing which says it cannot see a child is set up at the same moment as the
@@ -253,7 +258,7 @@ fn watch_what_this_interpreter_raises(major: u8, minor: u8) {
     let before_314 = (major, minor) < (3, 14);
 
     WATCHED
-        .set(bpd_core::spawn::making_a_process(major, minor))
+        .set(bpd_core::audit::watched(major, minor))
         .unwrap_or_else(|_| unreachable!("the agent installs the audit hook once"));
 
     // windows reaches a `multiprocessing` spawn child through
@@ -328,7 +333,7 @@ fn resolve(path: &str) -> Option<String> {
 
 /// the interpreter calls this for **every** audit event the process raises
 ///
-/// so the first thing it does is a comparison against a five-element list of
+/// so the first thing it does is a comparison against a six-element list of
 /// static strings, and the overwhelmingly common answer is that this event is
 /// not one of them
 ///
@@ -361,6 +366,15 @@ unsafe extern "C" fn saw(
     // borrowed reference to the event's argument tuple that outlives this call
     Python::attach(|python| {
         let arguments = unsafe { Bound::from_borrowed_ptr_or_opt(python, args) };
+
+        // the ui runtime announcing a record it appended. not a child, and not
+        // read as one: the record is forwarded while a client is watching and
+        // costs one atomic load otherwise
+        if name == bpd_core::recompose::TRACE_EVENT {
+            crate::ui_trace::announced(python, arguments.as_ref());
+            return;
+        }
+
         let name = name.to_string_lossy();
 
         // `import` is watched only on the interpreters that have the blind

@@ -1034,6 +1034,67 @@ pub fn tools() -> Vec<Tool> {
             ),
         },
         Tool {
+            name: "recompositions",
+            title: "why the ui recomposed",
+            description: "why the program's ui recomposed: the trace ring the \
+                basedpython-ui runtime keeps, read off its own storage on a held \
+                thread without running any of the program.\n\n\
+                every record says what happened and why — a scope that ran, with \
+                every cause it ran for (a state cell written, at which site, from \
+                what to what; an argument that changed; its parent running; a \
+                recovery from an error — a key change is `created` on the new \
+                scope with the old key under the parent's `disposed`); a state \
+                write, with how many readers it reached; a frame, with what it \
+                cost; a scope \
+                that raised; a write refused during composition. every location \
+                is a `.by` line when the build's source map covers it, with the \
+                generated python beside it.\n\n\
+                `records.dropped` is not decoration: the runtime's ring is \
+                bounded and so is this answer, and anything that fell off either \
+                is counted. an answer whose `dropped` is above zero does **not** \
+                begin where the trace did. a program that never imported the \
+                runtime, one whose runtime has tracing off, and one whose runtime \
+                writes a format this bpd does not read are each refused by name \
+                rather than answered with an empty ring."
+                .to_string(),
+            schema: object(
+                serde_json::json!({ "session": integer(SESSION) }),
+                &[],
+            ),
+        },
+        Tool {
+            name: "watch_recompositions",
+            title: "watch the ui recompose",
+            description: "forward every trace record the basedpython-ui runtime \
+                writes, as it writes it. the runtime announces each record it \
+                appends as an audit event, and with this on the agent reads the \
+                record off that event and queues it for a thread of its own to \
+                send — the program never waits on the stream. a record the \
+                queue cannot hold while nothing is reading is dropped in the \
+                program and counted.\n\n\
+                the records arrive under a `recompositions` key on the answer to \
+                whichever call the program was running during — this server \
+                writes nothing that is not an answer — keeping at most two \
+                hundred between calls. `dropped` counts both what that bound \
+                left out and what the program's queue dropped, and `says` names \
+                which. a busy ui writes one per scope run, so read \
+                `recompositions` on every control tool's answer while this is \
+                on, and turn it off when the question is answered.\n\n\
+                accepted before the program has imported the runtime: watching \
+                is an interest in records to come, and only `recompositions` \
+                needs the runtime to exist."
+                .to_string(),
+            schema: object(
+                serde_json::json!({
+                    "session": integer(SESSION),
+                    "on": { "type": "boolean", "description":
+                        "whether to forward records. what comes back is what the \
+                         agent says is set" },
+                }),
+                &["on"],
+            ),
+        },
+        Tool {
             name: "retainers",
             title: "what is holding an object",
             description: "why an object is still alive. name it with an \

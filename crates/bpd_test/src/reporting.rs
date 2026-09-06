@@ -7,7 +7,7 @@
 //! absorb one, because a fact about the program arriving where nobody looks is
 //! how a test passes while proving something else
 
-use bpd_core::{Blindspot, LogRecord, Reporting, SessionId, Spawn};
+use bpd_core::{Blindspot, LogRecord, Recomposed, Reporting, SessionId, Spawn, TraceRecord};
 
 /// a sink nothing is supposed to reach, which panics naming what did
 ///
@@ -35,6 +35,54 @@ impl Reporting for Unreported {
 
     fn attached(&mut self, session: SessionId) {
         panic!("nothing here debugs a forked child, and {session} joined this debuggee")
+    }
+
+    fn recomposed(&mut self, recomposed: Recomposed) {
+        panic!("nothing here watches the ui recompose, and the agent sent {recomposed:?}")
+    }
+}
+
+/// a sink that keeps every trace record the ui runtime wrote, for a test about
+/// watching it
+///
+/// the mirror of [`Logs`]. a logpoint reaching one is a test that set a
+/// breakpoint it did not mean to, and so is anything else
+#[derive(Debug, Default)]
+pub struct Recompositions {
+    /// every record, in the order it arrived
+    pub records: Vec<TraceRecord>,
+    /// how many records the agent dropped unsent, in total — the sum of every
+    /// `dropped_before`
+    ///
+    /// kept apart from the records so a test can say the stream was whole,
+    /// which is a claim about this number and not about the list
+    pub dropped: u64,
+}
+
+impl Reporting for Recompositions {
+    fn logged(&mut self, record: LogRecord) {
+        panic!("no logpoint was set, and the agent sent {record:?}")
+    }
+
+    fn pausing(&mut self, running: Vec<u64>) {
+        panic!("no pause was armed, and the agent acknowledged one naming {running:?}")
+    }
+
+    fn spawned(&mut self, child: Spawn) {
+        panic!("this program was not expected to start a child, and it started {child}")
+    }
+
+    fn blind_to(&mut self, blindspot: Blindspot) {
+        panic!("this interpreter announced a blind spot nothing here is about: {blindspot}")
+    }
+
+    fn attached(&mut self, session: SessionId) {
+        panic!("nothing here debugs a forked child, and {session} joined this debuggee")
+    }
+
+    fn recomposed(&mut self, recomposed: Recomposed) {
+        self.dropped += recomposed.dropped_before;
+        self.records.push(recomposed.record);
     }
 }
 
@@ -67,6 +115,10 @@ impl Reporting for Logs {
 
     fn attached(&mut self, session: SessionId) {
         panic!("nothing here debugs a forked child, and {session} joined this debuggee")
+    }
+
+    fn recomposed(&mut self, recomposed: Recomposed) {
+        panic!("nothing here watches the ui recompose, and the agent sent {recomposed:?}")
     }
 }
 
@@ -101,6 +153,10 @@ impl Reporting for Joining {
 
     fn attached(&mut self, session: SessionId) {
         self.joined.push(session);
+    }
+
+    fn recomposed(&mut self, recomposed: Recomposed) {
+        panic!("nothing here watches the ui recompose, and the agent sent {recomposed:?}")
     }
 }
 
@@ -149,5 +205,9 @@ impl Reporting for Children {
     /// the child then opened
     fn attached(&mut self, session: SessionId) {
         self.joined.push(session);
+    }
+
+    fn recomposed(&mut self, recomposed: Recomposed) {
+        panic!("nothing here watches the ui recompose, and the agent sent {recomposed:?}")
     }
 }

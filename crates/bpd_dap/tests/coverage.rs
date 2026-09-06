@@ -606,6 +606,50 @@ fn everything_said() -> Transcript {
     Transcript { messages }
 }
 
+/// a run record of the fake's ring, mapped
+///
+/// the generated location beside the `.by` one is the half a front end can
+/// drop without anything failing, so the fake's records carry it
+fn recomposition(name: &str) -> bpd_core::TraceRecord {
+    let at = |line: u32| bpd_core::Location {
+        file: "/src/app.by".to_string(),
+        line,
+        generated: Some(bpd_core::Located {
+            file: std::path::PathBuf::from("/tmp/build/app.py"),
+            line: line + 32,
+        }),
+        reason: None,
+    };
+    bpd_core::TraceRecord::Run {
+        runtime: 0,
+        frame: 3,
+        scope: 5,
+        parent: Some(0),
+        name: name.to_string(),
+        defined: at(9),
+        called: Some(at(24)),
+        key: None,
+        origin: bpd_core::Origin::Itself,
+        causes: vec![bpd_core::Cause::State {
+            cell: 4401,
+            kind: "state".to_string(),
+            op: "set".to_string(),
+            at: None,
+            old: "0".to_string(),
+            new: "2".to_string(),
+            declared: Some(at(12)),
+            declared_name: Some("count".to_string()),
+            written: at(14),
+            thread: THREAD,
+            posted: false,
+            readers: 1,
+        }],
+        skipped: Vec::new(),
+        disposed: Vec::new(),
+        elapsed_ns: 12_345,
+    }
+}
+
 /// what would show one thing the debugger says reached a DAP client
 ///
 /// exhaustive and with no catch-all arm, so a fact added to the core does not
@@ -621,6 +665,10 @@ fn shown(said: Told, told: &Transcript) -> bool {
         Told::Pausing => told.output("console", &mark::RUNNING.to_string()),
         Told::Spawned => told.output("console", mark::CHILD),
         Told::BlindSpot => told.output("important", mark::BLIND_TO),
+        // the sentence, because the record `say` makes arrives on the first
+        // wait and nothing has opted into the event by then. the data path is
+        // `a_client_that_opts_into_the_recomposition_event_is_handed_the_record_as_data`
+        Told::Recomposed => told.output("console", mark::RECOMPOSED),
         // a reverse request rather than an event, because the client has to
         // start a session for the held child rather than merely hear about it
         Told::Attached => told.messages.iter().any(|message| {
@@ -1107,6 +1155,43 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
          as where the recording began: {went}"
     );
 
+    // why the ui recomposed, and the switch that streams it. the fake's ring
+    // has dropped records and a mapped location, because those are the two
+    // halves a front end can leave out with nothing failing
+    let recomposed = answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/recompositions",
+        serde_json::json!({}),
+    );
+    assert_eq!(
+        recomposed["body"]["records"]["dropped"], 12,
+        "the ring's edge has to reach the client, or its oldest entry reads as \
+         where the trace began: {recomposed}"
+    );
+    let record = &recomposed["body"]["records"]["kept"][0];
+    assert_eq!(record["record"], "run", "{recomposed}");
+    assert_eq!(record["causes"][0]["cause"], "state", "{recomposed}");
+    assert_eq!(
+        record["causes"][0]["declared_name"], "count",
+        "the cell the scope ran for is named: {recomposed}"
+    );
+    assert_eq!(
+        record["defined"]["generated"]["line"], 41,
+        "a mapped location carries the generated one beside it, which is what \
+         a person who does not believe the debugger needs: {recomposed}"
+    );
+    let watching = answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/watchRecompositions",
+        serde_json::json!({ "on": true }),
+    );
+    assert_eq!(
+        watching["body"]["watching"], true,
+        "what is set is what the session says is set: {watching}"
+    );
+
     // why an object is still alive — a custom request, because DAP's model of
     // state is a tree walked downwards from a frame and this is asked upwards
     // from an object
@@ -1193,6 +1278,19 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
         &mut reader,
         "variables",
         serde_json::json!({ "variablesReference": local }),
+    );
+
+    // opting into the trace record as data only **now**, after the wait the
+    // step above produced. that wait's record was narrated on the console, and
+    // the records the waits below produce go out as `bpd/recomposition` events
+    // — both routes, in one conversation, so neither can be deleted without a
+    // test going red. the restart event stays named, because the restart made
+    // above was made after it was
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/understands",
+        serde_json::json!({ "events": ["bpd/restarting", "bpd/recomposition"] }),
     );
 
     answer(
@@ -1549,9 +1647,22 @@ impl Session for FakeSession {
         // which is what puts the adapter's route for every one of them in this
         // conversation rather than leaving it to a test that needs a real
         // interpreter to fork
-        if matches!(request, Request::Wait { .. }) && !self.said {
-            self.said = true;
-            say(reporting);
+        if matches!(request, Request::Wait { .. }) {
+            if self.said {
+                // and a trace record on every wait after the first, so that a
+                // client which opted into the event part way through the
+                // conversation is handed one as data — the first wait's arrived
+                // as narration, before anything had opted in. it comes with a
+                // gap in front of it, because the gap is the half of the
+                // stream a front end can drop with nothing failing
+                reporting.recomposed(bpd_core::Recomposed {
+                    record: recomposition(mark::RECOMPOSED),
+                    dropped_before: 3,
+                });
+            } else {
+                self.said = true;
+                say(reporting);
+            }
         }
         {
             let mut recorder = self.asked.lock().expect("the recorder is not poisoned");
@@ -1836,6 +1947,17 @@ impl Session for FakeSession {
                 recording: true,
                 window: 100_000,
             }),
+            // a ring that dropped records, because that is the half a front
+            // end can leave out with nothing failing — an answer whose oldest
+            // entry is not where the trace began reads as the whole history
+            Request::Recompositions => Response::Recompositions(bpd_core::Recompositions {
+                format: 1,
+                runtimes: 1,
+                tracing: true,
+                records: bpd_core::Kept::counted(vec![recomposition("Counter")], 12),
+                mode: Mode::NonStop,
+            }),
+            Request::WatchRecompositions { on } => Response::WatchingRecompositions { on },
             Request::Retainers { .. } => Response::Retainers(bpd_core::Retainers {
                 of: "a list holding 1".to_string(),
                 found: vec![bpd_core::Retainer {
@@ -1962,6 +2084,93 @@ impl Interrupt for FakeInterrupt {
     fn terminate(&mut self) -> Result<(), Failed> {
         Ok(())
     }
+}
+
+#[test]
+fn a_client_that_opts_into_the_recomposition_event_is_handed_the_record_as_data() {
+    // the two routes, one conversation. the record the fake writes on the wait
+    // a step produces arrives before anything has opted in and is narrated;
+    // the ones on the waits after `continue` arrive after `bpd/understands`
+    // named the event and go out as data. one conversation rather than both
+    // ends of the program, because the order between the two routes is what
+    // the last assertion reads
+    let told = drive(&Asked::default());
+    let events = told.events("bpd/recomposition");
+    assert!(
+        !events.is_empty(),
+        "the conversation opts into the event and the fake writes a record on \
+         every wait after the first"
+    );
+    let record = &events[0]["body"]["record"];
+    assert_eq!(record["record"], "run", "{}", events[0]);
+    assert_eq!(record["name"], mark::RECOMPOSED, "{}", events[0]);
+    assert_eq!(
+        record["causes"][0]["cause"], "state",
+        "the cause goes out whole, tag and all: {}",
+        events[0]
+    );
+    assert_eq!(
+        record["causes"][0]["declared_name"], "count",
+        "{}",
+        events[0]
+    );
+    assert_eq!(
+        record["defined"]["generated"]["file"], "/tmp/build/app.py",
+        "the generated location survives the trip: {}",
+        events[0]
+    );
+    assert_eq!(
+        events[0]["body"]["dropped_before"], 3,
+        "the gap the agent's queue left ahead of the record rides the event, \
+         or a client reads the stream as whole: {}",
+        events[0]
+    );
+
+    // the console carries the sentence for the record written before the
+    // opt-in — the name and the cell it ran for — and the gap ahead of it is
+    // said where a person is looking, because a sentence per run with the
+    // gap left unsaid reads as every run there was
+    assert!(
+        told.output("console", mark::RECOMPOSED),
+        "a client that never heard of the event was not narrated at"
+    );
+    assert!(
+        told.output("important", "3 trace record(s)"),
+        "the records the agent dropped ahead of the narrated one were not \
+         said to a client shown sentences"
+    );
+    assert!(
+        told.output("console", "`count` (state set) changed from 0 to 2"),
+        "the narration lost the cause, which is the whole of what a person \
+         wanted to know"
+    );
+
+    // and never both for one record. every narration precedes the opt-in and
+    // every event follows it, so a client that reads the data is not shown
+    // the same record twice
+    let last_narration = told
+        .messages
+        .iter()
+        .rposition(|message| {
+            message["type"] == "event"
+                && message["event"] == "output"
+                && message["body"]["category"] == "console"
+                && message["body"]["output"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(mark::RECOMPOSED))
+        })
+        .expect("one narration was asserted above");
+    let first_event = told
+        .messages
+        .iter()
+        .position(|message| message["type"] == "event" && message["event"] == "bpd/recomposition")
+        .expect("one event was asserted above");
+    assert!(
+        last_narration < first_event,
+        "a record was narrated after the client had been handed one as data, \
+         so it is being shown twice: narration at {last_narration}, first event \
+         at {first_event}"
+    );
 }
 
 #[test]

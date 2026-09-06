@@ -22,6 +22,7 @@
 //! in that sense: they are how one definition of a type reaches the agent
 //! without a second definition to convert to
 
+pub mod audit;
 pub mod breakpoint;
 pub mod error;
 pub mod exception;
@@ -32,6 +33,7 @@ pub mod parity;
 pub mod peer;
 pub mod python;
 pub mod query;
+pub mod recompose;
 pub mod refusal;
 pub mod replace;
 pub mod script;
@@ -64,6 +66,9 @@ pub use query::{
     Answer, Appeared, Changed, Difference, FrameState, Frames, Moved, NotCompared, NotRead,
     QueryPart, ScopeState, Seen, Side, Snapshot, SnapshotId, Source, State, StateQuery, Subject,
     Taken, Unverified, Wanted, WhyNot, difference,
+};
+pub use recompose::{
+    Cause, Disposed, Key, Location, Origin, Recomposed, Recompositions, TraceRecord,
 };
 pub use refusal::Refusal;
 pub use replace::{

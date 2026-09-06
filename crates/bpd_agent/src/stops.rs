@@ -279,6 +279,10 @@ pub(crate) fn route(request: FromEngine) {
         // about the whole program, so any held thread answers
         FromEngine::Record { .. } => Address::Any("whether to record where it goes"),
         FromEngine::Trail => Address::Any("where the program has been"),
+        // the trace ring is process state, and the watch is a flag of the
+        // process's audit hook — neither is one thread's
+        FromEngine::Recompositions => Address::Any("why the ui recomposed"),
+        FromEngine::WatchRecompositions { .. } => Address::Any("whether to watch the ui recompose"),
         FromEngine::Stack { stop, .. } | FromEngine::StopTheWorld { stop, .. } => {
             Address::Stop(*stop)
         }

@@ -109,7 +109,9 @@
 //! `a_program_that_forks_records_exactly_the_warnings_it_would_have` in
 //! `crates/bpd/tests/launch_parity.rs` compares what the program itself
 //! recorded, both ways. what the window costs is
-//! [`crate::attach::stand_down`]'s to state
+//! [`crate::attach::stand_down`]'s to state. the thread that writes the trace
+//! stream of [`crate::stream`] is a second thread of the agent's, and it goes
+//! the same way in the same handlers
 //!
 //! the three handlers compose in one direction only, and it is the one cpython
 //! decides: a fork runs every `before` handler, then either the child's
@@ -123,7 +125,7 @@ use bpd_core::StopReason;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 
-use crate::{attach, events, frames, session, spawns};
+use crate::{attach, events, frames, session, spawns, stream};
 
 /// whether a forked child opens a session of its own
 ///
@@ -192,6 +194,7 @@ pub(crate) fn install(python: Python<'_>) -> PyResult<()> {
 #[pyfunction]
 fn going_to_fork() {
     attach::stand_down();
+    stream::stand_down();
 }
 
 /// the fork is over in the process that did it, and the agent is a thread again
@@ -202,6 +205,7 @@ fn going_to_fork() {
 #[pyfunction]
 fn forked() {
     attach::resume_reading();
+    stream::resume_writing();
 }
 
 /// this process is the forked child, and it is not being debugged

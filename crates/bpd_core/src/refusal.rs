@@ -190,6 +190,44 @@ pub enum Refusal {
         /// what answering it raised
         error: crate::PythonError,
     },
+
+    /// the program has not imported `basedpython_ui.runtime`
+    ///
+    /// the trace ring is the runtime's, and a program that never imported the
+    /// runtime has no ring to read. answered off `sys.modules` rather than by
+    /// importing it: importing a package the program never asked for is the
+    /// debugger changing the program. the **read** is what this refuses; a
+    /// watch is accepted before the import, because watching is an interest in
+    /// records to come
+    NoUiRuntime,
+
+    /// every runtime of the program has tracing off
+    ///
+    /// `Runtime.trace` is `None` for each of them, so nothing was recorded and
+    /// nothing will be. an empty ring would read as a ui that never recomposed
+    UiTracingOff,
+
+    /// the runtime writes a trace format this `bpd` does not read
+    ///
+    /// the layouts are fixed per format, and reading one by another's layout
+    /// would be reporting slots that mean something else
+    UiTraceFormat {
+        /// the `TRACE_FORMAT` the runtime declares, or `None` when it declares
+        /// none at all — `null` on the wire, with a sentence of its own that
+        /// says the name is missing rather than wrong
+        found: Option<i64>,
+        /// the format this `bpd` reads
+        wanted: u32,
+    },
+
+    /// a trace record has a slot the layout does not allow
+    ///
+    /// every slot of a record is an exact builtin of one type, and one that is
+    /// not is refused by name rather than read as whatever it happened to be
+    UiTraceUnreadable {
+        /// which record, which slot, and what was there instead
+        what: String,
+    },
 }
 
 impl std::fmt::Display for Refusal {
@@ -339,6 +377,32 @@ impl std::fmt::Display for Refusal {
                  platform, so it is refused here for want of evidence rather \
                  than because it cannot work"
             ),
+            Self::NoUiRuntime => formatter.write_str(
+                "the program has not imported basedpython_ui.runtime, so there is \
+                 no trace to read",
+            ),
+            Self::UiTracingOff => formatter
+                .write_str("tracing is off in the program's runtime; start it with trace=True"),
+            Self::UiTraceFormat {
+                found: Some(found),
+                wanted,
+            } => write!(
+                formatter,
+                "the program's basedpython_ui writes trace format {found} and this \
+                 bpd reads {wanted}"
+            ),
+            Self::UiTraceFormat {
+                found: None,
+                wanted,
+            } => write!(
+                formatter,
+                "the program's basedpython_ui writes no trace format at all — \
+                 basedpython_ui.runtime has no TRACE_FORMAT — and this bpd reads \
+                 {wanted}"
+            ),
+            Self::UiTraceUnreadable { what } => {
+                write!(formatter, "the trace record could not be read: {what}")
+            }
         }
     }
 }
@@ -504,6 +568,41 @@ mod tests {
                     "still held",
                     "rather than raised into the program",
                 ],
+            ),
+            (
+                Refusal::NoUiRuntime,
+                vec![
+                    "has not imported basedpython_ui.runtime",
+                    "no trace to read",
+                ],
+            ),
+            (Refusal::UiTracingOff, vec!["tracing is off", "trace=True"]),
+            (
+                Refusal::UiTraceFormat {
+                    found: Some(2),
+                    wanted: 1,
+                },
+                vec!["writes trace format 2", "this bpd reads 1"],
+            ),
+            (
+                // the module without the name at all, which is a different
+                // thing to act on from a number that is wrong
+                Refusal::UiTraceFormat {
+                    found: None,
+                    wanted: 1,
+                },
+                vec![
+                    "no trace format at all",
+                    "no TRACE_FORMAT",
+                    "this bpd reads 1",
+                ],
+            ),
+            (
+                Refusal::UiTraceUnreadable {
+                    what: "slot 1 (`frame`) of a `run` record is a str and the layout says int"
+                        .to_string(),
+                },
+                vec!["could not be read", "slot 1 (`frame`) of a `run` record"],
             ),
         ];
 

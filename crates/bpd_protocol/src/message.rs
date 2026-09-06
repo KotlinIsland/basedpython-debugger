@@ -27,8 +27,8 @@ use std::io::{Read, Write};
 
 use bpd_core::{
     ContextLayer, Detail, Entry, Evaluated, Fact, Frame, FrameId, Limit, LogRecord, Mode, Omitted,
-    Refusal, Reported, Resolved, Retainers, Scope, Silent, SourceBreakpoint, StepKind, ThreadState,
-    Trail, Which,
+    Recompositions, Refusal, Reported, Resolved, Retainers, Scope, Silent, SourceBreakpoint,
+    StepKind, ThreadState, TraceRecord, Trail, Which,
 };
 
 use crate::frame::{self, Result};
@@ -359,6 +359,37 @@ pub enum FromAgent {
     SourcesMapped {
         /// how many generated files the agent will map locations of
         files: u32,
+    },
+
+    /// the trace ring of the program's ui, as it stood on the held thread
+    Recompositions {
+        /// the answer, whole
+        recompositions: Recompositions,
+    },
+
+    /// whether the ui runtime's records are being forwarded now
+    ///
+    /// read back off the agent's own flag rather than echoed, for the reason
+    /// [`Self::DebuggingChildren`] is
+    Watching {
+        /// whether records are forwarded as they are written
+        on: bool,
+    },
+
+    /// the ui runtime wrote a trace record, and a client is watching
+    ///
+    /// sent while the program runs and never waited on, for the reason
+    /// [`FromAgent::Logged`] is: the record is read off the runtime's own
+    /// audit event on the thread that appended it, handed to a bounded queue,
+    /// and written by a thread of the agent's own — so the thread that
+    /// appended it is not blocked for it, whether or not the engine is
+    /// reading. a busy ui sends one per scope run, and one the queue could not
+    /// hold is dropped and counted onto the next that gets through
+    Recomposed {
+        /// the record, read by the layout of its kind
+        record: TraceRecord,
+        /// how many records the agent dropped unsent since the one before this
+        dropped_before: u64,
     },
 
     /// the agent will not answer the request, and this is why
@@ -716,6 +747,27 @@ pub enum FromEngine {
         /// how much of the value read back to report
         detail: Detail,
     },
+
+    /// the trace ring of the program's ui
+    ///
+    /// read off `basedpython_ui.runtime`'s own storage in the debuggee — the
+    /// module is found in `sys.modules` and never imported, and every object
+    /// on the way is read through its instance dictionary rather than through
+    /// an attribute. the mapping of every location in it is the agent's, for
+    /// the reason every other location's is
+    Recompositions,
+
+    /// forward every trace record the ui runtime writes, or stop
+    ///
+    /// a flag in the agent, read by the native audit hook that already sees
+    /// every audit event the process raises. accepted whether or not the
+    /// runtime module is in `sys.modules` yet: watching is an interest in
+    /// records to come, and a program that imports the runtime later is
+    /// watched from then on
+    WatchRecompositions {
+        /// whether to forward records
+        on: bool,
+    },
 }
 
 impl FromEngine {
@@ -751,6 +803,8 @@ impl FromEngine {
             Self::Trail => "the trail",
             Self::Retainers { .. } => "the retainers",
             Self::SetVariable { .. } => "the variable's write",
+            Self::Recompositions => "why the ui recomposed",
+            Self::WatchRecompositions { .. } => "the recomposition watch",
         }
     }
 }
@@ -1447,6 +1501,91 @@ mod tests {
             write(&mut wire, &sent).expect("writing to a vec cannot fail");
 
             let received: Option<FromAgent> =
+                read(&mut wire.as_slice(), &mut Vec::new()).expect("the frame is whole");
+            assert_eq!(received, Some(sent));
+        }
+    }
+
+    #[test]
+    fn a_trace_record_round_trips_with_every_location_and_cause_it_carries() {
+        use bpd_core::{Cause, Key, Location, Origin, TraceRecord};
+
+        let by = |line: u32| Location {
+            file: "/app/counter.by".to_string(),
+            line,
+            generated: Some(bpd_core::Located {
+                file: PathBuf::from("/tmp/build/counter.py"),
+                line: line + 30,
+            }),
+            reason: None,
+        };
+        let record = TraceRecord::Run {
+            runtime: 0,
+            frame: 3,
+            scope: 5,
+            parent: Some(0),
+            name: "Counter".to_string(),
+            defined: by(9),
+            called: Some(by(24)),
+            key: Some(Key::Int(2)),
+            origin: Origin::Itself,
+            causes: vec![Cause::Derived {
+                derived: 77,
+                declared: Some(by(12)),
+                declared_name: Some("total".to_string()),
+                old: "1".to_string(),
+                new: "2".to_string(),
+                changed: true,
+                because: Box::new(Cause::State {
+                    cell: 4401,
+                    kind: "state".to_string(),
+                    op: "set".to_string(),
+                    at: Some(Key::Text("k".to_string())),
+                    old: "0".to_string(),
+                    new: "2".to_string(),
+                    declared: None,
+                    declared_name: None,
+                    written: by(14),
+                    thread: 8674,
+                    posted: true,
+                    readers: 1,
+                }),
+            }],
+            skipped: vec![7],
+            disposed: Vec::new(),
+            elapsed_ns: 12_345,
+        };
+
+        for sent in [
+            FromAgent::Recomposed {
+                record: record.clone(),
+                dropped_before: 3,
+            },
+            FromAgent::Recompositions {
+                recompositions: Recompositions {
+                    format: 1,
+                    runtimes: 1,
+                    tracing: true,
+                    records: bpd_core::Kept::counted(vec![record], 3),
+                    mode: Mode::NonStop,
+                },
+            },
+            FromAgent::Watching { on: true },
+        ] {
+            let mut wire = Vec::new();
+            write(&mut wire, &sent).expect("writing to a vec cannot fail");
+            let received: Option<FromAgent> =
+                read(&mut wire.as_slice(), &mut Vec::new()).expect("the frame is whole");
+            assert_eq!(received, Some(sent));
+        }
+
+        for sent in [
+            FromEngine::Recompositions,
+            FromEngine::WatchRecompositions { on: false },
+        ] {
+            let mut wire = Vec::new();
+            write(&mut wire, &sent).expect("writing to a vec cannot fail");
+            let received: Option<FromEngine> =
                 read(&mut wire.as_slice(), &mut Vec::new()).expect("the frame is whole");
             assert_eq!(received, Some(sent));
         }

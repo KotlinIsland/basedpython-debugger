@@ -754,6 +754,7 @@ told:
 | a child the program started                       | an `output` event on `console`, with no `source` and no `line` |
 | a way of starting a child this interpreter hides  | an `output` event on `important`                               |
 | a debugged fork joining                           | the `startDebugging` reverse request                           |
+| a trace record the ui runtime wrote while watched | a `bpd/recomposition` event, or a `console` line per run       |
 | a thread stopping                                 | a `stopped` event                                              |
 | the program exiting                               | an `exited` event with the code, then `terminated`             |
 | the program ending with threads still held        | an `output` event naming them, then the `stopped` events       |
@@ -776,7 +777,7 @@ run to each of the two ways a program can end, and the test reads the
 transcript for what would prove each one arrived. an adapter that emptied one of
 those methods passes every other test in the file and fails that one
 
-### four capabilities are reached through an extension
+### six capabilities are reached through an extension
 
 `Request::RunScript` — [the debug script](scripts.md) — is a capability of the
 core, so the parity rule does not let it be an agent's alone. DAP has no request
@@ -831,7 +832,31 @@ written to the `output` stream, in the `important` category, because the person
 who has to change something is looking at the debug console rather than at a
 response body
 
-nothing advertises any of the four. DAP has no capability flag for a custom
+`Request::Recompositions` and `Request::WatchRecompositions` —
+[why the ui recomposed](basedpython-ui.md) — are two more, and the second is
+the one that comes with an **event**. DAP has nothing about a ui framework's own
+record of itself, and an editor is where a person asks why something on screen
+changed:
+
+```json
+{ "command": "bpd/recompositions", "arguments": {} }
+{ "command": "bpd/watchRecompositions", "arguments": { "on": true } }
+```
+
+the first answers with the runtime's ring whole in the body, every location in
+it mapped to `.by` lines the way a stack frame is, and says on the `important`
+category when the ring's edge bit. the second answers `{ "watching": true }` —
+before the program has imported the runtime too, because watching is an
+interest in records to come — and from then on every record the runtime writes
+arrives as a `bpd/recomposition` event carrying
+`{ "record": …, "dropped_before": N }` — for a client that named it in
+`bpd/understands`, with `dropped_before` the count of records the agent's queue
+dropped ahead of this one while nothing read the stream. one that did not is
+shown one `console` line per **run** record instead, nothing for a write or a
+frame, and a line on `important` whenever `dropped_before` is above zero, the
+way `bpd/restarting` narrates for a client that never heard of it
+
+nothing advertises any of the six. DAP has no capability flag for a custom
 request, and a client that does not know about one never sends it
 
 ### and two extra fields, on requests DAP does have

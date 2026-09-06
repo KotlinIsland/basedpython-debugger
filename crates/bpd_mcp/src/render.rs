@@ -947,6 +947,67 @@ pub fn recording(on: bool, held: u64, dropped: u64) -> serde_json::Value {
     })
 }
 
+/// why the program's ui recomposed — the trace ring, whole, with the bound said
+///
+/// the records are the core's own serde, so nothing a record carries is
+/// dropped on the way, and `mode` is the sentence every other read carries.
+/// `says` names the count and what is not there, the way the trail's does
+pub fn recompositions(ring: &bpd_core::Recompositions) -> serde_json::Value {
+    let says = if !ring.tracing {
+        "the program has imported basedpython_ui.runtime and made no runtime \
+         yet, so there is nothing to trace"
+            .to_string()
+    } else if ring.records.dropped == 0 {
+        format!(
+            "every record the ring holds — {} of them, across {} runtime(s)",
+            ring.records.kept.len(),
+            ring.runtimes
+        )
+    } else {
+        format!(
+            "the last {} records. **{} are not here** — they fell off the \
+             runtime's own ring or off this answer's bound of {} — so the oldest \
+             entry here is not where the trace began",
+            ring.records.kept.len(),
+            ring.records.dropped,
+            bpd_core::recompose::RECORDS_KEPT
+        )
+    };
+    serde_json::json!({
+        "format": ring.format,
+        "runtimes": ring.runtimes,
+        "tracing": ring.tracing,
+        "records": ring.records,
+        "mode": ring.mode.to_string(),
+        "says": says,
+    })
+}
+
+/// whether the ui runtime's records are being forwarded now
+pub fn watching(on: bool) -> serde_json::Value {
+    serde_json::json!({
+        "watching": on,
+        "says": if on {
+            "forwarding every trace record the ui runtime writes. they arrive \
+             under `recompositions` on the answer to whichever call the program \
+             runs during, at most two hundred between calls, with the rest — \
+             and anything the program's own queue dropped while nothing was \
+             reading — counted in `dropped`"
+        } else {
+            "not forwarding trace records. the ring is still written and \
+             `recompositions` still reads it"
+        },
+    })
+}
+
+/// one trace record the ui runtime wrote while a client watched
+///
+/// the core's own serde, whole — a record read field by field on the other
+/// side is a record nothing here may have thinned
+pub fn recomposed(record: &bpd_core::TraceRecord) -> serde_json::Value {
+    serde_json::to_value(record).expect("a trace record is built from types whose serde is derived")
+}
+
 /// where the program has been
 pub fn trail(went: &bpd_core::Trail) -> serde_json::Value {
     serde_json::json!({

@@ -79,6 +79,7 @@ over_each_transport!(
     a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set,
     an_editor_can_run_a_whole_investigation_the_way_an_agent_can,
     an_editor_can_ask_what_changed_between_two_stops,
+    an_editor_can_ask_why_the_ui_recomposed_and_be_handed_the_next_record_as_data,
     an_editor_can_move_where_the_program_carries_on_from,
     a_frame_a_thread_is_executing_is_restarted_where_it_stands,
     a_frame_below_the_top_is_restarted_by_forcing_the_frames_above_it_out,
@@ -723,6 +724,123 @@ fn an_editor_can_ask_what_changed_between_two_stops(transport: Transport) {
         "the program printed what the diff said it computed"
     );
     client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+fn an_editor_can_ask_why_the_ui_recomposed_and_be_handed_the_next_record_as_data(
+    transport: Transport,
+) {
+    // the parity rule once more: the trace ring of basedpython-ui is a
+    // capability of the core, so an editor reaches it — as a custom request
+    // for the ring, and as a custom event for the records written while the
+    // program runs. the program is the stand-in runtime the engine's own tests
+    // read, and what it wrote is what comes back
+    let fixture = Fixture::new("recomposing", bpd_test::basedpython_ui::RECOMPOSING);
+    bpd_test::basedpython_ui::stand_in(&fixture);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line_of(bpd_test::basedpython_ui::RECOMPOSING, "done = 1") } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+    client.event("stopped");
+
+    let ring = client.request("bpd/recompositions", &serde_json::json!({}));
+    assert_eq!(ring["success"], true, "the ring was refused: {ring}");
+    assert_eq!(ring["body"]["format"], 1, "{ring}");
+    assert_eq!(ring["body"]["tracing"], true, "{ring}");
+    assert_eq!(ring["body"]["records"]["dropped"], 0, "{ring}");
+    let records = ring["body"]["records"]["kept"]
+        .as_array()
+        .expect("the records are an array");
+    assert_eq!(records.len(), 3, "{ring}");
+    assert_eq!(records[0]["record"], "write", "{ring}");
+    assert_eq!(records[1]["record"], "run", "{ring}");
+    assert_eq!(records[1]["name"], "Counter", "{ring}");
+    assert_eq!(records[1]["origin"], "self", "{ring}");
+    assert_eq!(records[1]["causes"][0]["cause"], "state", "{ring}");
+    assert_eq!(records[1]["causes"][0]["declared_name"], "count", "{ring}");
+    assert_eq!(records[1]["causes"][0]["old"], "0", "{ring}");
+    assert_eq!(records[1]["causes"][0]["new"], "2", "{ring}");
+    assert_eq!(
+        records[1]["defined"]["file"],
+        fixture.path().display().to_string(),
+        "{ring}"
+    );
+    assert_eq!(
+        records[1]["defined"]["line"],
+        line_of(bpd_test::basedpython_ui::RECOMPOSING, "def Counter"),
+        "{ring}"
+    );
+    assert_eq!(
+        records[1]["defined"]["generated"],
+        serde_json::Value::Null,
+        "nothing mapped a plain python program: {ring}"
+    );
+    assert_eq!(records[2]["record"], "frame", "{ring}");
+
+    // opting into the record as data, and turning the stream on. the program
+    // writes one more record after the breakpoint, and it arrives as an event
+    // before the program is reported over
+    client.request(
+        "bpd/understands",
+        &serde_json::json!({ "events": ["bpd/recomposition"] }),
+    );
+    let watching = client.request(
+        "bpd/watchRecompositions",
+        &serde_json::json!({ "on": true }),
+    );
+    assert_eq!(watching["success"], true, "{watching}");
+    assert_eq!(watching["body"]["watching"], true, "{watching}");
+
+    let stopped_thread = client
+        .seen
+        .iter()
+        .rev()
+        .find(|message| message["type"] == "event" && message["event"] == "stopped")
+        .map(|message| message["body"]["threadId"].clone())
+        .expect("a stop was announced");
+    client.request(
+        "continue",
+        &serde_json::json!({ "threadId": stopped_thread }),
+    );
+    let recomposed = client.event("bpd/recomposition");
+    assert_eq!(
+        recomposed["body"]["record"]["record"], "run",
+        "{recomposed}"
+    );
+    assert_eq!(
+        recomposed["body"]["dropped_before"], 0,
+        "the count of what the agent dropped ahead of the record rides the \
+         event, and nothing was: {recomposed}"
+    );
+    assert_eq!(
+        recomposed["body"]["record"]["name"], "Later",
+        "{recomposed}"
+    );
+    assert_eq!(
+        recomposed["body"]["record"]["causes"][0]["cause"], "invalidated",
+        "{recomposed}"
+    );
+    client.event("exited");
+    client.event("terminated");
+    // and a client that read the record as data was not narrated at as well
+    assert!(
+        !client.output().contains("`Later`"),
+        "the record went out as data and was narrated too: {}",
+        client.output()
+    );
     client.request("disconnect", &serde_json::json!({}));
     client.finish();
 }

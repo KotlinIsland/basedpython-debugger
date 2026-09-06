@@ -468,6 +468,9 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
     // the one mode that turns off what makes bpd fast, and the window it fills
     client.call("record", &serde_json::json!({ "on": true }));
     client.call("trail", &serde_json::json!({}));
+    // why the ui recomposed, and the switch that streams it
+    client.call("recompositions", &serde_json::json!({}));
+    client.call("watch_recompositions", &serde_json::json!({ "on": true }));
     // why an object is still alive, which is the question asked upwards from an
     // object rather than downwards from a frame
     client.call(
@@ -773,6 +776,8 @@ fn tool_order() -> Vec<&'static str> {
         "stack",
         "record",
         "trail",
+        "recompositions",
+        "watch_recompositions",
         "retainers",
         "variables",
         "facts",
@@ -957,6 +962,9 @@ fn shown(said: Told, told: &Transcript) -> bool {
         // beside the children rather than instead of them
         Told::BlindSpot => told.answered(&["\"cannot_see\"", "\"silence_is_not_evidence\":true"]),
         Told::Attached => told.answered(&["\"attached\"", &mark::JOINED.to_string()]),
+        // its own key, with the records whole under it. the fake's own ring
+        // names its scope differently, so the mark can only be the pulled one
+        Told::Recomposed => told.answered(&["\"recompositions\"", "\"records\"", mark::RECOMPOSED]),
         Told::Stopped => told.answered(&["\"outcome\":\"stopped\""]),
         // the code, the field, **and** the reason. the exit `ran` makes is one
         // whose output is still being written, and an agent handed the code
@@ -979,6 +987,77 @@ fn shown(said: Told, told: &Transcript) -> bool {
             &format!("\"waited_ms\":{}", mark::WAITED_MS),
         ]),
     }
+}
+
+/// a run record of the fake's ring, mapped
+fn recomposition() -> bpd_core::TraceRecord {
+    let at = |line: u32| bpd_core::Location {
+        file: "/src/app.by".to_string(),
+        line,
+        generated: Some(bpd_core::Located {
+            file: std::path::PathBuf::from("/tmp/build/app.py"),
+            line: line + 32,
+        }),
+        reason: None,
+    };
+    bpd_core::TraceRecord::Run {
+        runtime: 0,
+        frame: 3,
+        scope: 5,
+        parent: Some(0),
+        name: "Counter".to_string(),
+        defined: at(9),
+        called: Some(at(24)),
+        key: None,
+        origin: bpd_core::Origin::Itself,
+        causes: vec![bpd_core::Cause::Args {
+            parameter: "step".to_string(),
+            old: "1".to_string(),
+            new: "2".to_string(),
+            compared: true,
+        }],
+        skipped: Vec::new(),
+        disposed: Vec::new(),
+        elapsed_ns: 12_345,
+    }
+}
+
+#[test]
+fn the_ring_and_its_edge_reach_an_agent_and_a_watched_record_rides_the_next_answer() {
+    // the answer is the ring whole with the count beside it, and the pulled
+    // record is the whole record under its own key with the bound said — an
+    // agent reading either without the count would take what it holds for
+    // everything there was
+    let told = drive(&Asked::default());
+    let ring = told.result_of("recompositions");
+    assert_eq!(ring["records"]["dropped"], 12, "{ring}");
+    assert_eq!(ring["records"]["kept"][0]["record"], "run", "{ring}");
+    assert_eq!(
+        ring["records"]["kept"][0]["defined"]["generated"]["line"], 41,
+        "the generated location is beside the `.by` one: {ring}"
+    );
+    assert_eq!(ring["format"], 1, "{ring}");
+    assert!(
+        ring["says"]
+            .as_str()
+            .is_some_and(|said| said.contains("not where the trace began")),
+        "an agent cannot see an elision a person would: {ring}"
+    );
+
+    let watching = told.result_of("watch_recompositions");
+    assert_eq!(watching["watching"], true, "{watching}");
+
+    assert!(
+        told.answered(&[
+            "\"recompositions\"",
+            "\"dropped\":3",
+            "dropped in the program",
+            "\"declared_name\":\"count\"",
+            mark::RECOMPOSED,
+        ]),
+        "the record `say` makes rides the answer to the call it arrived during, \
+         whole, with the gap the agent's queue left ahead of it counted and said"
+    );
 }
 
 #[test]
@@ -1423,6 +1502,19 @@ impl Session for FakeSession {
                 recording: true,
                 window: 100_000,
             }),
+            // a ring that dropped records, for the reason the trail has: an
+            // answer whose oldest entry is not where the trace began reads as
+            // the whole history without the count. the record is named
+            // differently from the one `say` makes, so that the mark can only
+            // turn up on the pulled key
+            Request::Recompositions => Response::Recompositions(bpd_core::Recompositions {
+                format: 1,
+                runtimes: 1,
+                tracing: true,
+                records: bpd_core::Kept::counted(vec![recomposition()], 12),
+                mode: Mode::NonStop,
+            }),
+            Request::WatchRecompositions { on } => Response::WatchingRecompositions { on },
             Request::Retainers { .. } => Response::Retainers(bpd_core::Retainers {
                 of: "a list holding 1".to_string(),
                 found: vec![bpd_core::Retainer {

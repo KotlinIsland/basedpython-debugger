@@ -74,6 +74,7 @@ development = [
     "development/vscode.md",
     "development/intellij.md",
     "development/basedpython-pycharm.md",
+    "development/basedpython-ui.md",
     "development/agent-interface.md",
     "development/mcp.md",
     "development/scripts.md",

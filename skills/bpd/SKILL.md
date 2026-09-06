@@ -52,6 +52,10 @@ arrives in the `launch` tool call:
     trips
 5. **`step_over` / `step_in` / `step_out`**, each one call and one answer, or
     **`run_script`** for a whole investigation in one
+6. for a basedpython-ui program, **`recompositions`** answers why the ui
+    recomposed — the runtime's own record of every scope that ran and the
+    state write, argument or parent that made it — and **`watch_recompositions`**
+    streams the records onto the answers that follow while it is on
 
 ## the five things that are easy to get wrong
 

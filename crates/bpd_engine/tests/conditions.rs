@@ -1063,6 +1063,10 @@ impl bpd_core::Reporting for Counted {
     fn attached(&mut self, session: bpd_core::SessionId) {
         panic!("this program does not fork, and {session} joined this debuggee")
     }
+
+    fn recomposed(&mut self, recomposed: bpd_core::Recomposed) {
+        panic!("this program has no ui runtime, and the agent sent {recomposed:?}")
+    }
 }
 
 /// a program whose condition is the first thing to run another module

@@ -36,10 +36,14 @@
 //! every `after_in_parent` one does — measured on 3.13, 3.14, 3.15 and a
 //! free-threaded 3.14, from both sides: a thread stopped in a `before` handler
 //! is not counted, and one started in an `after_in_parent` handler is not
-//! either
+//! either. the thread that writes the trace stream — [`crate::stream`] — is
+//! stood down and put back by the same handlers, and waits the same way:
+//! [`awaited`] is the one wait both make
 
 use std::io;
 use std::net::TcpStream;
+#[cfg(unix)]
+use std::os::fd::BorrowedFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 #[cfg(unix)]
@@ -47,6 +51,9 @@ use std::sync::atomic::AtomicI32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
+
+#[cfg(unix)]
+use rustix::event::PollFlags;
 
 use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
@@ -457,17 +464,41 @@ pub(crate) fn detach() -> bool {
         return false;
     }
 
-    for descriptor in &DESCRIPTORS {
+    close_by_number(&DESCRIPTORS);
+
+    // and now the cells those values live in, so that this process can use the
+    // writing end, the reader and the stop registry again without waiting on a
+    // lock a thread the fork did not keep was holding. it does not take any of
+    // them to do it. the trace stream's own descriptors and cells go the same
+    // way, and its watch goes off: a child that inherited its parent's watch
+    // would forward its own ui's records onto a session that asked about the
+    // parent's
+    WRITER.abandon();
+    READER.abandon();
+    stops::abandon();
+    crate::stream::abandon();
+    true
+}
+
+/// close descriptors a forked child inherited, by number, and forget them
+///
+/// each is closed once: the number is swapped for `-1` first, so a second
+/// call finds nothing. what makes the close sound is stated by the caller —
+/// [`detach`] for the connection's own, [`crate::stream::abandon`] for the
+/// stream's — and it is the same argument for both: the values that own these
+/// numbers live in cells the child abandons and never frees, so nothing will
+/// ever drop a `TcpStream` or a `UnixStream` for one of them, and this is the
+/// only close they will get
+#[cfg(unix)]
+pub(crate) fn close_by_number(descriptors: &[AtomicI32]) {
+    for descriptor in descriptors {
         let raw = descriptor.swap(-1, Ordering::SeqCst);
         if raw < 0 {
             continue;
         }
-        // SAFETY: these are the descriptors `attach` opened in the process this
-        // one was forked from, and nothing in *this* process will close any of
-        // them again. the values that own them are in cells this call is about
-        // to abandon, and an abandoned cell is never freed — so nothing will
-        // ever drop a `TcpStream` or a `UnixStream` for one of these numbers,
-        // and this is the only close they will get
+        // SAFETY: these are descriptors opened in the process this one was
+        // forked from, and nothing in *this* process will close any of them
+        // again — see above
         #[expect(
             unsafe_code,
             reason = "the owning values are unreachable in a forked child, so \
@@ -479,15 +510,23 @@ pub(crate) fn detach() -> bool {
             std::os::fd::OwnedFd::from_raw_fd(raw)
         });
     }
+}
 
-    // and now the cells those values live in, so that this process can use the
-    // writing end, the reader and the stop registry again without waiting on a
-    // lock a thread the fork did not keep was holding. it does not take any of
-    // them to do it
-    WRITER.abandon();
-    READER.abandon();
-    stops::abandon();
-    true
+/// a handle of its own on the control connection, for a thread that polls it
+///
+/// the stream's writer waits for room on the socket before it writes, and the
+/// wait needs a descriptor no lock guards: the writing end is behind
+/// [`WRITER`]'s, and a thread holding that across a poll would hold every
+/// answer up. a duplicate refers to the same socket, so room on it is room on
+/// the one [`send`] writes to. its number is the stream's to keep and a forked
+/// child's to close
+#[cfg(unix)]
+pub(crate) fn clone_connection() -> io::Result<TcpStream> {
+    let writer = writer();
+    let Some(stream) = writer.as_ref() else {
+        unreachable!("nothing clones the control connection before `attach` installed it");
+    };
+    stream.try_clone()
 }
 
 /// open a session of this forked child's own, on the endpoint it inherited
@@ -570,88 +609,102 @@ pub(crate) fn send(message: &FromAgent) {
     }
 }
 
-/// what the reader thread does next
+/// what a thread waiting on the connection does next
 #[cfg(unix)]
-enum Next {
-    /// a frame has begun to arrive
-    Frame,
+pub(crate) enum Next {
+    /// the descriptor it watches is ready — a frame has begun to arrive, or
+    /// there is room to write one
+    Ready,
     /// the process is about to fork, and this thread must not be on it
     StandDown,
+}
+
+/// wait until `watched` is ready for `wanted`, or until the thread is to go
+///
+/// standing down **wins** over readiness: whatever the kernel is holding stays
+/// there, and the thread started after the fork finds it. that is what makes
+/// the window lossless for the reader — the alternative is one that stands
+/// down owning part of a frame, and a length-prefixed stream cannot be resumed
+/// from the middle — and for the stream's writer it is what keeps a fork from
+/// waiting on an engine that is not reading
+#[cfg(unix)]
+pub(crate) fn awaited(wakeup: &UnixStream, watched: BorrowedFd<'_>, wanted: PollFlags) -> Next {
+    use std::os::fd::AsFd as _;
+
+    use rustix::event::{PollFd, poll};
+
+    loop {
+        let mut polled = [
+            PollFd::from_borrowed_fd(wakeup.as_fd(), PollFlags::IN),
+            PollFd::from_borrowed_fd(watched, wanted),
+        ];
+        match poll(&mut polled, None) {
+            Ok(_) => {}
+            // a signal the *program* installed a handler for arrives on
+            // whichever thread the operating system picks, and this thread
+            // is as eligible as any. it is not a failure of the connection
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(error) => lost(&format!("the control connection failed: {error}")),
+        }
+
+        if polled[0].revents().intersects(PollFlags::IN) {
+            return Next::StandDown;
+        }
+
+        // an end of stream and an error are the reading or the writing path's
+        // to report, in the words it already has for them
+        if !polled[1].revents().is_empty() {
+            return Next::Ready;
+        }
+    }
+}
+
+/// take back every byte that was written to wake a thread
+///
+/// the invariant it keeps is that a wakeup is **empty whenever the end it
+/// belongs to is idle**, established by making a fresh pair and re-established
+/// here. a byte left behind would stand the next thread down the instant it
+/// started, with no fork in flight to join it — and then nothing would be
+/// reading the connection, or writing the stream, and nothing would have said
+/// so
+///
+/// it is done by the thread that joined the other rather than by that thread
+/// itself, because a reader can also return when the session ends, on a path
+/// that never looked at the wakeup at all
+#[cfg(unix)]
+pub(crate) fn drain_wakeup(wakeup: &mut UnixStream) {
+    use std::io::Read as _;
+
+    let mut swallowed = [0u8; 8];
+    loop {
+        match wakeup.read(&mut swallowed) {
+            Ok(read) if read > 0 => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
+            // the writing half lives in a `static` for the life of the
+            // process, so there is no end of stream to reach here and no
+            // error left that is about anything but the pair itself
+            other => fatal(&format!(
+                "a wakeup of the control connection could not be read back \
+                 ({other:?}). the next thread on that end would stand down the \
+                 moment it started, and the session would go unread"
+            )),
+        }
+    }
 }
 
 #[cfg(unix)]
 impl Reading {
     /// wait until there is a frame to read, or until this thread is to go
-    ///
-    /// standing down **wins** over a frame that has begun to arrive: whatever
-    /// the kernel is holding stays there, and the reader started after the fork
-    /// reads it. that is what makes the window lossless — the alternative is a
-    /// reader that stands down owning part of a frame, and a length-prefixed
-    /// stream cannot be resumed from the middle
-    fn awaited(&mut self) -> Next {
+    fn awaited(&self) -> Next {
         use std::os::fd::AsFd as _;
 
-        use rustix::event::{PollFd, PollFlags, poll};
-
-        loop {
-            let mut watched = [
-                PollFd::from_borrowed_fd(self.wakeup.as_fd(), PollFlags::IN),
-                PollFd::from_borrowed_fd(self.stream.as_fd(), PollFlags::IN),
-            ];
-            match poll(&mut watched, None) {
-                Ok(_) => {}
-                // a signal the *program* installed a handler for arrives on
-                // whichever thread the operating system picks, and this thread
-                // is as eligible as any. it is not a failure of the connection
-                Err(rustix::io::Errno::INTR) => continue,
-                Err(error) => lost(&format!("the control connection failed: {error}")),
-            }
-
-            let wakeup = watched[0].revents();
-            let stream = watched[1].revents();
-
-            if wakeup.intersects(PollFlags::IN) {
-                return Next::StandDown;
-            }
-
-            // an end of stream and an error are the reading path's to report,
-            // in the words it already has for them
-            if !stream.is_empty() {
-                return Next::Frame;
-            }
-        }
+        awaited(&self.wakeup, self.stream.as_fd(), PollFlags::IN)
     }
 
     /// take back every byte that was written to wake a reader
-    ///
-    /// the invariant it keeps is that the wakeup is **empty whenever the
-    /// reading end is idle**, established by [`attach`] making a fresh pair and
-    /// re-established here. a byte left behind would stand the next reader down
-    /// the instant it started, with no fork in flight to join it — and then
-    /// nothing would be reading the connection and nothing would have said so
-    ///
-    /// it is done by the thread that joined the reader rather than by the
-    /// reader itself, because a reader can also return when the session ends,
-    /// on a path that never looked at the wakeup at all
     fn drain_wakeup(&mut self) {
-        use std::io::Read as _;
-
-        let mut swallowed = [0u8; 8];
-        loop {
-            match self.wakeup.read(&mut swallowed) {
-                Ok(read) if read > 0 => {}
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
-                // the writing half lives in a `static` for the life of the
-                // process, so there is no end of stream to reach here and no
-                // error left that is about anything but the pair itself
-                other => fatal(&format!(
-                    "the wakeup of the control connection's reader could not be \
-                     read back ({other:?}). the next reader would stand down \
-                     the moment it started, and the session would go unread"
-                )),
-            }
-        }
+        drain_wakeup(&mut self.wakeup);
     }
 }
 

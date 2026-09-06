@@ -97,7 +97,9 @@ watch list is chosen from the running interpreter's version:
 | windows, any   | `_winapi.CreateProcess`, `os.exec`                                   |
 
 the list lives in `bpd_core::spawn::making_a_process`, not in the agent that
-installs the hook, because the parity suite needs the same answer. it used to
+installs the hook, because the parity suite needs the same answer — and what the
+hook compares against in total is `bpd_core::audit::watched`, which puts the
+trace event of [basedpython-ui](basedpython-ui.md) beside these. it used to
 be written in both places, and the copy in the test named a single event —
 `_posixsubprocess.fork_exec` on 3.14 and later. **which of these an ordinary
 `subprocess.run` raises is the interpreter's choice on the day**: cpython
@@ -389,6 +391,15 @@ that test also **asserts the reader thread is there**, out of
 happened to be single-threaded would record the same warnings for a reason that
 has nothing to do with the debugger, and the comparison beside it would be a
 coincidence rather than a result
+
+the agent has one more thread when a client is watching
+[the ui recompose](basedpython-ui.md): the one that writes the trace stream,
+which is put on the process by the first watch and never before. it goes the
+same way in the same handlers — `stream::stand_down` joins it after the reader
+in `before`, and `stream::resume_writing` starts it again in `after_in_parent` —
+with whatever it had queued still queued for the next writer, so the count
+cpython takes is unchanged by a watch. a forked child starts with the watch off
+and a queue of its own
 
 [counts]: https://github.com/python/cpython/issues/137109
 

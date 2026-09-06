@@ -473,7 +473,10 @@ impl Adapter {
             }
 
             if self.waiting() {
-                let mut events = Events::new(&self.output);
+                let mut events = Events::new(
+                    &self.output,
+                    self.client.understands.contains(RECOMPOSITION_EVENT),
+                );
                 let waited = self
                     .session
                     .as_mut()
@@ -590,7 +593,10 @@ impl Adapter {
     /// reported, and nothing is waited for, because the client's next message
     /// is what this loop is otherwise for
     fn look_at_the_program(&mut self) -> Answered {
-        let mut events = Events::new(&self.output);
+        let mut events = Events::new(
+            &self.output,
+            self.client.understands.contains(RECOMPOSITION_EVENT),
+        );
         let looked = self
             .session
             .as_mut()
@@ -712,6 +718,11 @@ impl Adapter {
             Some("bpd/trail") => self.trail(message),
             Some("bpd/retainers") => self.retainers(message),
             Some("bpd/replaceCode") => self.replace_code(message),
+            // the trace ring of basedpython-ui, and the switch that streams it.
+            // DAP has nothing about a ui framework's own record of itself, and
+            // an editor is where a person asks why something on screen changed
+            Some("bpd/recompositions") => self.recompositions(message),
+            Some("bpd/watchRecompositions") => self.watch_recompositions(message),
             Some(command) => Err(Aborted::Refuse(format!(
                 "bpd's DAP adapter does not implement `{command}`, and does not \
                  advertise a capability that would make a client send it"
@@ -1702,6 +1713,77 @@ impl Adapter {
         let body = serde_json::to_value(&went)
             .expect("a trail is built from types whose serde is derived");
         self.respond(message, Some(body))?;
+        Ok(())
+    }
+
+    /// why the program's ui recomposed — the trace ring of basedpython-ui
+    ///
+    /// a custom request because DAP has nothing for a ui framework's own record
+    /// of itself, and an editor is where a person asks why something on screen
+    /// changed. the answer is the ring whole, every location of it mapped to
+    /// `.by` lines the way a stack frame is, in the body
+    fn recompositions(&mut self, message: &Incoming) -> Answered {
+        let ring = match self.ask(Request::Recompositions)? {
+            Response::Recompositions(ring) => ring,
+            other => unreachable!("the trace ring was answered with {other:?}"),
+        };
+        // the ring's edge, said where a person is looking, for the reason the
+        // trail's is: an answer whose oldest record is not where the trace
+        // began reads as the whole history otherwise
+        if ring.records.cut() {
+            self.event(
+                "output",
+                &serde_json::json!({
+                    "category": "important",
+                    "output": format!(
+                        "the trace holds the last {} records and {} are not here — \
+                         they fell off the runtime's own ring or off this answer's \
+                         bound — so its oldest entry is not where the trace began\n",
+                        ring.records.kept.len(),
+                        ring.records.dropped
+                    ),
+                }),
+            )?;
+        }
+        let body = serde_json::to_value(&ring)
+            .expect("the trace ring is built from types whose serde is derived");
+        self.respond(message, Some(body))?;
+        Ok(())
+    }
+
+    /// forward every trace record the ui runtime writes, or stop
+    ///
+    /// a boolean, refused when it is not one: turning the stream on makes the
+    /// agent read a record off every audit event the runtime raises, and a busy
+    /// ui raises one per scope run, so it is not something to start on a guess
+    fn watch_recompositions(&mut self, message: &Incoming) -> Answered {
+        let on = match &message.arguments["on"] {
+            serde_json::Value::Bool(on) => *on,
+            other => {
+                return Err(Aborted::Refuse(format!(
+                    "a `bpd/watchRecompositions` needs `on`, a boolean, and this \
+                     was {other}. with it on the agent forwards every record the \
+                     ui runtime writes — one per scope run — so it is not \
+                     something to start on a guess"
+                )));
+            }
+        };
+        let watching = match self.ask(Request::WatchRecompositions { on })? {
+            Response::WatchingRecompositions { on } => on,
+            other => unreachable!("the recomposition watch was answered with {other:?}"),
+        };
+        // on the console when it goes on, because a stream with a price is a
+        // thing a person who left it on needs reminding of — and because the
+        // console is where the records land for a client that never named the
+        // event
+        if watching {
+            self.say(
+                "bpd is forwarding every trace record the ui runtime writes: as a \
+                 `bpd/recomposition` event to a client that named it in \
+                 `bpd/understands`, and as a console line per scope run otherwise\n",
+            )?;
+        }
+        self.respond(message, Some(serde_json::json!({ "watching": watching })))?;
         Ok(())
     }
 
@@ -2991,7 +3073,10 @@ impl Adapter {
     /// session that stop was reported from, and one that is about the program
     /// names none, which is the only session this connection serves
     fn ask(&mut self, request: Request) -> Result<Response, Aborted> {
-        let mut events = Events::new(&self.output);
+        let mut events = Events::new(
+            &self.output,
+            self.client.understands.contains(RECOMPOSITION_EVENT),
+        );
         let held = self.session.as_ref().map(|session| session.held());
         let answered = self
             .session
@@ -3318,6 +3403,16 @@ const MOVED_EVENT: &str = "bpd/moved";
 /// on the other left a client that had named `bpd/moved` and not this one with
 /// neither
 const RESTARTING_EVENT: &str = "bpd/restarting";
+
+/// the event carrying a trace record the ui runtime wrote
+///
+/// the third custom event, and the first that can arrive at any moment: a
+/// record is written while the program runs, and nothing is asking. gated the
+/// way [`RESTARTING_EVENT`] is — a client that named it here reads the record as
+/// data and is not narrated at, and one that never heard of it is shown a
+/// sentence per scope run on the console. the name switches the narration off,
+/// so it is one name both ways round
+const RECOMPOSITION_EVENT: &str = "bpd/recomposition";
 
 /// everything about a restart that neither the response nor a `stopped` event
 /// has a field for
@@ -3852,14 +3947,21 @@ struct Events<'a> {
     /// collected and sent by the caller, which is the one place that knows the
     /// answer is finished
     joined: Vec<SessionId>,
+    /// whether the client named [`RECOMPOSITION_EVENT`] in `bpd/understands`
+    ///
+    /// copied in when the sink is made, because what a client understands is
+    /// the adapter's to know and a record arrives while the adapter is inside a
+    /// dispatch it cannot reach back out of
+    records_as_data: bool,
 }
 
 impl<'a> Events<'a> {
-    const fn new(output: &'a Output) -> Self {
+    const fn new(output: &'a Output, records_as_data: bool) -> Self {
         Self {
             output,
             failed: None,
             joined: Vec::new(),
+            records_as_data,
         }
     }
 
@@ -3871,10 +3973,15 @@ impl<'a> Events<'a> {
     }
 
     fn emit(&mut self, body: &serde_json::Value) {
+        self.send("output", body);
+    }
+
+    /// one event of any name, kept if it could not be written
+    fn send(&mut self, event: &str, body: &serde_json::Value) {
         if self.failed.is_some() {
             return;
         }
-        let written = self.output.lock().expect(WRITING).event("output", body);
+        let written = self.output.lock().expect(WRITING).event(event, body);
         if let Err(error) = written {
             self.failed = Some(error);
         }
@@ -3943,6 +4050,46 @@ impl Reporting for Events<'_> {
     /// `startDebugging` reverse request — see the field
     fn attached(&mut self, session: SessionId) {
         self.joined.push(session);
+    }
+
+    /// the ui runtime wrote a trace record, and the client is watching
+    ///
+    /// as data to a client that named the event, and as a sentence on the
+    /// console to one that did not — never both, because a client that reads
+    /// the data and is also narrated at shows everything twice. only a **run**
+    /// is narrated: a write and a frame are the ring's own bookkeeping, and a
+    /// console line per state write would drown the one a person wanted
+    ///
+    /// what the agent's queue dropped before this record rides the event as
+    /// `dropped_before`, and is said on the `important` category to a client
+    /// shown sentences — whatever kind of record follows the gap, because the
+    /// gap is the fact and a client never told of it reads the stream as whole
+    fn recomposed(&mut self, recomposed: bpd_core::Recomposed) {
+        if self.records_as_data {
+            self.send(
+                RECOMPOSITION_EVENT,
+                &serde_json::to_value(&recomposed)
+                    .expect("a forwarded record is built from types whose serde is derived"),
+            );
+            return;
+        }
+        if recomposed.dropped_before > 0 {
+            self.emit(&serde_json::json!({
+                "category": "important",
+                "output": format!(
+                    "{} trace record(s) the ui runtime wrote could not be handed \
+                     on before the one that follows and are gone — the stream \
+                     has a gap here\n",
+                    recomposed.dropped_before
+                ),
+            }));
+        }
+        if matches!(recomposed.record, bpd_core::TraceRecord::Run { .. }) {
+            self.emit(&serde_json::json!({
+                "category": "console",
+                "output": format!("{}\n", recomposed.record),
+            }));
+        }
     }
 }
 

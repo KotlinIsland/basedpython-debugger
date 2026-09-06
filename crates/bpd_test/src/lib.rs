@@ -17,6 +17,7 @@
 
 pub mod agent;
 pub mod alloc;
+pub mod basedpython_ui;
 pub mod debuggee;
 pub mod django;
 pub mod reporting;

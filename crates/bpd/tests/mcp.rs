@@ -617,6 +617,87 @@ fn one_call_describes_a_stop_and_one_more_says_what_changed_since() {
     client.finish();
 }
 
+#[test]
+fn an_agent_can_ask_why_the_ui_recomposed_and_reads_the_next_record_off_the_answer_it_rode() {
+    // the same ring the editor reads, as a tool, and the same stream as a key
+    // on the next answer — the pull an agent has instead of an event
+    let fixture = Fixture::new("recomposing", bpd_test::basedpython_ui::RECOMPOSING);
+    bpd_test::basedpython_ui::stand_in(&fixture);
+    let mut client = Client::start();
+
+    client.ask("initialize", &serde_json::json!({}));
+    client.call(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.call(
+        "set_breakpoints",
+        &serde_json::json!({
+            "breakpoints": [ {
+                "file": fixture.path(),
+                "line": line_of(bpd_test::basedpython_ui::RECOMPOSING, "done = 1"),
+            } ],
+        }),
+    );
+    let hit = client.call("continue_", &serde_json::json!({ "deadline_ms": GENEROUS }));
+    assert_eq!(hit["outcome"], "stopped", "{hit}");
+
+    let ring = client.call("recompositions", &serde_json::json!({}));
+    assert_eq!(ring["format"], 1, "{ring}");
+    assert_eq!(ring["runtimes"], 1, "{ring}");
+    assert_eq!(ring["records"]["dropped"], 0, "{ring}");
+    let records = ring["records"]["kept"]
+        .as_array()
+        .expect("the records are an array");
+    assert_eq!(records.len(), 3, "{ring}");
+    assert_eq!(records[1]["record"], "run", "{ring}");
+    assert_eq!(records[1]["name"], "Counter", "{ring}");
+    assert_eq!(records[1]["causes"][0]["cause"], "state", "{ring}");
+    assert_eq!(records[1]["causes"][0]["declared_name"], "count", "{ring}");
+    assert_eq!(
+        records[1]["causes"][0]["written"]["line"], 14,
+        "the write site the program recorded: {ring}"
+    );
+    assert!(
+        ring["says"]
+            .as_str()
+            .is_some_and(|said| said.contains("every record the ring holds")),
+        "{ring}"
+    );
+    assert!(
+        ring["mode"]
+            .as_str()
+            .is_some_and(|mode| mode.starts_with("non-stop")),
+        "every read says which mode it was taken in: {ring}"
+    );
+
+    let watching = client.call("watch_recompositions", &serde_json::json!({ "on": true }));
+    assert_eq!(watching["watching"], true, "{watching}");
+
+    // the program writes one more record after the breakpoint and exits. the
+    // record rides the answer to the call it was written during, under its
+    // own key, with the bound said
+    let over = client.call("continue_", &serde_json::json!({ "deadline_ms": GENEROUS }));
+    assert_eq!(over["outcome"], "exited", "{over}");
+    assert_eq!(over["recompositions"]["dropped"], 0, "{over}");
+    assert_eq!(
+        over["recompositions"]["records"][0]["record"], "run",
+        "{over}"
+    );
+    assert_eq!(
+        over["recompositions"]["records"][0]["name"], "Later",
+        "{over}"
+    );
+    assert!(
+        over["recompositions"]["says"]
+            .as_str()
+            .is_some_and(|said| said.contains("1 trace record(s)")),
+        "{over}"
+    );
+
+    client.finish();
+}
+
 /// a program that reads its own stdin and says exactly what it got
 ///
 /// `read()` rather than one `input()`, because it reads to **end of stream**: it

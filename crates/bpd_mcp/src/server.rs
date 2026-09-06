@@ -95,6 +95,14 @@ const LOGS_KEPT: usize = 200;
 /// the same program. whatever falls off is counted and reported
 const CHILDREN_KEPT: usize = 50;
 
+/// how many trace records of the ui runtime are kept between calls
+///
+/// a busy ui writes one per scope run and one per state write, so there is no
+/// bound on these either. the same number as the logs, for the same reason:
+/// the first are kept and the rest counted, and an agent that wants more asks
+/// more often
+const RECOMPOSITIONS_KEPT: usize = 200;
+
 /// serve one MCP client over `input` and `output`
 ///
 /// returns when the client hangs up. the debuggee never outlives it: a client
@@ -577,6 +585,20 @@ impl<'a> Server<'a> {
                 match self.ask_in(args.session, Request::Trail)? {
                     Response::Trail(trail) => Ok(render::trail(&trail)),
                     other => unreachable!("a trail was answered with {other:?}"),
+                }
+            }
+            "recompositions" => {
+                let args: SessionOnly = parse(name, arguments)?;
+                match self.ask_in(args.session, Request::Recompositions)? {
+                    Response::Recompositions(ring) => Ok(render::recompositions(&ring)),
+                    other => unreachable!("the trace ring was answered with {other:?}"),
+                }
+            }
+            "watch_recompositions" => {
+                let args: WatchRecompositionsArgs = parse(name, arguments)?;
+                match self.ask_in(args.session, Request::WatchRecompositions { on: args.on })? {
+                    Response::WatchingRecompositions { on } => Ok(render::watching(on)),
+                    other => unreachable!("the recomposition watch was answered with {other:?}"),
                 }
             }
             "retainers" => {
@@ -1111,6 +1133,9 @@ impl<'a> Server<'a> {
         if let Some(joined) = self.said.joined() {
             answer["attached"] = joined;
         }
+        if let Some(recomposed) = self.said.recompositions() {
+            answer["recompositions"] = recomposed;
+        }
         if !answer.is_object() {
             unreachable!("every tool answers with an object, and one answered with {answer}");
         }
@@ -1358,9 +1383,72 @@ struct Said {
     children_dropped: usize,
     blind: Vec<bpd_core::Blindspot>,
     joined: Vec<SessionId>,
+    recomposed: Vec<bpd_core::TraceRecord>,
+    /// records that arrived after [`RECOMPOSITIONS_KEPT`] were held, since
+    /// the last answer
+    recomposed_capped: u64,
+    /// records the agent's own queue dropped ahead of the ones that arrived,
+    /// since the last answer — the sum of every `dropped_before`
+    ///
+    /// two counts rather than one because the sentence says which happened:
+    /// one is cured by asking more often, and the other by a client that
+    /// reads the stream while the program runs
+    recomposed_unsent: u64,
 }
 
 impl Said {
+    /// the trace records the ui runtime wrote since the last answer, if any
+    ///
+    /// its own key rather than part of the logs, for the reason a child has
+    /// one: an agent that found a trace record under `logged` would read it as
+    /// a logpoint firing. `dropped` and `says` are always there when the key
+    /// is, because a stream with a bound is a stream whose reader has to be
+    /// told where the bound is
+    fn recompositions(&mut self) -> Option<serde_json::Value> {
+        if self.recomposed.is_empty() && self.recomposed_capped == 0 && self.recomposed_unsent == 0
+        {
+            return None;
+        }
+        let records: Vec<serde_json::Value> =
+            self.recomposed.iter().map(render::recomposed).collect();
+        self.recomposed.clear();
+        let capped = std::mem::take(&mut self.recomposed_capped);
+        let unsent = std::mem::take(&mut self.recomposed_unsent);
+        let says = match (capped, unsent) {
+            (0, 0) => format!(
+                "{} trace record(s) the ui runtime wrote while this call ran, \
+                 every one of them",
+                records.len()
+            ),
+            (capped, 0) => format!(
+                "the ui runtime wrote more than the {RECOMPOSITIONS_KEPT} trace \
+                 records bpd keeps between calls, so {capped} later ones are \
+                 gone. these are the first — ask more often, or read the ring \
+                 with `recompositions`"
+            ),
+            (0, unsent) => format!(
+                "{unsent} trace record(s) the ui runtime wrote were dropped in \
+                 the program before they could be sent, because nothing was \
+                 reading the stream while it ran — the records here have gaps \
+                 where those were. the ring `recompositions` reads may still \
+                 hold them"
+            ),
+            (capped, unsent) => format!(
+                "{} trace records are gone: {unsent} were dropped in the program \
+                 before they could be sent, because nothing was reading the \
+                 stream while it ran, and {capped} arrived after the \
+                 {RECOMPOSITIONS_KEPT} bpd keeps between calls. ask more often, \
+                 or read the ring with `recompositions`",
+                capped + unsent
+            ),
+        };
+        Some(serde_json::json!({
+            "records": records,
+            "dropped": capped + unsent,
+            "says": says,
+        }))
+    }
+
     fn take(&mut self) -> Option<serde_json::Value> {
         if self.logs.is_empty() && self.dropped == 0 && self.pausing.is_empty() {
             return None;
@@ -1487,6 +1575,21 @@ impl Reporting for Said {
     /// whole feature is arranged to avoid
     fn attached(&mut self, session: SessionId) {
         self.joined.push(session);
+    }
+
+    /// the ui runtime wrote a trace record
+    ///
+    /// bounded like the logs, because a busy ui has no bound of its own, and
+    /// counted for the same reason. what the agent's own queue dropped ahead
+    /// of it is counted too — into the same `dropped` an agent reads, because
+    /// a gap is a gap wherever it was made
+    fn recomposed(&mut self, recomposed: bpd_core::Recomposed) {
+        self.recomposed_unsent += recomposed.dropped_before;
+        if self.recomposed.len() < RECOMPOSITIONS_KEPT {
+            self.recomposed.push(recomposed.record);
+        } else {
+            self.recomposed_capped += 1;
+        }
     }
 }
 
@@ -1731,6 +1834,15 @@ struct RestartFrameArgs {
 ///
 /// no stop and no frame: a replacement is about the process rather than about
 /// one held thread, and it names the file the same way a breakpoint does
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WatchRecompositionsArgs {
+    #[serde(default)]
+    session: Option<u64>,
+    /// whether to forward the ui runtime's records
+    on: bool,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordArgs {
@@ -2012,6 +2124,109 @@ mod tests {
     }
 
     #[test]
+    fn a_ui_that_wrote_more_records_than_are_kept_says_how_many_are_missing() {
+        // the same bound the logs have, for the same reason: a busy ui writes
+        // a record per scope run, and an agent handed the first two hundred
+        // without the count would read them as everything the ui did
+        let mut said = Said::default();
+        for frame in 0..(RECOMPOSITIONS_KEPT as u64 + 7) {
+            said.recomposed(bpd_core::Recomposed {
+                record: bpd_core::TraceRecord::Frame {
+                    runtime: 0,
+                    frame,
+                    runs: 1,
+                    skips: 0,
+                    compose_ns: 1,
+                    commit_ns: 2,
+                },
+                dropped_before: 0,
+            });
+        }
+
+        let taken = said.recompositions().expect("it kept records");
+        assert_eq!(
+            taken["records"]
+                .as_array()
+                .expect("records are an array")
+                .len(),
+            RECOMPOSITIONS_KEPT
+        );
+        assert_eq!(taken["dropped"], 7);
+        assert!(
+            taken["says"]
+                .as_str()
+                .is_some_and(|said| said.contains("7 later ones are gone")),
+            "{taken}"
+        );
+
+        // and nothing left over: the next answer carries no key at all rather
+        // than an empty one
+        assert!(said.recompositions().is_none());
+    }
+
+    #[test]
+    fn records_the_agent_dropped_unsent_are_counted_into_the_same_number_and_said_apart() {
+        // the agent drops a record its queue cannot hold and counts it onto
+        // the next that gets through. an agent reading `dropped` gets one
+        // number, because a gap is a gap wherever it was made — and the
+        // sentence says which, because the two are cured differently
+        let mut said = Said::default();
+        let frame = |number: u64| bpd_core::TraceRecord::Frame {
+            runtime: 0,
+            frame: number,
+            runs: 1,
+            skips: 0,
+            compose_ns: 1,
+            commit_ns: 2,
+        };
+        said.recomposed(bpd_core::Recomposed {
+            record: frame(1),
+            dropped_before: 0,
+        });
+        said.recomposed(bpd_core::Recomposed {
+            record: frame(5),
+            dropped_before: 3,
+        });
+
+        let taken = said.recompositions().expect("it kept records");
+        assert_eq!(
+            taken["records"]
+                .as_array()
+                .expect("records are an array")
+                .len(),
+            2
+        );
+        assert_eq!(taken["dropped"], 3);
+        assert!(
+            taken["says"]
+                .as_str()
+                .is_some_and(|said| said.contains("3 trace record(s)")
+                    && said.contains("dropped in the program")),
+            "{taken}"
+        );
+        assert!(said.recompositions().is_none());
+
+        // and both at once: the cap's count and the agent's, one number, each
+        // named
+        for number in 0..(RECOMPOSITIONS_KEPT as u64 + 2) {
+            said.recomposed(bpd_core::Recomposed {
+                record: frame(number),
+                dropped_before: u64::from(number == 0),
+            });
+        }
+        let taken = said.recompositions().expect("it kept records");
+        assert_eq!(taken["dropped"], 3);
+        assert!(
+            taken["says"]
+                .as_str()
+                .is_some_and(|said| said.contains("3 trace records are gone")
+                    && said.contains("1 were dropped in the program")
+                    && said.contains("2 arrived after")),
+            "{taken}"
+        );
+    }
+
+    #[test]
     fn an_argument_a_tool_does_not_name_is_refused_rather_than_defaulted() {
         // `deadlineMs` instead of `deadline_ms` would otherwise be a call with
         // no deadline at all, which is the one thing this interface promises
@@ -2074,6 +2289,8 @@ mod tests {
         "restart_frame" => RestartFrameArgs,
         "record" => RecordArgs,
         "trail" => SessionOnly,
+        "recompositions" => SessionOnly,
+        "watch_recompositions" => WatchRecompositionsArgs,
         "retainers" => RetainersArgs,
         "replace_code" => ReplaceCodeArgs,
         "threads" => ThreadsArgs,

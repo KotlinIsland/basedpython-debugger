@@ -157,6 +157,10 @@ fn answer(
         FromEngine::Retainers { frame, expression } => {
             attach::send(&stopped.retainers(frame, &expression)?);
         }
+        FromEngine::Recompositions => attach::send(&crate::ui_trace::read(python)?),
+        FromEngine::WatchRecompositions { on } => {
+            attach::send(&crate::ui_trace::watch(on)?);
+        }
         FromEngine::Facts {
             frame,
             names,
@@ -303,6 +307,11 @@ fn restarting(
 /// on return, the interpreter's instrumentation matches whatever breakpoint set
 /// the engine left behind
 pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyResult<()> {
+    // a record the ui runtime wrote before this stop reaches the engine before
+    // the stop does: the stream's writer is waited for, with the GIL released,
+    // so the rest of the program runs meanwhile. this thread is about to wait
+    // for the engine either way
+    python.detach(crate::stream::flush);
     let ticket = stops::enter(thread, reason, frames::holding(python)?);
     let mut stopped = frames::begin(python, ticket.stop);
     let mut stepping = None;
@@ -481,5 +490,9 @@ pub(crate) fn finishing() {
     if !held.is_empty() {
         attach::send(&FromAgent::Finishing { held });
     }
+    // what the ui runtime wrote and the stream has not sent yet goes out
+    // before the connection is allowed to close: a record dropped on the way
+    // out would be one nothing counted
+    crate::stream::finish();
     attach::mark_finished();
 }

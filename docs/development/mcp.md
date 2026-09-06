@@ -93,29 +93,31 @@ shape of what bpd can see from here
 
 ## the tools
 
-| tool                               | what it is                                                        |
-| ---------------------------------- | ----------------------------------------------------------------- |
-| `launch`                           | start a program and hold it before its first statement            |
-| `set_breakpoints`                  | replace the whole breakpoint set                                  |
-| `set_exception_breakpoints`        | stop where an exception is raised, or leaves the program          |
-| `continue_`                        | let every held thread go, and return the next stop                |
-| `step_over`, `step_in`, `step_out` | step one thread, and return where it landed                       |
-| `wait`                             | wait without touching the program                                 |
-| `pause`                            | hold the next thread that reaches a line                          |
-| `resume`                           | let held threads go without waiting                               |
-| `stack`                            | one held thread's frame chain                                     |
-| `variables`                        | one scope of one frame                                            |
-| `evaluate`                         | a python expression, in a frame                                   |
-| `set_variable`                     | write a name of a frame's scope                                   |
-| `set_next_statement`               | move the held frame to another line of the code it is running     |
-| `restart_frame`                    | re-enter the held frame from the top                              |
-| `replace_code`                     | make the running process run the code a file holds on disk        |
-| `threads`                          | what every thread is doing, as a sample                           |
-| `stop_the_world`                   | hold every thread that can be held                                |
-| `state`                            | describe a whole stop in one call, and keep the answer            |
-| `diff`                             | what changed between two of those answers                         |
-| `run_script`                       | run a whole investigation, and return what happened at every step |
-| `terminate`                        | end the debuggee                                                  |
+| tool                               | what it is                                                           |
+| ---------------------------------- | -------------------------------------------------------------------- |
+| `launch`                           | start a program and hold it before its first statement               |
+| `set_breakpoints`                  | replace the whole breakpoint set                                     |
+| `set_exception_breakpoints`        | stop where an exception is raised, or leaves the program             |
+| `continue_`                        | let every held thread go, and return the next stop                   |
+| `step_over`, `step_in`, `step_out` | step one thread, and return where it landed                          |
+| `wait`                             | wait without touching the program                                    |
+| `pause`                            | hold the next thread that reaches a line                             |
+| `resume`                           | let held threads go without waiting                                  |
+| `stack`                            | one held thread's frame chain                                        |
+| `variables`                        | one scope of one frame                                               |
+| `evaluate`                         | a python expression, in a frame                                      |
+| `set_variable`                     | write a name of a frame's scope                                      |
+| `set_next_statement`               | move the held frame to another line of the code it is running        |
+| `restart_frame`                    | re-enter the held frame from the top                                 |
+| `replace_code`                     | make the running process run the code a file holds on disk           |
+| `recompositions`                   | why the ui recomposed — the basedpython-ui runtime's own trace ring  |
+| `watch_recompositions`             | forward every trace record the ui runtime writes, on the next answer |
+| `threads`                          | what every thread is doing, as a sample                              |
+| `stop_the_world`                   | hold every thread that can be held                                   |
+| `state`                            | describe a whole stop in one call, and keep the answer               |
+| `diff`                             | what changed between two of those answers                            |
+| `run_script`                       | run a whole investigation, and return what happened at every step    |
+| `terminate`                        | end the debuggee                                                     |
 
 ### the schema of a script is its documentation
 
@@ -456,18 +458,19 @@ asymmetry between the two front ends: this server writes nothing that is not an
 answer, so a fact that arrives while the program is running is **kept and handed
 over on the next answer**:
 
-| what the debugger says                            | where an agent finds it                                               |
-| ------------------------------------------------- | --------------------------------------------------------------------- |
-| a logpoint's record                               | the `logged` key of the next answer                                   |
-| a pause armed while the program ran               | `pause_armed_while_running` under `logged`                            |
-| a child the program started                       | `spawned.started`                                                     |
-| a way of starting a child this interpreter hides  | `spawned.cannot_see`, beside the children rather than instead of them |
-| a debugged fork joining                           | `attached.sessions`, and the `sessions` tool afterwards               |
-| a thread stopping                                 | `outcome: stopped`, with the frames                                   |
-| the program exiting                               | `outcome: exited`, with `exit_code` and `output_complete`             |
-| the program ending with threads still held        | `outcome: finishing`, with `held`                                     |
-| the program being over with no exit bpd can read  | `outcome: ended`, deliberately with no `exit_code` field at all       |
-| a deadline passing with the program still running | `outcome: timed_out`, with `waited_ms`                                |
+| what the debugger says                            | where an agent finds it                                                                                       |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| a logpoint's record                               | the `logged` key of the next answer                                                                           |
+| a pause armed while the program ran               | `pause_armed_while_running` under `logged`                                                                    |
+| a child the program started                       | `spawned.started`                                                                                             |
+| a way of starting a child this interpreter hides  | `spawned.cannot_see`, beside the children rather than instead of them                                         |
+| a debugged fork joining                           | `attached.sessions`, and the `sessions` tool afterwards                                                       |
+| a trace record the ui runtime wrote while watched | `recompositions.records`, at most two hundred; `dropped` counts the rest and what the program's queue dropped |
+| a thread stopping                                 | `outcome: stopped`, with the frames                                                                           |
+| the program exiting                               | `outcome: exited`, with `exit_code` and `output_complete`                                                     |
+| the program ending with threads still held        | `outcome: finishing`, with `held`                                                                             |
+| the program being over with no exit bpd can read  | `outcome: ended`, deliberately with no `exit_code` field at all                                               |
+| a deadline passing with the program still running | `outcome: timed_out`, with `waited_ms`                                                                        |
 
 `output_complete` is on **every** exit rather than only the one where something
 is wrong, and that is the point of it: a field that appeared only on failure
