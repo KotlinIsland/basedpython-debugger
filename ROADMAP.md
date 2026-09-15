@@ -519,10 +519,10 @@ against a real `by run` before anything was built on them. see
     assigned — one message, because the agent holds the GIL for the whole of one
     and no longer, so three would leave two windows in which another thread's
     logpoint is mapped through a table for code it is not running
-- **a subcommand that sets the run up.** what a person types today is a two line
-    wrapper handed to `by run` through `PYTHON`, written out on the source mapping
+- **a subcommand that sets the run up.** what a person types today is a four line
+    launcher handed to `by run --launcher`, written out on the source mapping
     page and driven end to end against the real `by` binary. `bpd by <module>`
-    would write that wrapper itself, and it is sugar over a thing that already
+    would write that launcher itself, and it is sugar over a thing that already
     works rather than the thing that makes it work
 - **the `basedpython-pycharm` switch.** the plugin's reason for staying on
     debugpy was that bpd could not debug `.by` at all, and that is no longer

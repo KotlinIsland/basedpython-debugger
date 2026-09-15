@@ -187,26 +187,37 @@ the tree exists for exactly as long as the process it started. that is the right
 lifetime for a debug session and the wrong one for anything else — `by build`
 writes a durable `out/` and writes **no map** into it
 
-so the way to put `bpd` in the picture is to be the interpreter `by run` starts.
-it takes the one it runs from `PYTHON`:
+so the way to put `bpd` in the picture is to be the process `by run` starts.
+`by run --launcher` starts the program through another program, handing it the
+interpreter `by run`'s own discovery chose — the project's environment, as for a
+plain run — followed by the runner and its arguments:
 
 ```sh
-cat > bpd-python <<'EOF'
+cat > bpd-launcher <<'EOF'
 #!/bin/sh
-exec bpd launch --python python3.14 "$@"
+python="$1"
+shift
+exec bpd launch --python "$python" "$@"
 EOF
-chmod +x bpd-python
+chmod +x bpd-launcher
 
-PYTHON=./bpd-python by run demo
+by run --launcher ./bpd-launcher demo
 ```
 
-`by run` starts `bpd` on `_by_runner.py` with the build directory as the working
-directory, and waits. so the tree — the generated python and the map beside it —
-is alive for the whole session, `bpd` finds the map where the program is, and
-every `.by` breakpoint resolves through it. the same wrapper is what a DAP or MCP
-front end goes through, because all three reach the map the same way
+`by run` starts `bpd` on the `_by_runner.py` in the build tree, once, and waits; the
+version probe it makes first goes to the interpreter itself, not to the
+launcher. so the tree — the generated python and the map beside it — is alive
+for the whole session, `bpd` finds the map where the program is, and every `.by`
+breakpoint resolves through it. the same launcher is what a DAP or MCP front end
+goes through, because all three reach the map the same way
 
-`bpd` does not yet have a subcommand that writes that wrapper for you, and the
+`PYTHON=./wrapper by run` and `by run --python ./wrapper` both used to be how a
+debugger got there, and neither is right: `by run` reads `PYTHON` only when the
+project has no environment of its own, `--python` switches that discovery off
+so the wrapper has to name an interpreter itself, and either way the wrapper is
+also sent the version probe
+
+`bpd` does not yet have a subcommand that writes that launcher for you, and the
 roadmap's M6 entry says so
 
 ## what is mapped

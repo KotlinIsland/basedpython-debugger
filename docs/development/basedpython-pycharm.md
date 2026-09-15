@@ -70,10 +70,10 @@ the end state is not "bpd's plugin absorbed into the language plugin". it is
 was blocking that is done. the decision is now the language plugin's rather than
 something it is waiting on
 
-what a switch needs from this side is the wrapper `by run` is pointed at through
-`PYTHON`, which is two lines and is written out on the source mapping page. `bpd`
-has no subcommand that writes it yet, and that is sugar over a thing that already
-works
+what a switch needs from this side is the launcher `by run --launcher` starts
+the program through, which is four lines and is written out on the source
+mapping page. `bpd` has no subcommand that writes it yet, and that is sugar over
+a thing that already works
 
 when the switch happens the two plugins have one adapter between them, and whether
 they are one artefact or two is a packaging question rather than an
