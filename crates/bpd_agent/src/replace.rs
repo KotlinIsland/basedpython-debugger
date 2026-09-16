@@ -681,6 +681,23 @@ impl Facts {
 /// a nested code object becomes its `co_qualname`: what a body does is define
 /// it, and what is inside it is compared on its own pass
 ///
+/// ## only an operand that indexes the code object is resolved
+///
+/// `dis` resolves two kinds of operand, and only one of them needs it. an index
+/// into `co_consts`, `co_names`, the locals, the cells or the instruction stream
+/// means nothing without that table, so it is compared as what it resolves to.
+/// **every other operand is an index into a table the interpreter holds** — the
+/// comparison of `COMPARE_OP`, the conversion of `CONVERT_VALUE`, the constant
+/// of `LOAD_COMMON_CONSTANT` — and `dis` resolves those to the interpreter's own
+/// objects: `repr` and `ascii` for `f"{x!r}"` and `f"{x!a}"` on 3.13 onwards,
+/// and on 3.15 the classes and builtins behind the `__annotate__` body PEP 649
+/// gives every annotated function. marshal carries none of them, and every body
+/// holding one was refused as one bpd could not encode
+///
+/// the old code and the new are compiled by the same interpreter, so the index
+/// into its table *is* the entry, and it is compared as the index. what `dis`
+/// resolves it to is looked at nowhere
+///
 /// ## the one thing that is masked, and why
 ///
 /// **cpython stores the class's own source line in every class body**, as
@@ -699,15 +716,24 @@ impl Facts {
 fn instructions(python: Python<'_>, code: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     let kind = code.get_type();
     let stream = PyList::empty(python);
-    for instruction in python
-        .import("dis")?
+    let dis = python.import("dis")?;
+    let mut indexing = BTreeSet::new();
+    for table in ["hasconst", "hasname", "haslocal", "hasfree", "hasjump"] {
+        indexing.extend(dis.getattr(table)?.extract::<Vec<u32>>()?);
+    }
+    for instruction in dis
         .getattr("get_instructions")?
         .call1((code,))?
         .try_iter()?
     {
         let instruction = instruction?;
         let name: String = instruction.getattr("opname")?.extract()?;
-        let operand = instruction.getattr("argval")?;
+        let opcode: u32 = instruction.getattr("opcode")?.extract()?;
+        let operand = if indexing.contains(&opcode) {
+            instruction.getattr("argval")?
+        } else {
+            instruction.getattr("arg")?
+        };
 
         if name == "STORE_NAME"
             && operand
@@ -719,24 +745,10 @@ fn instructions(python: Python<'_>, code: &Bound<'_, PyAny>) -> PyResult<Vec<u8>
             stream.set_item(last, ("<the class's own source line>", python.None()))?;
         }
 
-        // `dis` resolves an operand to the object it means, and two kinds of
-        // object marshal cannot carry. a code object is one, and it becomes its
-        // name. **a class is the other**: since 3.15 the `__annotate__` body
-        // PEP 649 gives every annotated function loads `NotImplementedError`
-        // through `LOAD_COMMON_CONSTANT`, and `argval` there is the class
-        // itself. measured on 3.15.0rc1, where it made replacing any annotated
-        // module raise `ValueError: unmarshallable object` inside the debuggee
-        //
-        // it is named the way a code object is, and tagged, so that it cannot
-        // compare equal to a string operand that happens to spell the same name
+        // a resolved constant marshal cannot carry is a nested code object, and
+        // it becomes its name
         let key = if operand.is_instance(&kind)? {
             operand.getattr("co_qualname")?
-        } else if operand.is_instance_of::<pyo3::types::PyType>() {
-            let module: String = operand.getattr("__module__")?.extract()?;
-            let qualname: String = operand.getattr("__qualname__")?.extract()?;
-            ("<a class>", format!("{module}.{qualname}"))
-                .into_pyobject(python)?
-                .into_any()
         } else {
             operand
         };

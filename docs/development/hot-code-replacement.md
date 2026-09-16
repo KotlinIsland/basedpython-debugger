@@ -72,6 +72,18 @@ each operand resolved to what it means and each nested code object reduced to it
 class attribute changed from `5` to `7` is a different instruction here and is an
 index that looks the same there
 
+only an operand that indexes the **code object** is resolved. the rest index a
+table the interpreter holds — the comparison of `COMPARE_OP`, the conversion of
+`CONVERT_VALUE`, the constant of `LOAD_COMMON_CONSTANT` — and are compared as the
+index, because the old code and the new are compiled by the same interpreter and
+the index is the entry. resolved, they are the interpreter's own objects: `repr`
+for every `f"{x!r}"`, and a class inside every 3.15 `__annotate__` body. the
+comparison's encoding carries neither, and a file holding one anywhere was
+refused as one bpd could not encode — measured across the standard library on
+3.13, 3.14, 3.14t and 3.15, where those two opcodes are the only ones it
+happens for. `a_function_that_formats_with_a_conversion_is_replaced_like_any_other`
+and `a_function_that_carries_annotations_is_replaced_like_any_other` hold it
+
 what is **not** compared is the line table. it moves whenever a function body
 above gains or loses a line, and it says nothing about what the body does. that
 it moved is the whole reason for doing this at all

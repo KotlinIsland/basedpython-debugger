@@ -893,7 +893,8 @@ fn a_function_that_carries_annotations_is_replaced_like_any_other() {
     // and **on 3.15 that body loads `NotImplementedError` through
     // `LOAD_COMMON_CONSTANT`** — an operand `dis` resolves to the class itself.
     // bpd compares instruction streams by marshalling them and marshal cannot
-    // carry a class, so before it was named this raised `ValueError:
+    // carry a class, so before an operand of the interpreter's own tables was
+    // compared as its index this raised `ValueError:
     // unmarshallable object` *inside the debuggee*, at whatever line the
     // program was stopped on
     //
@@ -931,6 +932,65 @@ fn a_function_that_carries_annotations_is_replaced_like_any_other() {
     );
 
     to_exit(&mut debuggee);
+}
+
+#[test]
+fn a_function_that_formats_with_a_conversion_is_replaced_like_any_other() {
+    // `f"{value!r}"` compiles to `CONVERT_VALUE`, and `dis` resolves its
+    // operand to the conversion itself — the builtin `repr`, or `ascii` for
+    // `!a` — out of a table the interpreter holds rather than the code object.
+    // marshal cannot carry a builtin function, so a file with one of these in
+    // any body was refused as "could not encode the instructions of" that body.
+    // measured on 3.13, 3.14, 3.14t and 3.15, in a live session hot reloading
+    // basedpython's `_lazy_module`, whose `ImportError` message is written
+    // `{name!r}`
+    //
+    // the conversions are in a body of their own, `described`, whose statements
+    // are the same on both sides, and `plain` calling it is what the edit changes
+    let converting = |source: &str, plain: &str, body: &str| {
+        source.replace(
+            plain,
+            &format!(
+                "def described(value):\n    return f\"{{value!r}} {{value!a}} {{value!s}}\"\n\n\n\
+                 def plain(value):\n    return {body}\n"
+            ),
+        )
+    };
+    let before = converting(
+        VICTIM,
+        "def plain(value):\n    return (\"before\", value)\n",
+        "described(value)",
+    );
+    let after = converting(
+        EDITED,
+        "def plain(value):\n    return (\"after\", value * 10)\n",
+        "described(value * 2)",
+    );
+    assert_ne!(before, VICTIM, "the function this adds beside has moved");
+    assert_ne!(after, EDITED, "the function this adds beside has moved");
+
+    let (fixture, victim) = laid_out(&before);
+    let mut debuggee = launch(&fixture);
+    held_before_the_report(&mut debuggee, &fixture);
+
+    std::fs::write(&victim, &after).expect("the fixture directory is writable");
+    let replaced = debuggee
+        .replace_code(&victim)
+        .expect("the replacement was answered");
+
+    let (changed, _) = applied(&replaced);
+    assert!(
+        changed.iter().any(|one| one.function == "plain"),
+        "the converting function's caller changed, so it is one that was \
+         replaced: {changed:#?}"
+    );
+
+    to_exit(&mut debuggee);
+    assert!(
+        recorded(&fixture).starts_with("['2 2 2', "),
+        "the program ran the old `plain` after the replacement said it applied: {}",
+        recorded(&fixture)
+    );
 }
 
 #[test]
