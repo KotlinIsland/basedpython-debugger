@@ -313,7 +313,9 @@ a watch is **accepted before the program has imported the runtime**: watching
 is an interest in records to come, and a program that imports the runtime later
 is watched from then on — an editor that turns the watch on when the session
 starts, before a line has run, sees the first frame. only the read at a stop
-needs a ring to exist.
+needs a ring to exist. over DAP that is earlier still: a watch asked for before
+`launch` is held by the adapter and turned on with the breakpoints — see
+[the configuration phase](dap.md#the-configuration-phase-happens-before-there-is-a-program)
 `watching_forwards_every_record_the_runtime_announces_and_nothing_once_it_is_off`
 turns it on at the entry stop, reads the record the program announces the moment
 it has a runtime, turns it off before a third stop, and the sink it runs to the

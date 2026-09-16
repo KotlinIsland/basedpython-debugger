@@ -80,6 +80,7 @@ over_each_transport!(
     an_editor_can_run_a_whole_investigation_the_way_an_agent_can,
     an_editor_can_ask_what_changed_between_two_stops,
     an_editor_can_ask_why_the_ui_recomposed_and_be_handed_the_next_record_as_data,
+    a_recomposition_watch_asked_for_before_the_launch_sees_the_first_record,
     an_editor_can_move_where_the_program_carries_on_from,
     a_frame_a_thread_is_executing_is_restarted_where_it_stands,
     a_frame_below_the_top_is_restarted_by_forcing_the_frames_above_it_out,
@@ -839,6 +840,62 @@ fn an_editor_can_ask_why_the_ui_recomposed_and_be_handed_the_next_record_as_data
     assert!(
         !client.output().contains("`Later`"),
         "the record went out as data and was narrated too: {}",
+        client.output()
+    );
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+fn a_recomposition_watch_asked_for_before_the_launch_sees_the_first_record(transport: Transport) {
+    // the watch is asked for so that the first frame is seen, and the client
+    // that asks for it — the basedpython plugin, on the intellij platform —
+    // configures first and launches last. it used to be refused there with
+    // "nothing has been launched yet", so every session opened on a warning and
+    // the stream began at the first stop, after the records it was asked for
+    //
+    // there is no breakpoint in this session. the program runs start to end
+    // without a stop, and every record it writes has to arrive anyway
+    let fixture = Fixture::new("watched_first", bpd_test::basedpython_ui::RECOMPOSING);
+    bpd_test::basedpython_ui::stand_in(&fixture);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.event("initialized");
+    client.request(
+        "bpd/understands",
+        &serde_json::json!({ "events": ["bpd/recomposition"] }),
+    );
+
+    // held, and not claimed. nothing is forwarding anything before there is a
+    // program, and `pending` is how a client tells that from a watch refused
+    let watching = client.request(
+        "bpd/watchRecompositions",
+        &serde_json::json!({ "on": true }),
+    );
+    assert_eq!(watching["success"], true, "{watching}");
+    assert_eq!(watching["body"]["watching"], false, "{watching}");
+    assert_eq!(watching["body"]["pending"], true, "{watching}");
+
+    client.request("configurationDone", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+
+    // the first record the program writes, which is before any stop could
+    // have re-sent the watch — so the one held is the one that saw it
+    let first = client.event("bpd/recomposition");
+    assert_eq!(first["body"]["record"]["record"], "write", "{first}");
+    let run = client.event("bpd/recomposition");
+    assert_eq!(run["body"]["record"]["record"], "run", "{run}");
+    assert_eq!(run["body"]["record"]["name"], "Counter", "{run}");
+    client.event("exited");
+    client.event("terminated");
+    assert!(
+        client
+            .output()
+            .contains("bpd is forwarding every trace record"),
+        "the watch going on is said where it always is: {}",
         client.output()
     );
     client.request("disconnect", &serde_json::json!({}));

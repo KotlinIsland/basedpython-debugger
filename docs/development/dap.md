@@ -408,6 +408,14 @@ the adapter can be configured with no program in it:
 - the same holds for `setExceptionBreakpoints`: the filters are held and armed
     with the breakpoints, and every one of them answers `verified: false` until
     they are
+- and for `bpd/watchRecompositions`, which is asked early so that the first
+    frame is seen. it is held and turned on with the breakpoints, before the
+    program runs a line, and answers `{ "watching": false, "pending": true }`
+    until it is. it used to be refused with *"nothing has been launched yet"*,
+    so the basedpython plugin opened every session on a warning and its stream
+    began at the first stop.
+    `a_recomposition_watch_asked_for_before_the_launch_sees_the_first_record`
+    asks for it in the intellij order and reads the program's first record
 - `configurationDone` before `launch` is **recorded**, and the program is let go
     at whichever of the two arrives second — `Adapter::begin`, reached from both
 
@@ -847,7 +855,9 @@ the first answers with the runtime's ring whole in the body, every location in
 it mapped to `.by` lines the way a stack frame is, and says on the `important`
 category when the ring's edge bit. the second answers `{ "watching": true }` —
 before the program has imported the runtime too, because watching is an
-interest in records to come — and from then on every record the runtime writes
+interest in records to come, and `{ "watching": false, "pending": true }` before
+there is a program at all, when it is held until there is one — and from then on
+every record the runtime writes
 arrives as a `bpd/recomposition` event carrying
 `{ "record": …, "dropped_before": N }` — for a client that named it in
 `bpd/understands`, with `dropped_before` the count of records the agent's queue

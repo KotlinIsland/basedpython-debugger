@@ -418,6 +418,14 @@ struct Adapter {
     /// stops on breakpoints and not on exceptions depending on which client
     /// asked
     exceptions: Option<Filters>,
+    /// whether the recomposition stream was last asked on or off while there
+    /// was no program, if it was asked at all
+    ///
+    /// held for the reason the exception filters are. a client asks for the
+    /// stream so that it sees the first frame, and a client that launches last
+    /// asks before there is a program: refused there, the stream began at the
+    /// first stop, after the frames it was asked for
+    watch: Option<bool>,
 }
 
 /// what one `setExceptionBreakpoints` asked for
@@ -458,6 +466,7 @@ impl Adapter {
             breakpoints: FileBreakpoints::default(),
             unarmed: BTreeSet::new(),
             exceptions: None,
+            watch: None,
         }
     }
 
@@ -1066,6 +1075,11 @@ impl Adapter {
         if let Some(filters) = self.exceptions.take() {
             self.arm_exception_filters(filters)?;
         }
+        // off is the agent's own default, so a watch asked off has nothing to
+        // arm and a round trip to say so would be a round trip for nothing
+        if self.watch.take() == Some(true) {
+            self.arm_the_recomposition_watch()?;
+        }
 
         if self.unarmed.is_empty() {
             return Ok(());
@@ -1115,6 +1129,26 @@ impl Adapter {
             }
         }
         Ok(())
+    }
+
+    /// turn on the recomposition stream a client asked for before there was a
+    /// program
+    ///
+    /// before the program runs a line, which is the whole of why it was asked
+    /// for early. no event follows, for the reason none follows the exception
+    /// filters: the request was answered `pending` and DAP has nowhere to put a
+    /// correction. what the client is shown is the console line a watch going
+    /// on always prints — or, when the agent did not take it, a line saying so,
+    /// because this is the only channel left
+    fn arm_the_recomposition_watch(&mut self) -> Answered {
+        match self.ask(Request::WatchRecompositions { on: true })? {
+            Response::WatchingRecompositions { on: true } => self.say(WATCHING),
+            Response::WatchingRecompositions { on: false } => self.say(
+                "the recomposition watch was asked for before the program started \
+                 and the debuggee did not take it\n",
+            ),
+            other => unreachable!("the recomposition watch was answered with {other:?}"),
+        }
     }
 
     fn configuration_done(&mut self, message: &Incoming) -> Answered {
@@ -1768,20 +1802,26 @@ impl Adapter {
                 )));
             }
         };
+        // part of the configuration phase when it comes before the program, and
+        // held the way the exception filters are: turned on with the rest of
+        // what was held the moment there is a program, before it runs a line.
+        // `watching` is false because it is — nothing is forwarding anything
+        // yet — and `pending` says that it will be
+        if self.session.is_none() {
+            self.watch = Some(on);
+            self.respond(
+                message,
+                Some(serde_json::json!({ "watching": false, "pending": on })),
+            )?;
+            return Ok(());
+        }
+
         let watching = match self.ask(Request::WatchRecompositions { on })? {
             Response::WatchingRecompositions { on } => on,
             other => unreachable!("the recomposition watch was answered with {other:?}"),
         };
-        // on the console when it goes on, because a stream with a price is a
-        // thing a person who left it on needs reminding of — and because the
-        // console is where the records land for a client that never named the
-        // event
         if watching {
-            self.say(
-                "bpd is forwarding every trace record the ui runtime writes: as a \
-                 `bpd/recomposition` event to a client that named it in \
-                 `bpd/understands`, and as a console line per scope run otherwise\n",
-            )?;
+            self.say(WATCHING)?;
         }
         self.respond(message, Some(serde_json::json!({ "watching": watching })))?;
         Ok(())
@@ -3084,8 +3124,9 @@ impl Adapter {
             .ok_or(
                 "nothing has been launched yet, so there is no program to ask. \
                  the configuration phase is the exception and does not come \
-                 through here: breakpoints and exception filters set before a \
-                 program exists are held and armed when one starts",
+                 through here: breakpoints, exception filters and the \
+                 recomposition watch set before a program exists are held and \
+                 armed when one starts",
             )?
             .dispatch(
                 Addressed::of(request, &held.unwrap_or_default()),
@@ -3413,6 +3454,15 @@ const RESTARTING_EVENT: &str = "bpd/restarting";
 /// sentence per scope run on the console. the name switches the narration off,
 /// so it is one name both ways round
 const RECOMPOSITION_EVENT: &str = "bpd/recomposition";
+
+/// what the console says when the recomposition stream goes on
+///
+/// on the console, because a stream with a price is a thing a person who left it
+/// on needs reminding of — and because the console is where the records land
+/// for a client that never named the event
+const WATCHING: &str = "bpd is forwarding every trace record the ui runtime writes: as a \
+     `bpd/recomposition` event to a client that named it in `bpd/understands`, and as a \
+     console line per scope run otherwise\n";
 
 /// everything about a restart that neither the response nor a `stopped` event
 /// has a field for
