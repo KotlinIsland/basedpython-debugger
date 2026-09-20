@@ -4,109 +4,19 @@
 //! every one of these spawns a real interpreter running real generated python
 //! and asks for a breakpoint in a file the interpreter has never heard of
 //!
-//! ## why the pairs here are written rather than transpiled
-//!
-//! a source map is a claim about two files and a line table between them, and
-//! the digests are what make the claim checkable. nothing about `bpd` reading
-//! one depends on the transpiler having produced it — the same file written by
-//! hand with true digests **is** a valid map, and the format it has to be in is
-//! pinned separately against output captured from `by run` itself, in
-//! `bpd_core::source_map`
-//!
-//! what writing them buys is the line table. the cases that decide whether the
-//! source mapping rule holds — a generated line the transpiler invented, a `.by`
-//! line nothing was generated for, a `.by` edited since the build — are each one
-//! entry in that table, and reaching them through a real `by` would mean finding
-//! a basedpython program that happens to produce each one and then depending on
-//! it going on producing it. this depends on the *rule* instead
-//!
-//! it also means these run wherever `cargo test` runs. the `by` binary is a
-//! sibling repository rather than a package this suite installs, and a test that
-//! is skipped when it is missing is a test that reports success while proving
-//! nothing
+//! the pairs are written rather than transpiled, and
+//! [`bpd_test::basedpython`] is where the build they are written into lives —
+//! along with the account of why a hand-written map is the right fixture. what
+//! is here is the pairs themselves, because each one exists for the line table
+//! it carries
 
 use std::path::{Path, PathBuf};
 
 use bpd_core::Running;
-use bpd_core::source_map::{MAP_FILENAME, Mapping};
+use bpd_core::source_map::Mapping;
 use bpd_core::{Binding, Resolved, SourceBreakpoint, StopReason, Unbound};
 use bpd_engine::{Debuggee, Launched};
-
-/// the `.by` a person wrote
-///
-/// what is in it barely matters — the interpreter never reads it — but it is
-/// real basedpython, and `line_of` is what names a line of it rather than a
-/// number that goes stale
-const SOURCE: &str = "\
-def add(a: int, b: int) -> int:
-    total = a + b
-    return total
-
-
-# a comment, which the transpile does not keep
-def main() -> None:
-    answer = add(2, 3)
-    print(answer)
-
-
-main()  # entry
-";
-
-/// the python `by` would have transpiled [`SOURCE`] to
-///
-/// the six line prelude is the point of it, and so is the comment that is not
-/// here: the offset between the two files is not a constant, and a debugger that
-/// assumed one would be reporting the wrong line of the wrong file with total
-/// confidence
-const GENERATED: &str = "\
-from __future__ import annotations
-import os
-from pathlib import Path
-import sys
-
-
-def add(a: int, b: int) -> int:
-    total = a + b
-    return total
-
-
-def main() -> None:
-    answer = add(2, 3)
-    Path(sys.argv[1]).write_text(str(answer) + os.linesep)
-
-
-main()
-";
-
-/// which `.by` line each generated line came from, zero-based on both sides
-///
-/// `None` is prelude. the two `import` lines of [`SOURCE`] have no counterpart
-/// here on purpose: the transpiler emits its own imports and drops the source's,
-/// which is why a line table is not an offset
-fn line_table() -> Vec<Option<u32>> {
-    vec![
-        // the six line prelude, which no `.by` line is behind
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(0), // def add
-        Some(1), // total = a + b
-        Some(2), // return total
-        Some(3),
-        Some(4),
-        // the `.by`'s comment is line 5 and became nothing, so the next
-        // generated line skips it — this is why a line table is not an offset
-        Some(6), // def main
-        Some(7), // answer = add(2, 3)
-        Some(8), // print(answer), which became a write_text
-        Some(9),
-        Some(10),
-        Some(11), // main()
-    ]
-}
+use bpd_test::basedpython::{Build, GENERATED, SOURCE, line_table};
 
 /// a `.by` that raises, so a traceback has more than one frame of the build
 ///
@@ -159,132 +69,23 @@ fn raising_table() -> Vec<Option<u32>> {
     ]
 }
 
-/// a basedpython build directory: the `.by`, the python, and the map
-struct Build {
-    directory: tempfile::TempDir,
-    source: PathBuf,
-    generated: PathBuf,
-    /// where the program writes its answer, so a stop is provable
-    marks: PathBuf,
-}
-
-/// a path as a source map carries one
+/// the build this file's pairs make
 ///
-/// the map's strings take `\\` and `\"`, and **a windows path is full of the
-/// first**: written raw, `C:\Users\…` reaches bpd's parser as `\C` and the
-/// whole build is refused — by name, with a line and a column, which is the
-/// parser doing its job about a map this file wrote badly
-fn in_a_map(path: &Path) -> String {
-    path.display()
-        .to_string()
-        .replace('\\', r"\\")
-        .replace('"', "\\\"")
+/// [`Build::pair`] and the map it writes are in `bpd_test` because the DAP
+/// acceptance asks the same questions from the other end of the adapter; what is
+/// local here is which pair, which is what each case is about
+fn build() -> Build {
+    Build::demo()
 }
 
-impl Build {
-    fn new() -> Self {
-        Self::with(&line_table())
-    }
-
-    fn with(lines: &[Option<u32>]) -> Self {
-        Self::pair(SOURCE, GENERATED, lines)
-    }
-
-    /// the build whose program raises, for the traceback
-    fn raising() -> Self {
-        Self::pair(RAISING, RAISING_GENERATED, &raising_table())
-    }
-
-    fn pair(by: &str, py: &str, lines: &[Option<u32>]) -> Self {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        // canonicalised for the reason every fixture in this suite is: a
-        // temporary directory is under `/var` on macos and `/tmp` names it
-        // through a symlink, and the map's own paths would then be a third
-        // spelling of the same file
-        let root = directory
-            .path()
-            .canonicalize()
-            .expect("the directory was just made");
-        let source = root.join("demo.by");
-        let generated = root.join("demo.py");
-        std::fs::write(&source, by).expect("the `.by` is written");
-        std::fs::write(&generated, py).expect("the generated python is written");
-        let build = Self {
-            directory,
-            source,
-            generated,
-            marks: root.join("answer.txt"),
-        };
-        build.write_map(lines);
-        build
-    }
-
-    /// write `_by_sourcemap.py` with digests that are true of what is on disk
-    fn write_map(&self, lines: &[Option<u32>]) {
-        let table: Vec<String> = lines
-            .iter()
-            .map(|line| line.map_or_else(|| "None".to_owned(), |line| line.to_string()))
-            .collect();
-        std::fs::write(
-            self.root().join(MAP_FILENAME),
-            format!(
-                "# generated by `by run` — maps transpiled python frames to .by source\n\
-                 SOURCEMAP = {{\n    \"{generated}\": (\"{source}\", [{table}]),\n}}\n\n\
-                 DIGESTS = {{\n    \"{generated}\": {{\"by\": \"{by}\", \"py\": \"{py}\"}},\n}}\n",
-                generated = in_a_map(&self.generated),
-                source = in_a_map(&self.source),
-                table = table.join(", "),
-                by = digest(&self.source),
-                py = digest(&self.generated),
-            ),
-        )
-        .expect("the map is written");
-    }
-
-    /// a shim that runs the generated python, the way `by run` does
-    ///
-    /// `_by_runner.py` upstream, and what it buys here is a stack with frames
-    /// **under** the build in it: the shim itself and the import machinery it
-    /// goes through. none of that is basedpython and none of it may be dressed
-    /// as it
-    fn runner(&self) -> PathBuf {
-        let path = self.root().join("runner.py");
-        std::fs::write(
-            &path,
-            format!(
-                "import runpy\n\
-                 runpy.run_path({:?}, run_name=\"__main__\")\n",
-                self.generated.display().to_string()
-            ),
-        )
-        .expect("the runner is written");
-        path
-    }
-
-    fn root(&self) -> PathBuf {
-        self.directory
-            .path()
-            .canonicalize()
-            .expect("the directory is there for the life of the build")
-    }
-
-    /// what the program wrote, which is empty until it has run past the stop
-    fn answer(&self) -> String {
-        std::fs::read_to_string(&self.marks).unwrap_or_default()
-    }
+/// the same pair, mapped by a line table this case wrote
+fn build_mapped(lines: &[Option<u32>]) -> Build {
+    Build::pair(SOURCE, GENERATED, lines)
 }
 
-/// the sha-256 of a file, as `_by_sourcemap.py` writes one
-fn digest(path: &Path) -> String {
-    use sha2::Digest as _;
-    use std::fmt::Write as _;
-
-    let bytes = std::fs::read(path).expect("a file this fixture just wrote");
-    let mut out = String::from("sha256:");
-    for byte in sha2::Sha256::digest(&bytes) {
-        write!(out, "{byte:02x}").expect("a `String` grows to fit");
-    }
-    out
+/// the build whose program raises, for the traceback
+fn raising_build() -> Build {
+    Build::pair(RAISING, RAISING_GENERATED, &raising_table())
 }
 
 /// launch the generated python out of its build directory
@@ -327,7 +128,7 @@ fn refused(resolved: &Resolved) -> &Unbound {
 
 #[test]
 fn a_by_breakpoint_binds_to_the_generated_line_and_says_both_locations() {
-    let build = Build::new();
+    let build = build();
     let mut debuggee = launch(&build);
     let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
 
@@ -360,7 +161,7 @@ fn a_by_breakpoint_binds_to_the_generated_line_and_says_both_locations() {
 
 #[test]
 fn the_stop_names_the_by_line_the_breakpoint_was_set_on() {
-    let build = Build::new();
+    let build = build();
     let mut debuggee = launch(&build);
     let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
     let resolved = set(&mut debuggee, asked, &build.source);
@@ -390,7 +191,7 @@ fn the_stack_reports_the_by_and_carries_where_the_interpreter_really_is() {
     // the consistency rule, which is the one that matters most. a stop that
     // said `demo.by:11` beside a frame that said `demo.py:14` would be the
     // debugger contradicting itself about one place
-    let build = Build::new();
+    let build = build();
     let mut debuggee = launch(&build);
     let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
     set(&mut debuggee, asked, &build.source);
@@ -434,7 +235,7 @@ fn a_generated_line_no_by_line_is_behind_is_reported_as_python_and_says_why() {
     // user never did. so the location stays the generated one, and the frame
     // carries the map's own reason rather than leaving a temporary path in
     // front of a user with nothing to explain it
-    let build = Build::new();
+    let build = build();
     let mut debuggee = launch(&build);
     let prelude = bpd_test::debuggee::line_of(GENERATED, "from pathlib import Path");
 
@@ -471,7 +272,7 @@ fn frames_below_the_build_are_not_dressed_as_basedpython() {
     // under that. none of it is `.by`, the map says nothing about any of it,
     // and a debugger that mapped a frame it had no entry for would be
     // inventing a source file
-    let build = Build::new();
+    let build = build();
     let runner = build.runner();
     let mut debuggee = launch_program(&build, &runner);
     let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
@@ -526,7 +327,7 @@ fn a_by_line_the_transpiler_generated_nothing_for_moves_to_the_next_one_it_did()
     // the blank line between `return total` and `def main`. a breakpoint on one
     // moves forward exactly as it does in ordinary python, and the answer says
     // where it went — read back out of the map rather than assumed
-    let build = Build::new();
+    let build = build();
     let mut debuggee = launch(&build);
     let comment = bpd_test::debuggee::line_of(SOURCE, "# a comment");
 
@@ -545,7 +346,7 @@ fn a_by_line_the_transpiler_generated_nothing_for_moves_to_the_next_one_it_did()
 
 #[test]
 fn a_by_line_past_everything_the_transpiler_generated_is_unbound_with_the_reason() {
-    let build = Build::new();
+    let build = build();
     let mut debuggee = launch(&build);
     let past = u32::try_from(SOURCE.lines().count() + 10).expect("a fixture is not that long");
 
@@ -577,7 +378,7 @@ fn a_by_line_whose_generated_line_the_transpiler_invented_is_refused_not_attribu
     let mut lines = line_table();
     let last = lines.len() - 1;
     lines[last] = None;
-    let build = Build::with(&lines);
+    let build = build_mapped(&lines);
     let mut debuggee = launch(&build);
     // a blank `.by` line, which maps to a blank generated line. the interpreter
     // cannot stop on one, so binding walks forward to the next line it can —
@@ -625,7 +426,7 @@ fn a_by_edited_since_the_transpile_refuses_the_launch_rather_than_the_line() {
     // the milestone. the map still describes a pair of files, one of them is no
     // longer that file, and every line it would report is wrong with total
     // confidence — so nothing is reported and the program is not debugged at all
-    let build = Build::new();
+    let build = build();
     std::fs::write(
         &build.source,
         format!("# a line the build never saw\n{SOURCE}"),
@@ -654,7 +455,7 @@ fn a_python_breakpoint_in_a_mapped_build_is_untouched_by_the_map() {
     // the map is about `.by` files. a breakpoint in the generated python is a
     // breakpoint in a file the interpreter really has, and it binds the way any
     // python one does — an ordinary `Bound`, not a mapped one
-    let build = Build::new();
+    let build = build();
     let mut debuggee = launch(&build);
     let line = bpd_test::debuggee::line_of(GENERATED, "write_text");
 
@@ -670,7 +471,7 @@ fn a_python_breakpoint_in_a_mapped_build_is_untouched_by_the_map() {
 fn an_exception_of_the_build_is_reported_in_by_lines_all_the_way_down() {
     // a traceback is a location too, and one entry naming the generated python
     // beside a stack that does not would be two answers about one place
-    let build = Build::raising();
+    let build = raising_build();
     let mut debuggee = launch(&build);
     debuggee
         .set_exception_breakpoints(false, true)
@@ -718,7 +519,7 @@ fn the_source_around_a_by_frame_is_the_by_and_is_checked_against_the_map() {
     // contradiction this milestone is about. the `.by` is read on the
     // debuggee's own filesystem and checked against the digest the transpiler
     // wrote, which is the only thing that can say it is still that file
-    let build = Build::new();
+    let build = build();
     let mut debuggee = launch(&build);
     let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
     set(&mut debuggee, asked, &build.source);
@@ -754,7 +555,7 @@ fn a_by_edited_after_the_launch_refuses_the_source_rather_than_showing_it() {
     // editor that saved the `.by` in between leaves a file whose lines are
     // wrong with total confidence, which is the failure a source map exists to
     // prevent
-    let build = Build::new();
+    let build = build();
     let mut debuggee = launch(&build);
     let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
     set(&mut debuggee, asked, &build.source);
@@ -780,7 +581,7 @@ fn a_frame_reported_as_by_is_moved_by_naming_a_by_line() {
     // the inbound half. once a frame says `demo.by:11`, the line a client names
     // against it is a line of `demo.by` — a debugger that answered in one
     // file's lines and took orders in another's would be two debuggers
-    let build = Build::new();
+    let build = build();
     let mut debuggee = launch(&build);
     let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
     set(&mut debuggee, asked, &build.source);
@@ -816,7 +617,7 @@ fn a_frame_reported_as_by_is_moved_by_naming_a_by_line() {
 
 #[test]
 fn a_by_line_nothing_was_generated_for_refuses_the_move_rather_than_guessing() {
-    let build = Build::new();
+    let build = build();
     let mut debuggee = launch(&build);
     let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
     set(&mut debuggee, asked, &build.source);
@@ -844,7 +645,7 @@ fn where_a_thread_is_is_sampled_in_by_terms() {
     // a `Where` has no frame id on it and nowhere to carry the generated
     // location, and it is still the same location a frame of the same code
     // reports. one of them naming the other file would be the contradiction
-    let build = Build::new();
+    let build = build();
     let mut debuggee = launch(&build);
     let asked = bpd_test::debuggee::line_of(SOURCE, "print(answer)");
     set(&mut debuggee, asked, &build.source);

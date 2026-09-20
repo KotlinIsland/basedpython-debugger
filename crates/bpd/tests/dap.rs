@@ -35,6 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bpd_test::basedpython::{Build, SOURCE};
 use bpd_test::debuggee::{Fixture, line_of};
 
 /// the binary this test run built, not whatever `bpd` is on PATH
@@ -77,6 +78,7 @@ over_each_transport!(
     a_running_program_can_be_paused_while_the_adapter_is_waiting_for_it,
     a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so,
     a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set,
+    a_by_breakpoint_set_before_the_launch_binds_through_the_map_and_hits,
     an_editor_can_run_a_whole_investigation_the_way_an_agent_can,
     an_editor_can_ask_what_changed_between_two_stops,
     an_editor_can_ask_why_the_ui_recomposed_and_be_handed_the_next_record_as_data,
@@ -560,6 +562,124 @@ fn a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set(tra
     client.request("continue", &serde_json::json!({ "threadId": thread }));
     client.event("exited");
     client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+fn a_by_breakpoint_set_before_the_launch_binds_through_the_map_and_hits(transport: Transport) {
+    // the same handshake as the scenario above, in the one file where holding a
+    // breakpoint is not merely polite: a `.by` is never what the interpreter
+    // runs, and the map that says which generated line it means is **read at
+    // launch**, out of the build directory beside the program. so a client that
+    // configures first is asking about a `.by` line at the one moment bpd has
+    // no map at all
+    //
+    // the answer to that is `pending`, not a refusal. `NoSourceMap` is for a
+    // program that has no map — a fact that never changes — and spending it on
+    // a map that has not been read yet would be the debugger refusing a
+    // breakpoint for something it was about to do itself
+    //
+    // this is also the contract the intellij plugin stands on. it is why the
+    // plugin can send what it has to send when the platform tells it to,
+    // without having to reach the adapter ahead of the platform's own
+    // `setBreakpoints`
+    let build = Build::demo();
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.event("initialized");
+
+    let line = line_of(SOURCE, "print(answer)");
+    let set = client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": build.source },
+            "breakpoints": [ { "line": line } ],
+        }),
+    );
+    assert_eq!(
+        set["success"], true,
+        "the `.by` breakpoint was refused: {set}"
+    );
+    let held = &set["body"]["breakpoints"][0];
+    assert_eq!(
+        held["verified"], false,
+        "there is no interpreter watching that line yet: {set}"
+    );
+    assert_eq!(
+        held["reason"], "pending",
+        "a map that has not been read yet is not a map that will never arrive: {set}"
+    );
+    assert!(
+        held["message"]
+            .as_str()
+            .expect("a breakpoint that did not bind says why")
+            .contains("no program has been started yet"),
+        "the reason was {held}"
+    );
+
+    client.request("configurationDone", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({
+            "program": build.generated,
+            "python": interpreter(),
+            "args": [build.marks],
+        }),
+    );
+
+    // the map is read, the held `.by` line is translated, and the correction
+    // goes out as the `breakpoint` event DAP has for exactly this
+    let changed = client.event("breakpoint");
+    let bound = &changed["body"]["breakpoint"];
+    assert_eq!(changed["body"]["reason"], "changed", "{changed}");
+    assert_eq!(
+        bound["verified"], true,
+        "the held `.by` breakpoint never bound: {changed}"
+    );
+    // in `.by` terms, which is the only spelling the client ever used
+    assert_eq!(bound["line"], line, "{changed}");
+    assert_eq!(
+        bound["source"]["path"],
+        build.source.display().to_string(),
+        "{changed}"
+    );
+    assert!(
+        bound["message"]
+            .as_str()
+            .expect("a mapped binding says where it really went")
+            .contains(&build.generated.display().to_string()),
+        "the generated location is not dropped: {changed}"
+    );
+
+    // and it fires, on the generated line, reported as the `.by` one
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    let thread = stopped["body"]["threadId"].clone();
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    let top = &stack["body"]["stackFrames"][0];
+    assert_eq!(top["line"], line, "{stack}");
+    assert_eq!(
+        top["source"]["path"],
+        build.source.display().to_string(),
+        "a stop in the build is reported in the file the person wrote: {stack}"
+    );
+    // the half no answer can stand in for: the program really was held before
+    // the line ran, which the file it writes at that line is the witness to
+    assert_eq!(
+        build.answer(),
+        "",
+        "the program ran past the line it was supposed to be held on"
+    );
+
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    client.event("exited");
+    client.event("terminated");
+    assert_eq!(
+        build.answer().trim(),
+        "5",
+        "the program did not run to the end after the stop"
+    );
     client.request("disconnect", &serde_json::json!({}));
     client.finish();
 }

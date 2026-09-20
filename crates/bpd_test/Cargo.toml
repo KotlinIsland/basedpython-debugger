@@ -14,6 +14,9 @@ bpd_engine = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
+# the digests a hand-written `_by_sourcemap.py` carries, which are what make a
+# map checkable against the two files it describes
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 
 # a pseudo-terminal, for the half of launch parity a pipe cannot measure. std
