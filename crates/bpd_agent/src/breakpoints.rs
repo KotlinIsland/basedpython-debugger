@@ -119,11 +119,6 @@ pub(crate) fn bound_at(address: usize, line: u32) -> Vec<u32> {
         .unwrap_or_default()
 }
 
-/// whether anything is set, which is what decides if `PY_START` stays on
-pub(crate) fn any_set() -> bool {
-    !read().pending.is_empty()
-}
-
 /// what the breakpoint set wants of one code object
 ///
 /// half of what the interpreter is told about it — a step being made in the

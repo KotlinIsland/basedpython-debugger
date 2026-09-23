@@ -772,7 +772,7 @@ fn a_path_that_differs_only_in_case_is_never_bound_to_a_different_file() {
 }
 
 #[test]
-fn discovery_is_turned_off_while_nothing_is_set() {
+fn discovery_stays_armed_for_the_whole_session_with_nothing_set() {
     const OBSERVES: &str = r#"import pathlib, sys
 
 HERE = pathlib.Path(__file__).parent
@@ -784,57 +784,30 @@ def observe():
     )
 
 
-(HERE / "marks").write_text("before")
 observe()
 "#;
 
-    let events = |fixture: &Fixture| {
-        std::fs::read_to_string(fixture.directory().join("events"))
-            .expect("the program reported what it was instrumented with")
-    };
     let py_start = bpd_test::eval(
         interpreter(),
         "import sys; print(sys.monitoring.events.PY_START)",
     );
 
-    // with nothing set there is nothing that could ever stop, so the discovery
-    // callback is taken back off and the program runs uninstrumented
+    // nothing is set and nothing can stop, and discovery stays on anyway: it
+    // is also how the code of a file is found to replace, and a person who
+    // runs a program, pauses it, edits a module and reloads it has set nothing
+    // at any point. it used to be taken off here, and the module was then
+    // refused as one the interpreter had compiled nothing from while its
+    // functions ran. `a_module_imported_with_nothing_set_is_replaced_after_a_pause`
+    // in `replacement.rs` is that whole path
     let fixture = Fixture::new("observes", OBSERVES);
     let debuggee = launch(&fixture);
     finish(debuggee);
-    assert_eq!(events(&fixture), "0");
-
-    // with something set it stays on, because that is the only way a module
-    // imported later can ever bind
-    let fixture = Fixture::new("observes", OBSERVES);
-    let before = line_of(OBSERVES, r#"(HERE / "marks").write_text("before")"#);
-    let mut debuggee = launch(&fixture);
-    debuggee
-        .set_breakpoints(at(&fixture.path(), &[(1, before)]))
-        .expect("the breakpoint request was answered");
-    to_stop(&mut debuggee);
-
-    match debuggee
-        .run(&mut bpd_test::reporting::Unreported)
-        .expect("the debuggee was resumed")
-    {
-        Running::Exited { status, .. } => assert!(status.success()),
-        Running::Stopped { stop, .. } => panic!("it stopped again for {stop:?}"),
-        Running::StillRunning { waited, .. } => unreachable!(
-            "this wait carries no deadline and was answered after {waited:?} \
-             with the program still running"
-        ),
-        // bpd launched this program and holds its child, so it is bpd that
-        // reads the exit
-        Running::Ended { .. } => unreachable!(
-            "the program bpd launched ended without an exit status, and bpd \
-             holds its child"
-        ),
-        Running::Finishing { threads, .. } => {
-            panic!("nothing was held, and the debuggee ended holding {threads:?}")
-        }
-    }
-    assert_eq!(events(&fixture), py_start);
+    assert_eq!(
+        std::fs::read_to_string(fixture.directory().join("events"))
+            .expect("the program reported what it was instrumented with"),
+        py_start,
+        "with nothing set, the program runs with discovery and nothing else"
+    );
 }
 
 #[cfg(unix)]

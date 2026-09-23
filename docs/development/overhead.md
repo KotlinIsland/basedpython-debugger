@@ -138,6 +138,34 @@ no interpreter here had debugpy, and the benchmark will not run without it
 two censuses were answered per run. the difference is inside the bare row's own
 spread
 
+### discovery for the whole session
+
+code object discovery — a global `PY_START` that registers each code object the
+first time it runs and returns `DISABLE` — used to be taken off whenever no
+breakpoint was set. it is armed for the whole session now, because it is also
+how the code of a file is found to [replace](hot-code-replacement.md). so the
+`bpd` rows above, which set nothing, were measured **without** it, and this is
+what it adds, measured before the change was made: the same client, the
+program's own clock, rows interleaved per round on the busy machine at a load
+average of 40 to 90, outside criterion for the reason the row above is
+
+| workload  | rounds | bare               | bpd, discovery only while set | bpd, discovery all session |
+| --------- | ------ | ------------------ | ----------------------------- | -------------------------- |
+| `imports` | 20     | 56.4 (51.9–86.9)   | 58.2 (51.4–67.9)              | 63.9 (57.6–88.9)           |
+| `lines`   | 7      | 202.9 (171.4–1174) | 216.9 (173.4–1027)            | 212.1 (171.8–1077)         |
+| `calls`   | 7      | 289.7 (217.8–1097) | 225.6 (218.3–1746)            | 235.4 (218.3–1584)         |
+| `mixed`   | 7      | 562.8 (254.2–1036) | 280.5 (257.4–1186)            | 286.1 (258.8–1631)         |
+
+and the session's wall clock for `startup`, twenty rounds: 43.7 (40.7–86.6)
+before, 44.8 (41.1–75.9) after, against 13.3 bare
+
+the load makes the medians of the seven-round rows unreadable, and the smallest
+of each is the steadier figure: `lines`, `calls` and `mixed` do not move.
+`imports` does, by about 6 ms on its own clock — fifty-odd packages, thousands
+of code objects, each registered once — and that is the whole of the cost:
+nothing is paid again for a code object after its first run, and it is exactly
+what a session with any breakpoint set already paid
+
 ## attaching, in milliseconds
 
 three rows measured back to back in one run, so the machine's state cancels out

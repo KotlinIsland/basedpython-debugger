@@ -368,7 +368,13 @@ pub enum Unreplaceable {
         error: PythonError,
     },
 
-    /// the interpreter has compiled nothing from this file
+    /// no code of this file has run since bpd attached
+    ///
+    /// bpd registers every code object the first time it runs, for the whole
+    /// session, so this is a file the program has not imported yet — whose
+    /// edit needs no replacing, because the import will compile it as it is —
+    /// or one it imported somewhere bpd is never shown: before bpd attached,
+    /// or inside an expression bpd itself was evaluating
     NotLoaded {
         /// what was asked about
         file: PathBuf,
@@ -733,10 +739,14 @@ impl std::fmt::Display for Unreplaceable {
             ),
             Self::NotLoaded { file } => write!(
                 formatter,
-                "the interpreter has compiled nothing from `{}`, so there is no \
-                 code of it to replace. a module that has not been imported has \
-                 no live function objects, and importing it is the program's \
-                 business rather than the debugger's",
+                "no code from `{}` has run since bpd attached, so there is none \
+                 of it to replace. if the program has not imported it yet, \
+                 nothing needs doing: the import will compile the file as it is \
+                 on disk now, edit and all. if it has, it imported it where bpd \
+                 is never shown the code — before bpd attached, from a `.pth` \
+                 file or `sitecustomize`, or for the first time inside an \
+                 expression bpd was evaluating — and only restarting the \
+                 program runs the edit",
                 file.display()
             ),
             Self::CompiledMoreThanOnce { file, copies } => write!(
@@ -1023,7 +1033,14 @@ mod tests {
                 Unreplaceable::NotLoaded {
                     file: PathBuf::from("/tmp/never.py"),
                 },
-                vec!["/tmp/never.py", "compiled nothing"],
+                vec![
+                    "/tmp/never.py",
+                    "since bpd attached",
+                    // the common case is not a problem at all, and saying what
+                    // to do about the rare one is the point of the message
+                    "nothing needs doing",
+                    "only restarting",
+                ],
             ),
             (
                 Unreplaceable::NotAFile {

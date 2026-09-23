@@ -1097,3 +1097,102 @@ fn a_process_whose_audit_hook_refuses_the_assignment_is_refused_by_name_and_noth
         "a refusal has to leave the process exactly as it was"
     );
 }
+
+/// the program under test, run the way a person runs one: nothing set, and it
+/// goes on running until it is told to report
+///
+/// `victim` is imported **after** the entry stop, with no breakpoint anywhere,
+/// so the only thing that could have shown bpd its code is discovery armed for
+/// the whole session
+const RUNS_UNTIL_TOLD: &str = r#"import pathlib
+import time
+
+import victim
+
+HERE = pathlib.Path(__file__).parent
+first = victim.make_adder(10)
+second = victim.make_adder(100)
+widget = victim.Widget()
+
+
+def report():
+    (HERE / "ran.txt").write_text(
+        repr(
+            [
+                victim.plain(1),
+                first(1),
+                second(1),
+                victim.KEPT[0](),
+                victim.registered(),
+                widget.describe(),
+                victim.plain.__code__.co_firstlineno,
+            ]
+        )
+    )
+
+
+(HERE / "imported").write_text("x")
+while not (HERE / "go").exists():
+    time.sleep(0.005)
+report()
+"#;
+
+#[test]
+fn a_module_imported_with_nothing_set_is_replaced_after_a_pause() {
+    // run, pause, edit, reload — with no breakpoint set at any point. discovery
+    // used to be armed only while one was, so a module imported with nothing
+    // set was refused as one "the interpreter has compiled nothing from" while
+    // its functions were being called
+    let (fixture, victim) = laid_out_as(RUNS_UNTIL_TOLD, VICTIM);
+    let mut debuggee = launch(&fixture);
+
+    match debuggee
+        .dispatch(
+            bpd_core::Addressed::unnamed(bpd_core::Request::Run {
+                deadline: Some(std::time::Duration::from_millis(50)),
+            }),
+            &mut bpd_test::reporting::Unreported,
+        )
+        .expect("the debuggee was resumed")
+    {
+        bpd_core::Response::Ran(Running::StillRunning { .. }) => {}
+        other => panic!("the program waits to be told, and the run answered {other:?}"),
+    }
+    let imported = fixture.directory().join("imported");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    while !imported.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the program never imported the module"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    debuggee.pause().expect("the pause was armed");
+    match debuggee
+        .wait(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was waited on")
+    {
+        Running::Stopped { .. } => {}
+        other => panic!("the pause held nothing: {other:?}"),
+    }
+
+    std::fs::write(&victim, EDITED).expect("the fixture directory is writable");
+    let replaced = debuggee
+        .replace_code(&victim)
+        .expect("the replacement was answered");
+    applied(&replaced);
+
+    std::fs::write(fixture.directory().join("go"), "x").expect("the fixture directory is writable");
+    to_exit(&mut debuggee);
+    assert_eq!(
+        recorded(&fixture),
+        format!(
+            "[('after', 10), ('after', 1011), ('after', 1101), 'after', \
+             'wrapping after', 'after', {}]",
+            line_of(EDITED, "def plain(value):")
+        ),
+        "a module imported with nothing set runs the code on disk after the \
+         replacement, through every live object of it"
+    );
+}

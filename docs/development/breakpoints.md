@@ -27,9 +27,21 @@ generator expressions in `co_consts`, recursively. registering the module gives
 the whole tree, and binding walks it. so a breakpoint in a function that has
 never been called binds the moment the module it lives in is executed
 
-the discovery callback is armed **only while a breakpoint is set**. with nothing
-set nothing can stop, so the instrumentation would be paid for and never used.
-the program checks this itself, in `discovery_is_turned_off_while_nothing_is_set`
+the discovery callback is armed **for the whole session**, whether or not a
+breakpoint is set. it used to be armed only while one was, on the argument that
+with nothing set nothing can stop and the instrumentation would be paid for and
+never used — and that argument missed the other thing discovery is for. it is
+how the code of a file is found to [replace](hot-code-replacement.md), and a
+person who runs a program, pauses it, edits a module and reloads it has set
+nothing at any point: the module was refused as one the interpreter had
+"compiled nothing from" while its functions were running.
+`discovery_stays_armed_for_the_whole_session_with_nothing_set` has the program
+check it itself
+
+what that costs is one native call per code object, the first time it runs —
+exactly what any session with a breakpoint set already paid. it shows on a
+program that imports a great deal and nowhere else; the figures are in
+[overhead](overhead.md)
 
 ### what the registry keeps
 

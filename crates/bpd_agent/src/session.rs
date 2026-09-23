@@ -59,8 +59,15 @@ pub(crate) fn log(record: LogRecord) {
 ///
 /// what wants what:
 ///
-/// - `PY_START` discovers code objects while a breakpoint is set, and is how a
-///   step in catches the frame it enters
+/// - `PY_START` discovers code objects, for the **whole session**, and is how a
+///   step in catches the frame it enters. discovery is what binds a breakpoint
+///   in a module imported later, and it is also how the code of a file is found
+///   to replace — which is wanted with nothing set at all: run, pause, edit,
+///   reload. it was once armed only while a breakpoint was set, and a module
+///   imported with nothing set was then refused a reload as one the interpreter
+///   had compiled nothing from, while its functions were running. what it costs
+///   is one native call per code object, the first time that one runs —
+///   `docs/development/overhead.md` has the number
 /// - `LINE` catches a running thread, for stopping the world and for a pause
 /// - `PY_UNWIND` is how a step sees its frame left by an exception, and how an
 ///   exception leaving the outermost frame is found. it **cannot** be a local
@@ -74,7 +81,7 @@ pub(crate) fn refresh_events(python: Python<'_>) -> PyResult<()> {
     events::watch_globally(
         python,
         events::Global {
-            py_start: breakpoints::any_set() || entering,
+            py_start: true,
             line: world::parking() || pause::pausing() || crate::trail::recording(),
             py_unwind: following || exceptions::uncaught(),
             py_throw: entering,
@@ -401,8 +408,7 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
         return Ok(());
     }
 
-    // discovery costs a native call per code object first reached, and it buys
-    // nothing once there is nothing left that could stop
+    // whatever this stop armed that the session no longer needs comes off
     refresh_events(python)
 }
 

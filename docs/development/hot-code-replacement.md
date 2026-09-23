@@ -135,13 +135,22 @@ times
 | a function's parameters changed                               | callers in flight were compiled against the old ones  |
 | a frame is running code that is about to change               | it would leave two versions running at once           |
 | the file does not compile                                     | there is nothing to apply                             |
-| the interpreter compiled nothing from the file                | there are no live function objects                    |
+| no code of the file has run since bpd attached                | there are no live function objects                    |
 | only part of the file's code has been seen                    | a partial view answers every question wrongly         |
 | the file was compiled more than once                          | which copy a live function belongs to is unanswerable |
 | a changed function holds two nested code objects of one name  | nothing says which replaces which                     |
 | a live function's closure does not fit the new code           | cpython refuses that assignment                       |
 | an audit hook of the program refuses the assignment           | the process refuses it, and says so before any write  |
 | live objects run a nested function the file no longer defines | they would run code in no version of the file         |
+
+"no code has run" is almost always a module the program **has not imported
+yet**, and that refusal says nothing needs doing: the import will compile the
+file as it is on disk, edit and all. bpd registers every code object the first
+time it runs, for the whole session and whether or not a breakpoint is set — so
+a module that is running is one it has seen, and a reload needs nothing of the
+user first. the rare exception, and the refusal names it, is a module imported
+where bpd is never shown the code: before it attached, from a `.pth` file or
+`sitecustomize`, or for the first time inside an expression bpd was evaluating
 
 the last two conditions on the assignment are cpython's and the program's, and
 both are asked **before anything is written**, for the reason above. cpython's
