@@ -653,13 +653,13 @@ impl Session {
         readable
     }
 
-    /// one look at the connection even when the deadline has already passed
+    /// one look at the connection even when the deadline has already passed,
+    /// where a look cannot be taken without waiting
     ///
-    /// a wait with no time in it is a poll: what the agent has already said is
-    /// in the receive buffer, and a stop that arrived while nobody was reading
-    /// is exactly what a front end looking between its client's messages is
-    /// looking for. a socket timeout cannot be zero, so the look is bounded
-    /// by the smallest one the platforms agree on
+    /// a socket timeout cannot be zero, so on windows the look is bounded by
+    /// the smallest one there is. unix looks without waiting at all — see
+    /// [`Self::readable_now`]
+    #[cfg(not(unix))]
     const A_LOOK: Duration = Duration::from_millis(1);
 
     fn peek_until(&mut self, deadline: Instant) -> Result<bool> {
@@ -669,9 +669,19 @@ impl Session {
             if left.is_zero() && looked {
                 return Ok(false);
             }
+            // a wait with no time left in it is still one look, and a look is
+            // a poll: what the agent has already said is in the receive buffer,
+            // and a stop that arrived while nobody was reading is exactly what a
+            // front end looking between its client's messages is looking for
+            #[cfg(unix)]
+            if left.is_zero() {
+                return self.readable_now();
+            }
             looked = true;
+            #[cfg(not(unix))]
+            let left = left.max(Self::A_LOOK);
             self.reading
-                .set_read_timeout(Some(left.max(Self::A_LOOK)))
+                .set_read_timeout(Some(left))
                 .map_err(|source| Error::Control {
                     source: frame::Error::Io(source),
                 })?;
@@ -700,6 +710,49 @@ impl Session {
                 Err(source) => {
                     return Err(Error::Control {
                         source: frame::Error::Io(source),
+                    });
+                }
+            }
+        }
+    }
+
+    /// whether the agent has begun saying something, without waiting for it
+    ///
+    /// `poll` with a timeout of nothing, rather than a peek given the smallest
+    /// timeout a socket takes, because the smallest one is not small: a
+    /// millisecond, and a peek given one took 1.3 ms at the median on macos
+    /// where a look that does not wait takes 2 µs. that was paid on every look,
+    /// and a front end looks before every message while a thread is held —
+    /// measured as `scopes`, a request that never reaches the program, taking
+    /// 3.5 ms instead of 0.45 ms
+    ///
+    /// nor by making the socket non-blocking for a peek: the writing end is a
+    /// duplicate of this descriptor and shares its flags, so a pause written
+    /// from another thread in that window could be refused for a full buffer
+    ///
+    /// a hang-up or an error counts as readable, because it is: the read that
+    /// follows is what reports it, in the words it already has for it
+    #[cfg(unix)]
+    fn readable_now(&self) -> Result<bool> {
+        use std::os::fd::AsFd as _;
+
+        use rustix::event::{PollFd, PollFlags, Timespec, poll};
+
+        let nothing = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        loop {
+            let mut polled = [PollFd::from_borrowed_fd(
+                self.reading.as_fd(),
+                PollFlags::IN,
+            )];
+            match poll(&mut polled, Some(&nothing)) {
+                Ok(_) => return Ok(!polled[0].revents().is_empty()),
+                Err(rustix::io::Errno::INTR) => {}
+                Err(error) => {
+                    return Err(Error::Control {
+                        source: frame::Error::Io(error.into()),
                     });
                 }
             }

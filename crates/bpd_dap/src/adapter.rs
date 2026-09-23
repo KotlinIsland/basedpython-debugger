@@ -585,6 +585,34 @@ impl Adapter {
                 };
                 message
             };
+
+            // and while a thread is held, the program is looked at before
+            // **every** message too, not only when the client goes quiet. the
+            // slice above is a look at the client's silence, and a client that
+            // is never silent for a whole slice — an editor filling in a
+            // variables view, the next request sent as the last is answered —
+            // never gave it one: the second thread's stop sat unread on the
+            // connection for as long as the client kept talking. measured
+            // before this, with `scopes` asked back to back: the stop was
+            // announced one to two seconds after the thread reached it, and
+            // then only because the client happened to pause for a slice
+            //
+            // a request that goes to the program reads the connection anyway,
+            // and `ask` announces whatever it read on the way. what this covers
+            // is every request that does not — one answered from what the
+            // adapter already holds, or refused before it reaches the program —
+            // so that how soon a stop is reported does not depend on which
+            // requests a client happens to send. the wait has no time in it, so
+            // what it adds to a request is a look at two descriptors
+            //
+            // only once the program has been let go, for the reason nothing is
+            // announced before then, and only while something is held: with
+            // nothing held the turn was `waiting`, and has just looked
+            if self.holding() {
+                let looked = self.look_at_the_program();
+                self.finish(looked)?;
+            }
+
             let handled = self.handle(launcher, &message, commands);
             match handled {
                 Ok(()) => {}
@@ -686,6 +714,12 @@ impl Adapter {
     /// session that is not there
     fn waiting(&self) -> bool {
         self.session.is_some() && self.begun && !self.exited && self.announced.is_empty()
+    }
+
+    /// whether the program has been let go and the client has been told of a
+    /// stop that is still held — the other half of [`Self::waiting`]
+    fn holding(&self) -> bool {
+        self.session.is_some() && self.begun && !self.exited && !self.announced.is_empty()
     }
 
     fn handle(

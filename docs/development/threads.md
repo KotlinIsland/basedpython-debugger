@@ -42,6 +42,17 @@ python thread the question is about**, because an expression evaluated anywhere
 else would run the program's code on the wrong thread and report another
 thread's `threading.current_thread()`
 
+and the stop is **reported** straight away however busy the client is. the
+adapter looks at the program before every message it answers while a thread is
+held, not only when the client falls quiet: an editor filling in a variables
+view sends each request as the last is answered, and a look taken only in the
+client's silences left a second thread's stop unread for as long as the client
+kept talking — measured at one to two seconds with `scopes` asked back to back,
+and never over a pipe inside a minute. the look waits for nothing: a poll of the
+control connection, so a request pays a syscall for it.
+`a_second_thread_stopping_is_announced_to_a_client_that_never_stops_asking` is
+the acceptance, with the client keeping 256 requests unanswered at once
+
 a request names its thread through the stop it belongs to:
 
 | request                                    | addressed by                                                                          |

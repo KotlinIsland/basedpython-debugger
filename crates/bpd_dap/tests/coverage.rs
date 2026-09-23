@@ -1642,6 +1642,22 @@ impl Session for FakeSession {
     ) -> Result<Response, Failed> {
         let Addressed { session, request } = asked;
 
+        // a look at the program while its one thread is held, which is what the
+        // adapter takes before every message a client sends while something is
+        // held. the program here has one thread, so nothing could have stopped
+        // or said anything since: the engine answers such a look with
+        // `StillRunning` and reads nothing, and so does this. answering it with
+        // the next scripted stop would be a second stop of a thread that is
+        // already held
+        if matches!(request, Request::Wait { deadline: Some(deadline) } if deadline.is_zero())
+            && !self.held.is_empty()
+        {
+            return Ok(Response::Ran(Running::StillRunning {
+                waited: std::time::Duration::ZERO,
+                rebound: Vec::new(),
+            }));
+        }
+
         // everything a running program says arrives while it is running, so a
         // wait is where all of it is reported. the fake says one of each, once,
         // which is what puts the adapter's route for every one of them in this

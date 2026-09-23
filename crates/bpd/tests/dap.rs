@@ -74,6 +74,7 @@ macro_rules! over_each_transport {
 
 over_each_transport!(
     a_second_thread_stopping_while_the_first_is_held_is_announced_unasked,
+    a_second_thread_stopping_is_announced_to_a_client_that_never_stops_asking,
     a_breakpoint_is_hit_a_local_is_written_and_the_program_sees_the_write,
     a_running_program_can_be_paused_while_the_adapter_is_waiting_for_it,
     a_running_program_is_answered_about_itself_without_being_stopped,
@@ -350,6 +351,166 @@ fn a_second_thread_stopping_while_the_first_is_held_is_announced_unasked(transpo
         "continue",
         &serde_json::json!({ "threadId": first["body"]["threadId"] }),
     );
+    client.event("exited");
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+/// a program with two threads, the second of which reaches its breakpoint only
+/// once the client has said it is busy
+///
+/// the worker waits for a file rather than for a length of time, so that its
+/// stop cannot land in a moment the client was quiet: what is under test is a
+/// stop that happens while the client is talking. it writes down when it got
+/// there, on the wall clock, so that how long the announcement took is measured
+/// from the stop and not from how soon a busy machine scheduled the worker
+const WHILE_ASKED: &str = r#"import pathlib
+import threading
+import time
+
+HERE = pathlib.Path(__file__).parent
+GO = HERE / "go"
+ARRIVED = HERE / "arrived"
+
+
+def worker():
+    while not GO.exists():
+        time.sleep(0.01)
+    ARRIVED.write_text(repr(time.time()))
+    later = 2
+    return later
+
+
+def main():
+    thread = threading.Thread(target=worker)
+    thread.start()
+    total = 1
+    doubled = total * 2
+    thread.join()
+    return doubled
+
+
+main()
+"#;
+
+/// how many requests the client keeps unanswered at once
+///
+/// deep enough that the adapter always has the next one waiting: a client that
+/// ran dry for a whole slice would give the adapter the quiet moment this test
+/// exists to take away, and it would pass for the wrong reason
+const ASKING_AHEAD: usize = 256;
+
+/// how soon a stop has to be announced to a client that is talking
+///
+/// measured, on one machine: 6 to 15 ms with the program looked at before every
+/// message, and 3 to 38 seconds over loopback — never, over stdio, inside the
+/// watchdog's minute — with it looked at only when the client went quiet. a
+/// second is far enough from both that neither a slow machine nor a lucky pause
+/// decides the result
+const ANNOUNCED_WITHIN: Duration = Duration::from_secs(1);
+
+fn a_second_thread_stopping_is_announced_to_a_client_that_never_stops_asking(transport: Transport) {
+    // an editor filling in a variables view asks one thing after another, and
+    // the next is sent before the last is answered. the adapter looked at the
+    // program only when a client went quiet for a whole slice, so a stop that
+    // happened while one was talking sat unread on the connection for as long
+    // as it kept talking. `scopes` because it is answered from what the adapter
+    // already holds and never reaches the program: a request that does reads
+    // past the stop on its way, and would hide it
+    let fixture = Fixture::new("while_asked", WHILE_ASKED);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    let set = client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [
+                { "line": line_of(WHILE_ASKED, "doubled = total * 2") },
+                { "line": line_of(WHILE_ASKED, "later = 2") },
+            ],
+        }),
+    );
+    assert_eq!(set["body"]["breakpoints"][0]["verified"], true, "{set}");
+    assert_eq!(set["body"]["breakpoints"][1]["verified"], true, "{set}");
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let first = client.event("stopped");
+    let held = first["body"]["threadId"].clone();
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": held }));
+    let frame = stack["body"]["stackFrames"][0]["id"].clone();
+    let asking = serde_json::json!({ "frameId": frame });
+
+    // busy first, and only then is the worker let go
+    let mut outstanding = 0;
+    for _ in 0..ASKING_AHEAD {
+        client.send("scopes", &asking);
+        outstanding += 1;
+    }
+    std::fs::write(fixture.directory().join("go"), "")
+        .expect("the fixture's directory is writable");
+
+    // bounded well inside the watchdog's minute, so that a stop that is never
+    // announced fails here, with the count, rather than as an adapter that
+    // stopped talking
+    let deadline = Instant::now() + PATIENCE / 3;
+    let mut answered = 0;
+    let second = loop {
+        let message = client.next_message();
+        if message["type"] == "event" && message["event"] == "stopped" {
+            break message;
+        }
+        if message["type"] == "response" {
+            assert_eq!(message["success"], true, "{message}");
+            answered += 1;
+            outstanding -= 1;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the worker's stop was not announced to a client that never stopped asking — \
+             {answered} requests were answered while it sat unread"
+        );
+        client.send("scopes", &asking);
+        outstanding += 1;
+    };
+    let announced = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_secs_f64();
+    let arrived: f64 = std::fs::read_to_string(fixture.directory().join("arrived"))
+        .expect("the worker wrote down when it arrived, before the line it stopped on")
+        .trim()
+        .parse()
+        .expect("the worker wrote a number");
+    let took = Duration::from_secs_f64((announced - arrived).max(0.0));
+    assert!(
+        took < ANNOUNCED_WITHIN,
+        "the worker's stop was announced {took:?} after it happened, {answered} requests \
+         later — a client that is talking is told about a stop as late as one that is not"
+    );
+    assert_eq!(second["body"]["reason"], "breakpoint", "{second}");
+    assert_ne!(
+        second["body"]["threadId"], held,
+        "the second stop is the worker's: {second}"
+    );
+
+    // everything asked is still answered
+    while outstanding > 0 {
+        if client.next_message()["type"] == "response" {
+            outstanding -= 1;
+        }
+    }
+    client.request(
+        "continue",
+        &serde_json::json!({ "threadId": second["body"]["threadId"] }),
+    );
+    client.request("continue", &serde_json::json!({ "threadId": held }));
     client.event("exited");
     client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));
