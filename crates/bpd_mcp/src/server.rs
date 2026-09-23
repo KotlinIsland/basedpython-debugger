@@ -65,8 +65,9 @@ const INSTRUCTIONS: &str = "bpd is a python debugger. every control tool — \
     passes the answer says the program is still running rather than inventing a \
     location for it.\n\n\
     start with `launch`, which holds the program before its first statement. \
-    set breakpoints while something is held: the agent binds one on a python \
-    thread it is holding, so a running program has to be paused first.\n\n\
+    breakpoints, `threads`, `trail` and `replace_code` are about the process \
+    and are answered while the program runs; a stack, a variable or an \
+    expression needs a thread held.\n\n\
     a stop holds **one thread** and the rest of the program keeps running, so \
     several stops can be outstanding at once and a tool that is about one names \
     it. every read says which mode it was taken in, because a value read while \
@@ -922,11 +923,11 @@ impl<'a> Server<'a> {
                 "note": "the deadline passed and the program is still running. \
                          this is not a stop: nothing was held and nothing was read \
                          off the program, so bpd reports no location for it — \
-                         not even a sampled one. everything the agent inside the \
-                         debuggee answers, it answers on a thread it is holding, \
-                         and that includes the thread census. `wait` keeps \
-                         waiting without touching the program; `pause` holds the \
-                         next thread that reaches a line and then it can be asked",
+                         not even a sampled one. `threads` is answered while it \
+                         runs and says where each thread is, as the sample it is. \
+                         `wait` keeps waiting without touching the program; \
+                         `pause` holds the next thread that reaches a line, and \
+                         then its frames can be asked about",
             }),
         };
 

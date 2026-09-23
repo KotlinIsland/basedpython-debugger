@@ -232,7 +232,11 @@ pub(crate) fn held_for(thread: u64) -> Option<u64> {
 #[derive(Debug, Clone, Copy)]
 enum Address {
     /// any held thread will do, because the answer is about the process
-    Any(&'static str),
+    ///
+    /// and when there is none, [`crate::unheld`]'s own thread does: the answer
+    /// is about the process either way, and a program that is running is a
+    /// process
+    Any,
     /// the thread one stop is holding
     Stop(u64),
     /// the thread the stop a frame id belongs to is holding
@@ -242,6 +246,15 @@ enum Address {
 /// hand a request to the thread it is about, or refuse it saying why there is
 /// no such thread
 pub(crate) fn route(request: FromEngine) {
+    // about the process rather than about one thread of it — the breakpoint
+    // table, the source maps, the thread census, the code of a file. which
+    // those are is decided once, in `bpd_protocol`, because the engine reads
+    // the same list to decide what it may send to a running program
+    if request.about_the_process().is_some() {
+        deliver(Address::Any, request);
+        return;
+    }
+
     let address = match &request {
         FromEngine::Resume { which } => {
             resume(which);
@@ -253,36 +266,13 @@ pub(crate) fn route(request: FromEngine) {
             step(*stop, *kind);
             return;
         }
-        // the one request that is about a program with nothing held. it is
-        // armed on a thread of the agent's own, because there is no thread of
-        // the debuggee's waiting to be asked
+        // the one request that holds a thread rather than being answered on
+        // one. it is armed on a thread of the agent's own, because there is no
+        // thread of the debuggee's waiting to be asked
         FromEngine::Pause => {
             pause::request();
             return;
         }
-        FromEngine::SetBreakpoints { .. } => Address::Any("the breakpoints to resolve"),
-        // about the process: the map is how **every** location the agent
-        // reports is read, so it is not one thread's
-        FromEngine::MapSources { .. } => Address::Any("the source map to install"),
-        FromEngine::SetExceptionBreakpoints { .. } => {
-            Address::Any("the exception breakpoints to set")
-        }
-        // about the process rather than about one held thread, and about a
-        // process that does not exist yet at that. it is answered on a held
-        // thread because everything is
-        FromEngine::DebugChildren { .. } => Address::Any("what a forked child does"),
-        FromEngine::Threads { .. } => Address::Any("what the threads are doing"),
-        // about the process rather than about one held thread: it replaces the
-        // code of a file, and which held thread answers makes no difference to
-        // what it finds or what it writes
-        FromEngine::ReplaceCode { .. } => Address::Any("the code to replace"),
-        // about the whole program, so any held thread answers
-        FromEngine::Record { .. } => Address::Any("whether to record where it goes"),
-        FromEngine::Trail => Address::Any("where the program has been"),
-        // the trace ring is process state, and the watch is a flag of the
-        // process's audit hook — neither is one thread's
-        FromEngine::Recompositions => Address::Any("why the ui recomposed"),
-        FromEngine::WatchRecompositions { .. } => Address::Any("whether to watch the ui recompose"),
         FromEngine::Stack { stop, .. } | FromEngine::StopTheWorld { stop, .. } => {
             Address::Stop(*stop)
         }
@@ -310,7 +300,7 @@ fn deliver(address: Address, request: FromEngine) {
     let found = match address {
         // the lowest-numbered held stop, so which thread answers a
         // process-wide question is decided rather than raced
-        Address::Any(_) => registry.held.iter().min_by_key(|entry| entry.stop),
+        Address::Any => registry.held.iter().min_by_key(|entry| entry.stop),
         Address::Stop(stop) => registry.held.iter().find(|entry| entry.stop == stop),
         Address::Frame(frame) => registry.held.iter().find(|entry| entry.stop == frame.stop),
     };
@@ -323,9 +313,14 @@ fn deliver(address: Address, request: FromEngine) {
         }
         None => {
             let reason = match address {
-                Address::Any(wanted) => Refusal::NothingHeld {
-                    wanted: wanted.to_string(),
-                },
+                // nothing is held and the answer is about the process, so it is
+                // answered on a thread of the agent's own while the program
+                // goes on running
+                Address::Any => {
+                    drop(registry);
+                    crate::unheld::answer(request);
+                    return;
+                }
                 Address::Stop(stop) => Refusal::NoSuchStop {
                     stop,
                     held: registry.stops(),

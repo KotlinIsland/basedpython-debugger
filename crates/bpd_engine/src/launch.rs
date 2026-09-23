@@ -322,8 +322,11 @@ impl Debuggee {
 
     /// how many requests the engine has sent the only session's agent
     ///
-    /// the agent answers on a thread it is holding, so this is also the number
-    /// of times the debuggee has waited for the debugger
+    /// what the agent answers on a thread it is holding is answered while that
+    /// thread waits, so this is also an upper bound on the number of times the
+    /// debuggee has waited for the debugger — a request about the process,
+    /// asked while nothing is held, is answered without any thread of the
+    /// program's waiting for it
     ///
     /// # errors
     ///
@@ -748,10 +751,9 @@ impl Debuggee {
 
     /// replace the whole breakpoint set, and say how every one of them resolved
     ///
-    /// only while a thread is held. the agent answers on a thread it is holding
-    /// and nowhere else — asking a running program to bind something would be a
-    /// request that is answered whenever it next happens to stop, which is not
-    /// an answer
+    /// whether or not a thread is held: the breakpoint table is the process's,
+    /// so a running program binds it on a thread of the agent's own and goes on
+    /// running. see `bpd_protocol::message::FromEngine::about_the_process`
     pub fn set_breakpoints(&mut self, breakpoints: Vec<SourceBreakpoint>) -> Result<Vec<Resolved>> {
         match self.ask_for(Request::SetBreakpoints { breakpoints })? {
             Response::BreakpointsResolved { resolved } => Ok(resolved),
@@ -2065,6 +2067,14 @@ impl Attached {
     /// client never sees is a line of the program's history that silently went
     /// missing, and a stop that went missing is a thread the client thinks is
     /// running
+    ///
+    /// **a program that is running can still be asked about the process.** the
+    /// breakpoint table, the source maps, the thread census, the code of a file
+    /// and the trail are not one thread's, and the agent answers them on a
+    /// thread of its own — so what is refused here is a request that needs a
+    /// thread and has none, rather than every request there is. which is which
+    /// is `bpd_protocol::message::FromEngine::about_the_process`'s to say, in
+    /// the one place the agent's own router reads it from
     fn ask(
         &mut self,
         request: &FromEngine,
@@ -2072,18 +2082,25 @@ impl Attached {
         reporting: &mut dyn Reporting,
     ) -> Result<FromAgent> {
         if self.held.is_empty() {
-            // "nothing is held" invites holding something, and a program that
-            // has ended cannot be held at all. which of the two this is comes
-            // from the child, when there is one
-            return Err(match self.exit_code()? {
-                Some(Exit::Code(code)) => bpd_core::Error::ProgramExited {
-                    code,
-                    wanted: expected,
-                },
-                Some(Exit::Unknown) => bpd_core::Error::ProgramEnded { wanted: expected },
-                None => bpd_core::Error::NotStopped { wanted: expected },
+            // a program that has ended cannot be asked anything at all, and one
+            // that is running can be asked about itself. which of the two this
+            // is comes from the child, when there is one
+            match self.exit_code()? {
+                Some(Exit::Code(code)) => {
+                    return Err(bpd_core::Error::ProgramExited {
+                        code,
+                        wanted: expected,
+                    }
+                    .into());
+                }
+                Some(Exit::Unknown) => {
+                    return Err(bpd_core::Error::ProgramEnded { wanted: expected }.into());
+                }
+                None if request.about_the_process().is_none() => {
+                    return Err(bpd_core::Error::NotStopped { wanted: expected }.into());
+                }
+                None => {}
             }
-            .into());
         }
         // before anything else this session is ever asked, and once. the
         // launched session is sent the map at launch and this is what covers a

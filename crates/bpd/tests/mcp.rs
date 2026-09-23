@@ -238,13 +238,42 @@ fn a_program_that_never_stops_answers_the_deadline_rather_than_hanging() {
         "the run resumed everything, so nothing is held: {timed_out}"
     );
 
-    // and asking about the running program is refused with the reason, rather
-    // than answered from a sample
+    // and asking about a frame of the running program is refused with the
+    // reason, rather than answered from a sample
     let refused = client.failure("stack", &serde_json::json!({}));
     assert!(
         refused.contains("no thread of the debuggee is held"),
         "a running program cannot be asked for a stack, and said {refused}"
     );
+
+    // while what is about the process is answered as it runs — the reach an
+    // editor has, which the parity rule requires of this front end too
+    let threads = client.call("threads", &serde_json::json!({}));
+    assert!(
+        threads["threads"]
+            .as_array()
+            .is_some_and(|threads| !threads.is_empty()),
+        "a running program can be asked what its threads are doing: {threads}"
+    );
+    let line = line_of(SPINNING, "going = not STOP.exists()");
+    let set = client.call(
+        "set_breakpoints",
+        &serde_json::json!({ "breakpoints": [{ "file": fixture.path(), "line": line }] }),
+    );
+    assert_eq!(
+        set["breakpoints"][0]["bound"], true,
+        "a running program binds a breakpoint without being stopped: {set}"
+    );
+    // and it is a breakpoint, not a report of one: the loop runs into it
+    let hit = client.call("wait", &serde_json::json!({ "deadline_ms": GENEROUS }));
+    assert_eq!(hit["outcome"], "stopped", "the wait gave {hit}");
+    assert!(
+        hit["reason"]["breakpoint"].is_object(),
+        "the breakpoint set while the program ran is what stopped it: {hit}"
+    );
+    client.call("set_breakpoints", &serde_json::json!({ "breakpoints": [] }));
+    let running_again = client.call("continue_", &serde_json::json!({ "deadline_ms": 400 }));
+    assert_eq!(running_again["outcome"], "timed_out", "{running_again}");
 
     // a timeout is recoverable: `pause` holds the next thread that reaches a
     // line, and that really is a stop

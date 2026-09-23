@@ -44,17 +44,82 @@ thread's `threading.current_thread()`
 
 a request names its thread through the stop it belongs to:
 
-| request                              | addressed by                                           |
-| ------------------------------------ | ------------------------------------------------------ |
-| stack                                | the stop number                                        |
-| variables, evaluate, set variable    | the frame id, which carries the stop                   |
-| resume                               | the thread identities, or all of them                  |
-| breakpoints, threads, stop the world | the process, answered on the lowest-numbered held stop |
+| request                                    | addressed by                                                                          |
+| ------------------------------------------ | ------------------------------------------------------------------------------------- |
+| stack, stop the world                      | the stop number                                                                       |
+| variables, evaluate, set variable          | the frame id, which carries the stop                                                  |
+| resume                                     | the thread identities, or all of them                                                 |
+| breakpoints, threads, code, trail, ui ring | the process: the lowest-numbered held stop, or a thread of the agent's own if none is |
 
 a stop that has ended is **refused**, naming the stops that are held now. a
 resume that names a thread bpd is not holding is refused too, and refused
 **entirely**: a resume that half happened would leave the client's idea of what
 is running different from the agent's, with nothing saying which is right
+
+## a running program is still a process
+
+what is about the process rather than about one thread of it — the breakpoint
+table, the source maps, the exception filters, what a forked child does, the
+thread census, the code of a file, the trail and the ui's ring — reads no frame,
+so it needs no held thread. `FromEngine::about_the_process` in `bpd_protocol` is
+the one list of them, and both sides read it: the engine to decide what it may
+send to a program with nothing held, and the agent to decide where to answer
+
+a held thread answers them when there is one. when there is none, a thread of
+the agent's own does — started by the first such request, parked on a
+condition variable with no interpreter attached between requests, and taking the
+interpreter only for the length of one answer. it runs the **same** function a
+held thread runs, so a breakpoint binds identically whether or not the program
+happened to be stopped. it has no python frame, so `sys._current_frames` never
+names it and the census never reports the instrument as part of the program —
+`a_running_program_is_asked_what_its_threads_are_doing_without_being_stopped`
+checks exactly that
+
+before this, a program with nothing held was refused all of it. an editor asks
+`threads` before it asks for anything else, and waits for the answer — so an
+editor could neither set a breakpoint in a running program nor pause one
+
+### what it costs
+
+nothing, until something is asked of a running program: the thread does not
+exist, and nothing on any event path changed. once it does, what an answer costs
+the program is the time the agent's thread holds the interpreter — measured on a
+busy python loop with a release build, the median with the largest in brackets:
+
+| answer                                | interpreter held, wall | the thread's own cpu |
+| ------------------------------------- | ---------------------- | -------------------- |
+| a breakpoint set, on a line never run | 131 µs (349 µs)        | 120 µs               |
+| the trail                             | 46 µs (94 µs)          | 45 µs                |
+| the thread census, 50 ms apart        | —                      | 120 µs               |
+
+the census has no wall figure of its own because it lets the interpreter go for
+the interval between its samples, which is the point of it. the wall column was
+taken on a machine under heavy load and is the upper end of the truth; the cpu
+column does not depend on load
+
+and from the program's side, on its own clock: the `lines` workload of
+[overhead](overhead.md), asked `threads` back to back for the whole of its run —
+far more often than any client asks it — ran in 179.5 ms against 176.4 ms under
+`bpd` asked nothing and 175.8 ms bare, five interleaved rounds each, with two
+censuses answered per run. that difference is inside the bare row's own spread
+(171–218 ms) on a machine at a load average of 60 to 90. the row is
+`bpd, asked its threads throughout` in `crates/bpd/benches/overhead.rs`
+
+### it is off the process while it forks
+
+for the reason the connection's reader is — cpython counts the process's
+threads at `os.fork()`, and a program can record the warning. it is joined in the
+`before` handler and started again after, and a request arriving in between waits
+for the thread that comes after it
+
+a fork that lands **while an answer is in flight** waits for that answer, with
+the GIL given back: the answering thread is waiting for the GIL the forking
+thread holds, and keeping it would deadlock the program. that is a window other
+threads of the *program* can run in, which a bare fork does not have — and it
+opens only for a program that has other threads, which is the program cpython
+warns about anyway. how long the fork waits is how long the answer takes; for a
+census, that is its settle interval. `crates/bpd_engine/tests/forks.rs` pins both
+halves, and the second deadlocks if the GIL is kept
 
 ## the held thread still holds its locks
 
@@ -246,8 +311,8 @@ return the callback does not control, and a `restart_events()` cannot be
 ordered after an application it cannot see. it has not been reproduced, and
 that is what is claimed — not that it cannot happen
 
-a **pause** is the one request made with nothing held at all, and it holds one
-thread like every other stop: whichever reaches a line first. see
+a **pause** is the one request whose whole purpose is to hold a thread, and it
+holds one like every other stop: whichever reaches a line first. see
 [stepping](stepping.md)
 
 ## how it is tested

@@ -771,12 +771,73 @@ pub enum FromEngine {
 }
 
 impl FromEngine {
+    /// what this request is about, when it is about the **process** rather than
+    /// about one thread of it
+    ///
+    /// the breakpoint table, the source maps, the exception filters, what a
+    /// forked child does, the thread census, the code of a file, the trail and
+    /// the ui's ring are all one process's. none of them reads a frame, so none
+    /// of them needs the thread a frame belongs to — which is why the agent
+    /// answers them on a thread of its own while the program runs, and why the
+    /// engine sends them to a program that has nothing held
+    ///
+    /// it lives here rather than in either of them because **both** decide it:
+    /// the engine decides whether to send one, and the agent decides where to
+    /// answer it. two lists would be two answers to one question, and the shape
+    /// a disagreement takes is a request the engine sends and the agent refuses
+    ///
+    /// the string is what a refusal names, in the words of the thing that was
+    /// asked for rather than of the request's type
+    ///
+    /// the enum is `non_exhaustive` for everything outside this crate, so this
+    /// is one of the two places a match over it is required to be complete, and
+    /// a new request nobody classified does not compile
+    #[must_use]
+    pub const fn about_the_process(&self) -> Option<&'static str> {
+        match self {
+            Self::SetBreakpoints { .. } => Some("the breakpoints to resolve"),
+            // the map is how **every** location the agent reports is read, so
+            // it is not one thread's
+            Self::MapSources { .. } => Some("the source map to install"),
+            Self::SetExceptionBreakpoints { .. } => Some("the exception breakpoints to set"),
+            // about a process that does not exist yet, at that
+            Self::DebugChildren { .. } => Some("what a forked child does"),
+            Self::Threads { .. } => Some("what the threads are doing"),
+            // it replaces the code of a file, and which thread answers makes no
+            // difference to what it finds or to what it writes
+            Self::ReplaceCode { .. } => Some("the code to replace"),
+            Self::Record { .. } => Some("whether to record where it goes"),
+            Self::Trail => Some("where the program has been"),
+            // the trace ring is process state and the watch is a flag of the
+            // process's audit hook — neither is one thread's
+            Self::Recompositions => Some("why the ui recomposed"),
+            Self::WatchRecompositions { .. } => Some("whether to watch the ui recompose"),
+            // a resume, a step and a pause are about which threads run, and the
+            // agent's own reader is what answers all three. everything else
+            // names a stop or a frame, and that names a thread
+            Self::Resume { .. }
+            | Self::Step { .. }
+            | Self::Pause
+            | Self::StopTheWorld { .. }
+            | Self::Stack { .. }
+            | Self::Variables { .. }
+            | Self::Facts { .. }
+            | Self::TemplateContext { .. }
+            | Self::Evaluate { .. }
+            | Self::Source { .. }
+            | Self::SetNextStatement { .. }
+            | Self::RestartFrame { .. }
+            | Self::Retainers { .. }
+            | Self::SetVariable { .. } => None,
+        }
+    }
+
     /// what the request asks for, as a refusal names it
     ///
     /// one arm per request rather than the request's own debug form, which
     /// carries its payload — a breakpoint set, an expression — and a refusal is
     /// read by a person. the enum is `non_exhaustive` for everything outside
-    /// this crate, so this is the one place a match over it is required to be
+    /// this crate, so this is the other place a match over it is required to be
     /// complete, and a new request that has no name here does not compile
     #[must_use]
     pub const fn wanted(&self) -> &'static str {

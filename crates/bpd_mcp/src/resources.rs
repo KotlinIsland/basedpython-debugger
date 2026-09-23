@@ -76,11 +76,14 @@ pub fn resources() -> Vec<Resource> {
                 "continue_",
                 "diff",
                 "pause",
+                "replace_code",
                 "resume",
+                "set_breakpoints",
                 "stack",
                 "state",
                 "stop_the_world",
                 "threads",
+                "trail",
                 "wait",
             ],
         },
@@ -150,16 +153,16 @@ every control tool requires a `deadline_ms`, and when it passes the answer is
 `outcome: "timed_out"`. it carries no thread, no frames and no reason — not
 even a sampled one
 
-that is the thread model rather than an omission. everything the agent answers,
-it answers on a thread it is holding, and that includes the thread census. a
-program with nothing held cannot be asked what its threads are doing, so there is
-nothing to label as stale and nothing to report. what to do about it is in the
+that is the thread model rather than an omission. a stack is read off frames,
+and a frame belongs to a thread that has to be standing still. what is about the
+**process** rather than one thread — `threads`, `set_breakpoints`, `trail`,
+`replace_code` and the rest — is answered while the program runs, and `threads`
+is where each thread is, labelled as the sample it is. what else to do is in the
 answer: `wait` keeps waiting and touches the program in no way at all, and
 `pause` arms a line event for the whole program and holds the first thread that
 reaches one
 
-`pause` is the only thing that can be asked of a program with nothing held, and
-what it catches belongs to the operating system. its `running` counts only
+what a `pause` catches belongs to the operating system. its `running` counts only
 threads bpd is **not** already holding, so an empty one has two causes — every
 other thread is parked in a C call, or the threads that would reach a line are
 the ones already held — and the answer's `note` says which
@@ -191,7 +194,8 @@ compared, and `still` means the thread was in the same place both times
 that is where to look, not what is wrong. cpython exposes no owner for a lock, so
 bpd cannot say that a thread is waiting for one another thread holds — a thread
 blocked in `sock.recv` and a thread piled up behind a lock look identical from
-here. and it needs a held thread to answer on, like everything else
+here. it is answered whether or not a thread is held — a program that is
+running is the case it is most for
 
 ## a program that will not exit
 

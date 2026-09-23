@@ -14,7 +14,10 @@
 //! each workload is run bare, under `bpd`, and under debugpy; the `lines`
 //! workload is run twice more under each debugger, once with a breakpoint that
 //! is hit fifty times and once with a breakpoint whose line the program never
-//! reaches. both debuggers are driven through **DAP**, by the same client, so
+//! reaches — and once more under `bpd` alone, with the client asking the
+//! running program what its threads are doing, back to back, for the whole
+//! run, which is what answering a program with nothing held costs it. both
+//! debuggers are driven through **DAP**, by the same client, so
 //! the comparison includes each one's own front end rather than only its event
 //! path. that is what a user pays either way
 //!
@@ -275,6 +278,8 @@ struct Ran {
     reported: Duration,
     /// how many times the program stopped
     hits: u32,
+    /// how many questions about the process were answered while it ran
+    answered: u32,
 }
 
 /// the line every workload prints, and what it means
@@ -325,14 +330,25 @@ fn bare(interpreter: &Path, script: &Path) -> Ran {
             &String::from_utf8(output.stdout).expect("the workloads write utf8"),
         ),
         hits: 0,
+        answered: 0,
     }
 }
 
 /// run a program under a DAP adapter, to the program's own exit
 ///
 /// `breakpoint` is a line in the program, and the hit count that comes back is
-/// the only thing that proves the breakpoint was really there
-fn under(adapter: Command, script: &Path, interpreter: &Path, breakpoint: Option<u32>) -> Ran {
+/// the only thing that proves the breakpoint was really there. `asking` keeps
+/// the client asking the running program what its threads are doing, one
+/// question after another, from `configurationDone` until the program's end is
+/// on the wire — and the count of answers that comes back is what proves the
+/// questions reached a program that was running rather than waiting in a queue
+fn under(
+    adapter: Command,
+    script: &Path,
+    interpreter: &Path,
+    breakpoint: Option<u32>,
+    asking: bool,
+) -> Ran {
     let mut client = Client::start(adapter);
 
     client.request(
@@ -378,6 +394,16 @@ fn under(adapter: Command, script: &Path, interpreter: &Path, breakpoint: Option
 
     client.request("configurationDone", &serde_json::json!({}));
 
+    let mut answered = 0;
+    while asking && !client.saw("exited") {
+        // the answer is read without asserting on it, because the last
+        // question can cross the program's end on the wire and be refused for
+        // it. what is asserted is that the running program answered at all
+        if client.answer("threads", &serde_json::json!({}))["success"] == true {
+            answered += 1;
+        }
+    }
+
     let mut hits = 0;
     let mut exit = None;
     let mut said = String::new();
@@ -414,6 +440,7 @@ fn under(adapter: Command, script: &Path, interpreter: &Path, breakpoint: Option
     Ran {
         reported: reported(script, &said),
         hits,
+        answered,
     }
 }
 
@@ -483,17 +510,27 @@ impl Client {
 
     /// write a request and read until its answer arrives
     fn request(&mut self, command: &str, arguments: &serde_json::Value) -> serde_json::Value {
+        let answer = self.answer(command, arguments);
+        assert_eq!(answer["success"], true, "`{command}` was refused: {answer}");
+        answer
+    }
+
+    /// write a request and read until its answer arrives, whatever it says
+    fn answer(&mut self, command: &str, arguments: &serde_json::Value) -> serde_json::Value {
         let sent = self.send(command, arguments);
         loop {
             let message = self.next_message();
             if message["type"] == "response" && message["request_seq"] == sent {
-                assert_eq!(
-                    message["success"], true,
-                    "`{command}` was refused: {message}"
-                );
                 return message;
             }
         }
+    }
+
+    /// whether an event of this name has been read, looked at or not
+    fn saw(&self, event: &str) -> bool {
+        self.seen
+            .iter()
+            .any(|message| message["type"] == "event" && message["event"] == event)
     }
 
     /// the next event that has not been looked at yet
@@ -641,7 +678,7 @@ fn rows<'a>(
         (
             "bpd".to_string(),
             Box::new(move || {
-                let ran = under(bpd_adapter(), script, &session.interpreter, None);
+                let ran = under(bpd_adapter(), script, &session.interpreter, None, false);
                 assert_eq!(
                     ran.hits, 0,
                     "no breakpoints were set and the program stopped"
@@ -657,6 +694,7 @@ fn rows<'a>(
                     script,
                     &session.interpreter,
                     None,
+                    false,
                 );
                 assert_eq!(
                     ran.hits, 0,
@@ -668,6 +706,24 @@ fn rows<'a>(
     ];
 
     if workload.name == HELD {
+        // what answering a running program costs it. the census is the
+        // question an editor asks first and the dearest of the ones about the
+        // process — it samples every thread twice — and it is asked back to back
+        // for the whole run, which is far more often than any client asks it.
+        // bpd alone, because the row is about bpd answering with nothing held
+        rows.push((
+            "bpd, asked its threads throughout".to_string(),
+            Box::new(move || {
+                let ran = under(bpd_adapter(), script, &session.interpreter, None, true);
+                assert_eq!(ran.hits, 0, "nothing was set and the program stopped");
+                assert!(
+                    ran.answered > 0,
+                    "no question was answered while the program ran, so this \
+                     row is the plain `bpd` row under another name"
+                );
+                ran
+            }),
+        ));
         for &(what, needle, hits) in HELD_LINES {
             let line = line_of(workload.source, needle);
             rows.push((
@@ -686,7 +742,7 @@ fn rows<'a>(
 
 /// run a program with one breakpoint in it, and check it was really there
 fn held(adapter: Command, script: &Path, session: &Session, line: u32, hits: u32) -> Ran {
-    let ran = under(adapter, script, &session.interpreter, Some(line));
+    let ran = under(adapter, script, &session.interpreter, Some(line), false);
     assert_eq!(
         ran.hits, hits,
         "the breakpoint on line {line} was hit {} times and the program reaches \

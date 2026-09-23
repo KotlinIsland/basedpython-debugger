@@ -67,19 +67,24 @@ when the deadline passes the answer is `outcome: "timed_out"`, with how long was
 really waited. it is not a stop, and it carries no location at all — no thread,
 no frames, no reason
 
-### there is no sample, and that is a limit rather than a choice
+### a timeout carries no sample, and the census is where one is
 
 the [agent interface](agent-interface.md) design says a timeout may carry a
-**sample**: a stack read off a running thread, labelled as already stale. that
-is not available, and the reason is the architecture rather than an omission
+**sample**: a stack read off a running thread, labelled as already stale. a
+timeout does not, because a stack is read off frames and frames belong to a
+thread that has to be standing still — so `stack`, `variables`, `evaluate` and
+everything else about a frame are refused until a thread is held
 
-everything the agent inside the debuggee answers, it answers **on a thread it is
-holding**. that includes the thread census: `Request::Threads` is routed to the
-lowest-numbered held stop, and with nothing held it is refused. so a program
-that is running cannot be asked what its threads are doing, let alone where one
-of them is
+what **is** answered while the program runs is what is about the process rather
+than about one thread of it: `threads`, `set_breakpoints`,
+`set_exception_breakpoints`, `debug_children`, `record`, `trail`,
+`recompositions`, `watch_recompositions` and `replace_code`. the agent answers
+them on a thread of its own and the program goes on running — see
+[threads](threads.md). so where each thread is, labelled as the sample it is, is
+one `threads` call away from a timeout, and that is the sample the design asked
+for, in the one place it can be honest
 
-what a timeout says instead is what is true — the program is still running, and
+what a timeout says itself is what is true — the program is still running, and
 here is what to do about it:
 
 - **`wait`** carries on waiting and touches nothing. it is the only tool that
@@ -324,9 +329,9 @@ because the interpreter is the authority on what an expression is
 nothing held has two causes and they need opposite things done about them, so
 they are two refusals rather than one:
 
-- the program is **running**, and has to be held before anything can be asked.
-    the refusal says so, and names the two ways: run it to a breakpoint, or pause
-    it
+- the program is **running**, and has to be held before anything about a frame
+    can be asked. the refusal says so, names the two ways — run it to a
+    breakpoint, or pause it — and says what is answered without either
 - the program has **exited**, and there is nothing left to hold. the refusal
     names the exit code
 

@@ -360,26 +360,27 @@ with a stop is asking that stop anything more
 const WHY_WONT_IT_STOP: &str = r#"the program is not stopping. find out where it is
 
 a `timed_out` answer is **not a location**. it carries no thread, no frames and
-no reason, and that is the honest shape of what bpd can see: everything the agent
-inside the debuggee answers, it answers on a thread it is holding, and a program
-with nothing held cannot be asked what its threads are doing. do not resume again
-with a larger deadline hoping for more — that is the same answer, later
+no reason, because a stack is read off frames and a frame belongs to a thread
+that has to be standing still. do not resume again with a larger deadline hoping
+for more — that is the same answer, later
 
 do this instead:
 
-1. call `pause` with `{"deadline_ms": {deadline_ms}}`. it arms a line event for
-   the whole program and holds whichever thread reaches one first, which is a
-   **real stop** and makes everything askable again. `wait` is the alternative
-   when you would rather not touch the program at all, but it only helps if the
-   program was going to stop on its own
-2. if `pause` also times out, read its `running` and its `note`. `running` counts
+1. call `threads`. it is about the **process** rather than a held thread, so it
+   is answered while the program runs and touches none of it: two samples
+   `settle_ms` apart, a thread marked `still` when it was in the same place both
+   times, and where each one was. that is often the whole answer
+2. to read more than where a thread is, call `pause` with
+   `{"deadline_ms": {deadline_ms}}`. it arms a line event for the whole program
+   and holds whichever thread reaches one first, which is a **real stop** and
+   makes everything askable again. `wait` is the alternative when you would
+   rather not touch the program at all, but it only helps if the program was
+   going to stop on its own
+3. if `pause` also times out, read its `running` and its `note`. `running` counts
    only threads bpd is not already holding, so an empty one means either every
    other thread is parked in a C call — where there is no monitoring event to
    hold one at — or the threads that would reach a line are ones bpd already
    holds. the `note` says which, and what to do about it
-3. once something is held, call `threads`. it is the only question that is about
-   threads bpd is **not** holding. it takes two samples `settle_ms` apart and
-   marks a thread `still` when it was in the same place both times
 4. call `stack` or `state` on the held stop for where that one thread actually is
 
 what `threads` will not tell you, and what to do about it: cpython exposes no

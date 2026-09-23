@@ -73,13 +73,15 @@ the control tools and their deadlines are built —
 [the MCP adapter](mcp.md) is what shipped. three claims above did not survive
 contact with the session:
 
-- **there is no sample at all.** everything the agent inside the debuggee
-    answers, it answers on a thread it is **holding** — including the thread
-    census. so a program with nothing held cannot be asked what its threads are
-    doing, and there is nothing to label. a timeout therefore carries no
-    location of any kind, and names the two things that can be done instead:
-    keep waiting, or `pause` and get a real stop. the paragraphs above are still
-    the right rule; they describe a capability the thread model does not offer
+- **a timeout carries no sample.** a stack is read off frames, and a frame
+    belongs to a thread that has to be standing still, so a timeout carries no
+    location of any kind and names the two things that can be done instead:
+    keep waiting, or `pause` and get a real stop. what the paragraphs above
+    asked for exists one call away: the thread census is about the **process**
+    rather than a held thread, and the agent answers it — and everything else
+    about the process — on a thread of its own while the program runs. where
+    each thread is comes back labelled as the sample it is, taken twice a
+    stated interval apart. see [threads](threads.md)
 - **`set_breakpoint` is not a control operation.** it does not resume anything
     and nothing stops as a result of it, so there is no stop for it to return.
     it is also the whole *set* rather than one breakpoint, because a debugger
@@ -353,7 +355,7 @@ untrue:
     is inside a monitoring callback and cannot return. what the rest of the
     program can move underneath is the values reached through it
 - **"nothing is held" was one refusal doing two jobs.** a program that is
-    running has to be held before it can be asked anything; a program that has
+    running has to be held before a frame of it can be asked about; a program that has
     **exited** cannot be held at all. an agent told the first about the second
     goes on pausing a process that is not there, so they are two refusals now,
     and each names what to do

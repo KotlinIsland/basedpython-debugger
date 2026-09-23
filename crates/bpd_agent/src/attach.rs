@@ -477,6 +477,7 @@ pub(crate) fn detach() -> bool {
     READER.abandon();
     stops::abandon();
     crate::stream::abandon();
+    crate::unheld::abandon();
     true
 }
 

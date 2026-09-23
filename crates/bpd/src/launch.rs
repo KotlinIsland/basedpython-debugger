@@ -475,10 +475,10 @@ fn every_session(
         }
 
         for session in live {
-            // a resume is refused for a program with nothing held — the agent
-            // answers on a thread it is holding, and a parent blocked in
-            // `waitpid` on a child bpd has not let go of has none. so which of
-            // the two this is comes from what is held rather than from a guess
+            // a resume is refused for a program with nothing held — there is no
+            // thread to let go, and a parent blocked in `waitpid` on a child bpd
+            // has not let go of has none. so which of the two this is comes from
+            // what is held rather than from a guess
             let holding = debuggee.held().iter().any(|stop| stop.session == session);
             let request = if holding {
                 Request::Run {

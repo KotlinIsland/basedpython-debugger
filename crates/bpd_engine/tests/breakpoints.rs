@@ -1052,10 +1052,12 @@ fn a_debuggee_that_has_exited_says_so_rather_than_that_nothing_is_held() {
 }
 
 #[test]
-fn a_running_debuggee_refuses_a_request_rather_than_leaving_it_unanswered() {
-    // still alive, and still unaskable: the agent answers on a thread it is
-    // holding, so a request made here would be answered whenever the program
-    // next happened to stop — which is indistinguishable from a hang
+fn a_running_debuggee_binds_a_breakpoint_without_being_stopped_first() {
+    // the breakpoint table is the **process's** and not one thread's, so the
+    // agent answers this on a thread of its own while the program goes on
+    // running. it used to be refused, and what that cost was the whole session:
+    // an editor sends `threads` before it sends anything else, so nothing could
+    // be asked of a running program and nothing could pause one either
     let fixture = Fixture::new("sleeper", SLEEPER);
     let mut debuggee = launch(&fixture);
 
@@ -1072,25 +1074,45 @@ fn a_running_debuggee_refuses_a_request_rather_than_leaving_it_unanswered() {
         other => panic!("this program sleeps for a second, and the run answered {other:?}"),
     }
 
-    let error = debuggee
-        .set_breakpoints(at(&fixture.path(), &[(1, 1)]))
-        .expect_err("a running debuggee has no thread to bind on");
-    let said = error.to_string();
+    let resolved = debuggee
+        .set_breakpoints(at(&fixture.path(), &[(1, 4)]))
+        .expect("the breakpoint table is the process's, and the process is there");
     assert!(
-        said.contains("no thread of the debuggee is held"),
-        "the refusal must say why, and it said {said}"
-    );
-    assert!(
-        said.contains("pausing it"),
-        "the refusal must say what to do about it, and it said {said}"
+        matches!(
+            resolved.as_slice(),
+            [Resolved {
+                binding: Binding::Bound { line: 4, .. },
+                ..
+            }]
+        ),
+        "a breakpoint set while the program runs binds where it would have, and \
+         this one resolved to {resolved:?}"
     );
 
-    debuggee
-        .interrupt(None)
-        .expect("this debuggee holds the one session the test launched")
-        .terminate()
-        .expect("the sleeping program was ended");
+    // and it is a breakpoint rather than a report of one: the program is still
+    // inside its sleep, so it is waited for rather than resumed — nothing is
+    // held, and there is nothing to let go
+    let waited = debuggee
+        .dispatch(
+            bpd_core::Addressed::unnamed(bpd_core::Request::Wait { deadline: None }),
+            &mut bpd_test::reporting::Unreported,
+        )
+        .expect("the program was waited for");
+    match waited {
+        bpd_core::Response::Ran(Running::Stopped { stop, .. }) => assert!(
+            matches!(
+                &stop.reason,
+                StopReason::Breakpoint { breakpoints, line, .. }
+                    if breakpoints == &[1] && *line == 4
+            ),
+            "the breakpoint set while the program ran is what stopped it, and \
+             it stopped for {:?}",
+            stop.reason
+        ),
+        other => panic!("the breakpoint was bound on line 4 and the run answered {other:?}"),
+    }
 }
 
-/// a program that is still running a moment after it is let go
-const SLEEPER: &str = "import time\n\ntime.sleep(1)\n";
+/// a program that is still running a moment after it is let go, with a line
+/// after the sleep for a breakpoint set meanwhile to catch
+const SLEEPER: &str = "import time\n\ntime.sleep(1)\nprint('awake')\n";

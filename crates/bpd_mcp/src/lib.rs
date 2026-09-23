@@ -28,10 +28,11 @@
 //!
 //! that only works with a **deadline**, which every one of them requires. when
 //! it passes, the answer says the program is still running. it does not say
-//! where: everything the agent inside the debuggee answers, it answers on a
-//! thread it is holding, so a program with nothing held cannot be asked
-//! anything at all — not even what its threads are doing. a debugger that
-//! reported a location there would be reporting a state it did not read
+//! where: a location is read off a frame, and a frame belongs to a thread that
+//! has to be held to be read. a debugger that reported one there would be
+//! reporting a state it did not read. what is about the process — `threads`,
+//! the breakpoints, the trail, the code of a file — is answered while the
+//! program runs, and `threads` is where each thread is, as the sample it is
 //!
 //! ## the parity rule
 //!

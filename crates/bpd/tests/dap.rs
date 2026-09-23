@@ -76,6 +76,8 @@ over_each_transport!(
     a_second_thread_stopping_while_the_first_is_held_is_announced_unasked,
     a_breakpoint_is_hit_a_local_is_written_and_the_program_sees_the_write,
     a_running_program_can_be_paused_while_the_adapter_is_waiting_for_it,
+    a_running_program_is_answered_about_itself_without_being_stopped,
+    a_client_that_never_stops_asking_is_still_told_the_program_ended,
     a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so,
     a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set,
     a_by_breakpoint_set_before_the_launch_binds_through_the_map_and_hits,
@@ -370,10 +372,10 @@ sys.exit(0)
 "#;
 
 fn a_running_program_can_be_paused_while_the_adapter_is_waiting_for_it(transport: Transport) {
-    // the request that cannot go the way every other one goes: the agent
-    // answers on a thread it is holding, and a running program has none. so it
-    // is delivered on an interrupt while the session is blocked reading its
-    // connection, and this is what proves that path is real
+    // the request that cannot go the way every other one goes: it has to reach
+    // a program the session is in the middle of waiting on. so it is delivered
+    // on an interrupt while the session is blocked reading its connection, and
+    // this is what proves that path is real
     let fixture = Fixture::new("spinner", SPINNING);
     let mut client = Client::start(transport);
 
@@ -417,6 +419,124 @@ fn a_running_program_can_be_paused_while_the_adapter_is_waiting_for_it(transport
 
     std::fs::write(fixture.directory().join("stop"), "x").expect("the fixture directory is there");
     client.request("continue", &serde_json::json!({ "threadId": thread }));
+
+    let exited = client.event("exited");
+    assert_eq!(exited["body"]["exitCode"], 0);
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+fn a_running_program_is_answered_about_itself_without_being_stopped(transport: Transport) {
+    // the order an editor asks in. intellij sends `threads` before anything
+    // else and sends nothing more until it is answered — so an adapter that
+    // left it for the next stop left the editor unable to ask anything, and
+    // unable to pause a program that had no reason to stop. the program here
+    // never stops on its own, and every question is asked while it runs
+    let fixture = Fixture::new("spinner", SPINNING);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let deadline = Instant::now() + PATIENCE;
+    while !client.output().contains("running") {
+        assert!(Instant::now() < deadline, "the program never started");
+        client.drain();
+    }
+
+    let threads = client.request("threads", &serde_json::json!({}));
+    assert_eq!(threads["success"], true, "{threads}");
+    assert!(
+        !threads["body"]["threads"]
+            .as_array()
+            .expect("the threads are an array")
+            .is_empty(),
+        "a running program has a thread, and the answer named none: {threads}"
+    );
+
+    // an extension, which goes the same way as `threads` because it is about
+    // the process too — and which is what the parity rule says an editor can
+    // reach whenever an agent can
+    let trail = client.request("bpd/trail", &serde_json::json!({}));
+    assert_eq!(trail["success"], true, "{trail}");
+
+    // a breakpoint set on a line the loop is going round, while it is going
+    // round it: bound now, and hit next time round
+    let line = line_of(SPINNING, "going = not STOP.exists()");
+    let set = client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [{ "line": line }],
+        }),
+    );
+    assert_eq!(
+        set["body"]["breakpoints"][0]["verified"], true,
+        "a breakpoint set while the program runs binds at once: {set}"
+    );
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+
+    let thread = stopped["body"]["threadId"].clone();
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({ "source": { "path": fixture.path() }, "breakpoints": [] }),
+    );
+    std::fs::write(fixture.directory().join("stop"), "x").expect("the fixture directory is there");
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+
+    let exited = client.event("exited");
+    assert_eq!(exited["body"]["exitCode"], 0);
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+/// a program that is busy for half a second and then ends on its own
+const BUSY_THEN_DONE: &str = r#"import time
+
+started = time.monotonic()
+while time.monotonic() - started < 0.5:
+    pass
+print("done", flush=True)
+"#;
+
+fn a_client_that_never_stops_asking_is_still_told_the_program_ended(transport: Transport) {
+    // the adapter answers a running program's client between waits for the
+    // program. a client with a question always pending must not be able to
+    // keep it from waiting at all: measured before this test existed, a client
+    // asking `threads` back to back was never told the program had ended, and
+    // went on asking a program that had long exited
+    let fixture = Fixture::new("busy", BUSY_THEN_DONE);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let mut answered = 0;
+    while !client
+        .seen
+        .iter()
+        .any(|message| message["type"] == "event" && message["event"] == "exited")
+    {
+        // not asserted: the last one can cross the program's end on the wire
+        if client.request("threads", &serde_json::json!({}))["success"] == true {
+            answered += 1;
+        }
+    }
+    assert!(
+        answered > 0,
+        "the program ran for half a second and no question about it was answered"
+    );
 
     let exited = client.event("exited");
     assert_eq!(exited["body"]["exitCode"], 0);

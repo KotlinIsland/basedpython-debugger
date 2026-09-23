@@ -60,11 +60,11 @@ arrives in the `launch` tool call:
 ## the five things that are easy to get wrong
 
 - **a timeout is not a location.** `outcome: "timed_out"` carries no thread, no
-    frames and no reason, because everything the agent inside the debuggee answers
-    it answers on a thread it is **holding** — a running program cannot even be
-    asked what its threads are doing. resuming again with a larger deadline gives
-    the same answer later. call `pause` instead, which holds the next thread that
-    reaches a line and makes everything askable again
+    frames and no reason, because a frame belongs to a thread that has to be
+    **held** to be read. resuming again with a larger deadline gives the same
+    answer later. call `threads` — it is about the process and is answered while
+    the program runs — for where each thread is, and `pause` to hold the next
+    thread that reaches a line and make its frames askable
 - **a stop holds one thread, not the program.** everything else keeps running, so
     several stops can be outstanding and a tool that is about one names it. the
     held thread's own frame chain is a snapshot; every value reached through it is

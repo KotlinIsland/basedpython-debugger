@@ -1249,3 +1249,156 @@ fn a_fork_of_a_fork_is_a_third_session_rather_than_a_process_that_slipped_out() 
         other => panic!("the parent did not end: {other:?}"),
     }
 }
+
+/// a single-threaded program that forks when the test says so, and records the
+/// warnings its own fork raised
+///
+/// single-threaded is the point: it is the program cpython does **not** warn
+/// about, so a debugger thread left on the process is the one difference it
+/// could see
+const FORKS_WHEN_TOLD: &str = r#"import os
+import pathlib
+import signal
+import time
+import warnings
+
+HERE = pathlib.Path(__file__).parent
+signal.alarm(120)
+
+while not (HERE / "go").exists():
+    time.sleep(0.002)
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    os.waitpid(pid, 0)
+
+(HERE / "warnings").write_text(repr([warning.category.__name__ for warning in caught]))
+"#;
+
+#[test]
+fn a_program_asked_about_while_it_ran_forks_as_it_would_have() {
+    assert!(FORKS_WHEN_TOLD.contains(WATCHDOG));
+
+    let bare = Fixture::new("forker", FORKS_WHEN_TOLD);
+    std::fs::write(bare.directory().join("go"), "x").expect("the bare run was told to go");
+    let ran_bare = bare.run(interpreter(), Form::Script, &[]);
+    assert!(
+        ran_bare.success,
+        "the baseline failed on its own: {}",
+        ran_bare.stderr
+    );
+    let bare_warnings = std::fs::read_to_string(bare.directory().join("warnings"))
+        .expect("the bare run wrote what its fork raised");
+    assert_eq!(
+        bare_warnings, "[]",
+        "a single-threaded fork raises nothing on this interpreter, or the \
+         comparison below would be about something else"
+    );
+
+    let fixture = Fixture::new("forker", FORKS_WHEN_TOLD);
+    let mut debuggee = launch(&fixture);
+    let mut seen = Children::default();
+    match debuggee.dispatch(
+        bpd_core::Addressed::unnamed(Request::Run {
+            deadline: Some(Duration::from_millis(50)),
+        }),
+        &mut seen,
+    ) {
+        Ok(Response::Ran(Running::StillRunning { .. })) => {}
+        other => panic!("the program waits for the test, and the run answered {other:?}"),
+    }
+
+    // asked with nothing held, so the agent answers on a thread of its own —
+    // which is then a thread of the process, and has to be off it for the fork
+    debuggee
+        .threads(Duration::ZERO)
+        .expect("a running program can be asked what its threads are doing");
+
+    std::fs::write(fixture.directory().join("go"), "x").expect("the debuggee was told to go");
+    match debuggee.dispatch(
+        bpd_core::Addressed::unnamed(Request::Wait {
+            deadline: Some(LONG_ENOUGH),
+        }),
+        &mut seen,
+    ) {
+        Ok(Response::Ran(Running::Exited { status, .. })) => {
+            assert!(status.success(), "{status}");
+        }
+        other => panic!("the program did not end: {other:?}"),
+    }
+
+    let under_bpd = std::fs::read_to_string(fixture.directory().join("warnings"))
+        .expect("the debugged run wrote what its fork raised");
+    assert_eq!(
+        under_bpd, bare_warnings,
+        "the program recorded a different set of warnings for its own fork \
+         under bpd than without it. the thread the agent answered a running \
+         program on was still on the process when it forked"
+    );
+}
+
+#[test]
+fn a_fork_that_lands_while_a_running_program_is_being_answered_waits_for_the_answer() {
+    // the census sleeps between its two samples with the interpreter let go,
+    // so for the whole of its settle an answer is **in flight** on the agent's
+    // own thread. the program forks in the middle of it. the fork has to wait
+    // for that answer — the thread cannot be joined until it has one — and the
+    // forking thread holds the GIL the answer needs for its second sample. a
+    // stand-down that kept the GIL here would deadlock the program
+    assert!(FORKS_WHEN_TOLD.contains(WATCHDOG));
+    let settle = Duration::from_millis(1500);
+
+    let fixture = Fixture::new("forker", FORKS_WHEN_TOLD);
+    let mut debuggee = launch(&fixture);
+    let mut seen = Children::default();
+    match debuggee.dispatch(
+        bpd_core::Addressed::unnamed(Request::Run {
+            deadline: Some(Duration::from_millis(50)),
+        }),
+        &mut seen,
+    ) {
+        Ok(Response::Ran(Running::StillRunning { .. })) => {}
+        other => panic!("the program waits for the test, and the run answered {other:?}"),
+    }
+
+    // told to fork a fifth of the way into the settle, from a thread of the
+    // test's own, because the census holds this one until it is answered
+    let go = fixture.directory().join("go");
+    let teller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::write(go, "x").expect("the debuggee was told to go");
+    });
+    let census = debuggee
+        .threads(settle)
+        .expect("the census was answered across the fork rather than deadlocking it");
+    teller
+        .join()
+        .expect("the test's own thread told the program to go");
+    assert_eq!(census.settle, settle);
+
+    match debuggee.dispatch(
+        bpd_core::Addressed::unnamed(Request::Wait {
+            deadline: Some(LONG_ENOUGH),
+        }),
+        &mut seen,
+    ) {
+        Ok(Response::Ran(Running::Exited { status, .. })) => {
+            assert!(status.success(), "{status}");
+        }
+        other => panic!("the program did not end: {other:?}"),
+    }
+
+    // and the fork it waited for is still one the program cannot tell from a
+    // bare one: the answering thread was joined before it, not counted by it
+    let under_bpd = std::fs::read_to_string(fixture.directory().join("warnings"))
+        .expect("the debugged run wrote what its fork raised");
+    assert_eq!(
+        under_bpd, "[]",
+        "the program is single-threaded, and its fork raised warnings under bpd. \
+         the thread the agent answers a running program on was on the process \
+         when it forked"
+    );
+}

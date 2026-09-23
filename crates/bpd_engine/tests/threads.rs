@@ -894,3 +894,99 @@ fn a_program_that_ends_with_a_thread_still_held_says_so_rather_than_looking_like
     to_exit(&mut debuggee);
     expect(&fixture, "worker_done");
 }
+
+/// a program with two threads of its own, both running, both waiting on the
+/// test rather than on each other
+const BOTH_RUNNING: &str = r#"
+def worker():
+    announce("worker")
+    wait_for("stop")
+    touch("worker_done")
+
+
+announce("main")
+threading.Thread(target=worker).start()
+wait_for("stop")
+touch("main_done")
+"#;
+
+#[test]
+fn a_running_program_is_asked_what_its_threads_are_doing_without_being_stopped() {
+    // the census is about the threads bpd is **not** holding, so a program with
+    // nothing held is the case it is most for — and it was the one case that
+    // could not be asked. the agent answers it on a thread of its own now
+    let source = format!("{PRELUDE}{BOTH_RUNNING}");
+    let fixture = Fixture::new("both_running", &source);
+
+    let mut debuggee = launch(&fixture);
+    // let it go with nothing set, and wait only long enough to know it is past
+    // its first statement: both threads announce themselves and then park
+    match debuggee
+        .dispatch(
+            bpd_core::Addressed::unnamed(bpd_core::Request::Run {
+                deadline: Some(Duration::from_millis(50)),
+            }),
+            &mut bpd_test::reporting::Unreported,
+        )
+        .expect("the debuggee was resumed")
+    {
+        bpd_core::Response::Ran(Running::StillRunning { .. }) => {}
+        other => panic!("both threads wait on a file, and the run answered {other:?}"),
+    }
+    expect(&fixture, "ident_worker");
+
+    let census = debuggee
+        .threads(SETTLE)
+        .expect("a running program can be asked what its threads are doing");
+    assert_eq!(
+        census.mode,
+        Mode::NonStop,
+        "nothing was held and nothing was stopped, so this is a sample of a \
+         program that was running throughout"
+    );
+
+    for name in ["main", "worker"] {
+        let thread = ident(&fixture, name);
+        let state = census
+            .threads
+            .iter()
+            .find(|state| state.thread == thread)
+            .unwrap_or_else(|| panic!("the census left out the {name} thread: {census:?}"));
+        assert_eq!(
+            state.held, None,
+            "nothing is held, so no thread of the program is"
+        );
+    }
+
+    // and the thread the agent answered **on** is not one of the program's. it
+    // has no python frame of its own, so `sys._current_frames` never names it —
+    // a census that counted the instrument as part of what it measures would be
+    // reporting a thread the program does not have
+    let announced: Vec<u64> = ["main", "worker"]
+        .iter()
+        .map(|name| ident(&fixture, name))
+        .collect();
+    let strangers: Vec<u64> = census
+        .threads
+        .iter()
+        .map(|state| state.thread)
+        .filter(|thread| !announced.contains(thread))
+        .collect();
+    assert!(
+        strangers.is_empty(),
+        "the census named {strangers:?}, which the program did not announce. \
+         the thread the agent answers a running program on is the debugger's \
+         and is not a thread of the program"
+    );
+
+    tell(&fixture, "stop");
+    expect(&fixture, "worker_done");
+    expect(&fixture, "main_done");
+    match debuggee
+        .wait(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was waited on")
+    {
+        Running::Exited { status, .. } => assert!(status.success()),
+        other => panic!("nothing was set, and it answered {other:?}"),
+    }
+}

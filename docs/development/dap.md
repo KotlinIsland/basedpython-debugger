@@ -634,18 +634,38 @@ is not something a debugger may get wrong quietly
 
 ## how the session runs
 
-everything the agent answers, it answers on a thread it is **holding**. that one
-fact shapes the whole adapter:
+a frame can only be read on the thread it belongs to, while that thread is held.
+what is about the **process** — the breakpoints, the exception filters, the
+threads, the code of a file, the trail, the ui's ring — is answered whether or
+not anything is held. that split shapes the adapter:
 
-- the main thread owns the session. when nothing is held it is blocked waiting
-    for the program, which is where a `stopped` event comes from
+- the main thread owns the session. when nothing is held it waits for the
+    program in slices of `WAIT_SLICE`, which is where a `stopped` event comes
+    from — and **between** slices it answers whatever the client has already
+    sent. `threads`, `setBreakpoints`, `setExceptionBreakpoints` and the
+    process-wide `bpd/` extensions reach the agent there and are answered on a
+    thread of its own while the program runs; `stackTrace`, `variables`,
+    `evaluate` and the rest of what is read off a frame are refused at once,
+    naming what to do, rather than waiting for a stop that may never come
 - a reader thread owns the client's input and an interrupt handle. `pause`,
-    `disconnect` and `terminate` are the three things a *running* program can be
-    asked, and the reader answers them without going through the session
-- everything else that arrives while the program is running is queued and
-    answered when it next stops. that is the model rather than a shortcut: the
-    agent cannot bind a breakpoint or read a frame without a python thread to do
-    it on. **to change breakpoints in a program that is running, pause it first**
+    `disconnect` and `terminate` are answered there without going through the
+    session at all, because each of them has to reach a program the session
+    may be in the middle of waiting on
+
+the order matters to a real client. intellij sends `threads` before anything
+else and sends nothing more until it is answered — including the `pause` a
+person has just clicked. an adapter that left `threads` for the next stop left
+the editor unable to pause a program that had no reason to stop.
+`a_running_program_is_answered_about_itself_without_being_stopped` asks
+`threads`, `bpd/trail` and `setBreakpoints` of a program that never stops on its
+own, and requires the breakpoint to be hit
+
+an answer reaches the client within a slice of arriving — the adapter looks at
+the client between waits rather than during one — so what a running program
+costs to ask is a slice of latency at most, and what it costs the **program**
+is the time the agent's thread holds the interpreter: about a tenth of a
+millisecond for a breakpoint set or a trail read on a busy loop, measured.
+see [threads](threads.md)
 
 a second thread stopping while a first is held arrives on the connection rather
 than as the answer to anything, so the adapter compares what the session is

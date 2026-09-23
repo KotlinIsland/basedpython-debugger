@@ -401,11 +401,15 @@ the stop it causes — and two breakpoints in one request may not share an id,
 because that would hand the client a single answer for two questions with no way
 to tell which it belonged to
 
-a request is only answered while a thread is held. the agent runs the
-interpreter's own api on a thread it is holding and at no other time, so asking a
-program with nothing held to bind something would be a request answered whenever
-it next happened to stop — which is not an answer, and waiting for it looks
-exactly like a hang. the engine refuses instead
+a request is answered whether or not a thread is held. the breakpoint table is
+the **process's** rather than one thread's, so with a thread held that thread
+binds it, and with nothing held the agent binds it on a thread of its own while
+the program goes on running — the same function either way, so a breakpoint
+binds identically whether or not the program happened to be stopped. a running
+program was once refused here, and what that cost was the whole session: an
+editor that could not set a breakpoint in a program that had not stopped had no
+way to make it stop. what a set costs a running program, and how the agent's
+thread is kept off a fork, is on the [threads](threads.md) page
 
 ## what it costs
 

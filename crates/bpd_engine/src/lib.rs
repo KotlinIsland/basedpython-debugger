@@ -302,15 +302,19 @@ pub enum Error {
 
     /// a request that has to be waited for was sent on an [`Interrupt`]
     ///
-    /// an interrupt reaches a program that is **running**, and everything the
-    /// agent answers is answered on a thread it is already holding. so there is
-    /// exactly one request it can carry, and the rest are refused here rather
-    /// than written into a socket nobody will answer them on
+    /// an interrupt is written while **another** thread may be inside a wait on
+    /// the same session, reading its connection. an answer to anything sent
+    /// this way would arrive in that wait, which is not waiting for it. a pause
+    /// is the one request whose answer nobody waits for — its acknowledgement
+    /// is an event the wait already reports — so it is the one an interrupt
+    /// carries, and the rest are refused here rather than answered into the
+    /// wrong hands
     #[error(
-        "{request} cannot be sent to a running program: the agent answers a \
-         request on a thread it is holding, and there is none. a pause is the \
-         only request that reaches a running program, because arming one is how \
-         a thread becomes held"
+        "{request} cannot be sent on an interrupt: its answer would arrive in \
+         whatever wait is reading the session, which is not waiting for it. a \
+         pause is the only request an interrupt carries. send {request} to the \
+         session between waits — what is about the process is answered while \
+         the program runs, and what is about a frame needs a thread held"
     )]
     NotAnInterrupt {
         /// what was asked for
@@ -798,13 +802,13 @@ fn write_to(writing: &mut Writing, request: &FromEngine) -> Result<()> {
 
 /// a handle that reaches a debuggee while the engine is waiting for it
 ///
-/// every other request the engine makes is answered on a thread the agent is
-/// already holding, so it is sent and waited for on the same thread. the two
-/// things that are about a program which is **running** cannot be: a
-/// [`Request::Pause`] exists precisely for one, and ending it is the answer
-/// when it will not stop on its own. a front end blocked waiting for the
-/// program is exactly the front end that needs both, so they are on a handle of
-/// their own that can be moved to another thread
+/// every other request the engine makes is sent and waited for on the same
+/// thread, between waits for the program. the two that have to reach a program
+/// **while** some thread is inside such a wait cannot be: a [`Request::Pause`]
+/// is what ends a wait on a program that has no reason to stop, and ending the
+/// program is the answer when it will not pause either. a front end blocked
+/// waiting for the program is exactly the front end that needs both, so they
+/// are on a handle of their own that can be moved to another thread
 ///
 /// a pause is *delivered*, not asked: the acknowledgement comes back on the
 /// reading end, where the wait is, and reaches the caller through
@@ -833,9 +837,9 @@ impl Interrupt {
     /// send a request without waiting for the answer to it
     ///
     /// only [`Request::Pause`] can be sent this way, and anything else is
-    /// refused rather than written: the agent answers on a thread it is
-    /// holding, so a request sent to a running program would be answered
-    /// whenever it next happened to stop
+    /// refused rather than written: its answer would arrive in the wait another
+    /// thread is inside, which is not waiting for it. see
+    /// [`Error::NotAnInterrupt`]
     pub fn deliver(&mut self, request: &Request) -> Result<()> {
         match request {
             Request::Pause => write_to(
@@ -852,10 +856,11 @@ impl Interrupt {
 
     /// end the debuggee, whatever it is doing
     ///
-    /// the last resort rather than a resume: a program that is running cannot
-    /// be asked anything, so a client that wants to be finished with one has
-    /// nothing else to say. the agent is not told, because there is no thread
-    /// of the debuggee's waiting to be told
+    /// the last resort rather than a resume: a program that will neither stop
+    /// nor pause cannot be asked for anything about a frame, so a client that
+    /// wants to be finished with one has nothing else to say. the agent is not
+    /// told: the process is killed, and nothing it could be told first would
+    /// change what that does
     ///
     /// # errors
     ///

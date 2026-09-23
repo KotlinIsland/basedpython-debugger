@@ -101,16 +101,20 @@ pub enum Error {
         id: u32,
     },
 
-    /// something was asked of a debuggee with no thread held
+    /// something about a **thread** was asked of a debuggee with no thread held
     ///
-    /// the agent answers on a thread it is holding, so a request made to a
-    /// program with nothing held would be answered whenever it next happened to
-    /// stop. that is not an answer, and waiting for it looks exactly like a hang
+    /// a frame belongs to a thread, and a thread that is running has no frame
+    /// that stays still long enough to be read — so a stack, a variable or an
+    /// expression needs one held. what is about the **process** rather than
+    /// about one of its threads is answered while the program runs, on a thread
+    /// of the agent's own, and never reaches this
     #[error(
         "no thread of the debuggee is held, so it cannot be asked for {wanted}. \
-         the agent runs the interpreter's own api on a thread it is holding and \
-         at no other time — hold one first, by letting the program run to a \
-         breakpoint or by pausing it"
+         that is read off a frame, and a frame belongs to a thread that has to \
+         be standing still — hold one first, by letting the program run to a \
+         breakpoint or by pausing it. what is about the whole process — its \
+         breakpoints, its threads, its code, where it has been — is answered \
+         while it runs"
     )]
     NotStopped {
         /// what was asked for

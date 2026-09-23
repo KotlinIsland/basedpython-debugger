@@ -40,10 +40,11 @@ impl Tool {
 const DEADLINE: &str = "how long to wait for the program to stop, in \
     milliseconds. when it passes the answer is `outcome: \"timed_out\"`: the \
     program is **still running**, no thread is held, and bpd reports nothing \
-    about where it is — everything the agent inside the debuggee answers, it \
-    answers on a thread it is holding, so a running program cannot even be \
-    asked what its threads are doing. `wait` keeps waiting; `pause` holds the \
-    next thread that reaches a line";
+    about where it is. what is read off a frame — a stack, a variable, an \
+    expression — needs a held thread and is refused until there is one; what \
+    is about the process — `threads`, `set_breakpoints`, `trail`, \
+    `replace_code` — is answered while it runs. `wait` keeps waiting; `pause` \
+    holds the next thread that reaches a line";
 
 /// what every control tool says about the frames it returns
 const FRAMES: &str = "how many frames of the resulting stop to return, counting \
@@ -374,9 +375,9 @@ pub fn tools() -> Vec<Tool> {
                 every code object it was armed in, and for one that did not bind, \
                 why. a breakpoint is never reported as set unless there is a code \
                 object and an offset behind it.\n\n\
-                only while a thread is held. the agent binds a breakpoint on a \
-                python thread it is holding, so a running program has to be \
-                paused first."
+                answered whether or not a thread is held: the breakpoint table \
+                is the process's, so a program that is running binds it on a \
+                thread of the agent's own and goes on running."
                 .to_string(),
             schema: object(
                 serde_json::json!({
@@ -1037,8 +1038,9 @@ pub fn tools() -> Vec<Tool> {
             name: "recompositions",
             title: "why the ui recomposed",
             description: "why the program's ui recomposed: the trace ring the \
-                basedpython-ui runtime keeps, read off its own storage on a held \
-                thread without running any of the program.\n\n\
+                basedpython-ui runtime keeps, read off its own storage without \
+                running any of the program — on a held thread, or on one of the \
+                agent's own while the program runs.\n\n\
                 every record says what happened and why — a scope that ran, with \
                 every cause it ran for (a state cell written, at which site, from \
                 what to what; an argument that changed; its parent running; a \
@@ -1246,7 +1248,8 @@ pub fn tools() -> Vec<Tool> {
                 for a lock, so bpd cannot say a thread is waiting for one \
                 another thread holds — a thread blocked in `sock.recv` and a \
                 thread piled up behind a lock look identical from here.\n\n\
-                it needs a held thread to answer on, like everything else."
+                it is answered whether or not a thread is held — a program that \
+                is running is the case it is most for."
                 .to_string(),
             schema: object(
                 serde_json::json!({
@@ -1427,8 +1430,9 @@ pub fn tools() -> Vec<Tool> {
             name: "terminate",
             title: "end the debuggee",
             description: "kill the program. the last resort rather than a \
-                resume: a program that is running cannot be asked anything, so \
-                this is what is left when it will not stop on its own. the \
+                resume: a program that is running cannot be asked for a stack \
+                or a value, so this is what is left when it will not stop on its \
+                own and will not pause. the \
                 session has no program after it."
                 .to_string(),
             schema: object(serde_json::json!({ "session": integer(SESSION) }), &[]),

@@ -19,17 +19,20 @@
 //!
 //! ## the two threads, and why there are two
 //!
-//! everything the agent answers, it answers on a thread it is holding. so while
-//! the program is running the session is blocked reading its connection, and
-//! the one thing a client may reasonably ask then — stop it, or end it — cannot
-//! go down that path. a reader thread owns the client's input and an
-//! [`Interrupt`]; the main thread owns the session. `pause`, `disconnect` and
-//! `terminate` are answered by the reader; everything else is queued and
-//! answered when the program next stops
+//! while the program is running the main thread waits for it in slices, and
+//! between slices it answers whatever the client has already sent: what is
+//! about the process — `threads`, the breakpoints, the process-wide `bpd/`
+//! extensions — is answered by the agent on a thread of its own while the
+//! program runs, and what is read off a frame is refused at once, naming what
+//! to do. the two things that must reach the program **during** a slice — stop
+//! it, or end it — cannot wait for one to end, so a reader thread owns the
+//! client's input and an [`Interrupt`], and answers `pause`, `disconnect` and
+//! `terminate` itself; everything else is queued for the main thread
 //!
-//! a request that arrives while the program is running therefore waits for the
-//! next stop. that is the model rather than a shortcut: the agent cannot bind a
-//! breakpoint or read a frame without a python thread to do it on
+//! an editor depends on that order. intellij asks `threads` before anything
+//! else and waits for the answer — including before it sends the `pause` a
+//! person has just clicked — so an adapter that left `threads` for the next
+//! stop was one whose program could not be paused from the editor at all
 //!
 //! ## the configuration phase, which happens before there is a program
 //!
@@ -69,7 +72,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -359,13 +362,16 @@ struct Adapter {
     reachable: Reachable,
     /// what the client said it could do, in `initialize`
     client: ClientCan,
-    /// what arrived while the adapter was waiting for a client's answer
+    /// what the client has sent and has not been answered yet, oldest first
     ///
-    /// the answer to a `runInTerminal` is the one thing the adapter waits for
-    /// on the client's own channel, and anything else that arrives in that
-    /// window is set aside rather than dropped or answered out of turn. a
-    /// client is entitled to send whatever it likes; what it is not entitled to
-    /// is having it silently disappear
+    /// two things put a message here. the answer to a `runInTerminal` is the
+    /// one thing the adapter waits for on the client's own channel, and
+    /// anything else that arrives in that window is set aside rather than
+    /// dropped or answered out of turn. and a message the run loop found waiting
+    /// is parked here while it looks at the program first, so a turn that ends
+    /// early still leaves it where it will be answered. a client is entitled to
+    /// send whatever it likes; what it is not entitled to is having it silently
+    /// disappear
     deferred: Vec<Incoming>,
     session: Option<Box<dyn Session>>,
     configuration: Option<Configuration>,
@@ -481,6 +487,33 @@ impl Adapter {
                 return Ok(Ended::WithTheClient);
             }
 
+            // whether the client has already said something. it is taken off
+            // the channel into `deferred` rather than into hand, so that
+            // whatever ends this turn early — a disconnect, the program going —
+            // leaves it where `refuse_what_is_left` will find and answer it
+            let pending = if self.deferred.is_empty() {
+                match commands.try_recv() {
+                    Ok(message) => {
+                        self.deferred.push(message);
+                        true
+                    }
+                    Err(TryRecvError::Empty) => false,
+                    Err(TryRecvError::Disconnected) => return Ok(Ended::WithTheClient),
+                }
+            } else {
+                true
+            };
+
+            // a running program is looked at on **every** turn, and a client
+            // with something to say is answered on every turn too. the wait is
+            // a whole slice when the client is quiet and takes no time at all
+            // when it is not: a client that answered only at a stop would
+            // leave an editor that asks `threads` before it sends a pause
+            // unable to send the pause, and one that answered the client
+            // before ever looking at the program would never report a stop, or
+            // the program's end, to a client that asks one question after
+            // another — which is how this was found, measured, with the program
+            // long exited and the client told nothing
             if self.waiting() {
                 let mut events = Events::new(
                     &self.output,
@@ -495,7 +528,7 @@ impl Adapter {
                         // thread, so it names no session and is answered by the
                         // only one this connection serves
                         Addressed::unnamed(Request::Wait {
-                            deadline: Some(WAIT_SLICE),
+                            deadline: Some(if pending { Duration::ZERO } else { WAIT_SLICE }),
                         }),
                         &mut events,
                     );
@@ -522,12 +555,11 @@ impl Adapter {
                     }
                 };
                 self.finish(outcome)?;
-                continue;
+                if !pending {
+                    continue;
+                }
             }
 
-            // what was set aside while the adapter waited for a client's answer
-            // to a reverse request, in the order it arrived. before the channel,
-            // because a message that arrived first is answered first
             let message = if !self.deferred.is_empty() {
                 self.deferred.remove(0)
             } else if self.session.is_some() && !self.exited {

@@ -183,8 +183,10 @@ be a breakpoint the client never saw fire
 
 ## pausing
 
-`pause` is the one request made to a program with **nothing held**, and it is
-the one that cannot say in advance which thread it will get
+`pause` is the one request that exists to hold a thread of a program with
+**nothing held** — what is about the process is answered while it runs, see
+[threads](threads.md) — and it is the one that cannot say in advance which
+thread it will get
 
 nothing in cpython suspends a thread. what there is, is an event: `LINE` armed
 for the whole program, plus `restart_events()`, so that a thread going round a

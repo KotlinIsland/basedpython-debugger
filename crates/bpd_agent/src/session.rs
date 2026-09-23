@@ -116,20 +116,6 @@ fn answer(
     request: FromEngine,
 ) -> PyResult<Answered> {
     match request {
-        FromEngine::SetBreakpoints { breakpoints } => {
-            let resolved = breakpoints::apply(python, breakpoints)?;
-            attach::send(&FromAgent::BreakpointsResolved { resolved });
-        }
-        FromEngine::MapSources { files } => {
-            let files = sources::install(files);
-            attach::send(&FromAgent::SourcesMapped { files });
-        }
-        FromEngine::SetExceptionBreakpoints { raised, uncaught } => {
-            exceptions::watch(raised, uncaught);
-            refresh_events(python)?;
-            attach::send(&FromAgent::ExceptionBreakpointsSet { raised, uncaught });
-        }
-        FromEngine::DebugChildren { on } => debug_children(python, on)?,
         FromEngine::Stack { top, .. } => {
             let answer = stopped.stack(top)?;
             attach::send(&answer);
@@ -142,24 +128,8 @@ fn answer(
             let answer = stopped.variables(frame, scope, detail)?;
             attach::send(&answer);
         }
-        FromEngine::Record { on, depth } => {
-            let (held, dropped) = crate::trail::record(python, on, depth)?;
-            // the instrumentation follows the mode: recording arms `LINE` for
-            // the whole program, and stopping takes it off again
-            refresh_events(python)?;
-            attach::send(&FromAgent::Recording { on, held, dropped });
-        }
-        FromEngine::Trail => {
-            attach::send(&FromAgent::Trailed {
-                trail: crate::trail::taken(python)?,
-            });
-        }
         FromEngine::Retainers { frame, expression } => {
             attach::send(&stopped.retainers(frame, &expression)?);
-        }
-        FromEngine::Recompositions => attach::send(&crate::ui_trace::read(python)?),
-        FromEngine::WatchRecompositions { on } => {
-            attach::send(&crate::ui_trace::watch(on)?);
         }
         FromEngine::Facts {
             frame,
@@ -198,12 +168,72 @@ fn answer(
         FromEngine::RestartFrame { frame, again } => {
             return restarting(python, stopped, ticket, thread, frame, again);
         }
+        FromEngine::StopTheWorld { settle_ms, .. } => {
+            let answer = stop_the_world(python, thread, ticket.stop, settle_ms)?;
+            attach::send(&answer);
+        }
+        // a held thread is attached and already here, so it answers these
+        // itself rather than handing them to [`crate::unheld`]'s thread. what
+        // it runs is the same function that thread runs — a second
+        // implementation is how a breakpoint comes to bind differently
+        // depending on whether the program happened to be stopped
+        request if request.about_the_process().is_some() => {
+            about_the_process(python, request)?;
+        }
+        // the router only ever sends what a held thread can answer, so
+        // anything else is a bug in the routing rather than in the engine
+        other => unreachable!("a held thread was handed {other:?} to answer"),
+    }
+
+    Ok(Answered::StayHeld)
+}
+
+/// answer one request that is about the process rather than about a thread
+///
+/// which requests those are is
+/// [`bpd_protocol::message::FromEngine::about_the_process`]'s to say, in the
+/// one place both the engine and the agent read it from. none of them touches a
+/// frame, which is what lets [`crate::unheld`] run this on a thread of the
+/// agent's own while the program is running and nothing is held
+pub(crate) fn about_the_process(python: Python<'_>, request: FromEngine) -> PyResult<()> {
+    match request {
+        FromEngine::SetBreakpoints { breakpoints } => {
+            let resolved = breakpoints::apply(python, breakpoints)?;
+            attach::send(&FromAgent::BreakpointsResolved { resolved });
+        }
+        FromEngine::MapSources { files } => {
+            let files = sources::install(files);
+            attach::send(&FromAgent::SourcesMapped { files });
+        }
+        FromEngine::SetExceptionBreakpoints { raised, uncaught } => {
+            exceptions::watch(raised, uncaught);
+            refresh_events(python)?;
+            attach::send(&FromAgent::ExceptionBreakpointsSet { raised, uncaught });
+        }
+        FromEngine::DebugChildren { on } => debug_children(python, on)?,
+        FromEngine::Record { on, depth } => {
+            let (held, dropped) = crate::trail::record(python, on, depth)?;
+            // the instrumentation follows the mode: recording arms `LINE` for
+            // the whole program, and stopping takes it off again
+            refresh_events(python)?;
+            attach::send(&FromAgent::Recording { on, held, dropped });
+        }
+        FromEngine::Trail => {
+            attach::send(&FromAgent::Trailed {
+                trail: crate::trail::taken(python)?,
+            });
+        }
+        FromEngine::Recompositions => attach::send(&crate::ui_trace::read(python)?),
+        FromEngine::WatchRecompositions { on } => {
+            attach::send(&crate::ui_trace::watch(on)?);
+        }
         // the source map and the breakpoint set travel **on** this request when
         // a basedpython build was staged again, rather than arriving as two of
         // their own. the order between them and the code is the debugger's, and
-        // it only holds inside one message: the GIL is held for the whole of one
-        // and no longer, so a sequence of three would leave windows in which
-        // another thread reports a location through the wrong table
+        // it only holds inside one message: the interpreter is attached for the
+        // whole of one and no longer, so a sequence of three would leave
+        // windows in which another thread reports a location through the wrong
+        // table
         FromEngine::ReplaceCode {
             files,
             even_under_a_live_frame,
@@ -216,16 +246,12 @@ fn answer(
             let answer = threads::census(python, Duration::from_millis(settle_ms.into()))?;
             attach::send(&answer);
         }
-        FromEngine::StopTheWorld { settle_ms, .. } => {
-            let answer = stop_the_world(python, thread, ticket.stop, settle_ms)?;
-            attach::send(&answer);
-        }
-        // the router only ever sends what a held thread can answer, so
-        // anything else is a bug in the routing rather than in the engine
-        other => unreachable!("a held thread was handed {other:?} to answer"),
+        // the caller asked [`FromEngine::about_the_process`] first, and that is
+        // the list this match is the other half of
+        other => unreachable!("{other:?} is not a request about the process"),
     }
 
-    Ok(Answered::StayHeld)
+    Ok(())
 }
 
 /// what answering a request left the held thread to do

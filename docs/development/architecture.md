@@ -295,10 +295,10 @@ it
 the split is what the failure *describes*:
 
 - a failure that describes the **program** is a `bpd_core::Error` — an
-    interpreter that cannot be debugged, a request made with nothing held, a
-    request that names one stop while several are, a refusal the agent gave a
-    reason for. a front end that depends on `bpd_core` alone still has to render
-    every one of them
+    interpreter that cannot be debugged, a request about a frame made with
+    nothing held, a request that names one stop while several are, a refusal the
+    agent gave a reason for. a front end that depends on `bpd_core` alone still
+    has to render every one of them
 - a failure that describes **`bpd`'s own machinery** is a `bpd_engine::Error` —
     a socket, a spawned process, an agent artifact that could not be found, an
     interval that does not fit the wire. the engine carries a core error

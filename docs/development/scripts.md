@@ -92,19 +92,17 @@ inside a script the engine owns the whole composition, including the removal:
     wall clock budget arriving nowhere
 - every record of a `run_to` says what became of the breakpoint, as `disarmed`
 
-the one case it cannot simply be taken off is a script whose clock ran out with
-the program still running: the agent binds breakpoints on a python thread it is
-holding, and there is none. so bpd **arms a pause** — which holds the next
-thread that reaches a line — takes the breakpoint off on whichever thread that
-holds, and the transcript says it did (`paused_to_remove`, with where the pause
-landed). that is bpd touching the program without being asked, and it is
-reported rather than hidden
+a script whose clock ran out with the program still running takes the
+breakpoint off the **running** program: the breakpoint table is the process's,
+so it is answered with nothing held, and the program is left running exactly as
+the script found it (`removed`). it used to be paused for this — nothing could be
+asked of a program with nothing held then — and that was bpd holding a thread
+nobody had asked it to hold
 
-if no thread reaches a line even then, the answer is `still_armed`: it names the
-file, the line, the id, and the threads that were running python, and says to
-wait for the program to stop and set the breakpoints again. **the pause is still
-armed too**, and it says that as well. leaving something behind quietly is the
-only outcome that is not available
+the answer is `still_armed` only when the session refuses the set outright: it
+names the file, the line, the id and the refusal, and says to set the
+breakpoints again. leaving something behind quietly is the only outcome that is
+not available
 
 ### a predicate is python, and it has to be a `bool`
 

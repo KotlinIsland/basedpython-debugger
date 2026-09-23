@@ -123,6 +123,21 @@ the idle machine's, and not re-measured — see [the machine](#the-machine):
 | hit fifty times              | 180 (179–185) | 10384 (10203–10529) |
 | never hit                    | 165 (164–167) | 10285 (10060–10465) |
 
+and `lines` once more, under `bpd` alone, with the client asking the running
+program what its threads are doing back to back for the whole of its run — the
+cost of answering a program with nothing held, which [threads](threads.md)
+describes. this row was taken with the same client and the same reading of the
+program's own clock but **outside criterion**, five rounds interleaved with the
+two it is compared against, on the busy machine at a load average of 60 to 90:
+no interpreter here had debugpy, and the benchmark will not run without it
+
+|                            | bare                | bpd                 | bpd, asked its threads throughout |
+| -------------------------- | ------------------- | ------------------- | --------------------------------- |
+| `lines`, program's own run | 175.8 (171.4–217.7) | 176.4 (171.2–199.6) | 179.5 (176.1–239.3)               |
+
+two censuses were answered per run. the difference is inside the bare row's own
+spread
+
 ## attaching, in milliseconds
 
 three rows measured back to back in one run, so the machine's state cancels out

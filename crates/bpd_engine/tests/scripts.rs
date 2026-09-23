@@ -19,7 +19,7 @@ use std::path::Path;
 use bpd_core::python::Capabilities;
 use bpd_core::{
     Answered, Bound, Budget, Content, Did, Disarmed, Evaluated, Halted, Landed, Outcome, Predicate,
-    Record, Running, Script, Step, StopReason, Transcript,
+    Record, Running, Script, Step, Transcript,
 };
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
@@ -511,8 +511,9 @@ fn a_run_to_that_runs_out_of_clock_leaves_nothing_armed() {
     let mut debuggee = launch(&fixture);
 
     // a line the program reaches only after millions of loop passes, and a
-    // clock far too short to get there. the script's own breakpoint cannot be
-    // taken off a program that is running, so the engine holds a thread to do it
+    // clock far too short to get there. the script's own breakpoint is taken
+    // off the program while it runs — the breakpoint table is the process's —
+    // and the program is left running, as the script found it
     let transcript = debuggee
         .the_script(Script {
             steps: vec![
@@ -550,19 +551,22 @@ fn a_run_to_that_runs_out_of_clock_leaves_nothing_armed() {
             transcript.records[0]
         )
     };
-    let Disarmed::PausedToRemove { at } = disarmed else {
-        panic!("the script's own breakpoint was left armed: {disarmed}")
-    };
+    assert_eq!(
+        *disarmed,
+        Disarmed::Removed,
+        "the script's own breakpoint was left armed: {disarmed}"
+    );
     assert!(
-        matches!(at.why, StopReason::Paused { .. }),
-        "the thread it took the breakpoint off on is one it paused: {at:?}"
+        debuggee.held().is_empty(),
+        "nothing was held to take it off: bpd holds no thread nobody asked it \
+         to, and the program is still running"
     );
 
-    // the proof that nothing is armed: let the program go, and it runs to its
+    // the proof that nothing is armed: wait for the program, and it runs to its
     // end without stopping at the line the script was running to
     match debuggee
-        .run(&mut bpd_test::reporting::Unreported)
-        .expect("the program was resumed")
+        .wait(&mut bpd_test::reporting::Unreported)
+        .expect("the program was waited for")
     {
         Running::Exited { status, .. } => assert!(status.success(), "it exited with {status}"),
         other => panic!("the script left something armed and the program stopped at it: {other:?}"),

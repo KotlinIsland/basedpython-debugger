@@ -137,12 +137,15 @@ pub enum Refusal {
         held: Vec<u64>,
     },
 
-    /// the request needs a held thread and there is none
+    /// the interpreter is finalizing, so nothing of the program can be read
     ///
-    /// the agent runs the interpreter's own api to answer this, and it can only
-    /// do that on a thread it is holding. asking a program with nothing held
-    /// would be a request answered whenever it next happened to stop
-    NothingHeld {
+    /// a request about the process is answered on a thread of the agent's own
+    /// while the program runs, and that thread has to attach to the
+    /// interpreter. one that has begun to finalize never lets a thread attach
+    /// again — so the request is refused here rather than waited on, and the
+    /// engine learns of it from an answer rather than from the connection
+    /// closing under it
+    ProgramEnding {
         /// what was asked for
         wanted: String,
     },
@@ -358,12 +361,11 @@ impl std::fmt::Display for Refusal {
                  {held:?}. a stop holds one thread and leaves the rest running, \
                  so a thread bpd never stopped is one it cannot resume"
             ),
-            Self::NothingHeld { wanted } => write!(
+            Self::ProgramEnding { wanted } => write!(
                 formatter,
-                "no thread is held, so there is nothing to answer {wanted} on. \
-                 the agent runs the interpreter's own api on a thread it is \
-                 holding and at no other time — hold one first, by letting the \
-                 program run to a breakpoint or by pausing it"
+                "the program is ending, so {wanted} cannot be read. the \
+                 interpreter has begun to finalize and no thread can attach to \
+                 it again — what this session has left to report is the exit"
             ),
             Self::NoFork { platform } => write!(
                 formatter,
@@ -522,15 +524,15 @@ mod tests {
                 vec!["thread 11 is not held", "[12]"],
             ),
             (
-                Refusal::NothingHeld {
+                Refusal::ProgramEnding {
                     wanted: "the breakpoints to resolve".to_string(),
                 },
                 vec![
-                    "no thread is held",
+                    "the program is ending",
                     "the breakpoints to resolve",
-                    // a cause without an action leaves an agent to work out
-                    // that it has to hold something first
-                    "pausing it",
+                    // a cause without an outcome leaves a reader to wonder
+                    // what to do about it, and there is nothing to do
+                    "the exit",
                 ],
             ),
             (

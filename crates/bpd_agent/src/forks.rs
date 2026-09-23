@@ -110,7 +110,8 @@
 //! `crates/bpd/tests/launch_parity.rs` compares what the program itself
 //! recorded, both ways. what the window costs is
 //! [`crate::attach::stand_down`]'s to state. the thread that writes the trace
-//! stream of [`crate::stream`] is a second thread of the agent's, and it goes
+//! stream of [`crate::stream`] is a second thread of the agent's and the one
+//! that answers a running program in [`crate::unheld`] is a third, and both go
 //! the same way in the same handlers
 //!
 //! the three handlers compose in one direction only, and it is the one cpython
@@ -125,7 +126,7 @@ use bpd_core::StopReason;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 
-use crate::{attach, events, frames, session, spawns, stream};
+use crate::{attach, events, frames, session, spawns, stream, unheld};
 
 /// whether a forked child opens a session of its own
 ///
@@ -181,20 +182,29 @@ pub(crate) fn install(python: Python<'_>) -> PyResult<()> {
 
 /// this process is about to fork, and the agent must not be a thread on it
 ///
-/// the GIL is held for the whole of this and is deliberately **not** given
-/// back. everything it reaches is a socket write and a `pthread_join`, none of
-/// which needs the interpreter — so releasing it would only add a wait for the
-/// GIL inside `os.fork()` that a bare run of the program does not have, and a
-/// C extension holding the GIL somewhere else would then be able to hold the
-/// program's fork up
+/// the GIL is held for the whole of the first two and is deliberately **not**
+/// given back. everything they reach is a socket write and a `pthread_join`,
+/// none of which needs the interpreter — so releasing it would only add a wait
+/// for the GIL inside `os.fork()` that a bare run of the program does not have,
+/// and a C extension holding the GIL somewhere else would then be able to hold
+/// the program's fork up
+///
+/// the third is the one that can need it back, and only when an answer about
+/// the process is in flight on it: that thread is waiting for the GIL this one
+/// holds, and joining it without letting go would be the debugger deadlocking
+/// a program that forked at the wrong moment. see
+/// [`crate::unheld::stand_down`], which keeps the GIL whenever nothing is in
+/// flight — which is every fork of a session that never asked anything of a
+/// running program
 ///
 /// see [`crate::attach::stand_down`] for what a request arriving between here
 /// and [`forked`] does, which is: wait in the kernel's receive buffer and be
 /// read afterwards
 #[pyfunction]
-fn going_to_fork() {
+fn going_to_fork(python: Python<'_>) {
     attach::stand_down();
     stream::stand_down();
+    unheld::stand_down(python);
 }
 
 /// the fork is over in the process that did it, and the agent is a thread again
@@ -206,6 +216,7 @@ fn going_to_fork() {
 fn forked() {
     attach::resume_reading();
     stream::resume_writing();
+    unheld::resume_answering();
 }
 
 /// this process is the forked child, and it is not being debugged

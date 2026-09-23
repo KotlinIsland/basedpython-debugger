@@ -495,14 +495,6 @@ pub struct Record {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "did", rename_all = "snake_case")]
 #[non_exhaustive]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "a `run_to` says more about itself than a `log` does, and that is \
-              the vocabulary rather than an oversight. boxing a field of a \
-              report type to even them up would put an indirection in the thing \
-              a reader reads, to save bytes on a value that is built once per \
-              step and moved once into a vector"
-)]
 pub enum Did {
     /// a step of the script's thread
     Stepped {
@@ -676,9 +668,9 @@ pub enum Landed {
 
     /// the script's wall clock budget passed and the program is still running
     ///
-    /// not a stop, and it carries no location of any kind. everything the agent
-    /// inside the debuggee answers, it answers on a thread it is holding, so a
-    /// program with nothing held cannot be asked where it is
+    /// not a stop, and it carries no location of any kind: a location is read
+    /// off a frame, and a frame belongs to a thread that has to be held to be
+    /// read
     StillRunning,
 }
 
@@ -724,23 +716,14 @@ pub enum Disarmed {
     /// the program ended, so there is nothing left for it to be armed in
     ProgramEnded,
 
-    /// the program was still running, so bpd held a thread to take it off
+    /// it is **still armed**, because the session would not take the set back
     ///
-    /// a one-shot breakpoint cannot be removed from a program that is running,
-    /// and leaving one armed would leave the program stopping at a place nobody
-    /// asked about. so a pause is armed — which holds the next thread that
-    /// reaches a line — and this is where it landed
-    PausedToRemove {
-        /// where the pause landed
-        at: At,
-    },
-
-    /// it is **still armed**, and so is the pause bpd armed to take it off
-    ///
-    /// the program was running, and no thread reached a line to be held at, so
-    /// there was nothing to take it off on. this is the one case a `run_to`
-    /// leaves something behind, and it says so rather than leaving it to be
-    /// found
+    /// the breakpoint table is the process's, so it is put back whether or not
+    /// a thread is held — a script whose clock ran out with the program still
+    /// running takes it off the running program, and leaves the program
+    /// running. what is left is the agent refusing the set, and this is the one
+    /// case a `run_to` leaves something behind: it says so, with the refusal,
+    /// rather than leaving it to be found
     StillArmed {
         /// the file it is armed on
         file: PathBuf,
@@ -748,11 +731,8 @@ pub enum Disarmed {
         line: u32,
         /// the id it is armed under
         id: u32,
-        /// the threads that were running python when the pause was armed
-        ///
-        /// empty means nothing was going to reach it: every thread was parked
-        /// in a C call, where there is no monitoring event to hold one at
-        running: Vec<u64>,
+        /// why the set could not be put back, as the session said it
+        refused: String,
     },
 }
 
@@ -771,35 +751,18 @@ impl std::fmt::Display for Disarmed {
                 "the program ended, so there is nothing left for the script's own \
                  breakpoint to be armed in",
             ),
-            Self::PausedToRemove { at } => write!(
-                formatter,
-                "the program was still running, so bpd paused it to take its own \
-                 breakpoint back off — thread {} is now held at stop {}",
-                at.thread, at.stop
-            ),
             Self::StillArmed {
                 file,
                 line,
                 id,
-                running,
+                refused,
             } => write!(
                 formatter,
                 "the script's own breakpoint is **still armed** on `{}` line \
-                 {line}, as id {id}, and so is the pause bpd armed to take it \
-                 off. the program was running and no thread reached a line in \
-                 time — {}. wait for the program to stop, then set the \
-                 breakpoints again to take id {id} off",
-                file.display(),
-                if running.is_empty() {
-                    "every thread was parked in a C call, where there is no \
-                     monitoring event to hold one at"
-                        .to_string()
-                } else {
-                    format!(
-                        "{} thread(s) were running python: {running:?}",
-                        running.len()
-                    )
-                }
+                 {line}, as id {id}: putting the client's breakpoints back was \
+                 refused — {refused}. set the breakpoints again to take id {id} \
+                 off",
+                file.display()
             ),
         }
     }

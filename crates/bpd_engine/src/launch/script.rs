@@ -428,11 +428,7 @@ impl Run<'_> {
         // if the module it names is imported, which is exactly why the set has
         // to go back to what the client asked for before this returns
         if let Binding::Unbound { reason } = &binding {
-            let disarmed = if self.put_the_set_back()? {
-                Disarmed::NothingArmed
-            } else {
-                self.still_armed(file, line, Vec::new())
-            };
+            let disarmed = self.put_the_set_back(file, line, Disarmed::NothingArmed)?;
             return Ok(self.then(
                 path,
                 from,
@@ -480,12 +476,12 @@ impl Run<'_> {
 
     /// take the script's own breakpoint back off, whatever the program is doing
     ///
-    /// the one case it cannot be taken off is a program that is still running,
-    /// because the agent binds breakpoints on a python thread it is holding and
-    /// there is none. a pause is what turns one into something that can be
-    /// asked, and it is armed here rather than left to the client — a script
-    /// that ended mid-`run_to` must not leave the program armed with something
-    /// nobody asked for
+    /// the breakpoint table is the process's, so the client's set goes back
+    /// whether a thread is held or the script's clock ran out with the program
+    /// still running — and a running program is left running. it used to be
+    /// paused for this, because nothing could be asked of a program with nothing
+    /// held, and that was bpd holding a thread of the program nobody had asked
+    /// it to hold
     fn disarm(&mut self, landed: &Landed, file: &Path, line: u32) -> Result<Disarmed> {
         // both endings, because there is nothing left to take a breakpoint off
         // either way. which of the two it is says whether bpd could read the
@@ -493,51 +489,18 @@ impl Run<'_> {
         if matches!(landed, Landed::Exited { .. } | Landed::Ended) {
             return Ok(Disarmed::ProgramEnded);
         }
-        if !self.debuggee.attached[self.at].held.is_empty() {
-            return Ok(if self.put_the_set_back()? {
-                Disarmed::Removed
-            } else {
-                self.still_armed(file, line, Vec::new())
-            });
-        }
-
-        let running = match self.debuggee.attached[self.at].arm_pause(self.reporting) {
-            Ok(running) => running,
-            // nothing can be asked of a program with nothing held, and a pause
-            // that could not even be armed leaves the breakpoint exactly where
-            // it is. that is what has to be said
-            Err(Error::Session(_)) => Vec::new(),
-            Err(other) => return Err(other),
-        };
-        // the same bound the script itself had: a program that reaches no line
-        // in that long is one no pause reaches in it either
-        let waited = self
-            .debuggee
-            .wait_for(self.at, Some(self.budget.wall()), self.reporting)?;
-        self.keep_rebindings(&waited);
-        match waited {
-            Running::Stopped { stop, .. } => {
-                let at = At::of(&stop);
-                Ok(if self.put_the_set_back()? {
-                    Disarmed::PausedToRemove { at }
-                } else {
-                    self.still_armed(file, line, running)
-                })
-            }
-            _ => Ok(self.still_armed(file, line, running)),
-        }
+        self.put_the_set_back(file, line, Disarmed::Removed)
     }
 
-    /// set the breakpoints back to what the client last asked for
+    /// set the breakpoints back to what the client last asked for, and say
+    /// `done` when they went — or that the script's own is still armed, with
+    /// why the session would not take them
     ///
     /// the resolutions it answers with are not carried into the transcript:
     /// this set is the client's own, it was resolved when the client asked for
-    /// it, and anything that *changed* about it while the program ran arrived
-    /// as a rebinding on the wait that saw it
-    ///
-    /// `false` means the session would not take it, which is only possible with
-    /// nothing held — and then the script's own breakpoint is still in the set
-    fn put_the_set_back(&mut self) -> Result<bool> {
+    /// it, and anything that changed about it while the program ran arrived as
+    /// a rebinding on the wait that saw it
+    fn put_the_set_back(&mut self, file: &Path, line: u32, done: Disarmed) -> Result<Disarmed> {
         let set = self.debuggee.attached[self.at].armed.clone();
         match self.debuggee.attached[self.at].resolve_breakpoints(set, self.reporting) {
             Ok(resolved) => {
@@ -545,19 +508,15 @@ impl Run<'_> {
                     resolved.len() == self.debuggee.attached[self.at].armed.len(),
                     "the set that went back is the one the client asked for"
                 );
-                Ok(true)
+                Ok(done)
             }
-            Err(Error::Session(_)) => Ok(false),
+            Err(Error::Session(refused)) => Ok(Disarmed::StillArmed {
+                file: file.to_path_buf(),
+                line,
+                id: self.own,
+                refused: refused.to_string(),
+            }),
             Err(other) => Err(other),
-        }
-    }
-
-    fn still_armed(&self, file: &Path, line: u32, running: Vec<u64>) -> Disarmed {
-        Disarmed::StillArmed {
-            file: file.to_path_buf(),
-            line,
-            id: self.own,
-            running,
         }
     }
 
