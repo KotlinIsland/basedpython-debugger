@@ -107,13 +107,20 @@ fn the_extension_contributes_exactly_the_attributes_the_adapter_reads() {
     // agent, so the setting cannot be honoured. vs code sends it itself for
     // "run without debugging" — it is not something a `launch.json` is meant to
     // hold — and the adapter refuses it by name with what to do instead
-    let justified: BTreeSet<String> = [String::from("noDebug")].into();
+    //
+    // `understands` is the other, and for a different reason: it is a client
+    // saying which of bpd's own events it reads as data, which is a fact about
+    // the client and not a setting a person has. this extension reads none of
+    // them, and a `launch.json` that named one would switch off the console
+    // narration of something nothing is then listening to
+    let justified: BTreeSet<String> = [String::from("noDebug"), String::from("understands")].into();
 
     let read = fields_of::<Configuration>();
     assert!(
         read.is_superset(&justified),
-        "`noDebug` is excused here because the adapter reads it and refuses it. \
-         it no longer reads it, so the excuse is stale"
+        "`noDebug` and `understands` are excused here because the adapter reads them. \
+         it no longer reads {:?}, so the excuse is stale",
+        &justified - &read,
     );
 
     assert_eq!(&read - &justified, declared(&launch()));
@@ -175,6 +182,7 @@ fn every_contributed_attribute_declares_the_type_and_the_default_the_adapter_use
             "stopOnEntry" => flag(schema, adapter.stop_on_entry),
             "stopTheWorld" => flag(schema, adapter.stop_the_world),
             "debugChildren" => flag(schema, adapter.debug_children),
+            "watchRecompositions" => flag(schema, adapter.watch_recompositions),
             "threadSettleMs" => whole(schema, adapter.thread_settle_ms),
             "variables" => {
                 assert_eq!(schema["type"], "object");

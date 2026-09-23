@@ -415,7 +415,25 @@ the adapter can be configured with no program in it:
     so the basedpython plugin opened every session on a warning and its stream
     began at the first stop.
     `a_recomposition_watch_asked_for_before_the_launch_sees_the_first_record`
-    asks for it in the intellij order and reads the program's first record
+    asks for it in the intellij order and reads the program's first record.
+    holding works only for a client that can get the request in ahead of the
+    `launch`, so the launch can say it too — `watchRecompositions`, and
+    `understands` for what `bpd/understands` names — and a launch is the one
+    request that cannot arrive after the program has started, because it is
+    what starts it. the intellij platform offers no hook ahead of its own
+    configuration from 263.5701, and the basedpython plugin sends both this
+    way. `a_launch_that_says_what_the_client_reads_needs_nothing_sent_ahead_of_it`
+    sends nothing else and reads the first record as data
+- a `.by` breakpoint is held like any other, and is the case where holding
+    matters most: the map that translates it is read at launch, out of the
+    directory beside the program, so before the launch there is no map at all.
+    the answer is `pending`, never `NoSourceMap` — a map that has not been read
+    yet is not a map that will never arrive — and in `by run`'s shape it waits
+    once more, for the runner to import the module, still `pending`.
+    `a_by_breakpoint_set_before_the_launch_binds_through_the_map_and_hits` and
+    `a_by_breakpoint_in_a_module_the_runner_imports_is_held_until_the_import_binds_it`
+    pin both waits. no client publishes a map, and none has to get anything to
+    the adapter ahead of its breakpoints
 - `configurationDone` before `launch` is **recorded**, and the program is let go
     at whichever of the two arrives second — `Adapter::begin`, reached from both
 

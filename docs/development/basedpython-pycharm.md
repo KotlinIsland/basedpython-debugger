@@ -44,12 +44,13 @@ two things it does that a debugpy path does not:
     which line of which file has none. prelude is not attributed to whichever
     `.by` line was nearest, and neither is the runner shim underneath the build
 - [why the ui recomposed](basedpython-ui.md): the plugin reads the runtime's
-    trace ring with `bpd/recompositions`, turns the stream on with
-    `bpd/watchRecompositions` — held when it arrives before `launch`, answered
-    `pending`, and turned on before the program runs a line, so the first frame
-    is seen — and consumes the `bpd/recomposition` event, which
-    it names in `bpd/understands`, so `bpd`'s console narration of every run
-    stays off for it. every field is read by name, `dropped_before` on the event
+    trace ring with `bpd/recompositions`, turns the stream on from the start
+    with `watchRecompositions` in the `launch` — so it is on before the program
+    runs a line and the first frame is seen, with nothing that has to reach the
+    adapter ahead of the launch — and consumes the `bpd/recomposition` event,
+    which it names in the launch's `understands`, so `bpd`'s console narration
+    of every run stays off for it. mid-session it turns the stream on and off
+    with `bpd/watchRecompositions`. every field is read by name, `dropped_before` on the event
     is where the stream's gaps are, and an unknown `record` or `cause` value
     costs that record and never the session
 

@@ -97,6 +97,11 @@
                 "default": false,
                 "description": "debug a child the program forks. off by default: a debugged fork stops at the line that forked, and a second debug session is started for it through the startDebugging reverse request. it needs bpd to be reachable by a second connection, which means `bpd dap --listen`. a child that was exec'd rather than forked is a fresh interpreter and is reported rather than debugged"
               },
+              "watchRecompositions": {
+                "type": "boolean",
+                "default": false,
+                "description": "turn on basedpython-ui's recomposition stream before the program runs a line, so the first frame is seen. off by default: with it on, every composable that runs is reported on the debug console with why it ran"
+              },
               "console": {
                 "type": "string",
                 "enum": [

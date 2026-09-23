@@ -134,6 +134,14 @@ fn every_attribute_the_plugin_leaves_out_is_one_it_could_not_honour() {
         // nothing is silent about it either way: bpd refuses a `console` it
         // cannot honour at `launch`, by name
         String::from("console"),
+        // what the client reads of bpd's own events, and the ui stream the one
+        // named most often carries. this plugin handles none of bpd's custom
+        // events and has no view of the stream — it sends neither
+        // `bpd/understands` nor `bpd/watchRecompositions` either — so naming an
+        // event would switch off the narration nothing else replaces, and a
+        // watch would be a stream only the console reads
+        String::from("understands"),
+        String::from("watchRecompositions"),
     ]
     .into();
 

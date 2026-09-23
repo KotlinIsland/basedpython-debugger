@@ -79,10 +79,12 @@ over_each_transport!(
     a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so,
     a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set,
     a_by_breakpoint_set_before_the_launch_binds_through_the_map_and_hits,
+    a_by_breakpoint_in_a_module_the_runner_imports_is_held_until_the_import_binds_it,
     an_editor_can_run_a_whole_investigation_the_way_an_agent_can,
     an_editor_can_ask_what_changed_between_two_stops,
     an_editor_can_ask_why_the_ui_recomposed_and_be_handed_the_next_record_as_data,
     a_recomposition_watch_asked_for_before_the_launch_sees_the_first_record,
+    a_launch_that_says_what_the_client_reads_needs_nothing_sent_ahead_of_it,
     an_editor_can_move_where_the_program_carries_on_from,
     a_frame_a_thread_is_executing_is_restarted_where_it_stands,
     a_frame_below_the_top_is_restarted_by_forcing_the_frames_above_it_out,
@@ -684,6 +686,105 @@ fn a_by_breakpoint_set_before_the_launch_binds_through_the_map_and_hits(transpor
     client.finish();
 }
 
+fn a_by_breakpoint_in_a_module_the_runner_imports_is_held_until_the_import_binds_it(
+    transport: Transport,
+) {
+    // the shape `by run` really has, which the scenario above does not: the
+    // program is a runner in the build directory, and the `.by` a person set a
+    // breakpoint in is a module that runner **imports**. so a breakpoint the
+    // intellij platform sends before the launch waits twice — for the map, which
+    // is read at launch out of the directory beside the runner, and then for
+    // the import, which is the first moment there is code for it to be on
+    //
+    // neither wait may be answered as a refusal. between the two the answer is
+    // still `pending`, and the import is what binds it, told to the client as a
+    // `breakpoint` event in `.by` terms
+    let build = Build::demo();
+    let runner = build.root().join("runner.py");
+    std::fs::write(
+        &runner,
+        format!(
+            "import sys\n\
+             sys.path.insert(0, {root:?})\n\
+             import demo\n",
+            root = build.root().display().to_string(),
+        ),
+    )
+    .expect("the runner is written");
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.event("initialized");
+
+    let line = line_of(SOURCE, "print(answer)");
+    let set = client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": build.source },
+            "breakpoints": [ { "line": line } ],
+        }),
+    );
+    assert_eq!(
+        set["success"], true,
+        "the `.by` breakpoint was refused: {set}"
+    );
+    assert_eq!(set["body"]["breakpoints"][0]["reason"], "pending", "{set}");
+
+    client.request("configurationDone", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({
+            "program": runner,
+            "python": interpreter(),
+            "args": [build.marks],
+        }),
+    );
+
+    // every correction up to the one the import makes says it is still
+    // waiting, and none of them gives up on it
+    let bound = loop {
+        let changed = client.event("breakpoint");
+        let breakpoint = changed["body"]["breakpoint"].clone();
+        if breakpoint["verified"] == true {
+            break breakpoint;
+        }
+        assert_eq!(
+            breakpoint["reason"], "pending",
+            "a `.by` line in a module that is not imported yet will still bind: {changed}"
+        );
+    };
+    assert_eq!(bound["line"], line, "{bound}");
+    assert_eq!(
+        bound["source"]["path"],
+        build.source.display().to_string(),
+        "{bound}"
+    );
+
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    let thread = stopped["body"]["threadId"].clone();
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    let top = &stack["body"]["stackFrames"][0];
+    assert_eq!(top["line"], line, "{stack}");
+    assert_eq!(
+        top["source"]["path"],
+        build.source.display().to_string(),
+        "{stack}"
+    );
+    assert_eq!(
+        build.answer(),
+        "",
+        "the program ran past the line it was supposed to be held on"
+    );
+
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    client.event("exited");
+    client.event("terminated");
+    assert_eq!(build.answer().trim(), "5", "the program did not finish");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
 fn an_editor_can_run_a_whole_investigation_the_way_an_agent_can(transport: Transport) {
     // the parity rule, at the far end: a debug script is a capability of the
     // core, so it is not an agent's alone. DAP has no request of its own for one
@@ -1016,6 +1117,54 @@ fn a_recomposition_watch_asked_for_before_the_launch_sees_the_first_record(trans
             .output()
             .contains("bpd is forwarding every trace record"),
         "the watch going on is said where it always is: {}",
+        client.output()
+    );
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+fn a_launch_that_says_what_the_client_reads_needs_nothing_sent_ahead_of_it(transport: Transport) {
+    // the scenario above works only because the client got two requests of its
+    // own in ahead of the `launch`. a client whose platform decides when its
+    // requests go out cannot promise that — the intellij platform's hook for
+    // "ahead of the configuration" is gone from 263.5701 — and one that misses
+    // loses the first frame, or has it narrated on the console as prose while
+    // it waits for data
+    //
+    // so both can be said in the launch itself, which cannot arrive after the
+    // program has started because it is what starts it. nothing else is sent:
+    // no `bpd/understands`, no `bpd/watchRecompositions`
+    let fixture = Fixture::new("said_at_launch", bpd_test::basedpython_ui::RECOMPOSING);
+    bpd_test::basedpython_ui::stand_in(&fixture);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+    let launched = client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "understands": ["bpd/recomposition"],
+            "watchRecompositions": true,
+        }),
+    );
+    assert_eq!(launched["success"], true, "{launched}");
+
+    // the first record the program writes arrives, as data
+    let first = client.event("bpd/recomposition");
+    assert_eq!(first["body"]["record"]["record"], "write", "{first}");
+    let run = client.event("bpd/recomposition");
+    assert_eq!(run["body"]["record"]["record"], "run", "{run}");
+    assert_eq!(run["body"]["record"]["name"], "Counter", "{run}");
+    client.event("exited");
+    client.event("terminated");
+    // and only as data. a record narrated as well would be the console
+    // repeating what the client already has
+    assert!(
+        !client.output().contains("`Counter`"),
+        "the record went out as data and was narrated too: {}",
         client.output()
     );
     client.request("disconnect", &serde_json::json!({}));

@@ -835,11 +835,34 @@ impl Adapter {
         self.session = Some(session);
         // the configuration is the one the reverse request handed the client,
         // which carries no program: this connection did not start anything
-        self.configuration = Some(serde_json::from_value(message.arguments.clone()).map_err(
-            |error| Aborted::Refuse(format!("the attach configuration is not usable: {error}")),
-        )?);
+        let configuration: Configuration = serde_json::from_value(message.arguments.clone())
+            .map_err(|error| {
+                Aborted::Refuse(format!("the attach configuration is not usable: {error}"))
+            })?;
+        self.hear_the_configuration(&configuration);
+        self.configuration = Some(configuration);
         self.respond(message, None)?;
         self.take_up_the_program()
+    }
+
+    /// take what a `launch` or `attach` says about the client rather than the
+    /// program: the events it reads, and whether it wants the ui stream
+    ///
+    /// before the session is taken up, because that is where what was held is
+    /// armed — and the watch said here is armed there with the one a
+    /// `bpd/watchRecompositions` held, before the program runs a line. what the
+    /// client reads only ever grows here: a `bpd/understands` it sent earlier
+    /// is not taken back by a launch that names less
+    fn hear_the_configuration(&mut self, configuration: &Configuration) {
+        self.client
+            .understands
+            .extend(configuration.understands.iter().cloned());
+        // only ever on. the default is off, and a launch that did not mention
+        // the stream is not a launch that asked for it off: it must not undo a
+        // watch the client asked for with its own request
+        if configuration.watch_recompositions {
+            self.watch = Some(true);
+        }
     }
 
     fn launch(
@@ -869,6 +892,8 @@ impl Adapter {
                     .to_string(),
             ));
         }
+
+        self.hear_the_configuration(&configuration);
 
         let started = match configuration.console.kind() {
             Some(kind) => self.start_in_a_terminal(launcher, &configuration, kind, commands)?,

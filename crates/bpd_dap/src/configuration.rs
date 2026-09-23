@@ -109,6 +109,29 @@ pub struct Configuration {
     #[serde(default)]
     pub console: Console,
 
+    /// the custom events this client reads, by the names `bpd/understands`
+    /// takes
+    ///
+    /// the same list as that request's `events`, added to whatever it has
+    /// already said, and in effect before the program runs a line. what a client
+    /// names here is sent to it as data and not narrated on the console, and a
+    /// launch is the one request that cannot arrive after the program has
+    /// started: a client that sends its own `bpd/understands` instead has to
+    /// get it in ahead of the `launch`, and one whose platform decides when its
+    /// requests go out cannot promise that
+    #[serde(default)]
+    pub understands: Vec<String>,
+
+    /// turn the recomposition stream on before the program runs a line
+    ///
+    /// what `bpd/watchRecompositions` with `on` asks, said in the request that
+    /// starts the program, so that the first frame is seen whichever order the
+    /// client sends the rest in. off by default, which is the agent's own: on,
+    /// it reads a record off every audit event the ui runtime raises. a client
+    /// turns it off, or on again, with the request
+    #[serde(default)]
+    pub watch_recompositions: bool,
+
     /// run the program without debugging it
     ///
     /// refused rather than ignored. bpd has no path that launches a program
@@ -200,6 +223,10 @@ mod tests {
         assert_eq!(configuration.console.kind(), None);
         assert_eq!(configuration.variables, Detail::default());
         assert_eq!(configuration.settle(), Threads::SETTLE);
+        // a client that says nothing about bpd's own events is narrated at,
+        // and the ui stream is not read off a program nobody asked it of
+        assert!(configuration.understands.is_empty());
+        assert!(!configuration.watch_recompositions);
     }
 
     #[test]
