@@ -425,15 +425,17 @@ the adapter can be configured with no program in it:
     way. `a_launch_that_says_what_the_client_reads_needs_nothing_sent_ahead_of_it`
     sends nothing else and reads the first record as data
 - a `.by` breakpoint is held like any other, and is the case where holding
-    matters most: the map that translates it is read at launch, out of the
-    directory beside the program, so before the launch there is no map at all.
-    the answer is `pending`, never `NoSourceMap` — a map that has not been read
-    yet is not a map that will never arrive — and in `by run`'s shape it waits
-    once more, for the runner to import the module, still `pending`.
-    `a_by_breakpoint_set_before_the_launch_binds_through_the_map_and_hits` and
-    `a_by_breakpoint_in_a_module_the_runner_imports_is_held_until_the_import_binds_it`
-    pin both waits. no client publishes a map, and none has to get anything to
-    the adapter ahead of its breakpoints
+    matters most: the map that says the program is a basedpython build is read
+    at launch, out of the directory beside the program, so before the launch
+    there is no map at all. the answer is `pending`, never `NoSourceMap` — a map
+    that has not been read yet is not a map that will never arrive — and it
+    waits once more, for `by run`'s runner to compile the module as its `.by`,
+    still `pending`.
+    `a_by_breakpoint_set_before_the_launch_binds_where_by_run_compiles_the_by_and_hits`
+    and `a_by_breakpoint_in_a_module_by_run_imports_is_held_until_the_import_binds_it`
+    pin both waits, through the runner captured from `by run`. no client
+    publishes a map, and none has to get anything to the adapter ahead of its
+    breakpoints
 - `configurationDone` before `launch` is **recorded**, and the program is let go
     at whichever of the two arrives second — `Adapter::begin`, reached from both
 
@@ -484,19 +486,18 @@ second one — to stop waiting, or to mark it differently
 
 which refusals are temporary is a fact about the refusal, so it is asked of
 `bpd_core::Unbound::will_bind_later` rather than decided here. the adapter used
-to match the one variant it knew about, and that was right for every breakpoint
-the source mapping did not touch. a translated one does not arrive in that
-shape: `Unbound::InGeneratedPython` says **where bpd looked**, with the ordinary
-reason one level down — so a `.by` breakpoint waiting for its module reported
-`failed` while the identical `.py` breakpoint in the same session reported
-`pending`, and both bound on import a moment later
+to match the one variant it knew about, and a `.by` breakpoint whose reason
+arrived in a shape it did not know reported `failed` while the identical `.py`
+breakpoint in the same session reported `pending`, and both bound on import a
+moment later
 
 the message beside it was already right, and said so in words — *"it will bind
 if that file is imported later"* — next to a code that said the opposite. that
 is the shape of the bug worth remembering: the adapter reproduced a judgement
 the core owns instead of asking for it
 
-`Unmappable` inside the same wrapper stays `failed`, because the map could not
+`Unmappable` stays `failed`: the `.by` is not part of the build that is running,
+and nothing arriving later changes that
 place the line at all and nothing arriving later changes that
 
 ### a refused `launch` ends the session

@@ -482,9 +482,10 @@ against a real `by run` before anything was built on them. see
     crate, against thirty a location can leave through. mapping some of those
     thirty and not the others would report two different files for one location,
     which is worse than consistently reporting the interpreter's
-- a mapped frame carries the generated location beside the `.by` one, for the
-    reason `BoundInSource` does, and `Facet::GeneratedLocation` makes both front
-    ends carry it — DAP on the frame's `source.origin`, MCP on the frame itself
+- a mapped frame — one of a module running as the generated python — carries
+    the generated location beside the `.by` one, and `Facet::GeneratedLocation`
+    makes both front ends carry it — DAP on the frame's `source.origin`, MCP on
+    the frame itself
 - a generated line the map marks `None` keeps the generated location and says so.
     it is prelude, no `.by` line is behind it, and reporting one would be the
     debugger writing a line the user never did. `_by_runner.py` and everything
@@ -495,11 +496,13 @@ against a real `by run` before anything was built on them. see
     `sys.path` are still what a bare run of the same generated python has, and
     `a_program_in_a_basedpython_build_cannot_tell_the_map_reached_the_debuggee`
     is the proof rather than the claim
-- `Binding::BoundInSource` carries **both** locations, and a `.by` line the
-    transpiler generated nothing for moves forward the way a non-executable line
-    does — with the answer read back out of the map, so what it says about where
-    it went is true. a generated line the map marks `None` is refused rather than
-    attributed to whichever `.by` line was nearest
+- a `.by` breakpoint binds on the `.by` itself — an ordinary `Binding::Bound` —
+    because `by run` compiles each staged module as its `.by`, and a `.by` line
+    with no code on it moves forward the way a non-executable line does. code
+    the transpiler wrote on its own is the runner's line `0`, which no breakpoint
+    lands on, rather than being attributed to whichever `.by` line was nearest.
+    the replacement code of a hot reload is compiled the same way, so a `.by`
+    breakpoint binds in it too
 - bpd **finds** the map rather than being told where it is: a program running out
     of a directory holding `_by_sourcemap.py` is running that build. so the
     command line, a DAP client and an MCP client all reach it without any of them

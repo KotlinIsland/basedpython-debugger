@@ -507,9 +507,7 @@ pub fn replaced(replacement: &Replacements) -> serde_json::Value {
     // resolved every breakpoint of the build against the code that is running now
     for one in &replacement.rebound {
         notes.push(match &one.binding {
-            Binding::Bound { line, .. }
-            | Binding::BoundInTemplate { line, .. }
-            | Binding::BoundInSource { line, .. } => {
+            Binding::Bound { line, .. } | Binding::BoundInTemplate { line, .. } => {
                 format!(
                     "breakpoint {} is bound to line {line} now — it was armed on a code object \
                      nothing will execute any more, and was resolved again against the code \
@@ -643,31 +641,6 @@ pub fn breakpoints(
                         rendered["moved"] = format!(
                             "line {} renders no django node, so this moved to \
                              line {line}, which does",
-                            asked.map_or(0, |asked| asked.line)
-                        )
-                        .into();
-                    }
-                }
-                Binding::BoundInSource {
-                    line,
-                    generated,
-                    sites,
-                    evaluation,
-                } => {
-                    rendered["bound"] = true.into();
-                    rendered["line"] = (*line).into();
-                    rendered["evaluation"] = serde_json::json!(evaluation);
-                    rendered["sites"] = serde_json::json!(sites);
-                    // both locations, because both are real and neither stands
-                    // in for the other. `line` is the `.by` the agent reading
-                    // this asked about; `generated` is where the interpreter
-                    // will really stop, and it is what makes the code objects
-                    // in `sites` mean anything
-                    rendered["generated"] = serde_json::json!(generated);
-                    if asked.is_some_and(|asked| asked.line != *line) {
-                        rendered["moved"] = format!(
-                            "line {} generated nothing bpd can stop on, so this moved to line \
-                             {line}, which did",
                             asked.map_or(0, |asked| asked.line)
                         )
                         .into();
@@ -1058,25 +1031,19 @@ mod tests {
     }
 
     #[test]
-    fn a_by_breakpoint_is_rendered_with_both_of_its_locations() {
-        use bpd_core::source_map::Located;
-
-        // an agent reading this has one answer with two true locations in it.
-        // the `.by` line is the one it asked about; the generated location is
-        // what makes the code objects beside it mean anything
+    fn a_by_breakpoint_is_rendered_on_the_by_line_its_code_is_named_for() {
+        // `by run` compiles the build as its `.by` files, so the code objects
+        // beside a `.by` breakpoint are named after the `.by` and hold its lines.
+        // the answer is an ordinary binding, in the file the agent asked about
         let rendered = breakpoints(
             &[Resolved {
                 waiting_for: None,
                 id: 1,
-                binding: Binding::BoundInSource {
+                binding: Binding::Bound {
                     line: 7,
-                    generated: Located {
-                        file: std::path::PathBuf::from("/tmp/build/app.py"),
-                        line: 19,
-                    },
                     sites: vec![Site {
                         qualname: "main".to_string(),
-                        first_line: 12,
+                        first_line: 6,
                         offset: 4,
                     }],
                     evaluation: Evaluation::Always,
@@ -1091,8 +1058,6 @@ mod tests {
         assert_eq!(only["bound"], true);
         assert_eq!(only["line"], 7);
         assert_eq!(only["file"], "/src/app.by");
-        assert_eq!(only["generated"]["file"], "/tmp/build/app.py");
-        assert_eq!(only["generated"]["line"], 19);
         assert!(
             only["moved"].is_null(),
             "it bound on the line that was asked for: {only}"

@@ -273,8 +273,9 @@ bytes, and what this compiles is the generated python it always compiled
 
 staging one file of a build again rewrites `_by_sourcemap.py` beside the
 generated python. so the tables the session holds describe the tree it used to
-be, and every `.by` breakpoint is armed on a generated line that came out of
-them. both have to land before any `__code__` is assigned
+be — and the new code is compiled as its `.by` through the table, the way `by
+run` compiled the code it replaces, so it has to be the new one. the tables have
+to land before any `__code__` is assigned
 
 they land in **one message** because of what the agent is. it holds the GIL for
 the whole of one message and for no longer, so a debugger that sent the tables,
@@ -282,8 +283,8 @@ the breakpoints and the replacement as three would leave two windows in between 
 and in either of them another thread's logpoint is mapped through a table
 describing code it is not running. one message has no window in it
 
-the order inside it is: install the tables, translate and re-arm the whole
-breakpoint set, then replace. the order **outside** it is the reverse — the
+the order inside it is: install the tables, re-arm the whole breakpoint set,
+then replace. the order **outside** it is the reverse — the
 engine reads the new map first, because everything it sends depends on which
 tables they are, and adopts it last, because a refused replacement installs
 nothing and a session whose map had moved on while the process had not would

@@ -143,10 +143,10 @@ pub(crate) fn apply(
 /// replace the whole set and say only what the client has not been told
 ///
 /// what a **remap** arms the set with. the client did not ask for a breakpoint
-/// set here — it asked for a build's code to be replaced, and the set is being
-/// translated again because the table its generated lines came out of moved. so
-/// the answer is the same shape a rebinding has: the ones whose answer is not
-/// what the client was last told, and nothing about the ones that did not move
+/// set here — it asked for a build's code to be replaced, and the set is armed
+/// again because the tree it was sorted against was staged again. so the answer
+/// is the same shape a rebinding has: the ones whose answer is not what the
+/// client was last told, and nothing about the ones that did not move
 pub(crate) fn rearm(
     python: Python<'_>,
     requested: Vec<SourceBreakpoint>,

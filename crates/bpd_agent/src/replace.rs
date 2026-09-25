@@ -61,21 +61,30 @@
 //! answers, and it costs a pass over `gc.get_objects()` — asking about every
 //! file's code objects at once is the same pass
 //!
+//! a file of the build is named by its generated python, which is what is on
+//! disk to be compiled — and `by run` compiled it as the `.by` it came from, so
+//! the code it is compared against is registered under the `.by`, and the code
+//! that replaces it is compiled the same way, through [`crate::staged`]. a
+//! module a loader of the program's own compiled runs as the generated python,
+//! and is replaced as one
+//!
 //! staging a file of a basedpython build also rewrites `_by_sourcemap.py`, so
-//! the generated lines every `.by` breakpoint is armed on came out of a table
-//! that no longer describes the tree. a request may therefore carry a
-//! `Remapping`, and this module installs it — the tables, then the breakpoints,
-//! then the code, in that order and inside one message. **that ordering is why
-//! it is one message.** the agent answers with the GIL held and releases it when
-//! the answer goes out, so a debugger that sent three would leave two windows in
-//! which another thread's logpoint record is mapped through the table for code
-//! it is not running. nothing here decides that a map is trustworthy: it arrives
-//! as [`bpd_core::MappedFile`], which `bpd` could not have built without hashing
+//! the table the new code is compiled through, and the one every location of a
+//! module still running as generated python is reported through, is not the one
+//! that is installed. a request may therefore carry a `Remapping`, and this
+//! module installs it — the tables, then the breakpoints, then the code, in that
+//! order and inside one message. **that ordering is why it is one message.** the
+//! agent answers with the GIL held and releases it when the answer goes out, so a
+//! debugger that sent three would leave two windows in which another thread's
+//! logpoint record is mapped through the table for code it is not running.
+//! nothing here decides that a map is trustworthy: it arrives as
+//! [`bpd_core::MappedFile`], which `bpd` could not have built without hashing
 //! both files against disk first — see [`crate::sources`]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use bpd_core::source_map::MappedFile;
 use bpd_core::{
     Divergence, LiveFrame, Rebound, Remapped, Replaced, Replacement, Replacements, Resolved,
     StillRunning, Suspendable, Unreplaceable,
@@ -86,7 +95,7 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
 use crate::conditions::capture;
 use crate::files::{self, FileId};
-use crate::{breakpoints, code, events, sources, stops, world};
+use crate::{breakpoints, code, events, sources, staged, stops, world};
 
 /// `CO_OPTIMIZED` — the code object keeps its locals in compiler-assigned slots
 ///
@@ -136,9 +145,16 @@ pub(crate) fn replace(
     // even be planned has no `Prepared` and its refusals are only here
     let mut refusals: Vec<(PathBuf, Vec<Unreplaceable>)> = Vec::new();
 
+    // the tables the files are compiled through: the ones that arrive with the
+    // request when it carries them, because they describe the tree on disk now,
+    // and the installed ones when it does not
+    let tables = remap
+        .as_ref()
+        .map_or_else(sources::installed, |remap| remap.files.clone());
+
     for file in files {
         refusals.push((file.clone(), Vec::new()));
-        match prepare(python, file)? {
+        match prepare(python, file, &tables)? {
             Ok(one) => prepared.push(one),
             Err(because) => {
                 refusals
@@ -222,6 +238,7 @@ fn refuse_the_request(
 fn prepare<'py>(
     python: Python<'py>,
     file: &Path,
+    tables: &[MappedFile],
 ) -> PyResult<Result<Prepared<'py>, Vec<Unreplaceable>>> {
     let identity = match files::identify(file) {
         Ok(identity) => identity,
@@ -233,7 +250,23 @@ fn prepare<'py>(
         }
     };
 
-    let roots = match module_roots(python, &identity, file)? {
+    // generated python of a basedpython build, which `by run` compiled as the
+    // `.by` it was transpiled from: its code is registered under the `.by`, and
+    // what replaces it has to be compiled the same way — see [`crate::staged`].
+    // a module a loader of the program's own compiled instead runs as the
+    // generated python, and is registered under it like any other file
+    let staged = match sources::generating_among(tables, file) {
+        Some(table) => match files::identify(&table.source) {
+            Ok(source) if !code::units_for(python, &source)?.is_empty() => {
+                Some((table.clone(), source))
+            }
+            _ => None,
+        },
+        None => None,
+    };
+    let registered = staged.as_ref().map_or(&identity, |(_, source)| source);
+
+    let roots = match module_roots(python, registered, file)? {
         Ok(roots) => roots,
         Err(reason) => return Ok(Err(vec![reason])),
     };
@@ -251,7 +284,31 @@ fn prepare<'py>(
             }]));
         }
     };
-    let fresh = match compile(python, &bytes, &filename) {
+    let compiled = match &staged {
+        Some((table, _)) => {
+            // `bpd` hashed this `.by` against the table before the table was
+            // sent. what is read from it here is how wide each line is
+            let source = match std::fs::read(&table.source) {
+                Ok(source) => source,
+                Err(error) => {
+                    return Ok(Err(vec![Unreplaceable::NotAFile {
+                        file: table.source.clone(),
+                        reason: error.to_string(),
+                    }]));
+                }
+            };
+            staged::compile(
+                python,
+                &bytes,
+                &file.display().to_string(),
+                &filename,
+                table,
+                &source,
+            )
+        }
+        None => compile(python, &bytes, &filename),
+    };
+    let fresh = match compiled {
         Ok(fresh) => fresh,
         Err(error) => {
             return Ok(Err(vec![Unreplaceable::DoesNotCompile {
@@ -265,7 +322,7 @@ fn prepare<'py>(
     plan.compare(&roots, &fresh, Kind::Module)?;
     Ok(Ok(Prepared {
         file: file.to_path_buf(),
-        identity,
+        identity: registered.clone(),
         fresh,
         plan,
     }))
@@ -278,7 +335,7 @@ fn prepare<'py>(
 ///
 /// 1. **the tables**, so every location the process reports afterwards is read
 ///    through the map for the tree that is on disk now
-/// 2. **the breakpoints**, translated through those tables out of process and
+/// 2. **the breakpoints**, sorted against those tables out of process and
 ///    armed here. they are armed against the code that is still running, which
 ///    is a moment away from being replaced — and step 4 is what re-binds them
 /// 3. **the code**, one assignment to `function.__code__` per live holder

@@ -425,12 +425,12 @@ pub struct Remapping {
     /// two answers to one question
     pub files: Vec<bpd_core::MappedFile>,
 
-    /// the whole breakpoint set, translated through those tables
+    /// the whole breakpoint set, sorted against those tables
     ///
     /// the same value [`FromEngine::SetBreakpoints`] carries and it replaces the
     /// set for the same reason. it is the whole set rather than the breakpoints
-    /// of the files being replaced, because a table that moved moves every
-    /// breakpoint of the build
+    /// of the files being replaced, because a re-staged tree can hold a `.by` it
+    /// did not, or drop one
     pub breakpoints: Vec<SourceBreakpoint>,
 }
 

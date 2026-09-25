@@ -26,9 +26,18 @@ that everything downstream handles one shape, not two
 
 ### basedpython
 
-`.by` source transpiles to `.py`, and the interpreter runs the `.py`. a
-breakpoint in `.by` has to become a line in the generated python, and the answer
-about it has to become a line in `.by` again
+`.by` source transpiles to `.py`, and `by run` runs the `.py` — but not the way
+python's own loader would. its runner, `_by_runner.py`, compiles each module it
+staged **as the `.by` it came from**: the code object is named after the `.by`
+path, and every line in it is the `.by` line the generated line came from. a line
+the transpiler wrote on its own has no `.by` line and is line `0`. so the
+interpreter of a `.by` program is already running `.by` locations, and a
+breakpoint in `.by` is a breakpoint on a file the interpreter really compiles
+
+the one exception is a module a loader of the program's own stands in front of —
+pytest's assertion rewriting is the ordinary one — which the runner cannot compile
+this way and leaves as the generated python. that module is what the rest of the
+map is for: a location in it has to become a line in `.by` again
 
 the map is **produced by the transpiler**, not reconstructed afterwards. a
 lowering can move a statement, split one statement into several, or generate
@@ -138,41 +147,34 @@ update `bpd`, not an entry quietly skipped
 
 #### what a breakpoint answer looks like
 
-`Binding::BoundInSource` carries **both** locations rather than letting one stand
-in for the other:
+an ordinary `Binding::Bound`, on the `.by` line, with `sites` naming code objects
+of the `.by` — because `by run` compiled them as the `.by`, that is what they are.
+`line` is **not** necessarily the line that was asked for: a line with no code on
+it — a blank line, a comment, a line the transpile kept nothing of — moves to the
+next one that has some, exactly as a non-executable line does in ordinary python,
+and the answer says where it went
 
-- `line` — the `.by` line, which is what the user asked about and what an editor
-    puts a marker on
-- `generated` — the file and line the interpreter will really stop on
-- `sites` — the code objects it is armed in, named against the generated python,
-    because that is the only place a code object exists
-
-a client that shows only the first is showing the truth. one that shows only the
-second is too. what neither is doing is inventing a third location out of the
-two, which is what one field would have left room for
-
-`line` is **not** necessarily the line that was asked for, and two things move
-it. a `.by` line the transpiler generated nothing for — a blank line, a comment —
-moves to the next one it did, exactly as a non-executable line does in ordinary
-python. the generated line that produces may itself move on to the next
-executable one. **the answer is read back out of the map** rather than assumed to
-be what was asked, which is what makes the report of where it went a true one
+the map is still read before a `.by` breakpoint goes anywhere, and what it decides
+is whether the build can answer at all. it is not asked which generated line a
+`.by` line is: nothing the interpreter compiled is named after the generated
+python, so a breakpoint sent on as a line of it would wait for code that never
+arrives — which is what every `.by` breakpoint did, pending for the whole run,
+from the `by` that began compiling modules as their `.by` until bpd followed it
 
 #### when it does not bind
 
 three reasons, and each names something to do about it:
 
-| reason              | when                                                                                                                                                                                                                                       |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `NoSourceMap`       | the file is a `.by` and there is no map. the alternative would be binding to a `.py` of the same name and hoping the lines line up                                                                                                         |
-| `Unmappable`        | the map was loaded and verified and has no generated line for this one — including a generated line the transpiler invented, which is refused rather than attributed to whichever `.by` line was nearest                                   |
-| `InGeneratedPython` | the line was placed, and the ordinary python reason applies one level down. the generated location is carried beside it, because a user reading "not loaded" about a path in a temporary directory needs to know why bpd was looking there |
+| reason        | when                                                                                                                                                            |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NoSourceMap` | the file is a `.by` and there is no map, so the program is not a build `by run` staged. the alternative would be binding to a `.py` of the same name and hoping |
+| `Unmappable`  | the map was loaded and verified and does not hold that `.by`, so `by run` staged nothing from it and nothing in this program will be compiled as it             |
+| the rest      | the ordinary python reasons — not loaded yet, no executable line at or after it — about the `.by` itself, because that is the file the interpreter compiled     |
 
 the discriminator for "this is basedpython" is the `.by` extension rather than
-"the map has heard of it". a `.by` the map says nothing about is a file the
-interpreter is never going to run, and letting it through would earn it "it will
-bind if that file is imported later" — a sentence that is true of a `.py` and
-describes something that can never happen for a `.by`
+"the map has heard of it". a `.by` the map says nothing about is a file this
+build never staged, and letting it through would earn it "it will bind if that
+file is imported later" — a promise nothing in this program can keep
 
 ### django templates
 
@@ -222,8 +224,9 @@ roadmap's M6 entry says so
 
 ## what is mapped
 
-**breakpoints are.** a `.by` breakpoint binds through the map, in both
-directions, and refuses rather than guesses
+**breakpoints need not be.** a `.by` breakpoint binds on the `.by` itself,
+because that is what `by run` compiled — the map decides only whether the build
+holds the file, and refuses rather than guesses when it does not
 
 **and so is everything the debugger says about where the program is.** a stop, a
 stack frame, a traceback entry, a thread's sample, a logpoint's record and the
@@ -261,7 +264,9 @@ after the question
 
 ## a mapped frame carries both locations
 
-for the reason `BoundInSource` does: the one the user asked about and the one the
+a frame of a module `by run` compiled as its `.by` is the `.by` already, and
+carries no `mapping` — nothing was mapped. a frame of a module running as the
+generated python carries both: the one the user asked about and the one the
 interpreter is actually at.
 
 - `file` and `line` are the `.by`
@@ -310,19 +315,30 @@ which it is
 ## naming a line back
 
 a frame that reports `demo.by:11` is a frame a client will name a line of
-`demo.by` against. `setNextStatement` translates the line the other way through
-the same table before it moves anything — a debugger that answered in one file's
+`demo.by` against. in a module `by run` compiled as its `.by` that is the line
+the interpreter's own table holds, and it goes to `setNextStatement` as it is. in
+a module running as the generated python it is translated the other way through
+the same table before anything moves — a debugger that answered in one file's
 lines and took orders in another's would be two debuggers. a `.by` line the
 transpiler generated nothing for is a refusal naming it, not a move to somewhere
 near it
 
 ## the source a query reads
 
-`Source::Lines` for a mapped frame is the **`.by`**, and it is proved twice. the
-generated python is proved the way every frame's source is — it compiles, and the
-running code object is in what came out, so its line table is the thing producing
-the line numbers — and then the `.by` behind it is checked against the digest the
-map carries
+`Source::Lines` for a frame of the build is the **`.by`**, and it is proved twice.
+the generated python is proved the way every frame's source is — it compiles, and
+the running code object is in what came out, so its line table is the thing
+producing the line numbers — and then the `.by` behind it is checked against the
+digest the map carries
+
+for a module `by run` compiled as its `.by`, "it compiles" means compiled the way
+the runner compiles it: the generated python, moved onto the `.by`'s lines through
+the table, each location spanning its whole `.by` line. that is the runner's own
+construction and bpd's is held to it byte for byte — `crates/bpd_agent/src/staged.rs`
+is the one place it is written, and the tests that run a build through the runner
+captured from `by run` are what keep the two the same. a frame on the runner's
+line `0` is code the transpiler wrote on its own, and says so with
+`Unverified::TranspilerWritten`
 
 that second check is the one `bpd` cannot make from out here. it hashed the file
 at launch and a user asking to see it is asking about *now*; an editor that saved
@@ -340,11 +356,12 @@ some generate none
     it carries no `mapping` for that reason and not by omission
 
 `replaceCode` was on this list and is not any more. a `.by` named on it is
-resolved to the generated python through the map, which is the translation a
-breakpoint, a frame and a source read all go through. transpiling has not moved
-and is still `by`'s: `by` stages the file into the tree again first, so by the
-time the request arrives the generated python on disk is already the code to
-compile. what was added here is a `remap`, which reads `_by_sourcemap.py` again
-in the same message — staging a file again rewrites the map beside it, and every
-`.by` breakpoint is armed on a generated line that came out of the table it
-replaced
+resolved to the generated python through the map, and that is compiled the way
+`by run` compiled it — as the `.by`, through the table — so the code that replaces
+a function is named and lined like the code it replaces, and a `.by` breakpoint
+binds in it. transpiling has not moved and is still `by`'s: `by` stages the file
+into the tree again first, so by the time the request arrives the generated python
+on disk is already the code to compile. what was added here is a `remap`, which
+reads `_by_sourcemap.py` again in the same message — staging a file again
+rewrites the map beside it, and the new code has to be compiled through the new
+table

@@ -207,10 +207,10 @@ pub enum Facet {
     ///
     /// a field of one request, and the one capability here that is about two
     /// things happening in an order. staging a file of a basedpython build again
-    /// rewrites the map beside it, so the generated lines the `.by` breakpoints
-    /// are armed on are stale the moment the tree changes — and a front end
-    /// without this can replace the code of a build and go on reporting every
-    /// location in it through the table for the code that was there before. it
+    /// rewrites the map beside it, so the table the new code is compiled onto
+    /// its `.by` through is not the one installed — and a front end without this
+    /// can replace the code of a build and go on reporting a location of it
+    /// through the table for the code that was there before. it
     /// is not droppable in favour of a second request either: the two have to
     /// happen in one, which is why the flag is where it is
     Remap,

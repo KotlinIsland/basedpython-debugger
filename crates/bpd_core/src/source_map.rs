@@ -204,16 +204,18 @@ impl MappedFile {
 
 /// what the source map said about a location that is being reported
 ///
-/// carried beside a location rather than replacing it, for the reason
-/// [`crate::Binding::BoundInSource`] carries both: a client that shows the
+/// carried beside a location rather than replacing it: a client that shows the
 /// `.by` is showing the truth, one that shows the generated python is too, and
 /// what neither is doing is inventing a third location out of the two
 ///
 /// `None` — no `Mapping` at all — is the ordinary case. the location is the
 /// interpreter's own and nothing mapped it, which is every location of a
-/// program that is not basedpython and every location of a file this build did
-/// not generate: the standard library, a dependency, and the `_by_runner.py`
-/// shim `by run` starts
+/// program that is not basedpython, every location of a file this build did
+/// not generate — the standard library, a dependency, the `_by_runner.py` shim
+/// `by run` starts — and every location of a module `by run` compiled as its
+/// `.by`, which the interpreter already reports as the `.by`. a mapping is made
+/// for a module running as the generated python, because a loader of the
+/// program's own compiled it instead
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mapped", rename_all = "snake_case")]
 #[non_exhaustive]

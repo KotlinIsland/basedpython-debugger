@@ -1192,14 +1192,14 @@ pub fn tools() -> Vec<Tool> {
                     "remap": {
                         "type": "boolean",
                         "description": "read the build's `_by_sourcemap.py` again \
-                                        before replacing anything, and translate \
-                                        the whole breakpoint set through the new \
-                                        tables. for a basedpython build whose \
+                                        before replacing anything, and arm the \
+                                        whole breakpoint set against the tree it \
+                                        describes. for a basedpython build whose \
                                         tree was just staged again: the map \
                                         beside the generated python was rewritten \
-                                        too, so every `.by` breakpoint is armed \
-                                        on a generated line that came out of a \
-                                        table that no longer describes the tree. \
+                                        too, and the new code is compiled as its \
+                                        `.by` through the new table — the old one \
+                                        no longer describes the tree. \
                                         it happens in the same message as the \
                                         replacement, before any code is swapped, \
                                         because anything split across two would \

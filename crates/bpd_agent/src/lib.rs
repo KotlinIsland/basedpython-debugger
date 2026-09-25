@@ -43,6 +43,7 @@ mod session;
 mod source;
 mod sources;
 mod spawns;
+mod staged;
 mod steps;
 mod stops;
 mod storage;

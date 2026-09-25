@@ -1893,8 +1893,8 @@ struct ReplaceCodeArgs {
     /// read `_by_sourcemap.py` again before replacing anything
     ///
     /// for a basedpython build whose tree was just staged again: the map beside
-    /// the generated python was rewritten too, so the generated lines every `.by`
-    /// breakpoint is armed on came out of a table that no longer describes the
+    /// the generated python was rewritten too, and the new code is compiled as
+    /// its `.by` through the new table — the old one no longer describes the
     /// tree. off for a program that is not one, which has no map to read
     #[serde(default)]
     remap: bool,

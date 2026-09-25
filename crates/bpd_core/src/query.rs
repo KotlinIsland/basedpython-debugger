@@ -286,6 +286,19 @@ pub enum Unverified {
         /// the generated python it was transpiled to
         generated: String,
     },
+
+    /// the frame is in code `by` wrote on its own, which no `.by` line is behind
+    ///
+    /// `by run` compiles a staged module as its `.by`, and gives a line the
+    /// transpiler wrote itself — a runtime helper, a lowering's scaffolding — the
+    /// line `0`, because the `.by` has no line to give it. the code is proved; it
+    /// is the source that does not exist
+    TranspilerWritten {
+        /// the `.by` the code is named after
+        file: String,
+        /// the qualified name of the code the frame is running
+        function: String,
+    },
 }
 
 impl std::fmt::Display for Unverified {
@@ -327,6 +340,13 @@ impl std::fmt::Display for Unverified {
                  that build, so bpd will not show it against source that no \
                  longer matches. transpile again and debug the build that comes \
                  out"
+            ),
+            Self::TranspilerWritten { file, function } => write!(
+                formatter,
+                "`{function}` is code `by` wrote on its own when it transpiled \
+                 `{file}` — a runtime helper — and `by run` gives it line 0, \
+                 because no line of `{file}` is behind it. there is no source to \
+                 show"
             ),
         }
     }

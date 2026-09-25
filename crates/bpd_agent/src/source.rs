@@ -20,6 +20,7 @@
 //! further down the file leaves this code object identical, so its lines are
 //! still proven and lines outside it are not
 
+use bpd_core::source_map::MappedFile;
 use bpd_core::{Source, Unverified};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
@@ -39,6 +40,10 @@ pub(crate) fn around(
     let code = frame.getattr("f_code")?;
     let file: String = code.getattr("co_filename")?.extract()?;
     let line: u32 = frame.getattr("f_lineno")?.extract()?;
+
+    if let Some(table) = crate::sources::staged_as(&file) {
+        return staged(python, &code, file, line, around, &table);
+    }
 
     let bytes = match std::fs::read(&file) {
         Ok(bytes) => bytes,
@@ -94,7 +99,100 @@ pub(crate) fn around(
         Err(why) => return Ok(Source::Unverified { why }),
     };
 
-    let all = split(&bytes);
+    Ok(shown(
+        &bytes,
+        file,
+        line,
+        (lowest, highest),
+        around,
+        &wanted,
+    ))
+}
+
+/// the source around a frame of a module `by run` compiled as its `.by`
+///
+/// the frame's file is the `.by`, and the `.by` is not python: what the
+/// interpreter compiled is the generated python behind it, moved onto the `.by`'s
+/// lines by the runner. so that is what is compiled here, the same way — see
+/// [`crate::staged`] — and the frame's code object, line table and all, has to be
+/// in what comes out. the `.by` is then proved a second way, by the digest the
+/// transpiler wrote and `bpd` checked, because it is the file whose lines are
+/// shown and the compile only read how wide they are
+fn staged(
+    python: Python<'_>,
+    code: &Bound<'_, PyAny>,
+    file: String,
+    line: u32,
+    around: u32,
+    table: &MappedFile,
+) -> PyResult<Source> {
+    let generated = table.generated.display().to_string();
+    let read = |path: &str| {
+        std::fs::read(path).map_err(|error| Unverified::NotAFile {
+            file: path.to_string(),
+            reason: error.to_string(),
+        })
+    };
+    let (python_bytes, bytes) = match (read(&generated), read(&file)) {
+        (Ok(python_bytes), Ok(bytes)) => (python_bytes, bytes),
+        (Err(why), _) | (_, Err(why)) => return Ok(Source::Unverified { why }),
+    };
+    if bpd_core::source_map::digest(&bytes) != table.digest {
+        return Ok(Source::Unverified {
+            why: Unverified::NotTheSameSource { file, generated },
+        });
+    }
+
+    let compiled =
+        match crate::staged::compile(python, &python_bytes, &generated, &file, table, &bytes) {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                return Ok(Source::Unverified {
+                    why: Unverified::DoesNotCompile {
+                        file: generated,
+                        error: capture(python, &error),
+                    },
+                });
+            }
+        };
+
+    let wanted = Identity::of(code)?;
+    if !matches(&compiled, &wanted)? {
+        return Ok(Source::Unverified {
+            why: Unverified::NotTheSameCode {
+                file,
+                function: wanted.qualname,
+                first_line: wanted.first_line,
+            },
+        });
+    }
+
+    // the runner's line 0: code the transpiler wrote on its own, which no line of
+    // the `.by` is behind. the proof above holds and there is nothing to show
+    if line == 0 {
+        return Ok(Source::Unverified {
+            why: Unverified::TranspilerWritten {
+                file,
+                function: wanted.qualname,
+            },
+        });
+    }
+
+    let lines = extent(code, line)?;
+    Ok(shown(&bytes, file, line, lines, around, &wanted))
+}
+
+/// the lines around `line` of a file whose code object was proved, clamped to
+/// the lines that code object covers
+fn shown(
+    bytes: &[u8],
+    file: String,
+    line: u32,
+    (lowest, highest): (u32, u32),
+    around: u32,
+    wanted: &Identity,
+) -> Source {
+    let all = split(bytes);
     let total = u32::try_from(all.len()).unwrap_or(u32::MAX);
 
     // the window is the lines asked for, clamped to the code object that was
@@ -104,13 +202,13 @@ pub(crate) fn around(
     if first > last {
         // the frame's line is outside its own code object's line table, which
         // nothing in cpython should produce
-        return Ok(Source::Unverified {
+        return Source::Unverified {
             why: Unverified::NotTheSameCode {
                 file,
-                function: wanted.qualname,
+                function: wanted.qualname.clone(),
                 first_line: wanted.first_line,
             },
-        });
+        };
     }
 
     let mut lines = Vec::with_capacity((last - first + 1) as usize);
@@ -124,19 +222,19 @@ pub(crate) fn around(
             // declared. deciding that encoding again here would be a second
             // implementation of a rule cpython owns
             Err(_) => {
-                return Ok(Source::Unverified {
+                return Source::Unverified {
                     why: Unverified::NotUtf8 { file },
-                });
+                };
             }
         }
     }
 
-    Ok(Source::Lines {
+    Source::Lines {
         first,
         at: line,
         lines,
         total,
-    })
+    }
 }
 
 /// the `.by` behind a generated file, its bytes, and the window in its terms
@@ -290,10 +388,11 @@ fn matches(compiled: &Bound<'_, PyAny>, wanted: &Identity) -> PyResult<bool> {
 /// `co_lines` is cpython's own line table walk, in C, and it is the only thing
 /// that knows which lines a code object really covers. an entry with no line —
 /// which is what compiler generated code produces — carries `None` and is
-/// skipped rather than counted as line zero
-fn extent(code: &Bound<'_, PyAny>, first_line: u32) -> PyResult<(u32, u32)> {
-    let mut lowest = first_line;
-    let mut highest = first_line;
+/// skipped rather than counted as line zero, and so is line zero itself, which
+/// is what `by run` gives the code the transpiler wrote on its own
+fn extent(code: &Bound<'_, PyAny>, from: u32) -> PyResult<(u32, u32)> {
+    let mut lowest = from;
+    let mut highest = from;
     for entry in code.getattr("co_lines")?.call0()?.try_iter()? {
         let entry = entry?;
         let line = entry.get_item(2)?;
@@ -301,6 +400,9 @@ fn extent(code: &Bound<'_, PyAny>, first_line: u32) -> PyResult<(u32, u32)> {
             continue;
         }
         let line: u32 = line.extract()?;
+        if line == 0 {
+            continue;
+        }
         lowest = lowest.min(line);
         highest = highest.max(line);
     }

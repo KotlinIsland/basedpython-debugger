@@ -26,6 +26,17 @@
 //! skipped when it is missing is a test that reports success while proving
 //! nothing.
 //!
+//! ## the runner is captured rather than written
+//!
+//! what the interpreter runs is not the generated python as python's loader would
+//! compile it. `by run` starts [`RUNNER`], its `_by_runner.py`, and that compiles
+//! each staged module **as its `.by`** — named after the `.by` path, every line the
+//! `.by` line it came from — so the locations a debugger reads out of a build are
+//! the runner's doing. a runner written here would be a claim about that
+//! construction; the one `by run` writes is the construction. it is kept byte for
+//! byte as `by run` wrote it, and a `by` that changes it is a `by` whose builds
+//! this suite no longer describes until it is captured again.
+//!
 //! ## it is here rather than beside one test
 //!
 //! two suites ask about `.by` locations from the two ends: `bpd_engine` asks the
@@ -34,9 +45,16 @@
 //! that could disagree about what `by run` leaves on disk, which is the one thing
 //! neither of them is testing.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use bpd_core::source_map::MAP_FILENAME;
+
+/// `_by_runner.py`, as `by run` writes it into every build it starts
+///
+/// captured from `by` `df2a124c2087`, where it is `BY_RUNNER_SRC` in
+/// `crates/ty/src/by_commands.rs`
+pub const RUNNER: &str = include_str!("by_runner.py");
 
 /// the `.by` a person wrote
 ///
@@ -206,25 +224,40 @@ impl Build {
         .expect("the map is written");
     }
 
-    /// a shim that runs the generated python, the way `by run` does
+    /// `by run`'s runner, written into the build — the program `by run` starts
     ///
-    /// `_by_runner.py` upstream, and what it buys here is a stack with frames
-    /// **under** the build in it: the shim itself and the import machinery it
-    /// goes through. none of that is basedpython and none of it may be dressed
-    /// as it
+    /// launched with [`Self::arguments`], it runs [`Self::module`] as
+    /// `__main__` exactly as `by run` would, compiled as its `.by`. it is also
+    /// what puts frames **under** the build on the stack: the runner itself and
+    /// the import machinery it goes through, none of which is basedpython
     #[must_use]
     pub fn runner(&self) -> PathBuf {
-        let path = self.root().join("runner.py");
-        std::fs::write(
-            &path,
-            format!(
-                "import runpy\n\
-                 runpy.run_path({:?}, run_name=\"__main__\")\n",
-                self.generated.display().to_string()
-            ),
-        )
-        .expect("the runner is written");
+        let path = self.root().join("_by_runner.py");
+        std::fs::write(&path, RUNNER).expect("the runner is written");
         path
+    }
+
+    /// the module the build's `.by` is, which is what `by run` is asked to run
+    #[must_use]
+    pub fn module(&self) -> String {
+        self.generated
+            .file_stem()
+            .expect("the generated python has a name")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// what [`Self::runner`] is started with to run `module`: its name, and the
+    /// file the program writes its answer to
+    #[must_use]
+    pub fn arguments_running(&self, module: &str) -> Vec<OsString> {
+        vec![module.into(), self.marks.clone().into_os_string()]
+    }
+
+    /// [`Self::arguments_running`] the build's own module
+    #[must_use]
+    pub fn arguments(&self) -> Vec<OsString> {
+        self.arguments_running(&self.module())
     }
 
     /// the build directory, canonicalised — the directory `bpd` finds the map in

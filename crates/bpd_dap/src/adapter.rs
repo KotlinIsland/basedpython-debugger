@@ -1989,8 +1989,8 @@ impl Adapter {
         let files = files_to_replace(&message.arguments)?;
 
         // optional, defaulting off. it says whether `_by_sourcemap.py` was
-        // rewritten beside the code being replaced, which is what decides whether
-        // every `.by` breakpoint of the build is translated again — a fact about
+        // rewritten beside the code being replaced, which is what decides which
+        // table the new code is compiled onto its `.by` through — a fact about
         // what the caller just did to the tree, and not one to guess at
         let remap = match message.arguments.get("remap") {
             None | Some(serde_json::Value::Null) => false,
@@ -3896,42 +3896,6 @@ fn rendered_binding(resolved: &Resolved, requested: &SourceBreakpoint) -> serde_
             }
             body
         }
-        // DAP's `Breakpoint` carries one `source` and one `line`, so the `.by`
-        // location is what goes in them — it is the file the client asked
-        // about, and the one it will show a marker in. the generated location
-        // has nowhere of its own to go and rides in `message`, which is the
-        // only field of a `Breakpoint` that is free text. it is not dropped:
-        // a person who does not believe the debugger needs to be able to see
-        // what it saw
-        Binding::BoundInSource {
-            line,
-            generated,
-            sites,
-            ..
-        } => {
-            let moved = if *line == requested.line {
-                String::new()
-            } else {
-                format!(
-                    "line {} of that file generated nothing bpd can stop on, so this moved to line \
-                     {line}, which did. ",
-                    requested.line
-                )
-            };
-            serde_json::json!({
-                "id": resolved.id,
-                "verified": true,
-                "line": line,
-                "source": source_of(&requested.file.display().to_string()),
-                "message": format!(
-                    "{moved}`by` transpiled that to line {} of `{}`, and it is armed in {} code \
-                     object(s) there",
-                    generated.line,
-                    generated.file.display(),
-                    sites.len()
-                ),
-            })
-        }
         Binding::Unbound { reason } => serde_json::json!({
             "id": resolved.id,
             "verified": false,
@@ -3940,11 +3904,10 @@ fn rendered_binding(resolved: &Resolved, requested: &SourceBreakpoint) -> serde_
             "message": reason.to_string(),
             // a file that is not imported yet binds when it is, and everything
             // else will not bind at all. the distinction is the core's, and it
-            // is **asked** rather than reproduced here: a reason can arrive
-            // wrapped — `InGeneratedPython` is an ordinary one a level down —
-            // and matching the variant this adapter happened to know about made
-            // every unbound `.by` breakpoint `failed`, beside a message of its
-            // own saying it would bind on import
+            // is **asked** rather than reproduced here: matching the variant this
+            // adapter happened to know about once made every unbound `.by`
+            // breakpoint `failed`, beside a message of its own saying it would
+            // bind on import
             "reason": if reason.will_bind_later() { "pending" } else { "failed" },
         }),
     }
@@ -4506,97 +4469,24 @@ mod tests {
     }
 
     #[test]
-    fn a_wrapped_reason_decides_the_code_by_what_is_inside_the_wrapper() {
-        use bpd_core::source_map::{Located, Unmapped};
-
-        // a `.by` breakpoint whose module is not imported yet fails for exactly
-        // the reason a `.py` one does — `InGeneratedPython` says where bpd
-        // looked, not what stopped it. deciding the code on the wrapper made
-        // every unbound `.by` breakpoint `failed`, including the most ordinary
-        // one there is, while the message beside it said "it will bind if that
-        // file is imported later"
-        let requested = SourceBreakpoint::at(4, "/src/main.by", 5);
-        let generated = || Located {
-            file: PathBuf::from(under("build/main.py")),
-            line: 86,
-        };
-        let wrapped = |reason: Unbound| {
-            rendered_breakpoint(
-                &Resolved {
-                    waiting_for: None,
-                    id: 4,
-                    binding: Binding::Unbound {
-                        reason: Unbound::InGeneratedPython {
-                            file: PathBuf::from("/src/main.by"),
-                            requested: 5,
-                            generated: generated(),
-                            reason: Box::new(reason),
-                        },
-                    },
-                },
-                &requested,
-            )
-        };
-
-        let pending = wrapped(Unbound::NotLoaded {
-            file: PathBuf::from(under("build/main.py")),
-            templates_available: false,
-        });
-        assert_eq!(
-            pending["reason"], "pending",
-            "a `.by` breakpoint waiting for its module binds when the module is \
-             imported, exactly as the `.py` one does: {pending}"
-        );
-
-        // and the other side, which is what stops an unwrap that answers
-        // `pending` for everything from passing. a line the map cannot place is
-        // not waiting for anything
-        let unmappable = wrapped(Unbound::Unmappable {
-            reason: Unmapped::NotInTheMap {
-                file: PathBuf::from("/src/main.by"),
-            },
-        });
-        assert_eq!(
-            unmappable["reason"], "failed",
-            "the map could not place the line, and nothing arriving later \
-             changes that: {unmappable}"
-        );
-
-        let no_line = wrapped(Unbound::NoExecutableLine {
-            file: PathBuf::from(under("build/main.py")),
-            requested: 86,
-            last_executable: Some(40),
-        });
-        assert_eq!(
-            no_line["reason"], "failed",
-            "the file is loaded and has no line there: {no_line}"
-        );
-    }
-
-    #[test]
-    fn a_by_breakpoint_keeps_the_by_location_and_still_says_where_it_really_is() {
-        use bpd_core::source_map::Located;
+    fn a_by_breakpoint_is_rendered_in_the_by_terms_it_was_answered_in() {
+        use bpd_core::source_map::Unmapped;
         use bpd_core::{Evaluation, Site};
 
-        // DAP's `Breakpoint` has one source and one line. the `.by` is what goes
-        // in them, because that is the file the client asked about and the one
-        // it will put a marker in — and the generated location is not dropped
-        // for want of a field, because a person who does not believe the
-        // debugger has to be able to see what it saw
+        // `by run` compiles the build as its `.by` files, so a `.by` breakpoint
+        // binds on the `.by` line of code named after the `.by` — an ordinary
+        // `Bound`, and the client's own file and line are what go in DAP's one
+        // `source` and one `line`
         let requested = SourceBreakpoint::at(4, under("src/app.by"), 7);
         let rendered = rendered_breakpoint(
             &Resolved {
                 waiting_for: None,
                 id: 4,
-                binding: Binding::BoundInSource {
+                binding: Binding::Bound {
                     line: 7,
-                    generated: Located {
-                        file: PathBuf::from(under("build/app.py")),
-                        line: 19,
-                    },
                     sites: vec![Site {
                         qualname: "main".to_string(),
-                        first_line: 12,
+                        first_line: 6,
                         offset: 4,
                     }],
                     evaluation: Evaluation::Always,
@@ -4604,17 +4494,31 @@ mod tests {
             },
             &requested,
         );
-
         assert_eq!(rendered["verified"], true);
         assert_eq!(
             rendered["line"], 7,
             "the `.by` line is what the client sees"
         );
         assert_eq!(rendered["source"]["path"], under("src/app.by"));
-        let said = rendered["message"]
-            .as_str()
-            .expect("a mapped breakpoint says where it really is");
-        assert!(said.contains(&under("build/app.py")), "said {said}");
-        assert!(said.contains("line 19"), "said {said}");
+
+        // and a `.by` the build does not hold is not waiting for anything
+        let refused = rendered_breakpoint(
+            &Resolved {
+                waiting_for: None,
+                id: 4,
+                binding: Binding::Unbound {
+                    reason: Unbound::Unmappable {
+                        reason: Unmapped::NotInTheMap {
+                            file: PathBuf::from(under("src/app.by")),
+                        },
+                    },
+                },
+            },
+            &requested,
+        );
+        assert_eq!(
+            refused["reason"], "failed",
+            "nothing in this program will ever be compiled as that file: {refused}"
+        );
     }
 }

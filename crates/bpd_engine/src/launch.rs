@@ -208,13 +208,6 @@ struct Attached {
     /// with the launch, so this is what stops a second send and what makes the
     /// first one happen before the child runs anything
     mapped: bool,
-    /// where each translated breakpoint went, by the id the client gave it
-    ///
-    /// the record [`mapping::restore`] reads to put an answer back into `.by`
-    /// terms. replaced whole every time the set is, because a breakpoint set is
-    /// replaced whole and a stale entry here would map an answer through a
-    /// translation nobody made
-    translated: std::collections::BTreeMap<u32, mapping::Translated>,
     /// every state a query has read, under the id it was given out as
     ///
     /// nothing evicts one. a snapshot is a reading that was already taken rather
@@ -774,10 +767,11 @@ impl Debuggee {
     /// was true a moment ago rather than one that claims to be
     ///
     /// it is installed in **two** places, and they are not the same job. here,
-    /// so a `.by` breakpoint becomes a generated line before the agent sees one
-    /// — that translation has to happen before the program has run, and in DAP
-    /// before it has been launched. and in the **agent**, so that every
-    /// location the debuggee reports comes back as the `.by` line it came from.
+    /// so a `.by` breakpoint the build does not hold is refused before the agent
+    /// is asked — which has to be decidable before the program has run, and in
+    /// DAP before it has been launched. and in the **agent**, which compiles a
+    /// module of the build as its `.by` the way `by run` did, and reports a
+    /// module still running as generated python as the `.by` lines it came from.
     /// a location leaves through about thirty fields and translating them on
     /// the way out means finding every one of them; missing one reports two
     /// different files for a single location
@@ -1093,10 +1087,9 @@ impl Debuggee {
     ///
     /// what `by` has just rewritten in the tree, given to the process in one
     /// message: the files at once — applied together or not at all — and the map
-    /// beside them, because re-staging rewrote `_by_sourcemap.py` too and the
-    /// generated lines every `.by` breakpoint is armed on came out of the table
-    /// it replaced. see [`Attached::replace_the_code`] for why that is one
-    /// message and not three.
+    /// beside them, because re-staging rewrote `_by_sourcemap.py` too, and the
+    /// new code is compiled as its `.by` through the new table. see
+    /// [`Attached::replace_the_code`] for why that is one message and not three.
     ///
     /// An entry may be a `.by`; it is resolved through the map before it is sent.
     ///
@@ -1333,7 +1326,7 @@ impl Debuggee {
                     });
                 }
                 Some(FromAgent::BreakpointsResolved { resolved }) => {
-                    rebound.extend(self.attached[at].restore(resolved));
+                    rebound.extend(resolved);
                 }
                 Some(FromAgent::Logged { record }) => reporting.logged(record),
                 // the program started a child. it is already running — the
@@ -1421,7 +1414,6 @@ impl Attached {
             pending_recomposed: Vec::new(),
             map: None,
             mapped: false,
-            translated: std::collections::BTreeMap::new(),
             snapshots: Vec::new(),
         }
     }
@@ -1466,20 +1458,16 @@ impl Attached {
             }
         }
 
-        // a `.by` breakpoint is translated into the generated python before
-        // the agent sees it, and the answer is translated back before anybody
-        // else does. the agent never learns a source map exists
+        // a `.by` breakpoint goes to the agent as the `.by` line it is, because
+        // `by run` compiles the build as its `.by` files. what is settled here
+        // is only a `.by` that no build of this program holds
         let sent = mapping::send(self.map.as_deref(), breakpoints);
         let breakpoints = sent.breakpoints;
-        // replaced whole, like the set it describes. a translation left over
-        // from the last set would map an answer through a route this one never
-        // took
-        self.translated = sent.translated;
 
         let request = FromEngine::SetBreakpoints { breakpoints };
         match self.ask(&request, EXPECTED, reporting)? {
             FromAgent::BreakpointsResolved { resolved } => {
-                let mut answers = self.restore(resolved);
+                let mut answers = resolved;
                 // the ones the map refused never went to the agent, so they are
                 // put back here. a client asked about every breakpoint in the
                 // set and is owed an answer about every one of them, in the
@@ -1536,15 +1524,6 @@ impl Attached {
             ),
             other => Err(unexpected(&other, EXPECTED)),
         }
-    }
-
-    /// every answer about a translated breakpoint, back in `.by` terms
-    ///
-    /// applied to every `Resolved` that leaves this session — the answer to a
-    /// set and the rebindings that arrive unprompted — because a client that
-    /// was handed one raw would be reading a line of a file it never wrote
-    fn restore(&self, resolved: Vec<Resolved>) -> Vec<Resolved> {
-        mapping::restore(self.map.as_deref(), &self.translated, resolved)
     }
 
     fn arm_exceptions(
@@ -1762,10 +1741,11 @@ impl Attached {
     ///
     /// staging one file of a basedpython build again rewrites the generated
     /// python **and** `_by_sourcemap.py` beside it. so the tables this session
-    /// holds describe the tree it used to be, and every `.by` breakpoint is armed
-    /// on a generated line that came out of them. both have to land before any
-    /// `__code__` is assigned — and the agent holds the GIL for the whole of one
-    /// message and for no longer, so a debugger that sent the tables, the
+    /// holds describe the tree it used to be: the new code has to be compiled as
+    /// its `.by` through the new table, and a module still running as generated
+    /// python reports its locations through it. the tables have to land before
+    /// any `__code__` is assigned — and the agent holds the GIL for the whole of
+    /// one message and for no longer, so a debugger that sent the tables, the
     /// breakpoints and the replacement as three messages would leave two windows
     /// in which another thread's logpoint is mapped through a table describing
     /// code it is not running. one message has no window in it
@@ -1799,7 +1779,8 @@ impl Attached {
         let remapping = if remap {
             let map = Arc::new(self.map_again()?);
             // the whole set rather than the breakpoints of the files being
-            // replaced: a table that moved moves every breakpoint of the build
+            // replaced: a re-staged tree can hold a `.by` it did not, or drop
+            // one, and the set is sorted against the tree as it is now
             let sent = mapping::send(Some(&map), self.armed.clone());
             Some((map, sent))
         } else {
@@ -1810,10 +1791,9 @@ impl Attached {
             None => self.map.as_deref(),
         };
 
-        // a `.by` is not something the interpreter ever compiled, so what goes to
-        // the agent is the generated python it was transpiled into. the same
-        // translation a breakpoint and a frame go through, done here for the same
-        // reason: the agent has never heard of a source map's paths
+        // a `.by` is not python, so what goes to the agent is the generated
+        // python it was transpiled into: the file on disk the new code is
+        // compiled from, as its `.by`
         let files = files
             .into_iter()
             .map(|file| generated_for(map, file))
@@ -1836,7 +1816,7 @@ impl Attached {
             FromAgent::Replaced { mut replaced } => {
                 // adopted only where the agent adopted it. the two must not be
                 // able to disagree about which tree they are describing
-                if let Some((map, sent)) = remapping
+                if let Some((map, _)) = remapping
                     && replaced.remapped.is_some()
                 {
                     // the directory is named here because only here knows it: the
@@ -1848,17 +1828,8 @@ impl Attached {
                         remapped.directory = map.directory().to_path_buf();
                     }
                     self.map = Some(map);
-                    // replaced whole, like the set it describes — a translation
-                    // left over from the old tables would map an answer through a
-                    // route this set never took
-                    self.translated = sent.translated;
                 }
-                // the rebindings are answers about the client's own breakpoints
-                // and leave in `.by` terms, like every other answer from here
-                Ok(Replacements {
-                    rebound: self.restore(replaced.rebound),
-                    ..replaced
-                })
+                Ok(replaced)
             }
             other => Err(unexpected(&other, EXPECTED)),
         }
@@ -2172,8 +2143,7 @@ impl Attached {
                 Some(FromAgent::BreakpointsResolved { resolved })
                     if !matches!(request, FromEngine::SetBreakpoints { .. }) =>
                 {
-                    let restored = self.restore(resolved);
-                    self.pending_rebinds.extend(restored);
+                    self.pending_rebinds.extend(resolved);
                 }
                 Some(FromAgent::Stopped { stop }) => {
                     self.held.push(stop.in_session(self.session.id()));
@@ -2777,16 +2747,16 @@ fn attached_in_terminal(listener: Listener, map: Option<bpd_core::SourceMap>) ->
     Ok(Launched::Stopped(debuggee))
 }
 
-/// the file the interpreter compiled, for the file a client named
+/// the file on disk a replacement is compiled from, for the file a client named
 ///
 /// a `.py` is already it. under `by run` that is the copy in the build tree
 /// rather than the one in the project — the tree is what `sys.path[0]` is and
 /// what the interpreter imported — and naming it is the client's job, because
 /// the client is what knows which of the two it means.
 ///
-/// a `.by` never was: it is resolved through the map, which is the same
-/// translation a breakpoint, a frame and a source read go through. one the map
-/// does not describe is refused rather than answered about the python nearest it.
+/// a `.by` is not python: `by run` compiled the generated python behind it, and
+/// the map says which file that is. one the map does not describe is refused
+/// rather than answered about the python nearest it.
 fn generated_for(map: Option<&bpd_core::SourceMap>, file: PathBuf) -> Result<PathBuf> {
     if !mapping::is_source(&file) {
         return Ok(file);

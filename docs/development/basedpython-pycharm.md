@@ -30,16 +30,17 @@ describes. the language plugin ships source-mapped `.by` debugging on it,
 verified end to end, and its `docs/debugging.md` records that the identical
 "blocked upstream" belief it had held for a long time was false
 
-**`bpd` binds a `.by` breakpoint through that map, and reports every location it
-has in `.by` lines** — a stop, a stack frame, a traceback entry, a thread's
+**`bpd` binds a `.by` breakpoint on the `.by` `by run` compiled, and reports every
+location it has in `.by` lines** — a stop, a stack frame, a traceback entry, a thread's
 sample, a logpoint's record and the source a query reads. see
 [source mapping](source-mapping.md)
 
 two things it does that a debugpy path does not:
 
-- a mapped frame carries the **generated** location beside the `.by` one, so a
-    person who does not believe the debugger can see what it saw. in DAP it is
-    the stack frame's `source.origin`
+- a frame of a module running as the generated python — one a loader of the
+    program's own compiled — carries the **generated** location beside the
+    `.by` one, so a person who does not believe the debugger can see what it
+    saw. in DAP it is the stack frame's `source.origin`
 - a generated line no `.by` line is behind keeps the generated location and says
     which line of which file has none. prelude is not attributed to whichever
     `.by` line was nearest, and neither is the runner shim underneath the build

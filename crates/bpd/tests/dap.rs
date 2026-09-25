@@ -81,8 +81,8 @@ over_each_transport!(
     a_client_that_never_stops_asking_is_still_told_the_program_ended,
     a_breakpoint_in_a_module_that_is_not_imported_yet_is_pending_and_says_so,
     a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set,
-    a_by_breakpoint_set_before_the_launch_binds_through_the_map_and_hits,
-    a_by_breakpoint_in_a_module_the_runner_imports_is_held_until_the_import_binds_it,
+    a_by_breakpoint_set_before_the_launch_binds_where_by_run_compiles_the_by_and_hits,
+    a_by_breakpoint_in_a_module_by_run_imports_is_held_until_the_import_binds_it,
     an_editor_can_run_a_whole_investigation_the_way_an_agent_can,
     an_editor_can_ask_what_changed_between_two_stops,
     an_editor_can_ask_why_the_ui_recomposed_and_be_handed_the_next_record_as_data,
@@ -849,13 +849,15 @@ fn a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set(tra
     client.finish();
 }
 
-fn a_by_breakpoint_set_before_the_launch_binds_through_the_map_and_hits(transport: Transport) {
+fn a_by_breakpoint_set_before_the_launch_binds_where_by_run_compiles_the_by_and_hits(
+    transport: Transport,
+) {
     // the same handshake as the scenario above, in the one file where holding a
-    // breakpoint is not merely polite: a `.by` is never what the interpreter
-    // runs, and the map that says which generated line it means is **read at
-    // launch**, out of the build directory beside the program. so a client that
-    // configures first is asking about a `.by` line at the one moment bpd has
-    // no map at all
+    // breakpoint is not merely polite: a `.by` is only compiled once `by run`'s
+    // runner runs it, and the map that says the program is a basedpython build
+    // is **read at launch**, out of the build directory beside the program. so a
+    // client that configures first is asking about a `.by` line at the one moment
+    // bpd has no map at all
     //
     // the answer to that is `pending`, not a refusal. `NoSourceMap` is for a
     // program that has no map — a fact that never changes — and spending it on
@@ -865,7 +867,9 @@ fn a_by_breakpoint_set_before_the_launch_binds_through_the_map_and_hits(transpor
     // this is also the contract the intellij plugin stands on. it is why the
     // plugin can send what it has to send when the platform tells it to,
     // without having to reach the adapter ahead of the platform's own
-    // `setBreakpoints`
+    // `setBreakpoints`. and it is what broke when `by run` began compiling each
+    // module as its `.by`: a breakpoint sent on as a line of the generated python
+    // waited for code nothing named, and stayed `pending` for the whole run
     let build = Build::demo();
     let mut client = Client::start(transport);
 
@@ -905,37 +909,36 @@ fn a_by_breakpoint_set_before_the_launch_binds_through_the_map_and_hits(transpor
     client.request(
         "launch",
         &serde_json::json!({
-            "program": build.generated,
+            "program": build.runner(),
             "python": interpreter(),
-            "args": [build.marks],
+            "args": words(&build.arguments()),
         }),
     );
 
-    // the map is read, the held `.by` line is translated, and the correction
-    // goes out as the `breakpoint` event DAP has for exactly this
-    let changed = client.event("breakpoint");
-    let bound = &changed["body"]["breakpoint"];
-    assert_eq!(changed["body"]["reason"], "changed", "{changed}");
-    assert_eq!(
-        bound["verified"], true,
-        "the held `.by` breakpoint never bound: {changed}"
-    );
+    // the map is read, and the runner compiles the module as its `.by`. the
+    // corrections go out as the `breakpoint` event DAP has for exactly this, and
+    // every one before the binding says it is still waiting
+    let bound = loop {
+        let changed = client.event("breakpoint");
+        assert_eq!(changed["body"]["reason"], "changed", "{changed}");
+        let breakpoint = changed["body"]["breakpoint"].clone();
+        if breakpoint["verified"] == true {
+            break breakpoint;
+        }
+        assert_eq!(
+            breakpoint["reason"], "pending",
+            "the runner has not compiled the `.by` yet, and it will: {changed}"
+        );
+    };
     // in `.by` terms, which is the only spelling the client ever used
-    assert_eq!(bound["line"], line, "{changed}");
+    assert_eq!(bound["line"], line, "{bound}");
     assert_eq!(
         bound["source"]["path"],
         build.source.display().to_string(),
-        "{changed}"
-    );
-    assert!(
-        bound["message"]
-            .as_str()
-            .expect("a mapped binding says where it really went")
-            .contains(&build.generated.display().to_string()),
-        "the generated location is not dropped: {changed}"
+        "{bound}"
     );
 
-    // and it fires, on the generated line, reported as the `.by` one
+    // and it fires, reported as the `.by` line it is
     let stopped = client.event("stopped");
     assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
     let thread = stopped["body"]["threadId"].clone();
@@ -967,31 +970,21 @@ fn a_by_breakpoint_set_before_the_launch_binds_through_the_map_and_hits(transpor
     client.finish();
 }
 
-fn a_by_breakpoint_in_a_module_the_runner_imports_is_held_until_the_import_binds_it(
+fn a_by_breakpoint_in_a_module_by_run_imports_is_held_until_the_import_binds_it(
     transport: Transport,
 ) {
-    // the shape `by run` really has, which the scenario above does not: the
-    // program is a runner in the build directory, and the `.by` a person set a
-    // breakpoint in is a module that runner **imports**. so a breakpoint the
-    // intellij platform sends before the launch waits twice — for the map, which
-    // is read at launch out of the directory beside the runner, and then for
-    // the import, which is the first moment there is code for it to be on
+    // the other shape `by run` has: the module it runs imports the `.by` a person
+    // set a breakpoint in. so a breakpoint the intellij platform sends before the
+    // launch waits twice — for the map, which is read at launch out of the
+    // directory beside the runner, and then for the import, which is the first
+    // moment the runner compiles the `.by` and there is code for it to be on
     //
     // neither wait may be answered as a refusal. between the two the answer is
     // still `pending`, and the import is what binds it, told to the client as a
     // `breakpoint` event in `.by` terms
     let build = Build::demo();
-    let runner = build.root().join("runner.py");
-    std::fs::write(
-        &runner,
-        format!(
-            "import sys\n\
-             sys.path.insert(0, {root:?})\n\
-             import demo\n",
-            root = build.root().display().to_string(),
-        ),
-    )
-    .expect("the runner is written");
+    std::fs::write(build.root().join("entry.py"), "import demo\n")
+        .expect("the entry module is written");
     let mut client = Client::start(transport);
 
     client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
@@ -1015,9 +1008,9 @@ fn a_by_breakpoint_in_a_module_the_runner_imports_is_held_until_the_import_binds
     client.request(
         "launch",
         &serde_json::json!({
-            "program": runner,
+            "program": build.runner(),
             "python": interpreter(),
-            "args": [build.marks],
+            "args": words(&build.arguments_running("entry")),
         }),
     );
 
@@ -1064,6 +1057,14 @@ fn a_by_breakpoint_in_a_module_the_runner_imports_is_held_until_the_import_binds
     assert_eq!(build.answer().trim(), "5", "the program did not finish");
     client.request("disconnect", &serde_json::json!({}));
     client.finish();
+}
+
+/// program arguments as the strings a `launch` request carries them as
+fn words(arguments: &[std::ffi::OsString]) -> Vec<String> {
+    arguments
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect()
 }
 
 fn an_editor_can_run_a_whole_investigation_the_way_an_agent_can(transport: Transport) {

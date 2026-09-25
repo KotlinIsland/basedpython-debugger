@@ -130,8 +130,8 @@ pub struct Replacements {
     ///
     /// process-wide, and it has to be: a breakpoint was bound to a code object
     /// nothing will execute any more and is rebound against the code that is
-    /// running now — and after a remap the whole set was translated again
-    /// through a table that moved, so a breakpoint in a file that was **not**
+    /// running now — and after a remap the whole set was armed again against
+    /// a tree that was staged again, so a breakpoint in a file that was **not**
     /// replaced can move too. a client that was not told would be watching a
     /// line it can see is armed and never reached
     pub rebound: Vec<Resolved>,
@@ -247,7 +247,7 @@ pub struct Remapped {
     pub directory: PathBuf,
     /// how many `.by`/`.py` pairs the map covers now
     pub files: u32,
-    /// how many breakpoints were translated again through it
+    /// how many breakpoints were armed again against it
     pub breakpoints: u32,
 }
 
@@ -256,9 +256,9 @@ impl std::fmt::Display for Remapped {
         write!(
             formatter,
             "the basedpython build in `{}` was mapped again — {} file(s) in the \
-             map, {} breakpoint(s) translated through it. that happened before \
-             any code was replaced, because the generated lines the breakpoints \
-             were armed on came out of the table this replaced",
+             map, {} breakpoint(s) armed against it. that happened before any \
+             code was replaced, because the new code is compiled as its `.by` \
+             through the table this installed",
             self.directory.display(),
             self.files,
             self.breakpoints

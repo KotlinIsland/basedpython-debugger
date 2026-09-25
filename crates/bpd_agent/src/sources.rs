@@ -1,16 +1,23 @@
-//! reporting a generated python location as the `.by` line it came from
+//! a basedpython build's tables, and the generated python locations they report
+//! as `.by` lines
 //!
-//! basedpython transpiles `.by` to `.py` and the interpreter runs the `.py`, so
-//! **every** location this agent can read is a location in a file the user did
-//! not write. this is where the substitution happens, and it happens here — in
-//! the debuggee, at the moment a location is made — for one reason: a location
-//! leaves the debugger through about thirty fields, and mapping them on the way
-//! out means finding every one of them. missing one reports two different files
-//! for a single location, which is worse than consistently reporting the one
-//! the interpreter has
+//! basedpython transpiles `.by` to `.py`, and `by run`'s runner compiles each
+//! staged module **as its `.by`**: the code object is named after the `.by` path
+//! and every line in it is the `.by` line it came from. a location in one of
+//! those needs nothing from here — the interpreter already reports it in the
+//! user's terms. what the tables are for is everything around that:
 //!
-//! it is the same shape [`crate::templates`] uses for django, and for the same
-//! reason: what a client sees is decided once, where the fact is read
+//! - a module the runner could not compile as its `.by`, because a loader of the
+//!   program's own stands in front of it, runs as the generated python. its
+//!   locations are substituted here, in the debuggee, at the moment a location is
+//!   made — a location leaves the debugger through about thirty fields, and
+//!   mapping them on the way out means finding every one of them. it is the same
+//!   shape [`crate::templates`] uses for django, and for the same reason: what a
+//!   client sees is decided once, where the fact is read
+//! - a module the runner did compile as its `.by` is compiled that way again —
+//!   to replace its code, and to prove the source shown beside a frame is the
+//!   source it runs — which takes the generated python behind the `.by`, found
+//!   through [`staged_as`]
 //!
 //! ## what does not happen here
 //!
@@ -41,6 +48,7 @@
 //!   front of a user with nothing to explain it is its own kind of wrong
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use bpd_core::source_map::{Located, MappedFile, Mapping, Unmapped};
@@ -193,6 +201,57 @@ pub(crate) fn source_of(file: &str) -> Option<MappedFile> {
     entry_for(&mut state, file).map(|entry| entry.file.clone())
 }
 
+/// the entry of the build whose `.by` is this file, if any
+///
+/// the other direction from [`source_of`], and what a code object `by run`
+/// compiled needs: its runner names every staged module after the `.by` it was
+/// transpiled from, so its `co_filename` is the source and the generated python
+/// behind it is found through the table
+pub(crate) fn staged_as(file: &str) -> Option<MappedFile> {
+    staged_among(&installed(), Path::new(file)).cloned()
+}
+
+/// the build's tables as they are installed now
+pub(crate) fn installed() -> Vec<MappedFile> {
+    state()
+        .entries
+        .iter()
+        .map(|entry| entry.file.clone())
+        .collect()
+}
+
+/// the entry of `tables` whose generated python is `file`
+pub(crate) fn generating_among<'a>(
+    tables: &'a [MappedFile],
+    file: &Path,
+) -> Option<&'a MappedFile> {
+    among(tables, file, |entry| &entry.generated)
+}
+
+/// the entry of `tables` whose `.by` is `file`
+pub(crate) fn staged_among<'a>(tables: &'a [MappedFile], file: &Path) -> Option<&'a MappedFile> {
+    among(tables, file, |entry| &entry.source)
+}
+
+/// the entry one of whose two files is `file`
+///
+/// by the filesystem's identity, the comparison a breakpoint is bound by, after
+/// the exact spelling the table has — which is the path the build was written
+/// under, and the one the interpreter compiled
+fn among<'a>(
+    tables: &'a [MappedFile],
+    file: &Path,
+    side: impl Fn(&MappedFile) -> &PathBuf,
+) -> Option<&'a MappedFile> {
+    if let Some(exact) = tables.iter().find(|entry| side(entry) == file) {
+        return Some(exact);
+    }
+    let identity = files::identify(file).ok()?;
+    tables
+        .iter()
+        .find(|entry| files::identify(side(entry)).ok().as_ref() == Some(&identity))
+}
+
 /// which entry of the build a `co_filename` names, if any
 ///
 /// the identity comparison is the filesystem's own — the same one a breakpoint
@@ -216,7 +275,7 @@ fn entry_for<'a>(state: &'a mut State, file: &str) -> Option<&'a Entry> {
 
 /// look a filename up against the build, without the cache
 fn resolve(state: &State, file: &str) -> Option<usize> {
-    let path = std::path::Path::new(file);
+    let path = Path::new(file);
     if let Some(at) = state
         .entries
         .iter()

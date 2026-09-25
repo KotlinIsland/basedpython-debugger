@@ -535,17 +535,18 @@ pub enum Request {
         /// would be read as a statement about the edit
         files: Vec<PathBuf>,
 
-        /// read the build's source map again, and move the breakpoints with it
+        /// read the build's source map again, and arm the breakpoints with it
         ///
         /// what a re-staged basedpython build needs and nothing else does.
         /// staging one file of a build again rewrites `_by_sourcemap.py` too, so
-        /// the table every `.by` breakpoint's generated line came out of is
-        /// stale the moment the tree changes
+        /// the table the new code has to be compiled onto its `.by` through is
+        /// not the one installed, and the installed one is stale the moment the
+        /// tree changes
         ///
         /// asked for on the **replacement** rather than as a request of its own,
         /// because the order between them is not a client's to get right: the
         /// map is reloaded and verified, installed, and the `.by` breakpoints
-        /// are translated through it again, and only then is any code replaced.
+        /// are armed against it again, and only then is any code replaced.
         /// a client that sent two requests could order them the other way, and
         /// everything reported in between would be mapped through the table for
         /// code the process is no longer running
