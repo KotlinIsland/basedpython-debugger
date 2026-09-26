@@ -657,22 +657,18 @@ fn a_running_program_is_answered_about_itself_without_being_stopped(transport: T
     client.finish();
 }
 
-/// a program that is busy for half a second and then ends on its own
-const BUSY_THEN_DONE: &str = r#"import time
-
-started = time.monotonic()
-while time.monotonic() - started < 0.5:
-    pass
-print("done", flush=True)
-"#;
-
 fn a_client_that_never_stops_asking_is_still_told_the_program_ended(transport: Transport) {
     // the adapter answers a running program's client between waits for the
     // program. a client with a question always pending must not be able to
     // keep it from waiting at all: measured before this test existed, a client
     // asking `threads` back to back was never told the program had ended, and
     // went on asking a program that had long exited
-    let fixture = Fixture::new("busy", BUSY_THEN_DONE);
+    //
+    // the program ends when it is told to, and it is told only once a question
+    // has been answered. ending on its own clock instead left the test racing
+    // the runner: a loaded one answered nothing inside the window, which says
+    // nothing about the adapter
+    let fixture = Fixture::new("spinner", SPINNING);
     let mut client = Client::start(transport);
 
     client.request("initialize", &serde_json::json!({}));
@@ -683,21 +679,28 @@ fn a_client_that_never_stops_asking_is_still_told_the_program_ended(transport: T
     client.event("initialized");
     client.request("configurationDone", &serde_json::json!({}));
 
-    let mut answered = 0;
+    let deadline = Instant::now() + PATIENCE;
+    let mut told_to_end = false;
     while !client
         .seen
         .iter()
         .any(|message| message["type"] == "event" && message["event"] == "exited")
     {
         // not asserted: the last one can cross the program's end on the wire
-        if client.request("threads", &serde_json::json!({}))["success"] == true {
-            answered += 1;
+        let threads = client.request("threads", &serde_json::json!({}));
+        if !told_to_end {
+            assert!(
+                Instant::now() < deadline,
+                "a running program was asked its threads for {PATIENCE:?} and \
+                 no question was answered: {threads}"
+            );
+            if threads["success"] == true {
+                std::fs::write(fixture.directory().join("stop"), "x")
+                    .expect("the fixture directory is there");
+                told_to_end = true;
+            }
         }
     }
-    assert!(
-        answered > 0,
-        "the program ran for half a second and no question about it was answered"
-    );
 
     let exited = client.event("exited");
     assert_eq!(exited["body"]["exitCode"], 0);
