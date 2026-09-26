@@ -4,7 +4,7 @@ requires-python = ">=3.13"
 
 [[package]]
 name = "basedpython-debugger"
-version = "0.0.1a1"
+version = "0.0.1a2"
 source = { virtual = "." }
 
 [package.dev-dependencies]

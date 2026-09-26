@@ -3,7 +3,7 @@
 # `python/` has somewhere to declare itself when it lands
 [project]
 name = "basedpython-debugger"
-version = "0.0.1a1"
+version = "0.0.1a2"
 description = "a debugger for python and basedpython"
 requires-python = ">=3.13"
 dependencies = []
