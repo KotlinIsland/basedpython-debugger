@@ -30,6 +30,7 @@ pub mod fact;
 pub mod frame;
 pub mod jump;
 pub mod parity;
+pub mod path;
 pub mod peer;
 pub mod python;
 pub mod query;

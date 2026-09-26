@@ -184,10 +184,7 @@ impl Build {
         // temporary directory is under `/var` on macos and `/tmp` names it
         // through a symlink, and the map's own paths would then be a third
         // spelling of the same file
-        let root = directory
-            .path()
-            .canonicalize()
-            .expect("the directory was just made");
+        let root = bpd_core::path::resolved(directory.path()).expect("the directory was just made");
         let source = root.join("demo.by");
         let generated = root.join("demo.py");
         std::fs::write(&source, by).expect("the `.by` is written");
@@ -263,9 +260,7 @@ impl Build {
     /// the build directory, canonicalised — the directory `bpd` finds the map in
     #[must_use]
     pub fn root(&self) -> PathBuf {
-        self.directory
-            .path()
-            .canonicalize()
+        bpd_core::path::resolved(self.directory.path())
             .expect("the directory is there for the life of the build")
     }
 

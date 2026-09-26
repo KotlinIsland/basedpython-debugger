@@ -155,6 +155,6 @@ pub fn build() -> PathBuf {
 
 /// a path as the interpreter reports it, so a location read back compares
 fn canonical(path: &Path) -> PathBuf {
-    path.canonicalize()
+    bpd_core::path::resolved(path)
         .unwrap_or_else(|error| panic!("could not resolve {}: {error}", path.display()))
 }

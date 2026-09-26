@@ -687,13 +687,13 @@ impl SourceMap {
 
     /// the pair whose generated python is that file
     fn pair_generating(&self, file: &Path) -> Option<&MappedFile> {
-        let file = file.canonicalize().ok()?;
+        let file = crate::path::resolved(file).ok()?;
         self.pairs.get(&file)
     }
 
     /// the pair whose `.by` source is that file
     fn pair_from(&self, file: &Path) -> Option<&MappedFile> {
-        let file = file.canonicalize().ok()?;
+        let file = crate::path::resolved(file).ok()?;
         self.pairs.values().find(|pair| pair.source == file)
     }
 }
@@ -710,9 +710,10 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("{ALGORITHM}:{}", digest_of(bytes))
 }
 
-/// a path as the filesystem really spells it
+/// a path as the filesystem really spells it, in the form an interpreter
+/// reports one — see [`crate::path`]
 fn canonical(path: &Path) -> Result<PathBuf, MapError> {
-    path.canonicalize().map_err(|source| MapError::Uncheckable {
+    crate::path::resolved(path).map_err(|source| MapError::Uncheckable {
         path: path.to_path_buf(),
         source,
     })
@@ -844,7 +845,10 @@ mod tests {
             .to_source(&build.generated, 4)
             .expect("generated line 4 came from the first `.by` line");
         assert_eq!(located.line, 1);
-        assert_eq!(located.file, build.source.canonicalize().expect("on disk"));
+        assert_eq!(
+            located.file,
+            crate::path::resolved(&build.source).expect("on disk")
+        );
     }
 
     #[test]
@@ -902,7 +906,7 @@ mod tests {
         assert_eq!(located.line, 5);
         assert_eq!(
             located.file,
-            build.generated.canonicalize().expect("on disk")
+            crate::path::resolved(&build.generated).expect("on disk")
         );
     }
 
