@@ -79,13 +79,13 @@ use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::thread::JoinHandle;
 
 use bpd_core::TraceRecord;
 use bpd_protocol::message::FromAgent;
 
 use crate::attach;
 use crate::cells::ForkCell;
+use crate::own_thread::{self, OwnThread};
 
 /// how many records wait to be written before the oldest is dropped
 ///
@@ -217,7 +217,7 @@ struct Writer {
     wanted: bool,
     /// the thread that holds the connection's handle, which hands it back when
     /// it stands down
-    running: Option<JoinHandle<Writing>>,
+    running: Option<OwnThread<Writing>>,
     /// the handle while no thread holds it
     idle: Option<Writing>,
     /// how many forks are between their `before` handler and their
@@ -324,9 +324,7 @@ fn start_writing(writer: &mut Writer) -> io::Result<()> {
         #[cfg(not(unix))]
         None => Writing::open()?,
     };
-    let handle = std::thread::Builder::new()
-        .name("bpd-stream".to_string())
-        .spawn(move || write_records(writing))?;
+    let handle = own_thread::spawn("bpd-stream", move || write_records(writing))?;
     writer.running = Some(handle);
     Ok(())
 }
@@ -448,7 +446,7 @@ pub(crate) fn flush() {
 /// the caller holds the writer's lock. `stopping` is set under the queue's
 /// lock and the wakeup written after it, so a writer waiting on either is
 /// reached; one inside a write finishes the frame first — see the module note
-fn stop(writer: &mut Writer, handle: JoinHandle<Writing>) {
+fn stop(writer: &mut Writer, handle: OwnThread<Writing>) {
     {
         let mut outbound = outbound();
         outbound.stopping = true;

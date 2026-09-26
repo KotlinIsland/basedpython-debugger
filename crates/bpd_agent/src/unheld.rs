@@ -70,7 +70,6 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, MutexGuard};
-use std::thread::JoinHandle;
 
 use bpd_core::Refusal;
 use bpd_protocol::message::{FromAgent, FromEngine};
@@ -78,6 +77,7 @@ use pyo3::prelude::*;
 
 use crate::attach;
 use crate::cells::ForkCell;
+use crate::own_thread::{self, OwnThread};
 
 /// what is waiting to be answered, and who is answering it
 ///
@@ -94,7 +94,7 @@ struct Answering {
     /// the thread is to return the moment it can
     stopping: bool,
     /// the thread that takes requests off the queue, while there is one
-    running: Option<JoinHandle<()>>,
+    running: Option<OwnThread<()>>,
     /// how many forks are between their `before` handler and their
     /// `after_in_parent` one
     #[cfg(unix)]
@@ -157,9 +157,7 @@ fn start(state: &mut Answering) {
     state.stopping = false;
     // the reader thread outlives this, so a thread that cannot be started is a
     // request the debugger would wait on for ever
-    let spawned = std::thread::Builder::new()
-        .name("bpd-answer".to_string())
-        .spawn(answer_requests);
+    let spawned = own_thread::spawn("bpd-answer", answer_requests);
     match spawned {
         Ok(handle) => state.running = Some(handle),
         Err(error) => attach::fatal(&format!(
@@ -265,10 +263,11 @@ pub(crate) fn stand_down(python: Python<'_>) {
 
 /// wait for the answering thread to have gone
 ///
-/// `join` rather than a flag, because `pthread_join` is the only thing that
-/// says the operating system thread has gone — which is what cpython counts
+/// a join rather than a flag, because what cpython counts is operating system
+/// threads, and a join that waits for the kernel — [`OwnThread::join`] — is
+/// the only thing that says one has gone
 #[cfg(unix)]
-fn join(handle: JoinHandle<()>) {
+fn join(handle: OwnThread<()>) {
     // a panic in the agent is a broken invariant, and this is the one place it
     // would otherwise be swallowed
     if handle.join().is_err() {

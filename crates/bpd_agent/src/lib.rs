@@ -34,6 +34,7 @@ mod frames;
 mod inplace;
 mod interpframe;
 mod linetable;
+mod own_thread;
 mod pause;
 mod replace;
 mod restarts;

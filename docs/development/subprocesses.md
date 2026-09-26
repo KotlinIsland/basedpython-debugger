@@ -367,9 +367,15 @@ there is nothing bpd can do about that from inside the fork: the only thing that
 runs before the count is the audit hook, and killing and respawning the reader
 thread around every fork would be a worse debugger than the warning is a
 problem. `attach::stand_down` **joins** the thread rather than signalling it and
-leaving it, because `pthread_join` returning is the only thing that says the
-operating system thread has gone — which is what cpython counts, when it counts
-late enough to see it
+leaving it, and the join waits for the kernel as well as for `pthread_join` —
+[below](#the-parent-is-not-left-multi-threaded-either) — because that is the
+only thing that says the operating system thread has gone, which is what
+cpython counts, when it counts late enough to see it
+
+a joined thread of the **program's** own has no such wait, and linux counts one
+for a moment after `pthread_join` has returned. that is a second way for the
+same fork to be counted differently from run to run, and it is the program's
+thread, on both runs, so bpd has nothing to take away
 
 `a_program_that_forks_records_exactly_the_warnings_it_would_have` forks three
 times: once as launched, once with a thread of the program's own stopped in a
@@ -553,9 +559,17 @@ takes the count was measured from both sides, on 3.13, 3.14, 3.15 and a
 free-threaded 3.14 — a thread stopped in a `before` handler is not counted, and
 one started in an `after_in_parent` handler is not counted either
 
-the thread is **joined**, not signalled and abandoned. `join` is `pthread_join`,
-and that is the only thing that says the operating system thread has gone, which
-is what is being counted
+the thread is **joined**, not signalled and abandoned, and on linux the join
+waits for the kernel too. `pthread_join` returns when the kernel clears the
+thread's id at exit, and the kernel takes the thread out of the count cpython
+reads from `/proc/self/stat` a little later in the same exit. measured in a
+container with two cpus: 53 of 20000 joins were still counted the moment
+`pthread_join` returned, and 158 of 20000 with the cpus busy. ci found it as
+`a_program_asked_about_while_it_ran_forks_as_it_would_have` failing on a loaded
+ubuntu runner, with the thread that answers a running program joined and still
+counted. so every thread of the agent's is started and joined through
+`own_thread`, whose join then waits for `/proc/self/task/<tid>` to be gone — the
+kernel lowers the count before it unhashes the thread, under one lock
 
 this is the mechanism rather than the instance: `os.forkpty()` warns the same way
 and runs the same handlers — measured — so it is covered by the same registration

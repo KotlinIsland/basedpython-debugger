@@ -50,7 +50,6 @@ use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::thread::JoinHandle;
 
 #[cfg(unix)]
 use rustix::event::PollFlags;
@@ -59,6 +58,7 @@ use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
 use crate::cells::ForkCell;
+use crate::own_thread::{self, OwnThread};
 use crate::stops;
 
 /// the exit code used when the debugger disappears mid-session
@@ -161,7 +161,7 @@ struct Reader {
     /// the reading end while no thread holds it
     idle: Option<Reading>,
     /// the thread that holds it, which hands it back when it stands down
-    running: Option<JoinHandle<Reading>>,
+    running: Option<OwnThread<Reading>>,
 }
 
 /// in a [`ForkCell`] for the reason [`WRITER`] is: [`stand_down`] takes this,
@@ -289,9 +289,7 @@ fn start_reading(reader: &mut Reader) -> io::Result<()> {
     // that is the right end of a bad choice: the alternative is a session whose
     // connection is open and unread, which looks exactly like a debuggee that
     // is busy. every caller of this reports the failure and stops
-    let handle = std::thread::Builder::new()
-        .name("bpd-control".to_string())
-        .spawn(move || read_requests(reading))?;
+    let handle = own_thread::spawn("bpd-control", move || read_requests(reading))?;
     reader.running = Some(handle);
     Ok(())
 }
@@ -304,9 +302,9 @@ fn start_reading(reader: &mut Reader) -> io::Result<()> {
 /// back would put a wait for the GIL inside `os.fork()` that a bare run does
 /// not have
 ///
-/// the thread is joined rather than signalled and left, because `join` is
-/// `pthread_join` and that is the only thing that says the operating system
-/// thread has gone — which is what cpython counts
+/// the thread is joined rather than signalled and left, because what cpython
+/// counts is operating system threads, and a join that waits for the kernel —
+/// [`OwnThread::join`] — is the only thing that says one has gone
 ///
 /// it stands down **between frames**, so what has arrived and not been read
 /// stays in the kernel's receive buffer for the next reader. a request that
