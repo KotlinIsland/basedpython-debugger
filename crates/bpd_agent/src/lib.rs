@@ -148,6 +148,9 @@ mod bpd_agent {
 
         attach::attach(&endpoint, &token)
             .map_err(|error| PySystemExit::new_err(format!("bpd: could not attach: {error}")))?;
+        #[cfg(windows)]
+        attach::hang_up_at_exit()
+            .map_err(|error| PySystemExit::new_err(format!("bpd: could not attach: {error}")))?;
         claim(python)?;
         arm(python)?;
 

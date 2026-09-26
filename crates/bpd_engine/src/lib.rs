@@ -623,8 +623,36 @@ impl Session {
     }
 
     /// the next thing the agent has to say, or `None` once it has hung up
+    ///
+    /// the engine hangs up in turn, the moment it has read to the end. an agent
+    /// on windows waits for exactly that before its process may exit — see
+    /// `hang_up` in `bpd_agent` — and every caller that goes on to wait for the
+    /// child's exit status reaches that wait through here, so the two cannot
+    /// be waiting on each other
     pub fn next_event(&mut self) -> Result<Option<FromAgent>> {
-        Ok(message::read(&mut self.reading, &mut self.buffer)?)
+        let event = message::read(&mut self.reading, &mut self.buffer)?;
+        if event.is_none() {
+            self.hang_up()?;
+        }
+        Ok(event)
+    }
+
+    /// say that nothing more will be sent, because the agent has said so
+    fn hang_up(&self) -> Result<()> {
+        match self.writing().stream.shutdown(std::net::Shutdown::Write) {
+            Ok(()) => Ok(()),
+            // an agent whose process has already gone has nothing left to wait
+            // for, and its socket is closed or reset under this one
+            Err(error)
+                if error.kind() == io::ErrorKind::NotConnected
+                    || bpd_core::peer_is_gone(&error) =>
+            {
+                Ok(())
+            }
+            Err(source) => Err(Error::Control {
+                source: frame::Error::Io(source),
+            }),
+        }
     }
 
     /// whether the agent has begun saying something by `deadline`
@@ -951,5 +979,55 @@ impl Interrupt {
             source,
         })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read as _;
+
+    use super::*;
+
+    #[test]
+    fn the_engine_hangs_up_once_it_has_read_to_the_agents_end() {
+        // what an agent on windows waits for before its process may exit. an
+        // engine that kept its end open after reading the agent's would leave
+        // that exit waiting on it, and the engine waiting on the exit
+        const TOKEN: [u8; TOKEN_LEN] = [7; TOKEN_LEN];
+        const PATIENCE: Duration = Duration::from_secs(10);
+
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("a loopback port is free");
+        let endpoint = listener.local_addr().expect("the listener is bound");
+        let agent = std::thread::spawn(move || -> io::Result<usize> {
+            let mut stream = TcpStream::connect(endpoint)?;
+            frame::write_handshake(&mut stream, &TOKEN).map_err(io::Error::other)?;
+            frame::read_handshake(&mut stream, &TOKEN).map_err(io::Error::other)?;
+            stream.shutdown(std::net::Shutdown::Write)?;
+            stream.set_read_timeout(Some(PATIENCE))?;
+            let mut rest = Vec::new();
+            stream.read_to_end(&mut rest)
+        });
+
+        let (stream, _) = listener.accept().expect("the agent connects");
+        let mut session =
+            Session::attach(stream, &[TOKEN], PATIENCE).expect("the agent presents the token");
+        assert!(
+            session
+                .next_event()
+                .expect("an agent hanging up between frames is the end of the stream")
+                .is_none(),
+            "the agent said nothing before it hung up"
+        );
+
+        // the session is still held here, so the end the agent reads can only
+        // be the one `next_event` sent
+        let read = agent.join().expect("the agent returned");
+        assert_eq!(
+            read.map_err(|error| error.kind()),
+            Ok(0),
+            "the agent waited {PATIENCE:?} for the engine to hang up in turn"
+        );
+        drop(session);
     }
 }

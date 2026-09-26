@@ -90,6 +90,13 @@ const fn no_writer() -> Option<TcpStream> {
 /// would report a failure where there was none
 static FINISHED: AtomicBool = AtomicBool::new(false);
 
+/// whether this side has hung up, so that nothing more is written
+///
+/// windows only, and read in [`send`] under the writing end's lock, so a frame
+/// is either written whole before the hang-up or not at all. see [`hang_up`]
+#[cfg(windows)]
+static HUNG_UP: AtomicBool = AtomicBool::new(false);
+
 /// whether this process has given up the session it inherited
 ///
 /// set in a forked child and nowhere else, so it is false for the whole of an
@@ -413,6 +420,105 @@ pub(crate) fn mark_finished() {
     FINISHED.store(true, Ordering::Relaxed);
 }
 
+/// wait for the engine to have read everything, before the process may exit
+///
+/// **windows resets a socket its process exits holding, and a reset throws
+/// away what the other end has not read yet.** unix closes it, and a close
+/// leaves everything already sent readable up to the end of the stream. so on
+/// windows a debuggee that wrote faster than the engine read lost the tail of
+/// what it said at exit — measured in ci as a trace stream that ended part way
+/// through a frame, and as one that ended cleanly with 120 of its records
+/// neither forwarded nor counted as dropped
+///
+/// so this side hangs up first, and the process waits for the engine to hang
+/// up in turn. `shutdown` sends the end of the stream **after** everything
+/// already written, and the engine hangs up the moment it reads that end —
+/// `next_event` in `bpd_engine` — so when the reader sees the engine's end,
+/// the engine has read all of this one's. the reset the exit then sends
+/// discards nothing
+///
+/// it runs from `Py_AtExit`, after the interpreter has finalized, because that
+/// is the last moment there is: an `atexit` handler or a thread still running
+/// during finalization can reach a breakpoint and has to be able to report it.
+/// what waits is the exit, for the engine's next read — the wait
+/// [`crate::stream::finish`] already makes for a stream the engine was not
+/// reading. an engine that has gone ends the wait too, with its own end or a
+/// reset
+#[cfg(windows)]
+pub(crate) fn hang_up() {
+    // whatever the reader sees now is the end of a session whose program is
+    // over, including a program that never reached `finishing`
+    mark_finished();
+
+    {
+        let mut writer = writer();
+        HUNG_UP.store(true, Ordering::SeqCst);
+        let Some(stream) = writer.as_mut() else {
+            unreachable!("the hang-up is registered after `attach` installed the writing end");
+        };
+        match stream.shutdown(std::net::Shutdown::Write) {
+            Ok(()) => {}
+            // the engine is gone, and there is nothing left for it to lose
+            Err(error)
+                if error.kind() == io::ErrorKind::NotConnected
+                    || bpd_core::peer_is_gone(&error) =>
+            {
+                return;
+            }
+            Err(error) => fatal(&format!(
+                "the control connection could not be ended in order: {error}. \
+                 exiting without that would reset it, and the engine would lose \
+                 whatever it had not read yet"
+            )),
+        }
+    }
+
+    let running = reader().running.take();
+    if let Some(handle) = running {
+        // a panic in the agent is a broken invariant, and this is the one place
+        // it would otherwise be swallowed
+        if handle.join().is_err() {
+            fatal(
+                "the reader of the control connection panicked while waiting for \
+                 the engine to finish reading",
+            );
+        }
+    }
+}
+
+/// run [`hang_up`] once the interpreter has finalized
+///
+/// # errors
+///
+/// when the interpreter has no room left for another exit function. it holds
+/// a fixed number, and a debuggee that could not register this one would lose
+/// the end of what it said
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "`Py_AtExit` is the only hook that runs after the interpreter has \
+              finalized. an `atexit` function runs while the program's own, and \
+              its threads, can still reach a breakpoint — see `hang_up`"
+)]
+pub(crate) fn hang_up_at_exit() -> io::Result<()> {
+    extern "C" fn at_exit() {
+        hang_up();
+    }
+
+    // SAFETY: `Py_AtExit` stores the pointer and calls it once, from
+    // `Py_FinalizeEx`, after the interpreter is gone. the function it is handed
+    // is a plain `extern "C"` one that touches no python object
+    let registered = unsafe { pyo3::ffi::Py_AtExit(Some(at_exit)) };
+    if registered == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "the interpreter has no room for another exit function, and without \
+             one the end of what the debuggee says can be lost when it exits",
+        ))
+    }
+}
+
 /// whether this process has given up the session it inherited
 pub(crate) fn detached() -> bool {
     DETACHED.load(Ordering::Relaxed)
@@ -599,6 +705,13 @@ pub(crate) fn send(message: &FromAgent) {
     }
 
     let mut writer = writer();
+    // only the interpreter's own exit comes after a hang-up, so what would
+    // have been said here is said by the end of the stream instead: the
+    // program is over
+    #[cfg(windows)]
+    if HUNG_UP.load(Ordering::SeqCst) {
+        return;
+    }
     let Some(stream) = writer.as_mut() else {
         unreachable!("nothing sends on the control connection before `attach` installed it");
     };

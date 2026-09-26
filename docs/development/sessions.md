@@ -194,6 +194,31 @@ through one. `a_peer_that_reset_between_frames_is_the_end_of_the_stream` and
 `a_peer_that_reset_inside_a_frame_is_a_truncation` hold both halves, so a
 debuggee that really did die mid-frame is not quietly turned into a clean exit
 
+### a reset throws away what was not read
+
+a reset does more than say the peer is gone. windows **discards** whatever the
+receiving end has not read yet, so a debuggee that exited while the engine was
+behind lost the tail of what it said — measured in ci with a program that
+floods the trace stream while its client is idle, as a stream that stopped part
+way through a frame, and as one that ended cleanly with 120 of its 40000
+records neither forwarded nor counted as dropped. unix closes the socket
+instead, and a close leaves everything already sent readable up to the end
+
+so on windows the two sides end the connection in order before the process may
+exit. once the interpreter has finalized — from `Py_AtExit`, after every
+`atexit` handler and every thread that could still reach a breakpoint — the
+agent shuts down its sending half, which puts the end of the stream **after**
+everything already written, and waits. the engine shuts down its own sending
+half the moment it reads that end, whichever platform it is on, and the agent's
+reader seeing it is what lets the process go. by then the engine has read
+everything, and the reset the exit sends discards nothing
+
+what waits is the exit, for the engine's next read — the wait the trace stream
+already makes for a client that is not reading. the engine hangs up inside
+`next_event`, which is the only way any caller reaches the wait for the child's
+exit status, so the two can never be waiting on each other, and an engine that
+has gone ends the wait with its own end or a reset
+
 ## what is not built
 
 - **a session cannot be joined by hand.** there is no command that opens a
