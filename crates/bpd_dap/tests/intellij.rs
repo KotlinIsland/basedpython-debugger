@@ -142,6 +142,10 @@ fn every_attribute_the_plugin_leaves_out_is_one_it_could_not_honour() {
         // watch would be a stream only the console reads
         String::from("understands"),
         String::from("watchRecompositions"),
+        // a python run configuration names the program itself, and nothing
+        // this plugin starts runs it through a launcher. the one launcher there
+        // is, `by run`'s runner, is started by the basedpython plugin
+        String::from("launcher"),
     ]
     .into();
 

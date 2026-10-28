@@ -74,7 +74,7 @@ impl Launcher for Engine {
         // for itself
         let launched = bpd_engine::launch_piped(
             &interpreter,
-            &Program::Script(configuration.program.clone()),
+            &program_of(configuration),
             &arguments,
             move |stdout, stderr| {
                 Forwarders::on(vec![
@@ -157,5 +157,15 @@ impl Session for Attached {
 
     fn terminate(&mut self, session: Option<SessionId>) -> Result<(), Failed> {
         Ok(self.0.interrupt(session)?.terminate()?)
+    }
+}
+
+/// what the configuration asks to run, and whether it is the program or what
+/// starts it
+fn program_of(configuration: &Configuration) -> Program {
+    if configuration.launcher {
+        Program::Launcher(configuration.program.clone())
+    } else {
+        Program::Script(configuration.program.clone())
     }
 }

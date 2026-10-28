@@ -227,6 +227,7 @@ user could see accepted and never get
 | ---------------- | --------- | ------------------------------------------------------ |
 | `program`        | required  | the script to run                                      |
 | `args`           | `[]`      | arguments for the program, exactly as it receives them |
+| `launcher`       | `false`   | `program` starts the program rather than being it      |
 | `python`         | `python3` | the interpreter, resolved on `PATH` like any command   |
 | `stopOnEntry`    | `false`   | stay stopped before the first statement                |
 | `stopTheWorld`   | `false`   | hold every thread that can be held, for each stop      |
@@ -239,6 +240,33 @@ user could see accepted and never get
 breakpoint binds against a real interpreter rather than against a guess about
 one. `stopOnEntry` decides whether the client is told about it, not whether it
 happens
+
+### `launcher`
+
+`program` is a **launcher**: a script that makes the program being debugged
+`__main__` and runs it. `by run` starts every basedpython program that way —
+`<python> _by_runner.py <module>` — and a client debugging one hands bpd the
+runner as `program` and the module in `args`, because that is what `by run`
+hands its `--launcher`
+
+the launcher's frames are then how the program was started rather than part of
+it, and bpd treats them the way it treats its own bootstrap. no stack reports
+them, a step never lands in them — a step over the program's last line lets it
+end — and an exception the program does not catch is reported from the
+program's outermost frame below them. the launcher's code is known by **the code
+object bpd compiled it to**, and a frame is the launcher's when it runs that
+code or a function nested in it — never by a file name
+
+a frame of the launcher's in the **middle** of the program's stack — the import
+hook `by run`'s runner installs, between the program's `import` and the module
+it loads — is reported where it is, because the program's frames are on both
+sides of it. a step does not land in it either way
+
+debugpy is told the same thing as a `rules` entry that excludes the runner's
+path. that is a file-name match, and it is also the whole of debugpy's
+just-my-code filter, so the one argument means two things there. this one says
+which frames started the program and nothing about which of the program's own
+frames are interesting
 
 ### `debugChildren`
 

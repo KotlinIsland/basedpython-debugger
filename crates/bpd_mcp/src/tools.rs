@@ -357,6 +357,14 @@ pub fn tools() -> Vec<Tool> {
                     "args": { "type": "array", "items": { "type": "string" },
                         "description": "arguments for the program, exactly as it \
                                         receives them" },
+                    "launcher": { "type": "boolean", "description":
+                        "the script is a **launcher**: it runs the program being \
+                         debugged as `__main__`, the way `by run`'s \
+                         `_by_runner.py` does. its own frames are how the program \
+                         was started, so no stack shows them, no step lands in \
+                         them, and an exception the program does not catch stops \
+                         in the program's outermost frame below them. false when \
+                         left out" },
                     "frames": integer(FRAMES),
                 }),
                 &["program"],

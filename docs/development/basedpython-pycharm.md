@@ -75,7 +75,9 @@ something it is waiting on
 
 what a switch needs from this side is the launcher `by run --launcher` starts
 the program through, which is four lines and is written out on the source
-mapping page. `bpd` has no subcommand that writes it yet, and that is sugar over
+mapping page. the plugin's `launch` names `_by_runner.py` as
+`program`, so it also says `"launcher": true` — without it the runner's frames are
+the program's outermost, and every stack ends in them `bpd` has no subcommand that writes it yet, and that is sugar over
 a thing that already works
 
 when the switch happens the two plugins have one adapter between them, and whether

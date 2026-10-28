@@ -177,6 +177,104 @@ pub(crate) fn is_bootstrap(frame: &Bound<'_, PyAny>) -> bool {
         .is_some_and(|entry| frame.is(entry.bind(frame.py())))
 }
 
+/// the code of the launcher the program was entered through, when it was
+///
+/// a launcher is a script that runs the program being debugged as `__main__`:
+/// `by run`'s `_by_runner.py`, started as `<python> _by_runner.py <module>`, is
+/// one. its frames are how the program was started rather than part of it, so
+/// they are treated the way the bootstrap is
+///
+/// `runpy`'s under `-m` are deliberately **not** one of these, and the
+/// difference is what a bare run shows: a bare `python -m` traceback holds
+/// runpy's two frames, and bpd's `-m` matches it. a bare `by run` traceback
+/// holds nothing of the runner's — its excepthook takes them out — so a stack
+/// that showed them would be one no run without bpd ever shows
+///
+/// **known by identity, never by name.** bpd compiles the launcher itself, so
+/// the code object it runs is in hand, and every function the launcher defines
+/// is a code object nested in that one. a frame is the launcher's when the code
+/// it runs is one of those objects, which is the exact answer: a file name would
+/// be a guess about which code is whose, and wrong for a program with a file of
+/// the same name
+struct Launcher {
+    /// the launcher's module code, which keeps every nested code object alive
+    /// and so keeps the addresses below meaning what they meant
+    _code: Py<PyAny>,
+    /// the address of every code object the launcher compiled to
+    codes: std::collections::BTreeSet<usize>,
+}
+
+static LAUNCHER: OnceLock<Launcher> = OnceLock::new();
+
+/// remember the launcher's code, so its frames are never reported as the
+/// program's
+///
+/// called once, with the code object the script compiled to, before it runs
+pub(crate) fn remember_launcher(code: &Bound<'_, PyAny>) -> PyResult<()> {
+    let kind = code.get_type();
+    let mut codes = std::collections::BTreeSet::new();
+    let mut pending = vec![code.clone()];
+    while let Some(one) = pending.pop() {
+        if !codes.insert(one.as_ptr() as usize) {
+            continue;
+        }
+        for constant in one.getattr("co_consts")?.try_iter()? {
+            let constant = constant?;
+            if constant.get_type().is(&kind) {
+                pending.push(constant);
+            }
+        }
+    }
+    LAUNCHER
+        .set(Launcher {
+            _code: code.clone().unbind(),
+            codes,
+        })
+        .map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "the program was entered through two launchers",
+            )
+        })
+}
+
+/// whether this code object is the launcher's
+pub(crate) fn is_launchers(code: &Bound<'_, PyAny>) -> bool {
+    LAUNCHER
+        .get()
+        .is_some_and(|launcher| launcher.codes.contains(&(code.as_ptr() as usize)))
+}
+
+/// whether the program was entered **from** this frame
+///
+/// the bootstrap, and — when the program was started through a launcher — the
+/// launcher's frames below it, down to the one that runs the program. that is
+/// the whole of the frames no stack reports and no step lands in: the frame
+/// above the last of them is the program's outermost, which is where an
+/// exception nothing in the program caught is reported
+///
+/// a launcher's frame anywhere else — the import hook `by run`'s runner
+/// installs, called from inside the program — is not one of these. it is
+/// reported where it is, because the program's frames are on both sides of it;
+/// what keeps a step out of it is [`is_launchers`]
+pub(crate) fn is_entry(frame: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let mut current = frame.clone();
+    loop {
+        if is_bootstrap(&current) {
+            return Ok(true);
+        }
+        if !is_launchers(&current.getattr("f_code")?) {
+            return Ok(false);
+        }
+        let back = current.getattr("f_back")?;
+        if back.is_none() {
+            // the launcher's code on a thread it started, which is not the chain
+            // the program was entered through
+            return Ok(false);
+        }
+        current = back;
+    }
+}
+
 /// what the thread about to be held is holding that others can wait for
 ///
 /// walked once, at the stop, because that is when it is true. it costs a walk
@@ -825,7 +923,7 @@ impl<'py> Stopped<'py> {
             return refuse(Unrestartable::Suspendable { kind });
         }
         let caller = frame.getattr("f_back")?;
-        if caller.is_none() || is_bootstrap(&caller) {
+        if caller.is_none() || is_entry(&caller)? {
             return refuse(Unrestartable::NoCaller);
         }
         let exits = match bytecode::exit_tails(code, &namespaces_of(frame)?)? {
@@ -1500,14 +1598,14 @@ fn stack_of(python: Python<'_>) -> PyResult<Vec<Slot<'_>>> {
     Ok(slots)
 }
 
-/// walk the chain from the frame that stopped, stopping at the bootstrap
+/// walk the chain from the frame that stopped, stopping where the program was
+/// entered from — see [`is_entry`]
 fn walk(python: Python<'_>) -> PyResult<Vec<Bound<'_, PyAny>>> {
-    let bootstrap = BOOTSTRAP.get().map(|frame| frame.bind(python));
     let mut frames = Vec::new();
     let mut current = Some(events::current_frame(python)?);
 
     while let Some(frame) = current {
-        if bootstrap.is_some_and(|entry| frame.is(entry)) {
+        if is_entry(&frame)? {
             break;
         }
         let back = frame.getattr("f_back")?;

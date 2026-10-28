@@ -25,6 +25,18 @@ pub const TARGET: &str = "BPD_TARGET";
 /// which of the three ways the interpreter can be entered [`TARGET`] is
 pub const FORM: &str = "BPD_FORM";
 
+/// set, to `1`, when the script [`TARGET`] names is a **launcher**
+///
+/// a launcher is a script that runs the program being debugged as `__main__`
+/// — `by run`'s `_by_runner.py` is one. its own frames are how the program
+/// was started rather than part of it, so they are left out of every stack and
+/// never stepped or stopped in.
+/// absent for every other launch, which is the ordinary case
+///
+/// not a [`Form`]: a launcher is entered exactly as a script is, and what
+/// differs is only whose frames are whose
+pub const LAUNCHER: &str = "BPD_LAUNCHER";
+
 /// what `PYTHONPATH` held before the agent's directory was put in front of it
 ///
 /// the agent is imported by putting its staged directory on `PYTHONPATH`, and
@@ -84,6 +96,7 @@ pub const ALL: &[&str] = &[
     TOKEN,
     TARGET,
     FORM,
+    LAUNCHER,
     PYTHON_PATH,
     CHILD_ENDPOINT,
     CHILD_TOKEN,

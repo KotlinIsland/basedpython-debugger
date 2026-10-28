@@ -115,6 +115,8 @@ mod bpd_agent {
         let target = required_env(bpd_protocol::env::TARGET)?;
         let spelled = required_env(bpd_protocol::env::FORM)?;
         let inherited_path = std::env::var(bpd_protocol::env::PYTHON_PATH).ok();
+        // a flag rather than a value: present only when the script is a launcher
+        let launcher = std::env::var_os(bpd_protocol::env::LAUNCHER).is_some();
 
         // what an `exec`'d child would have to be told, kept now because the
         // loop below is the last moment the launcher's variables are readable.
@@ -171,7 +173,7 @@ mod bpd_agent {
         // frame to call one, so the frame running right now is the bootstrap's
         frames::remember_bootstrap(python)?;
 
-        let outcome = match run::enter(python, form, &target) {
+        let outcome = match run::enter(python, form, &target, launcher) {
             Ok(()) => Ok(()),
             Err(error) => Err(run::report_uncaught(python, error)),
         };
@@ -609,7 +611,9 @@ fn on_line<'py>(
         // whose condition was false would be the one place a thread escapes
         left_armed_here(python)?;
         world::park(python, thread);
-    } else if pause::pausing() && pause::claim() {
+    } else if pause::pausing() && !frames::is_launchers(code) && pause::claim() {
+        // a launcher's line is not the program's, so a pause is left for the
+        // first line that is — which the launcher is about to run
         pause::disarm(python)?;
         left_armed_here(python)?;
         session::stop(
@@ -1002,8 +1006,11 @@ fn on_py_unwind<'py>(
         // the bootstrap is excluded as a frame in its own right and not only as
         // a caller: the agent reports an exception the program did not catch by
         // raising `SystemExit` out of that frame, and reporting *that* would be
-        // bpd stopping the program for a decision bpd had just made
-        if !frames::is_bootstrap(&frame) && (caller.is_none() || frames::is_bootstrap(&caller)) {
+        // bpd stopping the program for a decision bpd had just made. a
+        // launcher's frames below it are excluded the same way, so the program's
+        // exception is reported once, in the program, and not again in each of
+        // the launcher's frames it goes on to leave
+        if !frames::is_entry(&frame)? && (caller.is_none() || frames::is_entry(&caller)?) {
             left_armed_here(python)?;
             session::stop(
                 python,
@@ -1033,6 +1040,13 @@ fn on_raise<'py>(
         || !exceptions::raised()
         || !exceptions::newly_raised(python, code, offset, exception)?
     {
+        return Ok(python.None().into_bound(python));
+    }
+
+    // the launcher's own code raising is the launcher's business: it is how
+    // the program was started, and a stop in it would be a stop in code no
+    // stack of the program's reports
+    if frames::is_launchers(code) {
         return Ok(python.None().into_bound(python));
     }
 

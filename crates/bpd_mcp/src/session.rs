@@ -132,6 +132,9 @@ pub struct Configuration {
     pub python: String,
     /// arguments for the program, exactly as it receives them
     pub args: Vec<String>,
+    /// whether [`Self::program`] is a launcher rather than the program — see
+    /// `bpd_engine::Program::Launcher`
+    pub launcher: bool,
 }
 
 /// something that starts a debuggee

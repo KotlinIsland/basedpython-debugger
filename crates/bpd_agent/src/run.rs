@@ -26,7 +26,12 @@ use crate::frames;
 /// the one place a launch form decides anything. what `target` holds is what
 /// the form says it holds: a path as the user typed it, a module name, or the
 /// source of a command
-pub(crate) fn enter(python: Python<'_>, form: Form, target: &str) -> PyResult<()> {
+///
+/// `launcher` says the script is not the program but what starts it — see
+/// [`frames::remember_launcher`]. only a script can be one: the engine has no
+/// way to ask for anything else, so the two disagreeing is the staged agent
+/// not being the one this bpd built
+pub(crate) fn enter(python: Python<'_>, form: Form, target: &str, launcher: bool) -> PyResult<()> {
     forget_the_bootstraps_source(python)?;
 
     match form {
@@ -37,8 +42,14 @@ pub(crate) fn enter(python: Python<'_>, form: Form, target: &str) -> PyResult<()
             let absolute = std::path::absolute(target).map_err(|error| {
                 PySystemExit::new_err(format!("bpd: could not resolve `{target}`: {error}"))
             })?;
-            script(python, target, &absolute)
+            script(python, target, &absolute, launcher)
         }
+        Form::Module | Form::Command if launcher => Err(PySystemExit::new_err(format!(
+            "bpd: the engine named a launcher for the `{}` form, and only a script \
+             can be one. the engine and the agent ship together, so the staged \
+             agent is not the one this bpd built",
+            form.as_str()
+        ))),
         Form::Module => module(python, target),
         Form::Command => command(python, target),
     }
@@ -123,7 +134,7 @@ fn watch_for(gate: Entry) {
 /// absolute and not canonical: cpython does not resolve symlinks here, and a
 /// debugger that reported the resolved path would disagree with the program's
 /// own `__file__`
-fn script(python: Python<'_>, as_given: &str, absolute: &Path) -> PyResult<()> {
+fn script(python: Python<'_>, as_given: &str, absolute: &Path, launcher: bool) -> PyResult<()> {
     let displayed = absolute.display().to_string();
 
     let sys = PyModule::import(python, "sys")?;
@@ -161,6 +172,9 @@ fn script(python: Python<'_>, as_given: &str, absolute: &Path) -> PyResult<()> {
         main.setattr("__cached__", python.None())?;
     }
 
+    if launcher {
+        frames::remember_launcher(&code)?;
+    }
     watch_for(Entry::Compiled(code.clone().unbind()));
     builtins
         .getattr("exec")?

@@ -210,6 +210,10 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
              the console before any code was replaced",
         ),
 
+        // a field of the launch configuration, which is the only place DAP has
+        // for anything about how the program is started
+        Facet::Launcher => Reach::Direct("`launcher` in the `launch` configuration"),
+
         // the one capability of the core that DAP cannot carry, and the reason
         // is DAP's rather than bpd's: `hitCondition` is free text whose meaning
         // is a per-client convention. `>5`, `=5`, `%5` and a bare `5` are read

@@ -2235,6 +2235,15 @@ pub enum Launched {
 pub enum Program {
     /// `python <path>`, with the path exactly as it was typed
     Script(PathBuf),
+    /// `python <path>`, where the script is a **launcher**: it runs the program
+    /// being debugged as `__main__`, the way `by run`'s `_by_runner.py` does
+    ///
+    /// entered exactly as [`Self::Script`] is. what differs is whose frames are
+    /// whose: the launcher's are how the program was started and not part of
+    /// it, so no stack reports them, no step lands in them, and an exception
+    /// the program does not catch stops in the program's outermost frame below
+    /// them — what debugpy does for `runpy`'s under `python -m`
+    Launcher(PathBuf),
     /// `python -m <module>`
     Module(String),
     /// `python -c <source>`
@@ -2245,16 +2254,21 @@ impl Program {
     /// how the interpreter is entered
     fn form(&self) -> env::Form {
         match self {
-            Self::Script(_) => env::Form::Script,
+            Self::Script(_) | Self::Launcher(_) => env::Form::Script,
             Self::Module(_) => env::Form::Module,
             Self::Command(_) => env::Form::Command,
         }
     }
 
+    /// whether what is entered is a launcher rather than the program itself
+    const fn is_launcher(&self) -> bool {
+        matches!(self, Self::Launcher(_))
+    }
+
     /// what the agent is handed, which the form says how to read
     fn target(&self) -> &std::ffi::OsStr {
         match self {
-            Self::Script(path) => path.as_os_str(),
+            Self::Script(path) | Self::Launcher(path) => path.as_os_str(),
             Self::Module(module) => module.as_ref(),
             Self::Command(source) => source.as_ref(),
         }
@@ -2540,6 +2554,9 @@ fn start(
             OsString::from(child_hook.python_path()),
         ),
     ];
+    if program.is_launcher() {
+        environment.push((env::LAUNCHER.to_string(), OsString::from("1")));
+    }
 
     // the agent is imported by putting its staged directory in front of
     // whatever `PYTHONPATH` this process inherited. **in front of** and not
@@ -2790,7 +2807,7 @@ fn generated_for(map: Option<&bpd_core::SourceMap>, file: PathBuf) -> Result<Pat
 /// it, and one that cannot be is a refusal at launch
 fn build_directory(program: &Program) -> Option<PathBuf> {
     let directory = match program {
-        Program::Script(path) => path
+        Program::Script(path) | Program::Launcher(path) => path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .map(Path::to_path_buf)

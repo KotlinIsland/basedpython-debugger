@@ -754,6 +754,7 @@ impl<'a> Server<'a> {
             program: args.program,
             python: args.python,
             args: args.args,
+            launcher: args.launcher,
         };
         let started = self
             .launcher
@@ -1629,6 +1630,8 @@ struct Launch {
     python: String,
     #[serde(default)]
     args: Vec<String>,
+    #[serde(default)]
+    launcher: bool,
     #[serde(default = "frames")]
     frames: u32,
 }

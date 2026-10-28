@@ -83,6 +83,7 @@ over_each_transport!(
     a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set,
     a_by_breakpoint_set_before_the_launch_binds_where_by_run_compiles_the_by_and_hits,
     a_by_breakpoint_in_a_module_by_run_imports_is_held_until_the_import_binds_it,
+    a_by_program_started_through_its_runner_as_a_launcher_is_only_its_own_frames,
     an_editor_can_run_a_whole_investigation_the_way_an_agent_can,
     an_editor_can_ask_what_changed_between_two_stops,
     an_editor_can_ask_why_the_ui_recomposed_and_be_handed_the_next_record_as_data,
@@ -970,6 +971,106 @@ fn a_by_breakpoint_set_before_the_launch_binds_where_by_run_compiles_the_by_and_
         "5",
         "the program did not run to the end after the stop"
     );
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+fn a_by_program_started_through_its_runner_as_a_launcher_is_only_its_own_frames(
+    transport: Transport,
+) {
+    // `by run` starts `<python> _by_runner.py <module>`, and that is what a
+    // client hands bpd as the program. measured against a real build before
+    // `launcher` existed: three runner frames under every stack, a step over the
+    // program's last line that went on through all three of them, and an
+    // exception the program did not catch reported at the runner's own module
+    let build = Build::demo();
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({
+            "program": build.runner(),
+            "python": interpreter(),
+            "args": words(&build.arguments()),
+            "launcher": true,
+        }),
+    );
+    client.event("initialized");
+    let inside = line_of(SOURCE, "total = a + b");
+    let last = line_of(SOURCE, "main()  # entry");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": build.source },
+            "breakpoints": [ { "line": inside } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+
+    // every frame is the program's, in the file the person wrote
+    let stopped = client.event("stopped");
+    let thread = stopped["body"]["threadId"].clone();
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    let frames: Vec<(String, String)> = stack["body"]["stackFrames"]
+        .as_array()
+        .expect("a stack is a list of frames")
+        .iter()
+        .map(|frame| {
+            (
+                frame["name"].as_str().unwrap_or_default().to_string(),
+                frame["source"]["path"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect();
+    let source = build.source.display().to_string();
+    assert_eq!(
+        frames,
+        [
+            ("add".to_string(), source.clone()),
+            ("main".to_string(), source.clone()),
+            ("<module>".to_string(), source),
+        ],
+        "{stack}"
+    );
+
+    // out to the module's last statement, and a step over it lets the program
+    // end, where the runner's frames used to be three more places to stop
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({ "source": { "path": build.source }, "breakpoints": [] }),
+    );
+    for _ in 0..2 {
+        client.request("stepOut", &serde_json::json!({ "threadId": thread }));
+        client.event("stopped");
+    }
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    assert_eq!(stack["body"]["stackFrames"][0]["line"], last, "{stack}");
+    let steps_before = client
+        .seen
+        .iter()
+        .filter(|message| message["type"] == "event" && message["event"] == "stopped")
+        .count();
+    client.request("next", &serde_json::json!({ "threadId": thread }));
+    let exited = client.event("exited");
+    assert_eq!(
+        exited["body"]["exitCode"], 0,
+        "the step over the last line ran the program to its end"
+    );
+    assert_eq!(
+        client
+            .seen
+            .iter()
+            .filter(|message| message["type"] == "event" && message["event"] == "stopped")
+            .count(),
+        steps_before,
+        "the step stopped somewhere on the way out: {:#?}",
+        client.seen
+    );
+    client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));
     client.finish();
 }

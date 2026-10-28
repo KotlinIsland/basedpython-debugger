@@ -208,7 +208,7 @@ impl Launcher for Engine {
         let interpreter = self.ready_for(configuration)?;
         let launched = bpd_engine::launch_piped(
             &interpreter,
-            &Program::Script(configuration.program.clone()),
+            &program_of(configuration),
             &arguments_of(configuration),
             // handed back rather than detached: the engine waits for these
             // before it reports the program over, so that a client is never
@@ -239,7 +239,7 @@ impl Launcher for Engine {
         let interpreter = self.ready_for(configuration)?;
         let launched = bpd_engine::launch_in_terminal(
             &interpreter,
-            &Program::Script(configuration.program.clone()),
+            &program_of(configuration),
             &arguments_of(configuration),
             |invocation| ask(&carried(invocation)?),
         )?;
@@ -422,5 +422,15 @@ impl bpd_dap::Interrupt for Reaching {
 
     fn terminate(&mut self) -> Result<(), Failed> {
         Ok(self.0.terminate()?)
+    }
+}
+
+/// what the configuration asks to run, and whether it is the program or what
+/// starts it
+fn program_of(configuration: &Configuration) -> Program {
+    if configuration.launcher {
+        Program::Launcher(configuration.program.clone())
+    } else {
+        Program::Script(configuration.program.clone())
     }
 }

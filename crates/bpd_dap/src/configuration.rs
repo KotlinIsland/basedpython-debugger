@@ -33,6 +33,24 @@ pub struct Configuration {
     #[serde(default)]
     pub args: Vec<String>,
 
+    /// `program` is a **launcher**: a script that runs the program being
+    /// debugged as `__main__`, the way `by run`'s `_by_runner.py` does
+    ///
+    /// it is entered exactly as a script is. what changes is whose frames are
+    /// whose: the launcher's are how the program was started, so no stack shows
+    /// them, no step lands in them, and an exception the program does not catch
+    /// stops in the program's outermost frame below them — what debugpy does
+    /// for `runpy`'s under `python -m`. bpd knows them by the code it compiled
+    /// the launcher to, never by a file name
+    ///
+    /// debugpy is told the same thing as a `rules` entry excluding the
+    /// runner's path, which is a file-name match and also the whole of its
+    /// just-my-code filter. this is narrower on purpose: it says which frames
+    /// started the program, and nothing about which of the program's own frames
+    /// are interesting
+    #[serde(default)]
+    pub launcher: bool,
+
     /// the interpreter to run under, resolved on `PATH` like any other command
     #[serde(default = "Configuration::python")]
     pub python: PathBuf,

@@ -84,6 +84,8 @@ struct Recorder {
     /// one of them survived the translation
     breakpoints: Vec<SourceBreakpoint>,
     details: Vec<bpd_core::Detail>,
+    /// whether each launch said its program was a launcher
+    launchers: Vec<bool>,
     /// what every request was addressed to, beside what it asked for
     ///
     /// naming the session is a capability like any other, and one the adapter
@@ -284,6 +286,24 @@ fn every_capability_carried_inside_a_request_is_reached_or_says_why_not() {
             );
         }
     }
+}
+
+#[test]
+fn a_launch_naming_a_launcher_reaches_what_starts_the_program() {
+    // the claim `reach_of_facet` makes about `Facet::Launcher`, read off what
+    // the launch configuration really handed whatever starts the program rather
+    // than off the table that claims it
+    let asked = Asked::default();
+    drive(&asked);
+    assert_eq!(
+        asked
+            .lock()
+            .expect("the recorder is not poisoned")
+            .launchers,
+        [true],
+        "`{}` was asked for in the launch and never reached what starts the program",
+        Facet::Launcher.name()
+    );
 }
 
 #[test]
@@ -902,6 +922,8 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
             // the only route DAP has to `bpd_core::Detail`, which is a
             // capability of the core that no DAP *request* can carry
             "variables": { "children": 7 },
+            // and the only route to starting the program through a launcher
+            "launcher": true,
         }),
     );
     answer(
@@ -1501,9 +1523,14 @@ impl Fake {
 impl Launcher for Fake {
     fn launch(
         &self,
-        _configuration: &Configuration,
+        configuration: &Configuration,
         _output: Arc<dyn ProgramOutput>,
     ) -> Result<Started, Failed> {
+        self.asked
+            .lock()
+            .expect("the recorder is not poisoned")
+            .launchers
+            .push(configuration.launcher);
         Ok(self.session(self.ending))
     }
 

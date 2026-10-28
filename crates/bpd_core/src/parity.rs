@@ -214,11 +214,21 @@ pub enum Facet {
     /// is not droppable in favour of a second request either: the two have to
     /// happen in one, which is why the flag is where it is
     Remap,
+
+    /// starting the program through a **launcher** whose frames are not the
+    /// program's — `by run`'s `_by_runner.py`, started as the script
+    ///
+    /// a field of the launch rather than a request, and a capability all the
+    /// same: a front end without it can start a basedpython build and every
+    /// stack it shows ends in the runner, a step over the program's last line
+    /// walks on through it, and an exception the program did not catch is
+    /// reported from the runner's own module
+    Launcher,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
@@ -231,6 +241,7 @@ impl Facet {
         Self::RecordingDepth,
         Self::ManyFilesAtOnce,
         Self::Remap,
+        Self::Launcher,
     ];
 
     /// what to call this capability in a message about it
@@ -248,6 +259,9 @@ impl Facet {
             Self::RecordingDepth => "how much of each step a recording keeps",
             Self::ManyFilesAtOnce => "replacing several files at once, all or nothing",
             Self::Remap => "reading the build's source map again as its code is replaced",
+            Self::Launcher => {
+                "starting the program through a launcher whose frames are not its own"
+            }
         }
     }
 }

@@ -211,13 +211,21 @@ fn reaching(python: Python<'_>, waited: Landing) -> PyResult<Option<StepKind>> {
             return Ok(Outcome::Carry);
         }
         let frame = events::current_frame(python)?;
-        Ok(if frame.is(step.frame.bind(python)) {
-            Outcome::Land
-        } else {
+        if !frame.is(step.frame.bind(python)) {
             // the same code object in another frame: a recursive call, or a
             // second generator built from the same function
-            Outcome::Carry
-        })
+            return Ok(Outcome::Carry);
+        }
+
+        // the launcher's own code is how the program was started, and a step
+        // that came back into it — the program's module returning into the
+        // import hook that ran it — goes on through it to wherever it returns.
+        // only its finishing is waited for, so none of its lines are offered
+        if frames::is_launchers(&frame.getattr("f_code")?) {
+            follow(python, step, frame, Landing::NotYet)?;
+            return Ok(Outcome::Carry);
+        }
+        Ok(Outcome::Land)
     })
 }
 
@@ -231,6 +239,12 @@ pub(crate) fn entered_frame(python: Python<'_>) -> PyResult<()> {
         // the step's own frame waking up is not a frame it entered. it is the
         // one it was already in, and the next line of it is still the landing
         if frame.is(step.frame.bind(python)) {
+            return Ok(Outcome::Carry);
+        }
+        // a frame of the launcher's is never where a step into lands. the step
+        // goes on waiting to enter one that is the program's, which is what the
+        // launcher was about to run
+        if frames::is_launchers(&frame.getattr("f_code")?) {
             return Ok(Outcome::Carry);
         }
         follow(python, step, frame, Landing::Line)?;
@@ -250,7 +264,7 @@ pub(crate) fn left_frame(python: Python<'_>, finish: Finish) -> PyResult<()> {
         }
 
         let caller = frame.getattr("f_back")?;
-        if caller.is_none() || frames::is_bootstrap(&caller) {
+        if caller.is_none() || frames::is_entry(&caller)? {
             // there is no frame above this one that bpd would ever report, so
             // the step has nowhere left to land. it is given up rather than
             // left armed, and what the program does next — finish, or raise —

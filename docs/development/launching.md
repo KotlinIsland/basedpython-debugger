@@ -455,6 +455,30 @@ it does cost one thing, and it is what the entry stop had to be redesigned
 around: nothing outside runpy knows which **file** the module resolved to until
 runpy is already running it
 
+### a launcher is a script whose frames are not the program's
+
+`by run` does not run a basedpython program as a script. it runs its runner,
+`_by_runner.py`, which installs an import hook, makes the program's module
+`__main__` and runs it — so to a debugger that runs the runner as the script,
+the runner **is** the program. measured against a real build: its three frames
+were under every stack, a step over the program's last line went on through all
+three, and an exception the program did not catch was reported at the runner's
+own `<module>`
+
+a launch can say the script is a launcher (`Program::Launcher`, `launcher` in
+DAP and MCP). it is entered exactly as a script is — `sys.argv`, `sys.path[0]`
+and `__main__` are a script's — and the agent remembers the code object it
+compiled the launcher to, with every code object nested in it. from then on the
+frames running that code, from the bootstrap up to the program, are treated the
+way the bootstrap is: the stack stops below them, a step whose frame returns
+into them is given up rather than landing, and the program's outermost frame is
+the one above them
+
+this is not what bpd does for `-m`. a bare `-m` traceback holds runpy's two
+frames and bpd's `-m` matches it; a bare `by run` traceback holds nothing of the
+runner's, because its excepthook takes them out, so a stack that showed them
+would be one no run without bpd shows
+
 ### how the entry stop knows the program
 
 the stop fires on the `PY_START` of the program's own body, so that a breakpoint

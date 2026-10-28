@@ -144,6 +144,9 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
             Reach::Direct("`remap` on `replace_code`, with what the reload installed in the answer")
         }
 
+        // an argument of the tool that starts the program
+        Facet::Launcher => Reach::Direct("`launcher` on the `launch` tool"),
+
         // the capability DAP has no route for. an MCP tool takes JSON Schema
         // input, so the typed form goes across as itself and there is no
         // convention to guess at

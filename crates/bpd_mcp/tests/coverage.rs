@@ -73,6 +73,8 @@ struct Recorder {
     requests: Vec<&'static str>,
     breakpoints: Vec<SourceBreakpoint>,
     details: Vec<Detail>,
+    /// whether each launch said its program was a launcher
+    launchers: Vec<bool>,
     /// what every request was addressed to, beside what it asked for
     ///
     /// naming the session is a capability like any other, and one the server
@@ -159,6 +161,15 @@ fn every_capability_carried_inside_a_request_reaches_the_session() {
             facet.name()
         );
     }
+
+    // the launcher, read off what the launch really handed whatever starts the
+    // program rather than off the table that claims it
+    assert_eq!(
+        recorded.launchers,
+        [true],
+        "`{}` was asked for in the launch and never reached what starts the program",
+        Facet::Launcher.name()
+    );
 
     // the trade, read off what really came back rather than off the table that
     // claims it. an agent that asked for a replacement under a live frame and
@@ -427,7 +438,7 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
 
     client.call(
         "launch",
-        &serde_json::json!({ "program": "/tmp/fake.py", "python": "python3" }),
+        &serde_json::json!({ "program": "/tmp/fake.py", "python": "python3", "launcher": true }),
     );
     client.call(
         "set_breakpoints",
@@ -1136,9 +1147,14 @@ struct FakeSession {
 impl Launcher for Fake {
     fn launch(
         &mut self,
-        _configuration: &Configuration,
+        configuration: &Configuration,
         output: Arc<dyn ProgramOutput>,
     ) -> Result<Started, Failed> {
+        self.asked
+            .lock()
+            .expect("the recorder is not poisoned")
+            .launchers
+            .push(configuration.launcher);
         Ok(Started::Stopped(Box::new(FakeSession {
             asked: Arc::clone(&self.asked),
             held: vec![stop_at(1, StopReason::Entry)],

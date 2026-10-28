@@ -99,9 +99,10 @@ fn sample(python: Python<'_>) -> PyResult<BTreeMap<u64, Spot>> {
     for (thread, frame) in frames {
         let thread: u64 = thread.extract()?;
         // the agent's own bootstrap is the outermost frame of the process and
-        // never a location of the program's, so a thread whose innermost frame
-        // is that one has no python frame worth reporting
-        let at = if frames::is_bootstrap(&frame) {
+        // never a location of the program's, and neither is a launcher's frame
+        // below it, so a thread whose innermost frame is one of them has no
+        // python frame worth reporting
+        let at = if frames::is_entry(&frame)? {
             None
         } else {
             Some(frames::describe_where(&frame)?)

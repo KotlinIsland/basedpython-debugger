@@ -87,6 +87,11 @@
                 "default": false,
                 "description": "stay stopped before the program's first statement. bpd holds every program there — it is how a breakpoint binds against a real interpreter — so this decides whether the client is told about it, not whether it happens"
               },
+              "launcher": {
+                "type": "boolean",
+                "default": false,
+                "description": "the program is a launcher: a script that makes the program being debugged `__main__` and runs it, the way `by run`'s `_by_runner.py` does. its own frames are how the program was started, so no stack shows them, no step lands in them, and an exception the program does not catch stops in the program's outermost frame below them"
+              },
               "stopTheWorld": {
                 "type": "boolean",
                 "default": false,
