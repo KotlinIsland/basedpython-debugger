@@ -115,6 +115,11 @@ struct Step {
     landing: Landing,
     /// whether a frame this thread enters is what it follows next
     entering: bool,
+    /// the one call of the line the step was asked to go into, by its offset
+    ///
+    /// until that call enters a frame, no other frame entered is a landing:
+    /// the line's other calls, and anything they call, are gone through
+    target: Option<u32>,
     /// whether the frame it follows is one it is only passing through — code at
     /// no line, or the launcher's — rather than one it could land in
     through: bool,
@@ -142,7 +147,12 @@ pub(crate) fn armed_here() -> bool {
 ///
 /// called from the stop the step was asked for, so `sys._getframe()` is the
 /// frame that stopped and the step follows it from here
-pub(crate) fn arm(python: Python<'_>, thread: u64, kind: StepKind) -> PyResult<()> {
+pub(crate) fn arm(
+    python: Python<'_>,
+    thread: u64,
+    kind: StepKind,
+    target: Option<u32>,
+) -> PyResult<()> {
     debug_assert!(
         !armed_here(),
         "a thread is held while it is stepping, so it cannot be asked to step \
@@ -167,6 +177,7 @@ pub(crate) fn arm(python: Python<'_>, thread: u64, kind: StepKind) -> PyResult<(
             Landing::Line
         },
         entering: matches!(kind, StepKind::In),
+        target,
         through: false,
         not_again: None,
     };
@@ -289,6 +300,20 @@ pub(crate) fn entered_frame(python: Python<'_>) -> PyResult<()> {
         // one it was already in, and the next line of it is still the landing
         if frame.is(step.frame.bind(python)) {
             return Ok(Outcome::Carry);
+        }
+        // a step into one call of the line enters only what that call enters:
+        // a frame whose caller is the line's frame, stopped at that call. every
+        // other frame — the line's other calls, and what they call — is gone
+        // through. once it is entered the step is an ordinary step in from
+        // there, which is what passes through a library or a launcher on the way
+        if let Some(target) = step.target {
+            let caller = frame.getattr("f_back")?;
+            let from_the_call = caller.is(step.frame.bind(python))
+                && caller.getattr("f_lasti")?.extract::<i64>()? == i64::from(target);
+            if !from_the_call {
+                return Ok(Outcome::Carry);
+            }
+            step.target = None;
         }
         // a frame of the launcher's is never where a step into lands, and with
         // just-my-code on neither is a library's. the step goes on waiting to

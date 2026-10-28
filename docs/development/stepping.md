@@ -156,6 +156,34 @@ the file's name and no path, so an editor does not open the file at its top,
 with `origin` saying why, and MCP gets `line: null` with the same sentence as
 `no_line`. it is `bpd_core::NO_LINE`, written once
 
+## smart step into
+
+`Request::StepInTargets` answers the calls a held frame's line is still to make:
+every `CALL`, `CALL_KW` and `CALL_FUNCTION_EX` of the line at or after where the
+frame is, in the order the line makes them, each named by what it calls as the
+source spells it — the call's position spans the whole call expression, and
+what is called is that span up to its argument list. a step in with a `target`
+then goes into **that** call: a frame entered while it waits is a landing only
+when its caller is the held frame stopped at that call's offset, so every other
+call of the line — and whatever it calls — runs through. once the call's frame
+is entered the step is an ordinary step in, which is what goes through a library
+or the launcher on the way. a call into a builtin enters no python frame, and
+the step lands where a step over would
+
+a module `by run` compiled as its `.by` has no columns: the runner gives every
+location the whole of its `.by` line. the bytecode is the generated python's,
+unchanged, so the generated python is compiled again and the code object with
+the same name and bytecode gives the positions — the label is the generated
+python's text and the target carries no columns. measured under `by` f566374c,
+that text shows the lowering: `Point(0.0, 0.0)` is offered as `_by_lazy.Point`,
+and `[classify(s) for s in shapes]` as `_soundness_iter` and
+`_by_lazy.classify`. naming them as the `.by` does needs `.by` columns in the
+relined code, which only `by` has
+
+DAP: `supportsStepInTargetsRequest`, `stepInTargets` answering `{id, label,
+line, column?, endColumn?}`, and `stepIn` with `targetId`. MCP: `step_in_targets`
+answering `{offset, label, line, columns}`, and `step_in` with `target`
+
 ## comprehensions are not something to step into
 
 since cpython 3.12 and PEP 709, list, dict and set comprehensions are **inlined**

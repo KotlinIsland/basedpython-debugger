@@ -88,6 +88,8 @@ struct Recorder {
     launchers: Vec<bool>,
     /// whether each evaluation asked for statements
     statements: Vec<bool>,
+    /// the call each step named, if it named one
+    targets: Vec<Option<u32>>,
     /// the exception rules the last `setExceptionBreakpoints` carried
     classes: Vec<bpd_core::ExceptionClass>,
     /// whether each launch said the program reads the adapter's stdin
@@ -312,6 +314,20 @@ fn an_exception_option_reaches_the_session_as_a_rule_for_its_class() {
         [("KeyError", true, false)],
         "the last segment of the path is the class, and `always` stops where one is raised"
     );
+}
+
+#[test]
+fn a_step_into_a_target_reaches_the_session_with_the_call_it_named() {
+    // the claim `reach_of_facet` makes about `Facet::StepTarget`: the fake's
+    // target is offset 42, minted as a handle, and the step names it again
+    let asked = Asked::default();
+    drive(&asked);
+    let targets = asked
+        .lock()
+        .expect("the recorder is not poisoned")
+        .targets
+        .clone();
+    assert!(targets.contains(&Some(42)), "{targets:?}");
 }
 
 #[test]
@@ -1354,11 +1370,19 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
         serde_json::json!({}),
     );
 
+    // smart step into: the calls of the held line, and a step into one of them
+    let targets = answer(
+        &mut client_writes,
+        &mut reader,
+        "stepInTargets",
+        serde_json::json!({ "frameId": frame }),
+    );
+    let target = targets["body"]["targets"][0]["id"].clone();
     answer(
         &mut client_writes,
         &mut reader,
-        "next",
-        serde_json::json!({ "threadId": thread }),
+        "stepIn",
+        serde_json::json!({ "threadId": thread, "targetId": target }),
     );
 
     // the thread has been stepped, so the reference from the stop it was held
@@ -1787,6 +1811,9 @@ impl Session for FakeSession {
             if let Request::SetBreakpoints { breakpoints } = &request {
                 recorder.breakpoints.clone_from(breakpoints);
             }
+            if let Request::Step { target, .. } = &request {
+                recorder.targets.push(*target);
+            }
             match &request {
                 Request::Evaluate {
                     detail, statements, ..
@@ -2093,6 +2120,14 @@ impl Session for FakeSession {
                 mode: Mode::NonStop,
             }),
             Request::WatchRecompositions { on } => Response::WatchingRecompositions { on },
+            Request::StepInTargets { .. } => {
+                Response::StepInTargets(vec![bpd_core::StepInTarget {
+                    offset: 42,
+                    label: "add".to_string(),
+                    line: 4,
+                    columns: Some((5, 14)),
+                }])
+            }
             Request::JustMyCode { on } => Response::JustMyCode(bpd_core::JustMyCode {
                 on,
                 libraries: vec!["/usr/lib/python3.14".to_string()],

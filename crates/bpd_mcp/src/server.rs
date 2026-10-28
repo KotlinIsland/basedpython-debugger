@@ -356,6 +356,21 @@ impl<'a> Server<'a> {
             }
             "step_over" => self.step(name, arguments, StepKind::Over),
             "step_in" => self.step(name, arguments, StepKind::In),
+            "step_in_targets" => {
+                let args: FrameOnly = parse(name, arguments)?;
+                let frame = self.frame_of(
+                    args.stop,
+                    args.session,
+                    args.frame,
+                    "the calls a step in can choose between",
+                )?;
+                match self.ask_in(args.session, Request::StepInTargets { frame })? {
+                    Response::StepInTargets(targets) => {
+                        Ok(serde_json::json!({ "targets": targets }))
+                    }
+                    other => unreachable!("step in targets were answered with {other:?}"),
+                }
+            }
             "step_out" => self.step(name, arguments, StepKind::Out),
             "wait" => {
                 let args: Waiting = parse(name, arguments)?;
@@ -842,9 +857,22 @@ impl<'a> Server<'a> {
     }
 
     fn step(&mut self, name: &str, arguments: &serde_json::Value, kind: StepKind) -> Answered {
-        let args: Stepping = parse(name, arguments)?;
+        // `target` is `step_in`'s alone, and the other two refuse it as an
+        // argument they do not take
+        let args: Stepping = if kind == StepKind::In {
+            parse::<SteppingIn>(name, arguments)?.into()
+        } else {
+            parse(name, arguments)?
+        };
         let stop = self.stop_of(args.stop, args.session, "stepping a thread")?;
-        match self.ask_in(args.session, Request::Step { stop, kind })? {
+        match self.ask_in(
+            args.session,
+            Request::Step {
+                stop,
+                kind,
+                target: args.target,
+            },
+        )? {
             Response::Resumed { .. } => {}
             other => unreachable!("a step was answered with {other:?}"),
         }
@@ -1725,6 +1753,47 @@ struct Stepping {
     frames: u32,
     #[serde(default)]
     stop: Option<u64>,
+    /// filled from [`SteppingIn`] alone
+    #[serde(skip)]
+    target: Option<u32>,
+}
+
+/// what `step_in` takes: a step, and the call to step into
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SteppingIn {
+    #[serde(default)]
+    session: Option<u64>,
+    deadline_ms: u64,
+    #[serde(default = "frames")]
+    frames: u32,
+    #[serde(default)]
+    stop: Option<u64>,
+    #[serde(default)]
+    target: Option<u32>,
+}
+
+impl From<SteppingIn> for Stepping {
+    fn from(asked: SteppingIn) -> Self {
+        Self {
+            session: asked.session,
+            deadline_ms: asked.deadline_ms,
+            frames: asked.frames,
+            stop: asked.stop,
+            target: asked.target,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrameOnly {
+    #[serde(default)]
+    session: Option<u64>,
+    #[serde(default)]
+    stop: Option<u64>,
+    #[serde(default)]
+    frame: u32,
 }
 
 impl Stepping {
@@ -2305,7 +2374,8 @@ mod tests {
         "sessions" => Empty,
         "continue_" => Waiting,
         "step_over" => Stepping,
-        "step_in" => Stepping,
+        "step_in" => SteppingIn,
+        "step_in_targets" => FrameOnly,
         "step_out" => Stepping,
         "wait" => Waiting,
         "pause" => Waiting,

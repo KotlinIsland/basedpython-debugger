@@ -28,8 +28,9 @@ pub(crate) enum Command {
     Answer(FromEngine),
     /// stop being held
     Resume,
-    /// stop being held, and be held again where this step lands
-    Step(StepKind),
+    /// stop being held, and be held again where this step lands — into the
+    /// call at that offset of the line, when one is named
+    Step(StepKind, Option<u32>),
 }
 
 /// one held thread's queue of work
@@ -262,8 +263,8 @@ pub(crate) fn route(request: FromEngine) {
         }
         // a step is a resume with instrumentation, so it leaves the registry
         // the way a resume does rather than being answered inside the stop
-        FromEngine::Step { stop, kind } => {
-            step(*stop, *kind);
+        FromEngine::Step { stop, kind, target } => {
+            step(*stop, *kind, *target);
             return;
         }
         // the one request that holds a thread rather than being answered on
@@ -284,7 +285,8 @@ pub(crate) fn route(request: FromEngine) {
         | FromEngine::Source { frame, .. }
         | FromEngine::SetVariable { frame, .. }
         | FromEngine::SetNextStatement { frame, .. }
-        | FromEngine::RestartFrame { frame, .. } => Address::Frame(*frame),
+        | FromEngine::RestartFrame { frame, .. }
+        | FromEngine::StepInTargets { frame } => Address::Frame(*frame),
         // `FromEngine` is non-exhaustive, so a newer engine could ask for
         // something this build cannot do. carrying on regardless would leave a
         // request unanswered and a debugger waiting for it
@@ -341,7 +343,7 @@ fn deliver(address: Address, request: FromEngine) {
 /// acknowledged as a resume of that thread, before it is woken, for the same
 /// reason a resume is: the landing is a stop of its own and must not arrive
 /// ahead of the acknowledgement that the thread was let go at all
-fn step(stop: u64, kind: StepKind) {
+fn step(stop: u64, kind: StepKind, target: Option<u32>) {
     let mut registry = registry();
     let Some(index) = registry.held.iter().position(|entry| entry.stop == stop) else {
         let held = registry.stops();
@@ -357,7 +359,7 @@ fn step(stop: u64, kind: StepKind) {
     attach::send(&FromAgent::Resumed {
         threads: vec![entry.thread],
     });
-    entry.mailbox.post(Command::Step(kind));
+    entry.mailbox.post(Command::Step(kind, target));
 }
 
 /// let held threads go

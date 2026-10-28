@@ -254,11 +254,15 @@ pub enum Facet {
     /// a class's rule ignoring library files, apart from the session's
     /// just-my-code — [`crate::ExceptionClass::libraries`]
     ExceptionClassLibraries,
+
+    /// stepping into one chosen call of the line — [`Request::Step`]'s
+    /// `target`, named by [`Request::StepInTargets`]
+    StepTarget,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
@@ -276,6 +280,7 @@ impl Facet {
         Self::Statements,
         Self::ExceptionClasses,
         Self::ExceptionClassLibraries,
+        Self::StepTarget,
     ];
 
     /// what to call this capability in a message about it
@@ -299,6 +304,7 @@ impl Facet {
             Self::InheritedStdin => "the program reading the stdin the front end was started with",
             Self::Statements => "running statements where an expression is evaluated",
             Self::ExceptionClasses => "a rule per exception class",
+            Self::StepTarget => "stepping into one chosen call of the line",
             Self::ExceptionClassLibraries => {
                 "a class's exception rule ignoring library files on its own"
             }
@@ -773,6 +779,7 @@ pub fn surface() -> Vec<Request> {
         Request::Step {
             stop: 1,
             kind: StepKind::Over,
+            target: None,
         },
         Request::Pause,
         Request::Threads {
@@ -897,6 +904,7 @@ fn asked_about_a_program(frame: FrameId) -> Vec<Request> {
         // failing: a watch that is never turned on is a stream nobody sees
         Request::WatchRecompositions { on: true },
         Request::JustMyCode { on: true },
+        Request::StepInTargets { frame },
     ]
 }
 

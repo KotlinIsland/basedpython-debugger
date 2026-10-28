@@ -313,7 +313,8 @@ impl Run<'_> {
 
     fn stepped(&mut self, kind: StepKind, path: &str, from: At) -> Result<Flow> {
         let stop = self.cursor.stop;
-        if let Err(error) = self.debuggee.attached[self.at].step_thread(stop, kind, self.reporting)
+        if let Err(error) =
+            self.debuggee.attached[self.at].step_thread(stop, kind, None, self.reporting)
         {
             return self.refused(path, from, error);
         }

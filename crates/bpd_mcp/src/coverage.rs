@@ -45,6 +45,7 @@ pub const fn reach_of(request: &Request) -> Reach {
 
         Request::Resume { .. } => Reach::Direct("resume"),
         Request::Step { .. } => Reach::Direct("step_over, step_in and step_out"),
+        Request::StepInTargets { .. } => Reach::Direct("step_in_targets"),
         Request::Pause => Reach::Direct("pause"),
         Request::Threads { .. } => Reach::Direct("threads"),
         Request::StopTheWorld { .. } => Reach::Direct("stop_the_world"),
@@ -153,6 +154,7 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // from a file, an argument or the environment
         Facet::Statements => Reach::Direct("`statements` on the `evaluate` tool"),
         Facet::ExceptionClasses => Reach::Direct("`classes` on `set_exception_breakpoints`"),
+        Facet::StepTarget => Reach::Direct("`target` on `step_in`, from `step_in_targets`"),
         Facet::ExceptionClassLibraries => {
             Reach::Direct("`libraries` on each of `set_exception_breakpoints`'s `classes`")
         }

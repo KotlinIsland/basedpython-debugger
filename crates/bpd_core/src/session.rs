@@ -263,6 +263,24 @@ pub enum Request {
         stop: u64,
         /// which way
         kind: StepKind,
+        /// the one call of the held line to step into, by the offset
+        /// [`Request::StepInTargets`] named it with — smart step into
+        ///
+        /// only a step in takes one. the step lands in the first frame **that
+        /// call** enters, going through every other call the line makes before
+        /// it; a call that enters no frame of python's — a builtin — lands where
+        /// a step over would
+        target: Option<u32>,
+    },
+
+    /// the calls the held line of a frame is still to make, to step into one
+    ///
+    /// read off the frame's bytecode: every call instruction of the line at or
+    /// after where the frame is, each named by the expression it calls as the
+    /// source spells it
+    StepInTargets {
+        /// the frame, which is the held one: only it is about to make a call
+        frame: FrameId,
     },
 
     /// hold the next thread of the debuggee that reaches a line
@@ -711,7 +729,7 @@ impl Request {
     /// four variants, and every parity assertion that iterates it — the
     /// comparison between the two front ends, the `JUSTIFIED` check, the
     /// "says what stands in the way" check — silently skipped those four
-    pub const KINDS: usize = 28;
+    pub const KINDS: usize = 29;
 
     /// where this variant sits in the enumeration
     ///
@@ -749,6 +767,7 @@ impl Request {
             Self::Recompositions => 25,
             Self::WatchRecompositions { .. } => 26,
             Self::JustMyCode { .. } => 27,
+            Self::StepInTargets { .. } => 28,
         }
     }
 
@@ -788,6 +807,7 @@ impl Request {
             Self::Recompositions => "why the ui recomposed",
             Self::WatchRecompositions { .. } => "watching the ui recompose",
             Self::JustMyCode { .. } => "stopping and stepping only in the program's own code",
+            Self::StepInTargets { .. } => "the calls a step in can choose between",
         }
     }
 
@@ -842,7 +862,8 @@ impl Request {
             | Self::SetNextStatement { frame, .. }
             | Self::Facts { frame, .. }
             | Self::Retainers { frame, .. }
-            | Self::RestartFrame { frame, .. } => Some(frame.stop),
+            | Self::RestartFrame { frame, .. }
+            | Self::StepInTargets { frame } => Some(frame.stop),
         }
     }
 }
@@ -1044,6 +1065,29 @@ pub enum Response {
     /// whether only the program's own code is stopped and stepped in, and what
     /// counts as a library's
     JustMyCode(JustMyCode),
+
+    /// the calls a step in can choose between, in the order the line makes them
+    StepInTargets(Vec<StepInTarget>),
+}
+
+/// one call the held line is still to make
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StepInTarget {
+    /// the call's instruction offset, which is what [`Request::Step`] names it by
+    pub offset: u32,
+    /// what it calls, as the source spells it — `sum`, `self.area`,
+    /// `json.dumps`
+    pub label: String,
+    /// the line the call is on, as it is reported
+    pub line: u32,
+    /// where in that line the call begins and ends, counting from one, when the
+    /// interpreter knows
+    ///
+    /// `None` for a module `by run` compiled as its `.by`: the runner gives
+    /// every location the whole of its `.by` line, so a column there would be
+    /// one the interpreter does not have. the label is still the generated
+    /// python's own text for the call
+    pub columns: Option<(u32, u32)>,
 }
 
 /// what [`Request::JustMyCode`] set, read back off the agent
@@ -1783,6 +1827,7 @@ mod tests {
                 // its own name claims
                 "what is provable about a frame's names",
                 "what is holding an object",
+                "the calls a step in can choose between",
             ]
         );
 

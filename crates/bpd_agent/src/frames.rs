@@ -426,6 +426,17 @@ impl<'py> Stopped<'py> {
         })
     }
 
+    /// the calls a frame's line is still to make — see [`crate::targets`]
+    pub(crate) fn step_in_targets(&mut self, id: FrameId) -> PyResult<FromAgent> {
+        let frame = match self.frame(id, "the calls a step in can choose between")? {
+            Ok(frame) => frame,
+            Err(reason) => return Ok(FromAgent::Refused { reason }),
+        };
+        Ok(FromAgent::StepInTargets {
+            targets: crate::targets::of(self.python, &frame)?,
+        })
+    }
+
     /// what one scope of one frame holds
     ///
     /// read at the deepest whole level the byte budget allows, rather than at

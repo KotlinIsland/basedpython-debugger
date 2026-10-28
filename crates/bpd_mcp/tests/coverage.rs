@@ -77,6 +77,8 @@ struct Recorder {
     launchers: Vec<bool>,
     /// whether each evaluation asked for statements
     statements: Vec<bool>,
+    /// the call each step named, if it named one
+    targets: Vec<Option<u32>>,
     /// the exception rules the last `set_exception_breakpoints` carried
     classes: Vec<bpd_core::ExceptionClass>,
     /// what every request was addressed to, beside what it asked for
@@ -154,6 +156,14 @@ fn the_launcher_and_statements_reach_the_session_as_they_were_asked() {
         "`{}` and `{}` never reached the session",
         Facet::ExceptionClasses.name(),
         Facet::ExceptionClassLibraries.name()
+    );
+
+    // the call `step_in` named
+    assert!(
+        recorded.targets.contains(&Some(42)),
+        "`{}` never reached the session: {:?}",
+        Facet::StepTarget.name(),
+        recorded.targets
     );
 
     // statements, read off what the evaluation really asked
@@ -647,7 +657,11 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
         }),
     );
     client.call("step_over", &serde_json::json!({ "deadline_ms": 500 }));
-    client.call("step_in", &serde_json::json!({ "deadline_ms": 500 }));
+    client.call("step_in_targets", &serde_json::json!({}));
+    client.call(
+        "step_in",
+        &serde_json::json!({ "deadline_ms": 500, "target": 42 }),
+    );
     client.call("step_out", &serde_json::json!({ "deadline_ms": 500 }));
     client.call("continue_", &serde_json::json!({ "deadline_ms": 500 }));
     client.call("pause", &serde_json::json!({ "deadline_ms": 500 }));
@@ -846,6 +860,7 @@ fn tool_order() -> Vec<&'static str> {
         "diff",
         "run_script",
         "step_over",
+        "step_in_targets",
         "step_in",
         "step_out",
         "continue_",
@@ -1588,6 +1603,14 @@ impl Session for FakeSession {
                 mode: Mode::NonStop,
             }),
             Request::WatchRecompositions { on } => Response::WatchingRecompositions { on },
+            Request::StepInTargets { .. } => {
+                Response::StepInTargets(vec![bpd_core::StepInTarget {
+                    offset: 42,
+                    label: "add".to_string(),
+                    line: 4,
+                    columns: Some((5, 14)),
+                }])
+            }
             Request::JustMyCode { on } => Response::JustMyCode(bpd_core::JustMyCode {
                 on,
                 libraries: vec!["/usr/lib/python3.14".to_string()],
@@ -1799,6 +1822,7 @@ impl FakeSession {
             Request::SetBreakpoints { breakpoints } => {
                 recorder.breakpoints.extend(breakpoints.iter().cloned());
             }
+            Request::Step { target, .. } => recorder.targets.push(*target),
             Request::Evaluate {
                 detail, statements, ..
             } => {

@@ -604,9 +604,17 @@ impl Debuggee {
             Request::Resume { which } => Ok(Response::Resumed {
                 threads: self.attached[at].let_go(which, reporting)?,
             }),
-            Request::Step { stop, kind } => Ok(Response::Resumed {
-                threads: self.attached[at].step_thread(stop, kind, reporting)?,
-            }),
+            Request::Step { stop, kind, target } => {
+                if target.is_some() && kind != StepKind::In {
+                    return Err(bpd_core::Error::TargetedStepNotIn { kind }.into());
+                }
+                Ok(Response::Resumed {
+                    threads: self.attached[at].step_thread(stop, kind, target, reporting)?,
+                })
+            }
+            Request::StepInTargets { frame } => Ok(Response::StepInTargets(
+                self.attached[at].step_in_targets(frame, reporting)?,
+            )),
             Request::Pause => Ok(Response::Pausing {
                 running: self.attached[at].arm_pause(reporting)?,
             }),
@@ -864,9 +872,41 @@ impl Debuggee {
     /// the thread has been let go. where it landed arrives from [`Self::wait`],
     /// as a stop of its own
     pub fn step(&mut self, stop: u64, kind: StepKind) -> Result<Vec<u64>> {
-        match self.ask_for(Request::Step { stop, kind })? {
+        match self.ask_for(Request::Step {
+            stop,
+            kind,
+            target: None,
+        })? {
             Response::Resumed { threads } => Ok(threads),
             other => unreachable!("a step was answered with {other:?}"),
+        }
+    }
+
+    /// step into one call of the held line — [`Request::Step`]'s `target`
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached
+    pub fn step_into(&mut self, stop: u64, target: u32) -> Result<Vec<u64>> {
+        match self.ask_for(Request::Step {
+            stop,
+            kind: StepKind::In,
+            target: Some(target),
+        })? {
+            Response::Resumed { threads } => Ok(threads),
+            other => unreachable!("a step was answered with {other:?}"),
+        }
+    }
+
+    /// the calls the held line of a frame is still to make
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached
+    pub fn step_in_targets(&mut self, frame: FrameId) -> Result<Vec<bpd_core::StepInTarget>> {
+        match self.ask_for(Request::StepInTargets { frame })? {
+            Response::StepInTargets(targets) => Ok(targets),
+            other => unreachable!("step in targets were answered with {other:?}"),
         }
     }
 
@@ -1622,15 +1662,34 @@ impl Attached {
         &mut self,
         stop: u64,
         kind: StepKind,
+        target: Option<u32>,
         reporting: &mut dyn Reporting,
     ) -> Result<Vec<u64>> {
         const EXPECTED: &str = "the thread to be stepped";
 
-        match self.ask(&FromEngine::Step { stop, kind }, EXPECTED, reporting)? {
+        match self.ask(
+            &FromEngine::Step { stop, kind, target },
+            EXPECTED,
+            reporting,
+        )? {
             FromAgent::Resumed { threads } => {
                 self.held.retain(|stop| !threads.contains(&stop.thread));
                 Ok(threads)
             }
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// the calls the held line of a frame is still to make
+    fn step_in_targets(
+        &mut self,
+        frame: FrameId,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Vec<bpd_core::StepInTarget>> {
+        const EXPECTED: &str = "the calls a step in can choose between";
+
+        match self.ask(&FromEngine::StepInTargets { frame }, EXPECTED, reporting)? {
+            FromAgent::StepInTargets { targets } => Ok(targets),
             other => Err(unexpected(&other, EXPECTED)),
         }
     }

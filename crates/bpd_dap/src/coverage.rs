@@ -76,6 +76,7 @@ pub const fn reach_of(request: &Request) -> Reach {
 
         Request::Resume { .. } => Reach::Direct("continue"),
         Request::Step { .. } => Reach::Direct("next, stepIn and stepOut"),
+        Request::StepInTargets { .. } => Reach::Direct("stepInTargets"),
         Request::Pause => Reach::Direct("pause"),
         Request::Threads { .. } => Reach::Direct("threads"),
 
@@ -229,6 +230,8 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // place a statement belongs: a hover or a watch that assigned would
         // change the program for having been looked at
         Facet::Statements => Reach::Direct("`evaluate` with `context: repl`"),
+
+        Facet::StepTarget => Reach::Direct("`targetId` on `stepIn`, minted by `stepInTargets`"),
 
         // DAP's own field for a rule per exception class
         Facet::ExceptionClasses => Reach::Direct(

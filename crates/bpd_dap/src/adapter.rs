@@ -796,6 +796,7 @@ impl Adapter {
             Some("continue") => self.continue_(message),
             Some("next") => self.step(message, StepKind::Over),
             Some("stepIn") => self.step(message, StepKind::In),
+            Some("stepInTargets") => self.step_in_targets(message),
             Some("stepOut") => self.step(message, StepKind::Out),
             Some("gotoTargets") => self.goto_targets(message),
             Some("goto") => self.goto(message),
@@ -2431,6 +2432,12 @@ impl Adapter {
                      carries"
                 )));
             }
+            Handle::StepTarget { frame, offset } => {
+                return Err(Aborted::Refuse(format!(
+                    "{reference} names the call at offset {offset} of {frame}, which \
+                     is what a `stepIn` carries as its `targetId`"
+                )));
+            }
         };
 
         self.respond(message, Some(serde_json::json!({ "variables": variables })))?;
@@ -2762,11 +2769,77 @@ impl Adapter {
         }
 
         let stop = self.stop_of(message)?;
-        match self.ask(Request::Step { stop, kind })? {
+        // smart step into: the target names a call of the held line, minted by
+        // `stepInTargets` at this stop
+        let target = match message.arguments["targetId"].as_i64() {
+            None => None,
+            Some(reference) => match self.handles.get(reference) {
+                Some(Handle::StepTarget { frame, offset }) if frame.stop == stop => Some(*offset),
+                Some(Handle::StepTarget { .. }) => {
+                    return Err(Aborted::Refuse(format!(
+                        "target {reference} names a call of another thread's line"
+                    )));
+                }
+                Some(other) => {
+                    return Err(Aborted::Refuse(format!(
+                        "{reference} names {other:?}, not a call to step into"
+                    )));
+                }
+                None => return Err(stale(reference)),
+            },
+        };
+        match self.ask(Request::Step { stop, kind, target })? {
             Response::Resumed { .. } => {}
             other => unreachable!("a step was answered with {other:?}"),
         }
         self.respond(message, None)?;
+        Ok(())
+    }
+
+    /// the calls the held line of a frame can be stepped into — smart step into
+    ///
+    /// each is named by what it calls, as the source spells it, and minted as
+    /// a handle a `stepIn` names with `targetId`. a call into a builtin is a
+    /// target like any other, and stepping into it lands where a step over
+    /// would, because there is no python frame to land in
+    fn step_in_targets(&mut self, message: &Incoming) -> Answered {
+        let reference = message.arguments["frameId"]
+            .as_i64()
+            .ok_or("a `stepInTargets` request arrived with no `frameId`")?;
+        let frame = match self.handles.get(reference) {
+            Some(Handle::Frame(frame)) => *frame,
+            Some(other) => {
+                return Err(Aborted::Refuse(format!(
+                    "{reference} names {other:?}, and only a python frame makes calls \
+                     a step can go into"
+                )));
+            }
+            None => return Err(stale(reference)),
+        };
+        let targets = match self.ask(Request::StepInTargets { frame })? {
+            Response::StepInTargets(targets) => targets,
+            other => unreachable!("step in targets were answered with {other:?}"),
+        };
+        let listed: Vec<serde_json::Value> = targets
+            .iter()
+            .map(|target| {
+                let id = self.handles.add(Handle::StepTarget {
+                    frame,
+                    offset: target.offset,
+                });
+                let mut listed = serde_json::json!({
+                    "id": id,
+                    "label": target.label,
+                    "line": target.line,
+                });
+                if let Some((column, end)) = target.columns {
+                    listed["column"] = column.into();
+                    listed["endColumn"] = end.into();
+                }
+                listed
+            })
+            .collect();
+        self.respond(message, Some(serde_json::json!({ "targets": listed })))?;
         Ok(())
     }
 

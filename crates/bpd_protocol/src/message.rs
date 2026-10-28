@@ -383,6 +383,12 @@ pub enum FromAgent {
     /// directories that were counted as a library's
     JustMyCode(bpd_core::JustMyCode),
 
+    /// the calls the held line is still to make
+    StepInTargets {
+        /// in the order the line makes them
+        targets: Vec<bpd_core::StepInTarget>,
+    },
+
     /// the ui runtime wrote a trace record, and a client is watching
     ///
     /// sent while the program runs and never waited on, for the reason
@@ -469,6 +475,15 @@ pub enum FromEngine {
         stop: u64,
         /// which way
         kind: StepKind,
+        /// the call of the held line to step into — `bpd_core::Request::Step`
+        #[serde(default)]
+        target: Option<u32>,
+    },
+
+    /// the calls the held line of a frame is still to make
+    StepInTargets {
+        /// the frame
+        frame: FrameId,
     },
 
     /// hold the next thread of the debuggee that reaches a line
@@ -857,6 +872,7 @@ impl FromEngine {
             | Self::Source { .. }
             | Self::SetNextStatement { .. }
             | Self::RestartFrame { .. }
+            | Self::StepInTargets { .. }
             | Self::Retainers { .. }
             | Self::SetVariable { .. } => None,
         }
@@ -897,6 +913,7 @@ impl FromEngine {
             Self::Recompositions => "why the ui recomposed",
             Self::WatchRecompositions { .. } => "the recomposition watch",
             Self::JustMyCode { .. } => "the just-my-code setting",
+            Self::StepInTargets { .. } => "the calls a step in can choose between",
         }
     }
 }

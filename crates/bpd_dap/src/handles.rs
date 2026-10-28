@@ -103,6 +103,17 @@ pub enum Handle {
         line: u32,
     },
 
+    /// a call of a held line that a step in may go into
+    ///
+    /// a handle for the reason a `goto` target is one: it names a call of a
+    /// frame, and stops resolving with everything else the stop handed out
+    StepTarget {
+        /// the frame whose line makes the call
+        frame: FrameId,
+        /// the call's instruction offset
+        offset: u32,
+    },
+
     /// a value that was read once and has no scope to re-read it from
     ///
     /// what an evaluated expression produces. it cannot be re-read, because
@@ -131,7 +142,8 @@ impl Handle {
             | Self::Scope { frame, .. }
             | Self::Nested { frame, .. }
             | Self::TemplateLayer { frame, .. }
-            | Self::Goto { frame, .. } => frame.stop,
+            | Self::Goto { frame, .. }
+            | Self::StepTarget { frame, .. } => frame.stop,
             Self::Stored { stop, .. } => *stop,
         }
     }

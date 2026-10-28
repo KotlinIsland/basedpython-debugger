@@ -176,6 +176,10 @@ fn answer(
         FromEngine::RestartFrame { frame, again } => {
             return restarting(python, stopped, ticket, thread, frame, again);
         }
+        FromEngine::StepInTargets { frame } => {
+            let answer = stopped.step_in_targets(frame)?;
+            attach::send(&answer);
+        }
         FromEngine::StopTheWorld { settle_ms, .. } => {
             let answer = stop_the_world(python, thread, ticket.stop, settle_ms)?;
             attach::send(&answer);
@@ -378,8 +382,8 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
         let command = python.detach(|| ticket.next());
         let request = match command {
             stops::Command::Resume => break,
-            stops::Command::Step(kind) => {
-                stepping = Some(kind);
+            stops::Command::Step(kind, target) => {
+                stepping = Some((kind, target));
                 break;
             }
             stops::Command::Answer(request) => request,
@@ -421,8 +425,8 @@ pub(crate) fn stop(python: Python<'_>, thread: u64, reason: StopReason) -> PyRes
 
     // armed while this thread is still inside the callback, so the first event
     // the program reaches after it returns is already being watched for
-    if let Some(kind) = stepping {
-        return steps::arm(python, thread, kind);
+    if let Some((kind, target)) = stepping {
+        return steps::arm(python, thread, kind, target);
     }
     // a restart armed itself before it answered, for the reason a step is armed
     // here: the events that finish it have to be on before the callback returns

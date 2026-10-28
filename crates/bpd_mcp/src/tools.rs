@@ -599,13 +599,43 @@ pub fn tools() -> Vec<Tool> {
              same frame rather than in the generator's consumer or in the event \
              loop.",
         ),
-        step(
-            "step_in",
-            "step into the next frame entered",
-            "stop at the first line of the next frame this thread enters — a \
-             function called, a generator or coroutine resumed, or one thrown \
-             into. a line that enters nothing behaves as `step_over`.",
-        ),
+        {
+            let mut tool = step(
+                "step_in",
+                "step into the next frame entered",
+                "stop at the first line of the next frame this thread enters — a \
+                 function called, a generator or coroutine resumed, or one thrown \
+                 into. a line that enters nothing behaves as `step_over`. with \
+                 `target`, it goes into that one call of the line and through \
+                 every other.",
+            );
+            tool.schema["properties"]["target"] = serde_json::json!({
+                "type": "integer",
+                "minimum": 0,
+                "description": "the call of the held line to step into, by the \
+                                `offset` `step_in_targets` answered with. a call \
+                                into a builtin enters no frame, and the step \
+                                lands where `step_over` would",
+            });
+            tool
+        },
+        Tool {
+            name: "step_in_targets",
+            title: "the calls the held line is still to make",
+            description: "every call of the frame's line at or after where it is, \
+                in the order the line makes them, each named by what it calls as \
+                the source spells it — `sum`, `self.area` — with the `offset` \
+                `step_in`'s `target` takes."
+                .to_string(),
+            schema: object(
+                serde_json::json!({
+                    "session": integer(SESSION),
+                    "stop": integer(STOP),
+                    "frame": integer(FRAME),
+                }),
+                &[],
+            ),
+        },
         step(
             "step_out",
             "run this frame to its end",

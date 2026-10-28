@@ -262,6 +262,16 @@ pub enum Error {
         held: Vec<String>,
     },
 
+    /// a step that is not a step in named a call to step into
+    #[error(
+        "a {kind} was asked to go into one call of the line, and only a step in \
+         goes into a call. ask for a step in with the target"
+    )]
+    TargetedStepNotIn {
+        /// the kind of step that was asked for
+        kind: crate::StepKind,
+    },
+
     /// the agent understood the request and would not answer it
     ///
     /// not a failure of `bpd`'s machinery: answering would have meant guessing

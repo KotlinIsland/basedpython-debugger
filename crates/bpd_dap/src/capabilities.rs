@@ -92,6 +92,11 @@ pub fn capabilities() -> serde_json::Value {
         // option's path. see `Adapter::exception_classes`
         "supportsExceptionOptions": true,
 
+        // `Request::StepInTargets` and a step in with a `targetId`: the calls of
+        // the held line, each named by what it calls, and a step into the one
+        // chosen that goes through the others
+        "supportsStepInTargetsRequest": true,
+
         "exceptionBreakpointFilters": [
             {
                 "filter": "raised",
@@ -145,6 +150,7 @@ mod tests {
                 "supportsRestartFrame",
                 "supportsSetVariable",
                 "supportsSingleThreadExecutionRequests",
+                "supportsStepInTargetsRequest",
             ]
         );
     }

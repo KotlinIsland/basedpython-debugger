@@ -50,6 +50,7 @@ mod steps;
 mod stops;
 mod storage;
 mod stream;
+mod targets;
 mod tasks;
 mod templates;
 mod threads;
