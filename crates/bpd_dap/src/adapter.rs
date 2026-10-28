@@ -71,6 +71,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
@@ -136,6 +137,13 @@ fn begins_a_session(message: &Incoming) -> bool {
 /// a client that vanishes leaves a program running with nothing watching it,
 /// which is the state the agent itself refuses to be in
 ///
+/// what it returns is what the program this session launched exited with, when
+/// bpd read one: the same status the client was sent in `exited`. `None` is a
+/// session whose program bpd did not see exit — it never launched one, the
+/// client ended it, or it was not bpd's child to read. what the caller does
+/// with it is the caller's: whoever started a `--listen` adapter started it in
+/// the program's place, and an editor that spawned one on its pipes did not
+///
 /// # errors
 ///
 /// when the connection to the client fails
@@ -144,7 +152,7 @@ pub fn serve(
     input: Box<dyn Read + Send>,
     output: Box<dyn Write + Send>,
     reachable: &Reachable,
-) -> Result<(), crate::wire::Error> {
+) -> Result<Option<ExitStatus>, crate::wire::Error> {
     let output: Output = Arc::new(Mutex::new(Writer::new(output)));
     let interrupt: Held = Arc::new(Mutex::new(None));
     let stopping = Arc::new(AtomicBool::new(false));
@@ -198,13 +206,13 @@ pub fn serve(
         while !reader.is_finished() && Instant::now() < deadline {
             std::thread::sleep(FAREWELL_POLL);
         }
-        return Ok(());
+        return Ok(adapter.program_exit);
     }
 
     let read = reader.join();
     served?;
     match read {
-        Ok(read) => read,
+        Ok(read) => read.map(|()| adapter.program_exit),
         Err(panicked) => std::panic::resume_unwind(panicked),
     }
 }
@@ -392,6 +400,11 @@ struct Adapter {
     /// the entry stop of a program the client asked to run straight past
     begun: bool,
     exited: bool,
+    /// what the program this session launched exited with, once bpd read it
+    ///
+    /// kept for whoever started the adapter rather than for the client, which
+    /// was told in the `exited` event. see [`serve`]
+    program_exit: Option<ExitStatus>,
     handles: Handles,
     threads: ThreadIds,
     /// the stops the client has already been told about
@@ -464,6 +477,7 @@ impl Adapter {
             configured: false,
             begun: false,
             exited: false,
+            program_exit: None,
             handles: Handles::default(),
             threads: ThreadIds::default(),
             announced: Vec::new(),
@@ -982,15 +996,16 @@ impl Adapter {
                 self.respond(message, None)?;
                 self.take_up_the_program()
             }
-            Started::ExitedBeforeStopping { code } => {
+            Started::ExitedBeforeStopping { status } => {
                 // the program has already said what went wrong, on its own
                 // stderr, in the interpreter's own words. adding a line of
                 // bpd's would be a line that is not there without the debugger
                 self.respond(message, None)?;
                 self.exited = true;
+                self.program_exit = Some(status);
                 self.event(
                     "exited",
-                    &serde_json::json!({ "exitCode": code.unwrap_or(-1) }),
+                    &serde_json::json!({ "exitCode": exit_code(status) }),
                 )?;
                 self.event("terminated", &serde_json::json!({}))?;
                 Ok(())
@@ -3034,6 +3049,7 @@ impl Adapter {
             Running::Stopped { .. } => self.announce(),
             Running::Exited { status, output, .. } => {
                 self.exited = true;
+                self.program_exit = Some(status);
                 // said **before** the exit rather than after it, because it is
                 // about everything that follows: a client reads `exited` as the
                 // end of the program's output, and a line arriving after one it

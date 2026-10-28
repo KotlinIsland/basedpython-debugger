@@ -45,6 +45,17 @@ one line of json on stdout, before anything is accepted, and then stdout is
 never written to again. `--listen` is the one transport where stdout is not the
 protocol, which is what makes reporting the port possible at all
 
+**and its exit is the program's.** a listening adapter was not spawned by the
+client it serves, and what starts one that way today starts it in the program's
+place: `by run --launcher` runs `LAUNCHER <python> <runner> <module>`, the
+launcher execs `bpd dap --listen`, and `by run` — and the IDE behind it — waits on
+that process for the program to end. so when the session's program exits, `bpd`
+exits with what it exited with, a signal as `128 + signal` the way `bpd run` and a
+shell report one. a session whose program bpd did not see exit leaves `0`. over
+stdio the exit stays the adapter's own: the editor spawned it to talk to, already
+had the program's exit in `exited`, and reads a non-zero adapter exit as the
+adapter failing
+
 `0` binds a port the operating system chooses and the line says which one it
 got. that is the point of it: a client that had to pick a number would be racing
 every other program on the machine for it, and a client that had to guess when

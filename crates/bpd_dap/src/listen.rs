@@ -241,11 +241,14 @@ impl Listening {
     ///
     /// takes `self` by value: one listener is one debuggee, and the listener is
     /// left non-blocking behind this
+    ///
+    /// what it returns is what the program the first client launched exited
+    /// with, when bpd read one — see [`crate::serve`]
     pub fn serve(
         self,
         launcher: &(dyn Launcher + Sync),
         say: &(dyn Fn(&str) + Send + Sync),
-    ) -> Result<(), Error> {
+    ) -> Result<Option<std::process::ExitStatus>, Error> {
         let first = loop {
             let (stream, peer) = self.listener.accept().map_err(|source| Error::Accept {
                 port: self.port,
@@ -313,7 +316,7 @@ impl Listening {
         say: &(dyn Fn(&str) + Send + Sync),
         stream: TcpStream,
         admitted: Admitted,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<std::process::ExitStatus>, Error> {
         let extra = self.listener.try_clone().map_err(|source| Error::Accept {
             port: self.port,
             source,

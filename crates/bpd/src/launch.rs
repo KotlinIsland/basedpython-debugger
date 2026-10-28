@@ -538,8 +538,9 @@ fn every_session(
 ///
 /// a program run under `bpd` exits the way it would have. a signal becomes
 /// `128 + signal`, which is the number a shell reports for a signalled child,
-/// so a script wrapping either one sees the same value
-fn exit_code(status: ExitStatus) -> u8 {
+/// so a script wrapping either one sees the same value. `bpd dap --listen`
+/// reports its program's the same way, for the same reason
+pub(crate) fn exit_code(status: ExitStatus) -> u8 {
     if let Some(code) = status.code() {
         return u8::try_from(code).unwrap_or_else(|_| {
             // unreachable on unix, where the kernel already truncated it. on

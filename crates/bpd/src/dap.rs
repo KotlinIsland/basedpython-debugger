@@ -64,22 +64,44 @@ pub(crate) struct Args {
 
 pub(crate) fn run(args: &Args) -> std::process::ExitCode {
     let served = match args.listen {
-        Some(port) => listen(port).map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
+        // **the program's exit is this process's.** an adapter that listens was
+        // not spawned by the client it serves, and the one thing that starts it
+        // that way today starts it *as the program*: `by run --launcher` runs
+        // `LAUNCHER <python> <runner> <module>`, the launcher execs this, and
+        // `by run` — and the IDE behind it — waits on this process for the
+        // program's exit. measured before this: a program that exited 3 was a
+        // run that exited 0
+        //
+        // a session whose program bpd did not see exit has nothing to pass on,
+        // and the adapter's own success is what is left to report
+        Some(port) => listen(port)
+            .map(|exit| {
+                exit.map_or(std::process::ExitCode::SUCCESS, |status| {
+                    std::process::ExitCode::from(crate::launch::exit_code(status))
+                })
+            })
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
         // nothing else can connect to a pair of pipes somebody spawned, and
         // that is what makes `debugChildren` refusable on this transport rather
         // than half deliverable: a second session would be a second `bpd dap`
         // process, with an engine of its own that this debuggee is not in
+        //
+        // and the exit is the adapter's own. an editor spawned this on its
+        // pipes to talk to, the program's exit reached it in `exited`, and an
+        // adapter exiting non-zero is what an editor reports as the adapter
+        // having failed
         None => bpd_dap::serve(
             &Engine::default(),
             Box::new(std::io::stdin()),
             Box::new(std::io::stdout()),
             &Reachable::Nowhere,
         )
+        .map(|_| std::process::ExitCode::SUCCESS)
         .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
     };
 
     match served {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             // stdout is the protocol, or the one line that said where it is, and
             // the client is already gone either way. this goes to stderr —
@@ -95,7 +117,7 @@ pub(crate) fn run(args: &Args) -> std::process::ExitCode {
 /// the announcement is printed and **flushed** before anything is accepted, so
 /// a script that reads a line and then connects cannot lose the race it would
 /// have had to run if it had to guess a port
-fn listen(port: u16) -> Result<(), bpd_dap::listen::Error> {
+fn listen(port: u16) -> Result<Option<std::process::ExitStatus>, bpd_dap::listen::Error> {
     let listening = Listening::bind(port)?;
 
     println!("{}", listening.announcement());
@@ -157,9 +179,7 @@ impl Engine {
             // child's exit status, and a program started in the client's own
             // terminal has no status bpd can read. the engine reports that one
             // as a failure naming the terminal instead
-            Launched::ExitedBeforeStopping(status) => Started::ExitedBeforeStopping {
-                code: status.code(),
-            },
+            Launched::ExitedBeforeStopping(status) => Started::ExitedBeforeStopping { status },
         })
     }
 

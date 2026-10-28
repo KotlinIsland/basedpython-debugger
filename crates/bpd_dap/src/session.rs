@@ -236,8 +236,8 @@ pub enum Started {
     /// has already said why on its own stderr, in the interpreter's own words,
     /// so what is left to report is that it ended and with what
     ExitedBeforeStopping {
-        /// the exit code, or `None` when a signal ended it
-        code: Option<i32>,
+        /// how it exited, which [`bpd_core::exit_code`] renders as one number
+        status: std::process::ExitStatus,
     },
 }
 

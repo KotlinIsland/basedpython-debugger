@@ -96,6 +96,7 @@ over_each_transport!(
     a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds,
     everything_a_program_printed_is_on_the_wire_before_it_is_reported_over,
     a_refused_launch_ends_the_session_instead_of_leaving_it_open,
+    the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program,
 );
 
 /// a program with a local worth writing to, and a marker after the breakpoint
@@ -267,7 +268,7 @@ fn a_breakpoint_is_hit_a_local_is_written_and_the_program_sees_the_write(transpo
     );
 
     client.request("disconnect", &serde_json::json!({}));
-    client.finish();
+    client.finish_after_the_program_exited(3);
 }
 
 /// a program with two threads that each reach a breakpoint, the main one first
@@ -849,7 +850,7 @@ fn a_client_that_configures_before_it_launches_keeps_every_breakpoint_it_set(tra
     client.event("exited");
     client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));
-    client.finish();
+    client.finish_after_the_program_exited(3);
 }
 
 fn a_by_breakpoint_set_before_the_launch_binds_where_by_run_compiles_the_by_and_hits(
@@ -1140,7 +1141,7 @@ fn an_editor_can_run_a_whole_investigation_the_way_an_agent_can(transport: Trans
     client.event("exited");
     client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));
-    client.finish();
+    client.finish_after_the_program_exited(3);
 }
 
 fn an_editor_can_ask_what_changed_between_two_stops(transport: Transport) {
@@ -1232,7 +1233,7 @@ fn an_editor_can_ask_what_changed_between_two_stops(transport: Transport) {
     );
     client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));
-    client.finish();
+    client.finish_after_the_program_exited(3);
 }
 
 fn an_editor_can_ask_why_the_ui_recomposed_and_be_handed_the_next_record_as_data(
@@ -1865,6 +1866,65 @@ print("the last thing this program said", flush=True)
 
 /// the last line `A_LOT_TO_SAY` prints
 const THE_LAST_THING: &str = "the last thing this program said";
+
+/// three ways a program ends, chosen by its first argument
+///
+/// an exit code of its own, an exception it did not catch, and a signal. the
+/// last is the one an exit code cannot hold, and it is sent by the program to
+/// itself so that nothing in the test races it
+const ENDINGS: &str = r#"import os
+import signal
+import sys
+
+how = sys.argv[1]
+if how == "code":
+    sys.exit(3)
+if how == "raise":
+    raise ValueError("left uncaught")
+os.kill(os.getpid(), signal.SIGTERM)
+"#;
+
+fn the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program(transport: Transport) {
+    // under `--listen` bpd is started **as the program**: `by run --launcher`
+    // starts `LAUNCHER <python> <runner> <module>` and the launcher execs
+    // `bpd dap --listen`, so the process the run waits on is bpd. measured
+    // before this: `sys.exit(3)` gave an `exited` event saying 3 and a run that
+    // ended 0, which is a failing program reported as a passing one
+    //
+    // over stdio the adapter is the editor's own child and its exit is its own
+    let endings: &[(&str, i32)] = if cfg!(unix) {
+        // a signalled child is `128 + signal`, the number a shell, java's
+        // `Process` and `bpd run` all report for one
+        &[("code", 3), ("raise", 1), ("signal", 128 + 15)]
+    } else {
+        &[("code", 3), ("raise", 1)]
+    };
+    for (how, code) in endings {
+        let fixture = Fixture::new("ending", ENDINGS);
+        let mut client = Client::start(transport);
+
+        client.request("initialize", &serde_json::json!({}));
+        client.request(
+            "launch",
+            &serde_json::json!({
+                "program": fixture.path(),
+                "python": interpreter(),
+                "args": [how],
+            }),
+        );
+        client.event("initialized");
+        client.request("configurationDone", &serde_json::json!({}));
+
+        let exited = client.event("exited");
+        assert_eq!(
+            exited["body"]["exitCode"], *code,
+            "the `exited` event for `{how}` carries what the program exited with"
+        );
+        client.event("terminated");
+        client.request("disconnect", &serde_json::json!({}));
+        client.finish_after_the_program_exited(*code);
+    }
+}
 
 /// the program's own output, and the moment the client is told it is over
 ///
@@ -2681,6 +2741,39 @@ impl Client {
 
     /// wait for the adapter to end, and require that it ended cleanly
     fn finish(self) {
+        let status = self.ended();
+        assert!(
+            status.success(),
+            "`bpd dap` exited with {status}. it said:\n{}",
+            self.said
+                .lock()
+                .expect("nothing panics holding what the adapter said")
+        );
+    }
+
+    /// wait for the adapter to end, and require that it ended the way it does
+    /// after a program that exited with `code`
+    ///
+    /// over stdio the adapter is the editor's child and its exit is its own, so
+    /// it is `0` whatever the program did. under `--listen` it stands where the
+    /// program would have — `by run --launcher` starts it as the program — so
+    /// its exit is the program's
+    fn finish_after_the_program_exited(self, code: i32) {
+        let expected = if self.listening.is_some() { code } else { 0 };
+        let status = self.ended();
+        assert_eq!(
+            status.code(),
+            Some(expected),
+            "`bpd dap` exited with {status} after a program that exited with {code}. it \
+             said:\n{}",
+            self.said
+                .lock()
+                .expect("nothing panics holding what the adapter said")
+        );
+    }
+
+    /// wait for the adapter to end, and say how it did
+    fn ended(&self) -> std::process::ExitStatus {
         let deadline = Instant::now() + PATIENCE;
         loop {
             let ended = self
@@ -2692,14 +2785,7 @@ impl Client {
             match ended {
                 Some(status) => {
                     self.finished.store(true, Ordering::Relaxed);
-                    assert!(
-                        status.success(),
-                        "`bpd dap` exited with {status}. it said:\n{}",
-                        self.said
-                            .lock()
-                            .expect("nothing panics holding what the adapter said")
-                    );
-                    return;
+                    return status;
                 }
                 None => assert!(
                     Instant::now() < deadline,
