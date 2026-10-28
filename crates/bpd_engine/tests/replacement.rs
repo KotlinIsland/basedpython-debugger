@@ -1015,23 +1015,25 @@ fn a_breakpoint_in_the_replaced_file_is_bound_again_and_fires_where_the_code_is_
     let (_, rebound) = applied(&replaced);
 
     // a breakpoint is a **line of a file**, and the file moved: line 5 was that
-    // `return` and is now a blank line above the `def`. so it resolves forward
-    // to the `def`, exactly as a breakpoint on a non-executable line always
-    // does — and the point is that the client is *told*. left alone it would
-    // have stayed armed on a code object no thread will ever reach again, which
-    // is a breakpoint that can be seen to be set and never fires
+    // `return` and is now a blank line above the `def`. the next executable
+    // line is where `plain` begins, and a move into a definition is refused
+    // like any other — and the point is that the client is *told*. left alone
+    // it would have stayed armed on a code object no thread will ever reach
+    // again, which is a breakpoint that can be seen to be set and never fires
     let moved = rebound
         .iter()
         .find(|resolution| resolution.id == 1)
         .unwrap_or_else(|| panic!("the breakpoint's binding was not reported again: {rebound:#?}"));
     match &moved.binding {
-        Binding::Bound { line, .. } => assert_eq!(
-            *line,
+        Binding::Unbound {
+            reason: bpd_core::Unbound::CrossesADefinition { next, .. },
+        } => assert_eq!(
+            *next,
             line_of(EDITED, "def plain(value):"),
             "line {was_at} of the file on disk is no longer that statement, and \
-             the answer has to say where the request lands now"
+             the answer has to say where the request would land now"
         ),
-        other => panic!("the breakpoint came unbound: {other:?}"),
+        other => panic!("expected the move into `plain` to be refused: {other:?}"),
     }
 
     // and a breakpoint set on where that statement really is now fires in the
