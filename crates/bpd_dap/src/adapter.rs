@@ -399,6 +399,8 @@ struct Adapter {
     /// session things, so a gate that was already open by then would announce
     /// the entry stop of a program the client asked to run straight past
     begun: bool,
+    /// how this connection's session came to it — see [`Arrival`]
+    arrival: Arrival,
     exited: bool,
     /// what the program this session launched exited with, once bpd read it
     ///
@@ -447,6 +449,21 @@ struct Adapter {
     watch: Option<bool>,
 }
 
+/// how a connection's session came to it
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arrival {
+    /// it launched the program, or has not yet: the default before either
+    Launched,
+    /// it took up a session that was already held — a debugged child, arriving
+    /// at the line that forked or at its own startup
+    ///
+    /// such a session is held **for the client**: it is what `startDebugging`
+    /// asked the client to come and see. so configuring it ends in telling the
+    /// client where it is held, whatever `stopOnEntry` the parent's
+    /// configuration carried, rather than in letting it go
+    TakenUp,
+}
+
 /// what one `setExceptionBreakpoints` asked for
 ///
 /// the two bpd offers, as booleans rather than as the client's strings: the
@@ -476,6 +493,7 @@ impl Adapter {
             configuration: None,
             configured: false,
             begun: false,
+            arrival: Arrival::Launched,
             exited: false,
             program_exit: None,
             handles: Handles::default(),
@@ -921,6 +939,7 @@ impl Adapter {
             })?;
         self.hear_the_configuration(&configuration);
         self.configuration = Some(configuration);
+        self.arrival = Arrival::TakenUp;
         self.respond(message, None)?;
         self.take_up_the_program()
     }
@@ -1281,6 +1300,33 @@ impl Adapter {
     /// second, and it runs once: the two orders a DAP client may use end in the
     /// same place rather than in two arrangements of the same steps
     fn begin(&mut self) -> Answered {
+        // before the program runs a line, so the first raise and the first step
+        // are already decided by it. on unless the configuration says off, which
+        // is debugpy's default and what a person stepping through their own
+        // program expects; the agent's own default is off, so off is not sent
+        if self.configuration().just_my_code {
+            match self.ask(Request::JustMyCode { on: true })? {
+                Response::JustMyCode(set) if set.on => {
+                    self.say(&format!(
+                        "stopping and stepping only in the program's own code. a library's \
+                         is a file that is not a file, or one under {}. set `justMyCode` to \
+                         false to stop and step in every one\n",
+                        set.libraries.join(", ")
+                    ))?;
+                }
+                // read back off the agent rather than assumed. a client told it
+                // took would be shown stops in code it was told were skipped
+                Response::JustMyCode(_) => {
+                    return Err(Aborted::Refuse(
+                        "the debuggee did not take `justMyCode`, and a library's code \
+                         would be stopped and stepped in"
+                            .to_string(),
+                    ));
+                }
+                other => unreachable!("just-my-code was answered with {other:?}"),
+            }
+        }
+
         // before the program runs a line, because the handler that acts on it
         // runs inside `os.fork()` and a program can fork in its first statement.
         // only when it was asked for: the agent's default is off, and a request
@@ -1308,7 +1354,13 @@ impl Adapter {
         // asked for its program to run straight past it
         self.begun = true;
 
-        if self.configuration().stop_on_entry {
+        // a child taken up is announced where it is held. resuming it here was
+        // a race the adapter used to win: the child's stop was usually not
+        // recorded yet when the resume went out, so the resume let nothing go
+        // and the stop was announced after it — and a request asked of the child
+        // first, `debugChildren` from the parent's own configuration among them,
+        // was enough time for the stop to arrive and be let go unannounced
+        if self.configuration().stop_on_entry || self.arrival == Arrival::TakenUp {
             self.announce()?;
         } else {
             self.resume(Which::All)?;

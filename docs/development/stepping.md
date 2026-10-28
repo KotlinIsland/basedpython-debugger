@@ -286,6 +286,31 @@ at. it is reported as the exception propagating, which is to say not reported
 again. `an_object_c_code_raises_again_is_reported_as_the_same_exception_propagating`
 pins it
 
+### just my code
+
+measured in the IDE: "on raise" stopped six times inside
+`<frozen importlib._bootstrap>` and `zipimport` before any line of the program
+had run, and under `by run` forty times before its first import was done —
+every `KeyError` the import system raises at itself and catches. what made it
+usable for a person is what debugpy calls `justMyCode`, and it is a session
+setting here (`Request::JustMyCode`), on by default in DAP as it is in debugpy
+and off for an agent unless it asks
+
+with it on, a raise in a library's code is not a stop where it was raised. it is
+a stop where it first **arrives** in the program's own code — cpython raises the
+event again in that frame, and the library's raise is left unrecorded so that
+event is the new one — and one a library catches never arrives at all. a step in
+goes through a library's code the way it goes through code at no line, landing
+in the first function of the program's the library calls, and a step over or out
+that comes back into a library's code lands in whichever function of the
+program's comes first, which may be a callback rather than the caller
+
+a library is the interpreter's answer, read in the debuggee without importing
+anything: a `co_filename` that is not a file (a frozen module, `<string>`), or a
+file under the directory `os` was loaded from or a site-packages directory
+`site` reports. the answer names the directories, and DAP says them on the
+console
+
 ### uncaught
 
 whether an exception will be caught is decided by what happens **after** it is

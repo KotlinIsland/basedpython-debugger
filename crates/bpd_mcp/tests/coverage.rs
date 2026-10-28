@@ -482,6 +482,7 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
     // why the ui recomposed, and the switch that streams it
     client.call("recompositions", &serde_json::json!({}));
     client.call("watch_recompositions", &serde_json::json!({ "on": true }));
+    client.call("just_my_code", &serde_json::json!({ "on": true }));
     // why an object is still alive, which is the question asked upwards from an
     // object rather than downwards from a frame
     client.call(
@@ -789,6 +790,7 @@ fn tool_order() -> Vec<&'static str> {
         "trail",
         "recompositions",
         "watch_recompositions",
+        "just_my_code",
         "retainers",
         "variables",
         "facts",
@@ -1531,6 +1533,10 @@ impl Session for FakeSession {
                 mode: Mode::NonStop,
             }),
             Request::WatchRecompositions { on } => Response::WatchingRecompositions { on },
+            Request::JustMyCode { on } => Response::JustMyCode(bpd_core::JustMyCode {
+                on,
+                libraries: vec!["/usr/lib/python3.14".to_string()],
+            }),
             Request::Retainers { .. } => Response::Retainers(bpd_core::Retainers {
                 of: "a list holding 1".to_string(),
                 found: vec![bpd_core::Retainer {

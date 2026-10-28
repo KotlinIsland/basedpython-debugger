@@ -33,6 +33,7 @@ mod forks;
 mod frames;
 mod inplace;
 mod interpframe;
+mod libraries;
 mod linetable;
 mod own_thread;
 mod pause;
@@ -1037,10 +1038,14 @@ fn on_raise<'py>(
     offset: i32,
     exception: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    if conditions::evaluating()
-        || !exceptions::raised()
-        || !exceptions::newly_raised(python, code, offset, exception)?
-    {
+    // a library raising is not the program raising. it is reported where it
+    // first arrives in the program's own code, which is the `RAISE` cpython
+    // raises again in that frame — so it is left unrecorded here, and that
+    // event is the new raise. one a library catches never arrives at all
+    if conditions::evaluating() || !exceptions::raised() || libraries::skips(code)? {
+        return Ok(python.None().into_bound(python));
+    }
+    if !exceptions::newly_raised(python, code, offset, exception)? {
         return Ok(python.None().into_bound(python));
     }
 

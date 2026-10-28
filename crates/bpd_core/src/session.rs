@@ -653,6 +653,25 @@ pub enum Request {
         /// whether to forward records
         on: bool,
     },
+
+    /// stop and step only in the program's own code
+    ///
+    /// what debugpy calls `justMyCode`. on, an exception raised in a library is
+    /// not a stop where it was raised — it is one where it first arrives in the
+    /// program's own code, if it ever does — and a step in goes through a
+    /// library's code the way it goes through code at no line, landing in the
+    /// first function of the program's that the library calls
+    ///
+    /// **library code is the interpreter's own answer, not a list of names.** a
+    /// code object is a library's when its file is in the standard library —
+    /// the directory `os` was loaded from — or in a site-packages directory
+    /// `site` says this interpreter has, or when it is not a file at all: a
+    /// frozen module, or source handed to `exec`. the answer says which
+    /// directories those were, so a client can see what was counted
+    JustMyCode {
+        /// whether to stop and step only in the program's own code
+        on: bool,
+    },
 }
 
 impl Request {
@@ -681,7 +700,7 @@ impl Request {
     /// four variants, and every parity assertion that iterates it — the
     /// comparison between the two front ends, the `JUSTIFIED` check, the
     /// "says what stands in the way" check — silently skipped those four
-    pub const KINDS: usize = 27;
+    pub const KINDS: usize = 28;
 
     /// where this variant sits in the enumeration
     ///
@@ -718,6 +737,7 @@ impl Request {
             Self::RestartFrame { .. } => 24,
             Self::Recompositions => 25,
             Self::WatchRecompositions { .. } => 26,
+            Self::JustMyCode { .. } => 27,
         }
     }
 
@@ -756,6 +776,7 @@ impl Request {
             Self::RestartFrame { .. } => "restarting a frame",
             Self::Recompositions => "why the ui recomposed",
             Self::WatchRecompositions { .. } => "watching the ui recompose",
+            Self::JustMyCode { .. } => "stopping and stepping only in the program's own code",
         }
     }
 
@@ -793,6 +814,8 @@ impl Request {
             // the process's hook — neither is one thread's
             | Self::Recompositions
             | Self::WatchRecompositions { .. }
+            // a setting of the process, which every thread reads
+            | Self::JustMyCode { .. }
             | Self::Diff { .. } => None,
 
             Self::Step { stop, .. }
@@ -1006,6 +1029,23 @@ pub enum Response {
         /// whether records are forwarded as they are written
         on: bool,
     },
+
+    /// whether only the program's own code is stopped and stepped in, and what
+    /// counts as a library's
+    JustMyCode(JustMyCode),
+}
+
+/// what [`Request::JustMyCode`] set, read back off the agent
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JustMyCode {
+    /// whether only the program's own code is stopped and stepped in
+    pub on: bool,
+    /// the directories whose files are a library's, as the interpreter named
+    /// them: the standard library, and every site-packages `site` reports
+    ///
+    /// a file that is not a file — a frozen module, `<string>` — is a library's
+    /// too, and is not in here because it has no directory
+    pub libraries: Vec<String>,
 }
 
 /// whether everything a program wrote had arrived by the time it was reported

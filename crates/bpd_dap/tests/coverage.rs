@@ -2001,6 +2001,10 @@ impl Session for FakeSession {
                 mode: Mode::NonStop,
             }),
             Request::WatchRecompositions { on } => Response::WatchingRecompositions { on },
+            Request::JustMyCode { on } => Response::JustMyCode(bpd_core::JustMyCode {
+                on,
+                libraries: vec!["/usr/lib/python3.14".to_string()],
+            }),
             Request::Retainers { .. } => Response::Retainers(bpd_core::Retainers {
                 of: "a list holding 1".to_string(),
                 found: vec![bpd_core::Retainer {

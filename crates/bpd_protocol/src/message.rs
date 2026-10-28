@@ -376,6 +376,10 @@ pub enum FromAgent {
         on: bool,
     },
 
+    /// whether only the program's own code is stopped and stepped in, and the
+    /// directories that were counted as a library's
+    JustMyCode(bpd_core::JustMyCode),
+
     /// the ui runtime wrote a trace record, and a client is watching
     ///
     /// sent while the program runs and never waited on, for the reason
@@ -768,6 +772,16 @@ pub enum FromEngine {
         /// whether to forward records
         on: bool,
     },
+
+    /// stop and step only in the program's own code, or anywhere
+    ///
+    /// the agent works out which directories are a library's itself, from the
+    /// interpreter it is in: a child that was `exec`'d may be another one, and
+    /// the engine's probe of the interpreter it started would be about that
+    JustMyCode {
+        /// whether to stop and step only in the program's own code
+        on: bool,
+    },
 }
 
 impl FromEngine {
@@ -812,6 +826,8 @@ impl FromEngine {
             // process's audit hook — neither is one thread's
             Self::Recompositions => Some("why the ui recomposed"),
             Self::WatchRecompositions { .. } => Some("whether to watch the ui recompose"),
+            // a flag every thread reads at its own events
+            Self::JustMyCode { .. } => Some("whether only the program's code is stopped in"),
             // a resume, a step and a pause are about which threads run, and the
             // agent's own reader is what answers all three. everything else
             // names a stop or a frame, and that names a thread
@@ -866,6 +882,7 @@ impl FromEngine {
             Self::SetVariable { .. } => "the variable's write",
             Self::Recompositions => "why the ui recomposed",
             Self::WatchRecompositions { .. } => "the recomposition watch",
+            Self::JustMyCode { .. } => "the just-my-code setting",
         }
     }
 }
@@ -1632,6 +1649,10 @@ mod tests {
                 },
             },
             FromAgent::Watching { on: true },
+            FromAgent::JustMyCode(bpd_core::JustMyCode {
+                on: true,
+                libraries: vec!["/usr/lib/python3.14".to_string()],
+            }),
         ] {
             let mut wire = Vec::new();
             write(&mut wire, &sent).expect("writing to a vec cannot fail");
@@ -1643,6 +1664,7 @@ mod tests {
         for sent in [
             FromEngine::Recompositions,
             FromEngine::WatchRecompositions { on: false },
+            FromEngine::JustMyCode { on: true },
         ] {
             let mut wire = Vec::new();
             write(&mut wire, &sent).expect("writing to a vec cannot fail");

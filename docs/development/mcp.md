@@ -117,6 +117,7 @@ shape of what bpd can see from here
 | `replace_code`                     | make the running process run the code a file holds on disk           |
 | `recompositions`                   | why the ui recomposed — the basedpython-ui runtime's own trace ring  |
 | `watch_recompositions`             | forward every trace record the ui runtime writes, on the next answer |
+| `just_my_code`                     | stop and step only in the program's own code, naming what is library |
 | `threads`                          | what every thread is doing, as a sample                              |
 | `stop_the_world`                   | hold every thread that can be held                                   |
 | `state`                            | describe a whole stop in one call, and keep the answer               |

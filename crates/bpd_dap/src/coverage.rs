@@ -46,6 +46,15 @@ pub const fn reach_of(request: &Request) -> Reach {
              that cannot take it up would leave it held",
         ),
 
+        // the same, and for the same reason: a property of the session, so the
+        // launch configuration carries it, and it is sent before the program
+        // runs a line so the first raise and the first step are decided by it
+        Request::JustMyCode { .. } => Reach::OnItsOwn(
+            "at `configurationDone`, when `justMyCode` is on in the launch \
+             configuration — which it is unless the configuration turns it off — \
+             with the directories counted as a library's said on the console",
+        ),
+
         Request::Run { .. } => Reach::Composed {
             of: &["resuming a thread", "waiting for the program"],
             why: "a `continue` has to be answered before the program stops \

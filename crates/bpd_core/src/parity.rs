@@ -854,6 +854,7 @@ fn asked_about_a_program(frame: FrameId) -> Vec<Request> {
         // on, because that is the half a front end can drop with nothing
         // failing: a watch that is never turned on is a stream nobody sees
         Request::WatchRecompositions { on: true },
+        Request::JustMyCode { on: true },
     ]
 }
 

@@ -477,11 +477,17 @@ impl Debuggee {
             Request::Trail => self.taken(at, reporting),
             Request::Recompositions => self.recomposed(at, reporting),
             Request::WatchRecompositions { on } => self.watching(at, on, reporting),
+            Request::JustMyCode { on } => Ok(Response::JustMyCode(
+                self.attached[at].just_my_code(on, reporting)?,
+            )),
+            Request::DebugChildren { on } => Ok(Response::DebuggingChildren {
+                on: self.attached[at].debug_children(on, reporting)?,
+            }),
             Request::Retainers { frame, expression } => {
                 self.holds(at, frame, expression, reporting)
             }
             other => {
-                unreachable!("`observing` is only ever handed one of its five, and got {other:?}")
+                unreachable!("`observing` is only ever handed one of its seven, and got {other:?}")
             }
         }
     }
@@ -571,9 +577,6 @@ impl Debuggee {
                     self.attached[at].arm_exceptions(raised, uncaught, reporting)?,
                 ))
             }
-            Request::DebugChildren { on } => Ok(Response::DebuggingChildren {
-                on: self.attached[at].debug_children(on, reporting)?,
-            }),
             Request::Run { deadline } => {
                 // the deadline bounds the wait rather than the whole request:
                 // the resume is answered on a thread that is already held, so
@@ -650,13 +653,15 @@ impl Debuggee {
                 remap,
                 even_under_a_live_frame,
             } => self.answer_a_replacement(at, files, remap, even_under_a_live_frame, reporting),
-            // the five that observe the program without moving it — the trail
-            // and the ui runtime's ring, each with its switch, and what holds
-            // an object — lifted out together for the reason the three below are
-            Request::Record { .. }
+            // the ones that observe without moving the program, and the two
+            // settings of what it does, lifted out together for the reason the
+            // three below are
+            Request::DebugChildren { .. }
+            | Request::Record { .. }
             | Request::Trail
             | Request::Recompositions
             | Request::WatchRecompositions { .. }
+            | Request::JustMyCode { .. }
             | Request::Retainers { .. } => self.observing(at, request, reporting),
             // the three that read state rather than moving the program, lifted
             // out together: this match is at the length where one more arm stops
@@ -1032,6 +1037,19 @@ impl Debuggee {
         match self.ask_for(Request::Recompositions)? {
             Response::Recompositions(recompositions) => Ok(recompositions),
             other => unreachable!("the trace ring was answered with {other:?}"),
+        }
+    }
+
+    /// stop and step only in the program's own code — see
+    /// [`Request::JustMyCode`]
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached
+    pub fn just_my_code(&mut self, on: bool) -> Result<bpd_core::JustMyCode> {
+        match self.ask_for(Request::JustMyCode { on })? {
+            Response::JustMyCode(set) => Ok(set),
+            other => unreachable!("the just-my-code setting was answered with {other:?}"),
         }
     }
 
@@ -1897,6 +1915,25 @@ impl Attached {
 
         match self.ask(&FromEngine::Recompositions, EXPECTED, reporting)? {
             FromAgent::Recompositions { recompositions } => Ok(recompositions),
+            other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// stop and step only in the program's own code, or anywhere
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached, when the agent refuses by name, or
+    /// when it answers with something else
+    fn just_my_code(
+        &mut self,
+        on: bool,
+        reporting: &mut dyn Reporting,
+    ) -> Result<bpd_core::JustMyCode> {
+        const EXPECTED: &str = "whether only the program's own code is stopped in";
+
+        match self.ask(&FromEngine::JustMyCode { on }, EXPECTED, reporting)? {
+            FromAgent::JustMyCode(set) => Ok(set),
             other => Err(unexpected(&other, EXPECTED)),
         }
     }

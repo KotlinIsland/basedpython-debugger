@@ -74,6 +74,12 @@ impl Session for Willing {
                 settle: Threads::SETTLE,
                 mode: Mode::NonStop,
             })),
+            // the launch configuration's `justMyCode` is on unless it is turned off,
+            // and the adapter sends it before the program runs
+            Request::JustMyCode { on } => Ok(Response::JustMyCode(bpd_core::JustMyCode {
+                on,
+                libraries: Vec::new(),
+            })),
             other => Err(format!("this fake answers those two, and got {other:?}").into()),
         }
     }

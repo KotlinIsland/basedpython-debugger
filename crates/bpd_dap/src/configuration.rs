@@ -73,6 +73,20 @@ pub struct Configuration {
     #[serde(default)]
     pub stop_the_world: bool,
 
+    /// stop and step only in the program's own code
+    ///
+    /// **on by default**, which is debugpy's default and what a person stepping
+    /// through their own program expects: an exception a library raises and
+    /// catches is not a stop, one it raises into the program is a stop where it
+    /// arrives in the program, and a step in goes through a library's code to
+    /// the next function of the program's it calls. a library is a file that is
+    /// not a file — a frozen module, `<string>` — or one in the standard library
+    /// or a site-packages directory of the interpreter that runs the program,
+    /// and the console says which directories those were. off stops and steps
+    /// in everything
+    #[serde(default = "Configuration::on")]
+    pub just_my_code: bool,
+
     /// how much of a value to read, and what the debugger may run to read it
     ///
     /// DAP has nowhere to carry these, and they are the difference between an
@@ -200,6 +214,11 @@ impl Console {
 }
 
 impl Configuration {
+    /// the default of a setting that is on unless it is turned off
+    const fn on() -> bool {
+        true
+    }
+
     /// the interpreter used when the configuration does not name one
     fn python() -> PathBuf {
         PathBuf::from("python3")

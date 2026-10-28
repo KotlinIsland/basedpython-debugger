@@ -70,6 +70,12 @@ impl Session for NotOurs {
                 depth: 0,
                 mode: Mode::NonStop,
             })),
+            // the launch configuration's `justMyCode` is on unless it is turned
+            // off, and the adapter sends it before the program runs
+            Request::JustMyCode { on } => Ok(Response::JustMyCode(bpd_core::JustMyCode {
+                on,
+                libraries: Vec::new(),
+            })),
             other => {
                 Err(format!("this fake answers a resume and a stack, and got {other:?}").into())
             }

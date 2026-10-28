@@ -595,6 +595,17 @@ impl<'a> Server<'a> {
                     other => unreachable!("the trace ring was answered with {other:?}"),
                 }
             }
+            "just_my_code" => {
+                let args: JustMyCodeArgs = parse(name, arguments)?;
+                match self.ask_in(args.session, Request::JustMyCode { on: args.on })? {
+                    Response::JustMyCode(set) => Ok(serde_json::json!({
+                        // read back off the agent rather than echoed
+                        "just_my_code": set.on,
+                        "libraries": set.libraries,
+                    })),
+                    other => unreachable!("just-my-code was answered with {other:?}"),
+                }
+            }
             "watch_recompositions" => {
                 let args: WatchRecompositionsArgs = parse(name, arguments)?;
                 match self.ask_in(args.session, Request::WatchRecompositions { on: args.on })? {
@@ -1849,6 +1860,15 @@ struct WatchRecompositionsArgs {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct JustMyCodeArgs {
+    #[serde(default)]
+    session: Option<u64>,
+    /// whether to stop and step only in the program's own code
+    on: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RecordArgs {
     #[serde(default)]
     session: Option<u64>,
@@ -2295,6 +2315,7 @@ mod tests {
         "trail" => SessionOnly,
         "recompositions" => SessionOnly,
         "watch_recompositions" => WatchRecompositionsArgs,
+        "just_my_code" => JustMyCodeArgs,
         "retainers" => RetainersArgs,
         "replace_code" => ReplaceCodeArgs,
         "threads" => ThreadsArgs,

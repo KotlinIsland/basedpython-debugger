@@ -234,6 +234,12 @@ pub(crate) fn about_the_process(python: Python<'_>, request: FromEngine) -> PyRe
         FromEngine::WatchRecompositions { on } => {
             attach::send(&crate::ui_trace::watch(on)?);
         }
+        FromEngine::JustMyCode { on } => {
+            let set = crate::libraries::set(python, on)?;
+            // a step decides at events it is already armed for, and a raise is
+            // armed whatever this says, so nothing needs re-arming
+            attach::send(&FromAgent::JustMyCode(set));
+        }
         // the source map and the breakpoint set travel **on** this request when
         // a basedpython build was staged again, rather than arriving as two of
         // their own. the order between them and the code is the debugger's, and

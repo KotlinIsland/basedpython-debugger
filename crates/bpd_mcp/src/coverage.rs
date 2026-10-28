@@ -77,6 +77,7 @@ pub const fn reach_of(request: &Request) -> Reach {
         // count of what is not there beside them
         Request::Recompositions => Reach::Direct("recompositions"),
         Request::WatchRecompositions { .. } => Reach::Direct("watch_recompositions"),
+        Request::JustMyCode { .. } => Reach::Direct("just_my_code"),
 
         // the shape this front end exists for, in one call: an agent says what
         // it wants to know and is answered with it, instead of walking a tree

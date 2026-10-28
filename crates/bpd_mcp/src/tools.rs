@@ -1075,6 +1075,31 @@ pub fn tools() -> Vec<Tool> {
             ),
         },
         Tool {
+            name: "just_my_code",
+            title: "stop and step only in the program's own code",
+            description: "with this on, an exception a library raises and \
+                catches is not a stop, one a library raises into the program is \
+                a stop where it first arrives in the program's own code, and a \
+                step in goes through a library's code to the next function of \
+                the program's that it calls. off by default for an agent: every \
+                raise and every frame is stopped and stepped in.\n\n\
+                a library is a file that is not a file — a frozen module, \
+                `<string>` — or one under the standard library or a \
+                site-packages directory of the interpreter running the program, \
+                and the answer's `libraries` lists those directories as the \
+                interpreter named them."
+                .to_string(),
+            schema: object(
+                serde_json::json!({
+                    "session": integer(SESSION),
+                    "on": { "type": "boolean", "description":
+                        "whether to stop and step only in the program's own code. \
+                         what comes back is what the agent says is set" },
+                }),
+                &["on"],
+            ),
+        },
+        Tool {
             name: "watch_recompositions",
             title: "watch the ui recompose",
             description: "forward every trace record the basedpython-ui runtime \

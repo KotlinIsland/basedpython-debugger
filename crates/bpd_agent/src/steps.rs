@@ -234,7 +234,8 @@ fn reaching(python: Python<'_>, waited: Landing) -> PyResult<Option<StepKind>> {
         // that came back into it — the program's module returning into the
         // import hook that ran it — goes on through it to wherever it returns.
         // only its finishing is waited for, so none of its lines are offered
-        if frames::is_launchers(&frame.getattr("f_code")?) {
+        let code = frame.getattr("f_code")?;
+        if frames::is_launchers(&code) || crate::libraries::skips(&code)? {
             follow(python, step, frame, Landing::NotYet)?;
             return Ok(Outcome::Carry);
         }
@@ -268,8 +269,8 @@ fn reaching(python: Python<'_>, waited: Landing) -> PyResult<Option<StepKind>> {
 /// follows is where it has already arrived. a frame passed through is not
 /// arrived at: what a step into a call through a helper is looking for is the
 /// function the helper calls
-fn go_on_entering(python: Python<'_>, step: &mut Step) -> PyResult<()> {
-    if step.kind != StepKind::In || step.entering {
+fn go_on_entering(python: Python<'_>, step: &mut Step, whatever_the_kind: bool) -> PyResult<()> {
+    if (step.kind != StepKind::In && !whatever_the_kind) || step.entering {
         return Ok(());
     }
     step.entering = true;
@@ -289,10 +290,11 @@ pub(crate) fn entered_frame(python: Python<'_>) -> PyResult<()> {
         if frame.is(step.frame.bind(python)) {
             return Ok(Outcome::Carry);
         }
-        // a frame of the launcher's is never where a step into lands. the step
-        // goes on waiting to enter one that is the program's, which is what the
-        // launcher was about to run
-        if frames::is_launchers(&frame.getattr("f_code")?) {
+        // a frame of the launcher's is never where a step into lands, and with
+        // just-my-code on neither is a library's. the step goes on waiting to
+        // enter one that is the program's, which is what they call next
+        let code = frame.getattr("f_code")?;
+        if frames::is_launchers(&code) || crate::libraries::skips(&code)? {
             return Ok(Outcome::Carry);
         }
         follow(python, step, frame, Landing::Line)?;
@@ -332,7 +334,7 @@ pub(crate) fn left_frame(python: Python<'_>, finish: Finish) -> PyResult<()> {
         follow(python, step, caller.clone(), landing)?;
         if passed_through {
             step.not_again = Some(frames::line_now(&caller)?);
-            go_on_entering(python, step)?;
+            go_on_entering(python, step, false)?;
         }
         Ok(Outcome::Carry)
     })?;
@@ -396,7 +398,8 @@ fn follow(
     // code, and code at no line. decided here, as the step takes the frame up,
     // because cpython may offer such a frame no line event at all — a table
     // that gives every instruction line 0 has none to offer
-    step.through = frames::is_launchers(&code) || frames::line_now(&frame)? == 0;
+    let library = crate::libraries::skips(&code)?;
+    step.through = library || frames::is_launchers(&code) || frames::line_now(&frame)? == 0;
     step.frame = frame.unbind();
     step.landing = landing;
     step.entering = false;
@@ -412,8 +415,13 @@ fn follow(
     }
 
     watch(python, step, &code)?;
-    if step.through {
-        go_on_entering(python, step)?;
+    // a step over or out that came back into a library's code is on its way
+    // back to the program's, and the program's code it reaches first may be a
+    // function the library calls rather than the one that called the library —
+    // a callback, the next task of an event loop. so it lands in whichever
+    // comes first
+    if step.through && (step.kind == StepKind::In || library) {
+        go_on_entering(python, step, true)?;
     }
     session::refresh_events(python)
 }
