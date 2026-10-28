@@ -278,27 +278,31 @@ fn a_generated_line_no_by_line_is_behind_is_reported_as_python_and_says_why() {
 
 #[test]
 fn a_by_line_the_transpiler_generated_nothing_for_moves_to_the_next_one_it_did() {
-    // the comment above `def main`, which the transpile does not keep. `by run`
-    // compiled no code onto it, so a breakpoint on it moves forward exactly as it
-    // does in ordinary python, and the answer says where it went
+    // the blank line after `main`'s body, which the transpile keeps nothing of.
+    // `by run` compiled no code onto it, so a breakpoint on it moves forward
+    // exactly as it does in ordinary python — to the module's call of `main`,
+    // which is inside the same definitions it is — and the answer says where
+    // it went. the comment above `def main` is the other kind of line: the next
+    // executable line from there is where `main` begins, and a move into a
+    // definition is refused, as it is in python — see `breakpoints.rs`
     let build = build();
     let mut debuggee = by_run(&build);
-    let comment = bpd_test::debuggee::line_of(SOURCE, "# a comment");
-    set(&mut debuggee, comment, &build.source);
+    let blank = bpd_test::debuggee::line_of(SOURCE, "print(answer)") + 1;
+    set(&mut debuggee, blank, &build.source);
 
     let (reason, rebound) = run_to_stop(&mut debuggee);
 
-    let def_main = bpd_test::debuggee::line_of(SOURCE, "def main");
+    let entry = bpd_test::debuggee::line_of(SOURCE, "main()  # entry");
     let Binding::Bound { line, .. } = &last_about(1, &rebound).binding else {
         panic!("it was supposed to move forward and bind: {rebound:?}")
     };
     assert_eq!(
-        *line, def_main,
-        "line {comment} has no code, so the breakpoint moved to the next `.by` line \
+        *line, entry,
+        "line {blank} has no code, so the breakpoint moved to the next `.by` line \
          that does — and the answer says which one that is"
     );
     assert!(
-        matches!(&reason, StopReason::Breakpoint { line, .. } if *line == def_main),
+        matches!(&reason, StopReason::Breakpoint { line, .. } if *line == entry),
         "{reason:?}"
     );
 }

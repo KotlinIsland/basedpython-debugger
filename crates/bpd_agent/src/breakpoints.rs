@@ -537,6 +537,10 @@ fn resolve(
         });
     };
 
+    if let Some(refused) = crossing(request, line, &units) {
+        return Ok(Binding::Unbound { reason: refused });
+    }
+
     let mut sites = Vec::new();
     for unit in units {
         let Some(&offset) = unit.lines.get(&line) else {
@@ -577,6 +581,44 @@ fn resolve(
         line,
         sites,
         evaluation: plan.evaluation(),
+    })
+}
+
+/// the refusal a move from the asked-for line to `line` earns, when it crosses a
+/// definition's edge
+///
+/// a move goes no further than the definitions the asked-for line is in. every
+/// unit of the file is a definition — the module, a class body, a function, a
+/// lambda — and its lines run from its first to the last its code runs on. one
+/// that holds exactly one of the two lines is an edge the move would cross
+///
+/// the widest edge is the one named. a `def` line is where its function begins
+/// and also where cpython 3.14's `__annotate__` for it does, which spans that
+/// one line, and the function is the definition a person means
+fn crossing(request: &SourceBreakpoint, line: u32, units: &[code::Unit]) -> Option<Unbound> {
+    if line == request.line {
+        return None;
+    }
+    let (_, definition, into) = units
+        .iter()
+        .filter_map(|unit| {
+            let last = unit.lines.keys().copied().filter(|&at| at != 0).max()?;
+            let holds = |at: u32| unit.first_line <= at && at <= last;
+            (holds(request.line) != holds(line)).then(|| {
+                (
+                    last.saturating_sub(unit.first_line),
+                    unit.qualname.clone(),
+                    holds(line),
+                )
+            })
+        })
+        .max_by_key(|(width, ..)| *width)?;
+    Some(Unbound::CrossesADefinition {
+        file: request.file.clone(),
+        requested: request.line,
+        next: line,
+        definition,
+        into,
     })
 }
 

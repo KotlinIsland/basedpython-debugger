@@ -113,7 +113,9 @@ this is where debuggers quietly lie, so it is spelled out:
 - the executable lines of a code object come from `co_lines()`. a breakpoint on
     a blank line, a comment, or a `pass` that the compiler elided has no
     location. it moves to the next executable line **and the response says it
-    moved**, with the line it moved to
+    moved**, with the line it moved to — and only inside the definitions it is
+    in: a move across a function's edge is refused, because it would stop at
+    another moment as well as another line
 - a breakpoint in a module that has not been imported yet cannot bind. it is
     reported **unbound**, and it binds later when the module is imported. it is
     never reported as bound-and-set

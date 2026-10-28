@@ -404,6 +404,76 @@ fn a_breakpoint_on_a_comment_says_which_line_it_moved_to() {
 }
 
 #[test]
+fn a_breakpoint_never_moves_into_a_definition_its_line_is_not_inside() {
+    // measured in the IDE before this: a breakpoint on the blank line after one
+    // function's body moved to the `def` of the next — a line of the module,
+    // which runs once, at import — and stopped there, in `<module>`, before
+    // either function had run. it said it had moved, and what it moved to was a
+    // different place in time as well as on the page
+    const TWO: &str = r"def first():
+    return 1
+# after first
+
+
+def second():
+    total = 2
+
+    return total
+
+
+first()
+second()
+";
+    let fixture = Fixture::new("two", TWO);
+    let after_first = line_of(TWO, "# after first");
+    let inside_second = line_of(TWO, "total = 2") + 1;
+    let returned = line_of(TWO, "return total");
+
+    let mut debuggee = launch(&fixture);
+    let resolved = debuggee
+        .set_breakpoints(at(
+            &fixture.path(),
+            &[(1, after_first), (2, after_first + 1), (3, inside_second)],
+        ))
+        .expect("the breakpoint request was answered");
+
+    // the comment and the blank line after it are inside no function, and the
+    // next executable line is where `second` begins
+    for refused in &resolved[..2] {
+        let Unbound::CrossesADefinition {
+            requested,
+            next,
+            definition,
+            ..
+        } = unbound(refused)
+        else {
+            panic!("expected the move to be refused, got {refused:?}")
+        };
+        assert_eq!(*next, line_of(TWO, "def second():"));
+        assert_eq!(definition, "second");
+        assert!(*requested == after_first || *requested == after_first + 1);
+        assert!(
+            !unbound(refused).will_bind_later(),
+            "the program running on does not change where a line is"
+        );
+    }
+
+    // a blank line between two statements of one function still moves to the
+    // next of them: both are inside `second` and nothing else
+    let (line, sites) = bound(&resolved[2]);
+    assert_eq!(line, returned);
+    assert_eq!(
+        sites
+            .iter()
+            .map(|site| site.qualname.as_str())
+            .collect::<Vec<_>>(),
+        ["second"]
+    );
+
+    finish(debuggee);
+}
+
+#[test]
 fn two_breakpoints_that_land_on_one_line_are_both_reported() {
     let fixture = Fixture::new("widget", WIDGET);
     let comment = line_of(WIDGET, "# a comment, which is not executable");
@@ -451,14 +521,27 @@ fn the_lines_that_can_hold_a_breakpoint_are_exactly_the_ones_co_lines_yields() {
         let expected = executable.iter().copied().find(|line| *line >= asked);
 
         match expected {
-            // every line at or below the last executable one binds, and binds
-            // to the first executable line at or after it — that single rule is
-            // both the line table and the rule for moving off a blank line
-            Some(expected) => assert_eq!(
+            // an executable line binds to itself, always
+            Some(expected) if expected == asked => assert_eq!(
                 bound(resolution).0,
                 expected,
                 "a breakpoint asked for on line {asked}"
             ),
+            // every other line at or below the last executable one binds to the
+            // first executable line at or after it — or is refused for the one
+            // reason a move is, which is a definition's edge between the two,
+            // and the refusal names that same next line. see
+            // `a_breakpoint_never_moves_into_a_definition_its_line_is_not_inside`
+            Some(expected) => match &resolution.binding {
+                Binding::Unbound {
+                    reason: Unbound::CrossesADefinition { next, .. },
+                } => assert_eq!(*next, expected, "a breakpoint asked for on line {asked}"),
+                _ => assert_eq!(
+                    bound(resolution).0,
+                    expected,
+                    "a breakpoint asked for on line {asked}"
+                ),
+            },
             None => {
                 let reason = unbound(resolution);
                 assert!(

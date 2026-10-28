@@ -379,7 +379,9 @@ pub fn tools() -> Vec<Tool> {
                 one, and every later report names a breakpoint by that id.\n\n\
                 the answer says what is really behind each one: the line it \
                 bound to (which may not be the line asked for — a blank line, a \
-                comment or an elided `pass` moves to the next executable line), \
+                comment or an elided `pass` moves to the next executable line, \
+                and only inside the definitions it is in — a move into or out of \
+                a function is refused and says why), \
                 every code object it was armed in, and for one that did not bind, \
                 why. a breakpoint is never reported as set unless there is a code \
                 object and an offset behind it.\n\n\

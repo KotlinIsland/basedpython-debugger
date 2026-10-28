@@ -452,6 +452,31 @@ pub enum Unbound {
         last_executable: Option<u32>,
     },
 
+    /// the line is not executable, and the next one that is lies inside a
+    /// definition this one is not inside, or outside one this one is inside
+    ///
+    /// a breakpoint on a blank line, a comment or an elided `pass` moves to the
+    /// next executable line — inside the same function. one that moved across a
+    /// definition's edge would stop somewhere else in **time** as well as on the
+    /// page: measured in the IDE, a blank line after one function's body moved
+    /// to the `def` of the next, a line of the module that runs once, at
+    /// import, and stopped there before either function had run. "inside" is
+    /// the lines a definition's code spans, from its first line to the last
+    /// line its code runs on
+    CrossesADefinition {
+        /// the path as the client gave it
+        file: PathBuf,
+        /// the line that was asked for
+        requested: u32,
+        /// the next executable line, which the move would have gone to
+        next: u32,
+        /// the qualified name of the definition whose edge lies between them
+        definition: String,
+        /// whether `next` is inside it, which makes the move one into it rather
+        /// than out of it
+        into: bool,
+    },
+
     /// the condition does not compile
     ///
     /// nothing about the file is wrong. a breakpoint whose condition cannot be
@@ -571,6 +596,9 @@ impl Unbound {
             Self::PartiallyLoaded { .. } => false,
             // the file is loaded and has no such line
             Self::NoExecutableLine { .. } => false,
+            // the file is loaded, and where its lines are does not change
+            // while it runs
+            Self::CrossesADefinition { .. } => false,
             // a condition that does not compile never will
             Self::ConditionInvalid { .. } => false,
             // the breakpoint it waits for can never arm it
@@ -664,6 +692,31 @@ fn no_rendered_node(
     }
 }
 
+/// why a move across a definition's edge is refused — see
+/// [`Unbound::CrossesADefinition`]
+fn crosses(
+    formatter: &mut std::fmt::Formatter<'_>,
+    file: &std::path::Path,
+    requested: u32,
+    next: u32,
+    definition: &str,
+    into: bool,
+) -> std::fmt::Result {
+    let edge = if into {
+        format!("is inside `{definition}`, and line {requested} is not")
+    } else {
+        format!("is outside `{definition}`, and line {requested} is inside it")
+    };
+    write!(
+        formatter,
+        "line {requested} of `{}` is not executable, and the next line that is, \
+         {next}, {edge}. a breakpoint moves to the next executable line only inside \
+         the same definitions, because across one it would stop at another time as \
+         well as another place. set it on a line of the code you mean",
+        file.display()
+    )
+}
+
 /// [`Unbound::NoSourceMap`], and what would have produced one
 fn no_source_map(
     formatter: &mut std::fmt::Formatter<'_>,
@@ -749,6 +802,13 @@ impl std::fmt::Display for Unbound {
                     None => write!(formatter, ". it has no executable lines at all"),
                 }
             }
+            Self::CrossesADefinition {
+                file,
+                requested,
+                next,
+                definition,
+                into,
+            } => crosses(formatter, file, *requested, *next, definition, *into),
             Self::NoSourceMap { file } => no_source_map(formatter, file),
             Self::Unmappable { reason } => write!(formatter, "{reason}"),
             Self::ConditionInvalid { condition, error } => write!(

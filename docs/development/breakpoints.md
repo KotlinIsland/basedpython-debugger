@@ -99,6 +99,19 @@ rather than against numbers written down here:
     executable line in that file and the response says which line it moved to. if
     there is no executable line at or after it, it is unbound, and the reason
     names the last line that could have held one
+- **a move never crosses a definition's edge.** every code object of the file is
+    a definition — the module, a class body, a function, a lambda — and it spans
+    the lines from its first to the last its code runs on. a move is refused when
+    one of them holds exactly one of the two lines, and the reason names the line
+    the move would have gone to and the definition in between. measured in the
+    IDE before this: a breakpoint on the blank line after one function's body
+    moved to the `def` of the next, a line of the module that runs once, at
+    import, and stopped there before either function had run — it said it had
+    moved, and where it went was another moment as well as another line. a
+    blank line between two statements of one function is inside exactly the
+    definitions they are, and still moves. when more than one definition's edge
+    is in between, the widest is named, because a `def` line is where cpython
+    3.14's one-line `__annotate__` for the function begins as well
 
 a line of `0` is never a breakpoint. cpython attributes a module's leading
 `RESUME` to line 0, source lines are 1-based, and a breakpoint bound there could
