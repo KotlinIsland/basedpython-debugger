@@ -323,6 +323,35 @@ the filesystem's identity, because the map spells them `/var/folders/…` where
 the interpreter compiles `/private/var/folders/…`. the answer names the
 directories and those files, and DAP says them on the console
 
+### a rule per class
+
+PyCharm's exception breakpoint is a class, "on raise", "on termination" and
+"ignore library files", and the two filters cannot say any of that. so
+`Request::SetExceptionBreakpoints` carries `bpd_core::ExceptionClass` rules
+beside them, and a rule decides for its class **in place of** the filters:
+
+- the class is matched against the exception's whole method resolution order,
+    so a rule for `LookupError` decides for a `KeyError` — `except LookupError:`'s
+    rule — and when more than one matches, the nearest class's decides, so a
+    `KeyError` rule overrides a `LookupError` one
+- a rule with neither `raised` nor `uncaught` leaves its class out of a filter
+    that is on, which is how a program that raises and catches `StopIteration`
+    all day stays debuggable with "raised" on
+- `libraries` off is "ignore library files": a library raising one is not a stop
+    there, and the stop is where it first arrives in the program's own code, by
+    the same mechanism just-my-code uses. it is the rule's own, whatever the
+    session's just-my-code is; an exception no rule names takes the filter's,
+    which is just-my-code
+
+DAP carries rules as `exceptionOptions`: the last segment of an option's path is
+the class (vs code writes `Python Exceptions` above it), `always` stops at the
+raise, `unhandled` where it leaves the program, and `never` at neither.
+`userUnhandled` is refused by name, because bpd stops where an exception leaves
+the program and not where it leaves the program's code. an option has no field
+for one class's library choice, and `breakpointModes` attach to filters rather
+than options, so a rule from DAP ignores library files exactly when `justMyCode`
+is on. MCP carries `libraries` on each rule
+
 ### uncaught
 
 whether an exception will be caught is decided by what happens **after** it is

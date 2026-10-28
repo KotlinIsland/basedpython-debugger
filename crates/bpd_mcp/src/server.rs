@@ -298,6 +298,7 @@ impl<'a> Server<'a> {
                     Request::SetExceptionBreakpoints {
                         raised: args.raised,
                         uncaught: args.uncaught,
+                        classes: args.classes,
                     },
                 )? {
                     Response::ExceptionBreakpoints(armed) => Ok(serde_json::json!({
@@ -305,6 +306,7 @@ impl<'a> Server<'a> {
                         // request: what is armed is what the agent says is armed
                         "raised": armed.raised,
                         "uncaught": armed.uncaught,
+                        "classes": armed.classes,
                     })),
                     other => unreachable!("exception breakpoints were answered with {other:?}"),
                 }
@@ -1693,6 +1695,8 @@ struct ExceptionArgs {
     raised: bool,
     #[serde(default)]
     uncaught: bool,
+    #[serde(default)]
+    classes: Vec<bpd_core::ExceptionClass>,
 }
 
 #[derive(Debug, serde::Deserialize)]

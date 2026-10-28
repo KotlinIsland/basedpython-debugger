@@ -77,6 +77,8 @@ struct Recorder {
     launchers: Vec<bool>,
     /// whether each evaluation asked for statements
     statements: Vec<bool>,
+    /// the exception rules the last `set_exception_breakpoints` carried
+    classes: Vec<bpd_core::ExceptionClass>,
     /// what every request was addressed to, beside what it asked for
     ///
     /// naming the session is a capability like any other, and one the server
@@ -139,6 +141,20 @@ fn the_launcher_and_statements_reach_the_session_as_they_were_asked() {
     let asked = Asked::default();
     drive(&asked);
     let recorded = asked.lock().expect("the recorder is not poisoned");
+
+    // the class rules, with the library choice each carries
+    assert_eq!(
+        recorded.classes,
+        [bpd_core::ExceptionClass {
+            name: "KeyError".to_string(),
+            raised: true,
+            uncaught: false,
+            libraries: false,
+        }],
+        "`{}` and `{}` never reached the session",
+        Facet::ExceptionClasses.name(),
+        Facet::ExceptionClassLibraries.name()
+    );
 
     // statements, read off what the evaluation really asked
     assert_eq!(
@@ -480,7 +496,10 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
     );
     client.call(
         "set_exception_breakpoints",
-        &serde_json::json!({ "uncaught": true }),
+        &serde_json::json!({
+            "uncaught": true,
+            "classes": [{ "name": "KeyError", "raised": true, "uncaught": false, "libraries": false }],
+        }),
     );
 
     // what a forked child of the program does, and the tool that makes a second
@@ -1405,8 +1424,21 @@ impl Session for FakeSession {
                     })
                     .collect(),
             },
-            Request::SetExceptionBreakpoints { raised, uncaught } => {
-                Response::ExceptionBreakpoints(bpd_core::ExceptionBreakpoints { raised, uncaught })
+            Request::SetExceptionBreakpoints {
+                raised,
+                uncaught,
+                classes,
+            } => {
+                self.asked
+                    .lock()
+                    .expect("the recorder is not poisoned")
+                    .classes
+                    .clone_from(&classes);
+                Response::ExceptionBreakpoints(bpd_core::ExceptionBreakpoints {
+                    raised,
+                    uncaught,
+                    classes,
+                })
             }
             Request::DebugChildren { on } => Response::DebuggingChildren { on },
             Request::Run { .. } => {

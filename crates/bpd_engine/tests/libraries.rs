@@ -238,3 +238,120 @@ fn with_just_my_code_a_step_in_goes_through_a_library_to_the_programs_callback()
         }
     }
 }
+
+/// raises of four classes, one of them a library's
+const CLASSES: &str = r#"import json
+
+
+def main():
+    try:
+        {}["missing"]  # a KeyError
+    except KeyError:
+        pass
+    try:
+        next(iter([]))  # a StopIteration
+    except StopIteration:
+        pass
+    try:
+        raise ValueError("mine")  # a ValueError
+    except ValueError:
+        pass
+    try:
+        json.loads("{")  # into json
+    except ValueError:
+        pass
+
+
+ready = 1
+main()
+"#;
+
+fn rule(name: &str, raised: bool, libraries: bool) -> bpd_core::ExceptionClass {
+    bpd_core::ExceptionClass {
+        name: name.to_string(),
+        raised,
+        uncaught: false,
+        libraries,
+    }
+}
+
+#[test]
+fn a_rule_for_a_class_decides_for_it_and_its_subclasses_in_place_of_the_filters() {
+    let fixture = Fixture::new("classes", CLASSES);
+    let program = fixture.path().display().to_string();
+
+    // the filter is on for everything, and the rules carve two classes out of
+    // it: `LookupError` decides for the `KeyError`, and `StopIteration` is left
+    // out of the filter
+    let mut debuggee = launch(&fixture);
+    held_at(&mut debuggee, &fixture, line_of(CLASSES, "ready = 1"));
+    let set = debuggee
+        .set_exception_rules(
+            true,
+            false,
+            vec![
+                rule("LookupError", true, true),
+                rule("StopIteration", false, true),
+            ],
+        )
+        .expect("the exception breakpoints were set");
+    assert_eq!(
+        set.classes.len(),
+        2,
+        "the agent holds what was set: {set:?}"
+    );
+    let all = raises(&mut debuggee);
+    assert!(
+        !all.iter().any(|(kind, ..)| kind == "StopIteration"),
+        "no stop for the `StopIteration` the rule left out: {all:?}"
+    );
+    let seen: Vec<(String, u32)> = all
+        .into_iter()
+        .filter(|(_, file, _)| *file == program)
+        .map(|(kind, _, line)| (kind, line))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("KeyError".to_string(), line_of(CLASSES, "# a KeyError")),
+            ("ValueError".to_string(), line_of(CLASSES, "# a ValueError")),
+        ],
+        "the `KeyError` by the rule for `LookupError`, the `ValueError` by the \
+         filter — and the one `json` raised was a stop inside `json`, where the \
+         filter with just-my-code off stops for it"
+    );
+}
+
+#[test]
+fn a_rule_that_ignores_library_files_stops_where_a_libraries_raise_arrives() {
+    let fixture = Fixture::new("classes", CLASSES);
+    let program = fixture.path().display().to_string();
+
+    for libraries in [false, true] {
+        let mut debuggee = launch(&fixture);
+        held_at(&mut debuggee, &fixture, line_of(CLASSES, "ready = 1"));
+        debuggee
+            .set_exception_rules(false, false, vec![rule("ValueError", true, libraries)])
+            .expect("the exception breakpoints were set");
+        let seen = raises(&mut debuggee);
+        let decoded = seen
+            .iter()
+            .find(|(kind, ..)| kind.ends_with("JSONDecodeError"))
+            .unwrap_or_else(|| {
+                panic!("the rule for `ValueError` decides for its subclass: {seen:?}")
+            });
+        if libraries {
+            assert_ne!(decoded.1, program, "where `json` raised it: {seen:?}");
+        } else {
+            assert_eq!(
+                (&decoded.1, decoded.2),
+                (&program, line_of(CLASSES, "# into json")),
+                "where it first arrives in the program's own code"
+            );
+        }
+        assert!(
+            !seen.iter().any(|(kind, ..)| kind == "KeyError"),
+            "no rule and no filter stops a `KeyError`: {seen:?}"
+        );
+    }
+}

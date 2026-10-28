@@ -87,6 +87,11 @@ pub fn capabilities() -> serde_json::Value {
         // and its traceback, which is exactly what this request asks for
         "supportsExceptionInfoRequest": true,
 
+        // a rule per exception class — PyCharm's exception breakpoint — with
+        // `always`, `unhandled` and `never`, the class the last segment of the
+        // option's path. see `Adapter::exception_classes`
+        "supportsExceptionOptions": true,
+
         "exceptionBreakpointFilters": [
             {
                 "filter": "raised",
@@ -134,6 +139,7 @@ mod tests {
                 "supportsConditionalBreakpoints",
                 "supportsConfigurationDoneRequest",
                 "supportsExceptionInfoRequest",
+                "supportsExceptionOptions",
                 "supportsGotoTargetsRequest",
                 "supportsLogPoints",
                 "supportsRestartFrame",

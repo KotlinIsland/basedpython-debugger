@@ -65,6 +65,13 @@ const JUSTIFIED: &[(&str, &str)] = &[
         "MCP",
         "the program reading the stdin the front end was started with",
     ),
+    // DAP's `ExceptionOptions` is a path and a break mode, and its
+    // `breakpointModes` attach to filters rather than to options, so one
+    // class's library choice has no field. MCP carries it on each rule
+    (
+        "DAP",
+        "a class's exception rule ignoring library files on its own",
+    ),
 ];
 
 /// everything the debugger says that one front end cannot pass on, and which

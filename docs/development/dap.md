@@ -639,6 +639,15 @@ that: the entries of a stop are forgotten when its thread is resumed, and asking
 again is refused with "ask for the stack again" rather than resolved against
 whatever is at that index now
 
+### an exception option is a rule for one class
+
+`supportsExceptionOptions` is advertised, and an `exceptionOptions` entry is a
+`bpd_core::ExceptionClass` rule: the class is the last segment of its path,
+`always` stops at the raise, `unhandled` where it leaves the program, `never`
+at neither, and `userUnhandled` is refused by name. each gets its own entry in
+the response, after the filters', verified when the agent holds it. the whole
+of it is [stepping](stepping.md#a-rule-per-class)
+
 ### the console runs statements, and nothing else does
 
 DAP's `evaluate` says where it comes from in `context`. from the console —

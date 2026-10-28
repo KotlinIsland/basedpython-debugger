@@ -45,6 +45,8 @@ struct State {
     /// filesystem's identity — the build's map names them as `BY_CODE`, and
     /// they are a library's whatever directory the build is in
     by_code: Vec<(String, crate::files::FileId)>,
+    /// whether `roots` has been read off the interpreter yet
+    read: bool,
     /// every directory whose files are a library's, each ending in a separator
     /// so that `/usr/lib/python3.14` does not claim `/usr/lib/python3.14x`
     roots: Vec<String>,
@@ -54,6 +56,7 @@ struct State {
 
 static STATE: Mutex<State> = Mutex::new(State {
     by_code: Vec::new(),
+    read: false,
     roots: Vec::new(),
     known: BTreeMap::new(),
 });
@@ -86,16 +89,16 @@ pub(crate) fn by_code(files: &[std::path::PathBuf]) {
 
 /// turn it on or off, and say what is counted as a library's
 pub(crate) fn set(python: Python<'_>, on: bool) -> PyResult<bpd_core::JustMyCode> {
-    let roots = if on { roots(python)? } else { Vec::new() };
-    let by_code: Vec<String> = {
+    let (roots, by_code) = if on {
+        let roots = roots(python)?;
         let mut state = state();
         state.roots.clone_from(&roots);
+        state.read = true;
         state.known.clear();
-        if on {
-            state.by_code.iter().map(|(file, _)| file.clone()).collect()
-        } else {
-            Vec::new()
-        }
+        let by_code = state.by_code.iter().map(|(file, _)| file.clone()).collect();
+        (roots, by_code)
+    } else {
+        (Vec::new(), Vec::new())
     };
     ON.store(on, Ordering::Relaxed);
     Ok(bpd_core::JustMyCode {
@@ -114,6 +117,38 @@ pub(crate) fn skips(code: &Bound<'_, PyAny>) -> PyResult<bool> {
     if !ON.load(Ordering::Relaxed) {
         return Ok(false);
     }
+    is_library(code)
+}
+
+/// read the library directories off the interpreter, once
+///
+/// called where a request that will need them is answered, so the reading —
+/// which runs `site`'s own python — happens on a held thread rather than inside
+/// a monitoring callback
+pub(crate) fn prepare(python: Python<'_>) -> PyResult<()> {
+    if state().read {
+        return Ok(());
+    }
+    let roots = roots(python)?;
+    let mut state = state();
+    state.roots = roots;
+    state.read = true;
+    state.known.clear();
+    Ok(())
+}
+
+/// whether just-my-code is on
+pub(crate) fn on() -> bool {
+    ON.load(Ordering::Relaxed)
+}
+
+/// whether this code object is a library's, whatever just-my-code is set to
+///
+/// what a rule for one exception class asks when it ignores library files.
+/// the directories are read the first time they are needed, the way [`set`]
+/// reads them
+pub(crate) fn is_library(code: &Bound<'_, PyAny>) -> PyResult<bool> {
+    prepare(code.py())?;
     let file: String = code.getattr("co_filename")?.extract()?;
     let mut state = state();
     if let Some(known) = state.known.get(&file) {

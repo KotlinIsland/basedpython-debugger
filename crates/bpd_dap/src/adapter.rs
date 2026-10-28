@@ -469,10 +469,12 @@ enum Arrival {
 /// the two bpd offers, as booleans rather than as the client's strings: the
 /// names are validated where the request arrives, and what is kept is the
 /// question [`Request::SetExceptionBreakpoints`] asks
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Filters {
     raised: bool,
     uncaught: bool,
+    /// one rule per class `exceptionOptions` named
+    classes: Vec<bpd_core::ExceptionClass>,
 }
 
 impl Adapter {
@@ -1253,10 +1255,17 @@ impl Adapter {
     /// that wants to know what is armed asks again. what this does guarantee is
     /// that the filters really are armed on the program, which is the half a
     /// client cannot check for itself
-    fn arm_exception_filters(&mut self, filters: Filters) -> Answered {
+    fn arm_exception_filters(&mut self, mut filters: Filters) -> Answered {
+        // a rule asked for before the launch took its library filter from a
+        // configuration that did not exist yet, and the one that does decides
+        let libraries = !self.configuration().just_my_code;
+        for class in &mut filters.classes {
+            class.libraries = libraries;
+        }
         let armed = match self.ask(Request::SetExceptionBreakpoints {
             raised: filters.raised,
             uncaught: filters.uncaught,
+            classes: filters.classes.clone(),
         })? {
             Response::ExceptionBreakpoints(armed) => armed,
             other => unreachable!("exception breakpoints were answered with {other:?}"),
@@ -1515,10 +1524,15 @@ impl Adapter {
             }
         }
 
+        let classes = self.exception_classes(&message.arguments["exceptionOptions"])?;
         let filters = Filters {
             raised: named.contains(&"raised"),
             uncaught: named.contains(&"uncaught"),
+            classes,
         };
+        // one answer per filter and then one per exception option, which is the
+        // order DAP's response is read in
+        let options = filters.classes.len();
 
         // the same configuration phase `setBreakpoints` arrives in, and held
         // the same way. `verified: false` for every filter, because it is: with
@@ -1527,8 +1541,7 @@ impl Adapter {
         // applying because there is no agent to ask
         if self.session.is_none() {
             self.exceptions = Some(filters);
-            let waiting: Vec<serde_json::Value> = named
-                .iter()
+            let waiting: Vec<serde_json::Value> = (0..named.len() + options)
                 .map(|_| serde_json::json!({ "verified": false }))
                 .collect();
             self.respond(message, Some(serde_json::json!({ "breakpoints": waiting })))?;
@@ -1538,6 +1551,7 @@ impl Adapter {
         let armed = match self.ask(Request::SetExceptionBreakpoints {
             raised: filters.raised,
             uncaught: filters.uncaught,
+            classes: filters.classes.clone(),
         })? {
             Response::ExceptionBreakpoints(armed) => armed,
             other => unreachable!("exception breakpoints were answered with {other:?}"),
@@ -1545,7 +1559,7 @@ impl Adapter {
 
         // read back off the agent rather than echoed from the request: what is
         // armed is what the agent says is armed
-        let verified: Vec<serde_json::Value> = named
+        let mut verified: Vec<serde_json::Value> = named
             .iter()
             .map(|filter| {
                 let on = match *filter {
@@ -1555,12 +1569,94 @@ impl Adapter {
                 serde_json::json!({ "verified": on })
             })
             .collect();
+        verified.extend(
+            filters
+                .classes
+                .iter()
+                .map(|asked| serde_json::json!({ "verified": armed.classes.contains(asked) })),
+        );
 
         self.respond(
             message,
             Some(serde_json::json!({ "breakpoints": verified })),
         )?;
         Ok(())
+    }
+
+    /// the rules DAP's `exceptionOptions` asks for, one per class named
+    ///
+    /// the class is the **last** segment of an option's path — a client writes
+    /// a category above it, `Python Exceptions` in vs code — and each name in
+    /// that segment is a class. the break mode is the rule: `always` stops where
+    /// one is raised, `unhandled` where one leaves the program, and `never`
+    /// stops for it under neither filter. `userUnhandled` — "not handled by the
+    /// program's own code" — is refused by name: bpd answers where an exception
+    /// leaves the program, not where it leaves the program's code
+    ///
+    /// DAP has nowhere in an option for `PyCharm`'s "ignore library files", so a
+    /// rule from here ignores them exactly when `justMyCode` is on. MCP carries
+    /// it per class
+    fn exception_classes(
+        &self,
+        options: &serde_json::Value,
+    ) -> Result<Vec<bpd_core::ExceptionClass>, Aborted> {
+        let Some(options) = options.as_array() else {
+            return Ok(Vec::new());
+        };
+        let libraries = self
+            .configuration
+            .as_ref()
+            .is_some_and(|configuration| !configuration.just_my_code);
+        let mut classes = Vec::new();
+        for option in options {
+            let (raised, uncaught) = match option["breakMode"].as_str() {
+                Some("always") => (true, false),
+                Some("unhandled") => (false, true),
+                Some("never") => (false, false),
+                Some("userUnhandled") => {
+                    return Err(Aborted::Refuse(
+                        "`userUnhandled` asks for a stop where an exception leaves the \
+                         program's own code, and bpd stops where one leaves the program \
+                         — `unhandled`. it will not offer the one as the other"
+                            .to_string(),
+                    ));
+                }
+                other => {
+                    return Err(Aborted::Refuse(format!(
+                        "an exception option's `breakMode` is `never`, `always`, \
+                         `unhandled` or `userUnhandled`, and this one is {other:?}"
+                    )));
+                }
+            };
+            let Some(last) = option["path"].as_array().and_then(|path| path.last()) else {
+                return Err(Aborted::Refuse(
+                    "an exception option with no `path` names no class, and bpd has no \
+                     rule for every exception but the two filters"
+                        .to_string(),
+                ));
+            };
+            if last["negate"].as_bool() == Some(true) {
+                return Err(Aborted::Refuse(
+                    "a negated exception path — every class but these — is not a rule \
+                     bpd has. name the classes the rule is for"
+                        .to_string(),
+                ));
+            }
+            for name in last["names"].as_array().map_or(&[][..], Vec::as_slice) {
+                let Some(name) = name.as_str() else {
+                    return Err(Aborted::Refuse(format!(
+                        "an exception path names classes as strings, and one was {name}"
+                    )));
+                };
+                classes.push(bpd_core::ExceptionClass {
+                    name: name.to_string(),
+                    raised,
+                    uncaught,
+                    libraries,
+                });
+            }
+        }
+        Ok(classes)
     }
 
     fn threads(&mut self, message: &Incoming) -> Answered {

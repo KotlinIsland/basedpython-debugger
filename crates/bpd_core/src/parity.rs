@@ -242,11 +242,23 @@ pub enum Facet {
     /// without it can evaluate every expression and cannot assign a local,
     /// import a module or run a loop in the frame, which is what a console is
     Statements,
+
+    /// a rule per exception class — [`crate::ExceptionClass`] on
+    /// [`Request::SetExceptionBreakpoints`]
+    ///
+    /// a field of one request, and `PyCharm`'s exception breakpoint: a front end
+    /// without it can stop on every raise or on none, and on a program that
+    /// raises and catches `StopIteration` all day that is no choice at all
+    ExceptionClasses,
+
+    /// a class's rule ignoring library files, apart from the session's
+    /// just-my-code — [`crate::ExceptionClass::libraries`]
+    ExceptionClassLibraries,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
@@ -262,6 +274,8 @@ impl Facet {
         Self::Launcher,
         Self::InheritedStdin,
         Self::Statements,
+        Self::ExceptionClasses,
+        Self::ExceptionClassLibraries,
     ];
 
     /// what to call this capability in a message about it
@@ -284,6 +298,10 @@ impl Facet {
             }
             Self::InheritedStdin => "the program reading the stdin the front end was started with",
             Self::Statements => "running statements where an expression is evaluated",
+            Self::ExceptionClasses => "a rule per exception class",
+            Self::ExceptionClassLibraries => {
+                "a class's exception rule ignoring library files on its own"
+            }
         }
     }
 }
@@ -746,6 +764,7 @@ pub fn surface() -> Vec<Request> {
         Request::SetExceptionBreakpoints {
             raised: false,
             uncaught: true,
+            classes: Vec::new(),
         },
         Request::DebugChildren { on: true },
         Request::Run { deadline: None },

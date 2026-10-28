@@ -152,6 +152,10 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // not the protocol to hand a program. an agent's program takes its input
         // from a file, an argument or the environment
         Facet::Statements => Reach::Direct("`statements` on the `evaluate` tool"),
+        Facet::ExceptionClasses => Reach::Direct("`classes` on `set_exception_breakpoints`"),
+        Facet::ExceptionClassLibraries => {
+            Reach::Direct("`libraries` on each of `set_exception_breakpoints`'s `classes`")
+        }
 
         Facet::InheritedStdin => Reach::Unreachable {
             why: "`bpd mcp` speaks MCP on its stdin, so the one stdin it has is the \

@@ -83,10 +83,10 @@ pub(crate) fn refresh_events(python: Python<'_>) -> PyResult<()> {
         events::Global {
             py_start: true,
             line: world::parking() || pause::pausing() || crate::trail::recording(),
-            py_unwind: following || exceptions::uncaught(),
+            py_unwind: following || exceptions::uncaught_armed(),
             py_throw: entering,
             py_resume: entering,
-            raised: exceptions::raised(),
+            raised: exceptions::raised_armed(),
         },
     )
 }
@@ -214,10 +214,24 @@ pub(crate) fn about_the_process(python: Python<'_>, request: FromEngine) -> PyRe
             let files = sources::install(files);
             attach::send(&FromAgent::SourcesMapped { files });
         }
-        FromEngine::SetExceptionBreakpoints { raised, uncaught } => {
-            exceptions::watch(raised, uncaught);
+        FromEngine::SetExceptionBreakpoints {
+            raised,
+            uncaught,
+            classes,
+        } => {
+            // a rule that ignores library files asks which code is a library's
+            // at a raise, and the directories are read here, on a held thread,
+            // rather than inside the callback that asks
+            if classes.iter().any(|rule| !rule.libraries) {
+                crate::libraries::prepare(python)?;
+            }
+            exceptions::watch(raised, uncaught, classes);
             refresh_events(python)?;
-            attach::send(&FromAgent::ExceptionBreakpointsSet { raised, uncaught });
+            attach::send(&FromAgent::ExceptionBreakpointsSet {
+                raised,
+                uncaught,
+                classes: exceptions::classes(),
+            });
         }
         FromEngine::DebugChildren { on } => debug_children(python, on)?,
         FromEngine::Record { on, depth } => {

@@ -85,6 +85,9 @@ pub enum FromAgent {
         raised: bool,
         /// stopping where an exception leaves the outermost frame
         uncaught: bool,
+        /// the rules for one class each, as the agent holds them
+        #[serde(default)]
+        classes: Vec<bpd_core::ExceptionClass>,
     },
 
     /// whether a forked child of this process becomes a session of its own
@@ -487,6 +490,9 @@ pub enum FromEngine {
         raised: bool,
         /// stop where an exception leaves the outermost frame
         uncaught: bool,
+        /// the rules for one class each — `bpd_core::ExceptionClass`
+        #[serde(default)]
+        classes: Vec<bpd_core::ExceptionClass>,
     },
 
     /// decide what a forked child of this process does

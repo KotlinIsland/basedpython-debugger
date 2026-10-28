@@ -484,6 +484,26 @@ pub fn tools() -> Vec<Tool> {
                         "stop where an exception is raised, caught or not" },
                     "uncaught": { "type": "boolean", "description":
                         "stop where an exception leaves the outermost frame" },
+                    "classes": {
+                        "type": "array",
+                        "description": "a rule per exception class, which decides for \
+                            that class in place of the two above. the class matches \
+                            subclasses, and the rule for the nearest class decides. a \
+                            rule with neither `raised` nor `uncaught` leaves its class \
+                            out of a filter that is on",
+                        "items": object(serde_json::json!({
+                            "name": { "type": "string", "description":
+                                "`module.QualName`, or a builtin's bare name" },
+                            "raised": { "type": "boolean", "description":
+                                "stop where one is raised" },
+                            "uncaught": { "type": "boolean", "description":
+                                "stop where one leaves the program" },
+                            "libraries": { "type": "boolean", "description":
+                                "stop where a library's code raises one, rather than \
+                                 where it first arrives in the program's own code. \
+                                 PyCharm's \"ignore library files\" is this, false" },
+                        }), &["name", "raised", "uncaught", "libraries"]),
+                    },
                 }),
                 &[],
             ),

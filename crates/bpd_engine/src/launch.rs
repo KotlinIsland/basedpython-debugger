@@ -584,11 +584,13 @@ impl Debuggee {
                 self.attached[at].armed = breakpoints;
                 Ok(Response::BreakpointsResolved { resolved })
             }
-            Request::SetExceptionBreakpoints { raised, uncaught } => {
-                Ok(Response::ExceptionBreakpoints(
-                    self.attached[at].arm_exceptions(raised, uncaught, reporting)?,
-                ))
-            }
+            Request::SetExceptionBreakpoints {
+                raised,
+                uncaught,
+                classes,
+            } => Ok(Response::ExceptionBreakpoints(
+                self.attached[at].arm_exceptions(raised, uncaught, classes, reporting)?,
+            )),
             Request::Run { deadline } => {
                 // the deadline bounds the wait rather than the whole request:
                 // the resume is answered on a thread that is already held, so
@@ -830,7 +832,26 @@ impl Debuggee {
         raised: bool,
         uncaught: bool,
     ) -> Result<ExceptionBreakpoints> {
-        match self.ask_for(Request::SetExceptionBreakpoints { raised, uncaught })? {
+        self.set_exception_rules(raised, uncaught, Vec::new())
+    }
+
+    /// set the exception breakpoints with rules for single classes — see
+    /// [`bpd_core::ExceptionClass`]
+    ///
+    /// # errors
+    ///
+    /// when the session cannot be reached
+    pub fn set_exception_rules(
+        &mut self,
+        raised: bool,
+        uncaught: bool,
+        classes: Vec<bpd_core::ExceptionClass>,
+    ) -> Result<ExceptionBreakpoints> {
+        match self.ask_for(Request::SetExceptionBreakpoints {
+            raised,
+            uncaught,
+            classes,
+        })? {
             Response::ExceptionBreakpoints(armed) => Ok(armed),
             other => unreachable!("an exception breakpoint set was answered with {other:?}"),
         }
@@ -1557,15 +1578,26 @@ impl Attached {
         &mut self,
         raised: bool,
         uncaught: bool,
+        classes: Vec<bpd_core::ExceptionClass>,
         reporting: &mut dyn Reporting,
     ) -> Result<ExceptionBreakpoints> {
         const EXPECTED: &str = "the exception breakpoints to be set";
 
-        let request = FromEngine::SetExceptionBreakpoints { raised, uncaught };
+        let request = FromEngine::SetExceptionBreakpoints {
+            raised,
+            uncaught,
+            classes,
+        };
         match self.ask(&request, EXPECTED, reporting)? {
-            FromAgent::ExceptionBreakpointsSet { raised, uncaught } => {
-                Ok(ExceptionBreakpoints { raised, uncaught })
-            }
+            FromAgent::ExceptionBreakpointsSet {
+                raised,
+                uncaught,
+                classes,
+            } => Ok(ExceptionBreakpoints {
+                raised,
+                uncaught,
+                classes,
+            }),
             other => Err(unexpected(&other, EXPECTED)),
         }
     }

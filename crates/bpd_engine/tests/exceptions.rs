@@ -234,7 +234,14 @@ fn armed(fixture: &Fixture, source: &str, raised: bool, uncaught: bool) -> Debug
     let set = debuggee
         .set_exception_breakpoints(raised, uncaught)
         .expect("the exception breakpoints were set");
-    assert_eq!(set, ExceptionBreakpoints { raised, uncaught });
+    assert_eq!(
+        set,
+        ExceptionBreakpoints {
+            raised,
+            uncaught,
+            classes: Vec::new(),
+        }
+    );
     debuggee
         .set_breakpoints(Vec::new())
         .expect("the breakpoint set was cleared");

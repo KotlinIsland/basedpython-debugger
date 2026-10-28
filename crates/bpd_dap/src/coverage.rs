@@ -230,6 +230,22 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // change the program for having been looked at
         Facet::Statements => Reach::Direct("`evaluate` with `context: repl`"),
 
+        // DAP's own field for a rule per exception class
+        Facet::ExceptionClasses => Reach::Direct(
+            "`exceptionOptions` on `setExceptionBreakpoints`: the last path segment's \
+             names, with `always`, `unhandled` or `never`",
+        ),
+
+        // an exception option is a path and a break mode and nothing else, and
+        // `breakpointModes` attach to filters, not to options. so a rule from
+        // DAP ignores library files exactly when `justMyCode` is on
+        Facet::ExceptionClassLibraries => Reach::Unreachable {
+            why: "an `ExceptionOptions` is a path and a `breakMode`, and DAP's \
+                  `breakpointModes` attach to filters rather than to options, so \
+                  there is no field for one class's library choice. a rule from DAP \
+                  follows the session's `justMyCode`",
+        },
+
         Facet::InheritedStdin => {
             Reach::Direct("`inheritStdin` in the `launch` configuration, under `bpd dap --listen`")
         }

@@ -193,6 +193,9 @@ pub enum Request {
         raised: bool,
         /// stop where an exception leaves the outermost frame
         uncaught: bool,
+        /// rules for exceptions of one class each, which decide for that class
+        /// in place of the two above — see [`ExceptionClass`]
+        classes: Vec<ExceptionClass>,
     },
 
     /// decide whether a forked child of the program becomes a session of its own
@@ -1517,12 +1520,44 @@ impl Threads {
 }
 
 /// what the debuggee stops for, of the exceptions it raises
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExceptionBreakpoints {
     /// stopping where an exception is raised, whether or not it is caught
     pub raised: bool,
     /// stopping where an exception leaves the outermost frame
     pub uncaught: bool,
+    /// the rules for one class each, as the agent holds them
+    pub classes: Vec<ExceptionClass>,
+}
+
+/// what to do about exceptions of one class, in place of the two filters
+///
+/// `PyCharm`'s exception breakpoint is one of these: a class, "on raise", "on
+/// termination", and "ignore library files". the class is matched against the
+/// exception's whole method resolution order, so a rule for `LookupError`
+/// decides for a `KeyError` — which is `except LookupError:`'s rule too — and
+/// when more than one rule matches, the one for the **nearest** class decides,
+/// so a rule for `KeyError` overrides one for `LookupError`. an exception no rule
+/// matches is left to the two filters
+///
+/// a rule with neither `raised` nor `uncaught` is how a class is left out of a
+/// filter that is on: a program that raises and catches `StopIteration` all day
+/// is still debuggable with "raised" on
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExceptionClass {
+    /// the class, as `module.QualName` or, for a builtin, its bare name —
+    /// `ValueError`, `json.decoder.JSONDecodeError`
+    pub name: String,
+    /// stop where one is raised
+    pub raised: bool,
+    /// stop where one leaves the program
+    pub uncaught: bool,
+    /// stop where a library's code raises one, rather than where it first
+    /// arrives in the program's own code
+    ///
+    /// `PyCharm`'s "ignore library files" is this, off. a library is what
+    /// [`Request::JustMyCode`] counts as one
+    pub libraries: bool,
 }
 
 /// what stopping the world managed to stop

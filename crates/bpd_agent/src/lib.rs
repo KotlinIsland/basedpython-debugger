@@ -997,7 +997,7 @@ fn on_py_unwind<'py>(
         session::stop(python, events::thread_ident(python)?, reason)?;
     }
 
-    if exceptions::uncaught() {
+    if exceptions::uncaught_armed() {
         let frame = events::current_frame(python)?;
         let caller = frame.getattr("f_back")?;
         // no frame above this one that bpd would ever report, so nothing left
@@ -1012,7 +1012,10 @@ fn on_py_unwind<'py>(
         // launcher's frames below it are excluded the same way, so the program's
         // exception is reported once, in the program, and not again in each of
         // the launcher's frames it goes on to leave
-        if !frames::is_entry(&frame)? && (caller.is_none() || frames::is_entry(&caller)?) {
+        if !frames::is_entry(&frame)?
+            && (caller.is_none() || frames::is_entry(&caller)?)
+            && exceptions::decide(exception, true)? != exceptions::Decision::Pass
+        {
             left_armed_here(python)?;
             session::stop(
                 python,
@@ -1042,7 +1045,13 @@ fn on_raise<'py>(
     // first arrives in the program's own code, which is the `RAISE` cpython
     // raises again in that frame — so it is left unrecorded here, and that
     // event is the new raise. one a library catches never arrives at all
-    if conditions::evaluating() || !exceptions::raised() || libraries::skips(code)? {
+    if conditions::evaluating() || !exceptions::raised_armed() {
+        return Ok(python.None().into_bound(python));
+    }
+    let exceptions::Decision::Stop { libraries } = exceptions::decide(exception, false)? else {
+        return Ok(python.None().into_bound(python));
+    };
+    if !libraries && libraries::is_library(code)? {
         return Ok(python.None().into_bound(python));
     }
     if !exceptions::newly_raised(python, code, offset, exception)? {

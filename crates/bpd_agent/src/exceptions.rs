@@ -58,6 +58,7 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use bpd_core::ExceptionClass;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -68,6 +69,21 @@ static RAISED: AtomicBool = AtomicBool::new(false);
 
 /// stop where an exception leaves the outermost frame
 static UNCAUGHT: AtomicBool = AtomicBool::new(false);
+
+/// whether any class's rule stops where one is raised
+static ANY_RAISED: AtomicBool = AtomicBool::new(false);
+
+/// whether any class's rule stops where one leaves the program
+static ANY_UNCAUGHT: AtomicBool = AtomicBool::new(false);
+
+/// the rules for single classes
+static RULES: std::sync::Mutex<Vec<ExceptionClass>> = std::sync::Mutex::new(Vec::new());
+
+fn rules() -> std::sync::MutexGuard<'static, Vec<ExceptionClass>> {
+    RULES
+        .lock()
+        .expect("nothing panics holding the exception rules: every path through them is a copy")
+}
 
 thread_local! {
     /// the exception this thread was last stopped for
@@ -87,10 +103,86 @@ pub(crate) fn uncaught() -> bool {
     UNCAUGHT.load(Ordering::Relaxed)
 }
 
-/// set both, together, because the request carries both
-pub(crate) fn watch(raised: bool, uncaught: bool) {
+/// set both, together with the rules for single classes, because the request
+/// carries all three
+pub(crate) fn watch(raised: bool, uncaught: bool, classes: Vec<ExceptionClass>) {
     RAISED.store(raised, Ordering::Relaxed);
     UNCAUGHT.store(uncaught, Ordering::Relaxed);
+    ANY_RAISED.store(classes.iter().any(|rule| rule.raised), Ordering::Relaxed);
+    ANY_UNCAUGHT.store(classes.iter().any(|rule| rule.uncaught), Ordering::Relaxed);
+    *rules() = classes;
+}
+
+/// the rules for single classes, as they were set
+pub(crate) fn classes() -> Vec<ExceptionClass> {
+    rules().clone()
+}
+
+/// whether `RAISE` has to be armed: the filter, or any class's rule
+pub(crate) fn raised_armed() -> bool {
+    RAISED.load(Ordering::Relaxed) || ANY_RAISED.load(Ordering::Relaxed)
+}
+
+/// whether an exception leaving the program has to be watched for
+pub(crate) fn uncaught_armed() -> bool {
+    UNCAUGHT.load(Ordering::Relaxed) || ANY_UNCAUGHT.load(Ordering::Relaxed)
+}
+
+/// what was decided about stopping for one exception
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Decision {
+    /// it is not a stop
+    Pass,
+    /// it is a stop, and `libraries` says whether a library raising it counts
+    /// or whether it is reported where it arrives in the program's own code
+    Stop {
+        /// whether a library's raise is a stop where it was raised
+        libraries: bool,
+    },
+}
+
+/// whether this exception is a stop, at a raise or at the program's edge
+///
+/// the rule for the **nearest** class in the exception's method resolution
+/// order decides — so a rule for `KeyError` overrides one for `LookupError`,
+/// as `except KeyError:` before `except LookupError:` would — and an exception
+/// no rule names is the filter's. the filter's library rule is just-my-code
+pub(crate) fn decide(exception: &Bound<'_, PyAny>, at_the_edge: bool) -> PyResult<Decision> {
+    let rules = rules().clone();
+    if !rules.is_empty() {
+        for class in exception.get_type().getattr("__mro__")?.try_iter()? {
+            let class = class?;
+            let module: String = class.getattr("__module__")?.extract()?;
+            let qualname: String = class.getattr("__qualname__")?.extract()?;
+            let name = if module == "builtins" {
+                qualname
+            } else {
+                format!("{module}.{qualname}")
+            };
+            if let Some(rule) = rules.iter().find(|rule| rule.name == name) {
+                let stops = if at_the_edge {
+                    rule.uncaught
+                } else {
+                    rule.raised
+                };
+                return Ok(if stops {
+                    Decision::Stop {
+                        libraries: rule.libraries,
+                    }
+                } else {
+                    Decision::Pass
+                });
+            }
+        }
+    }
+    let stops = if at_the_edge { uncaught() } else { raised() };
+    Ok(if stops {
+        Decision::Stop {
+            libraries: !crate::libraries::on(),
+        }
+    } else {
+        Decision::Pass
+    })
 }
 
 /// whether this `RAISE` event is an exception being raised, rather than one
