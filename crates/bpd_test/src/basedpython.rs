@@ -297,6 +297,29 @@ impl Build {
         .expect("the map is written");
     }
 
+    /// add `LAUNCHER` and `BY_CODE` to the map, as `by` writes them since
+    /// `f566374c`: the runner, and every file of `by`'s own python in the tree
+    ///
+    /// spelled through the temporary directory as it was **handed out**, not
+    /// canonicalised — which is what `by` writes, and on macos that is
+    /// `/var/folders/…` while the interpreter compiles the same file as
+    /// `/private/var/folders/…`. a reader comparing strings is wrong there
+    pub fn name_bys_own(&self, by_code: &[&str]) {
+        let spelled = |name: &str| in_a_map(&self.directory.path().join(name));
+        let files: Vec<String> = by_code
+            .iter()
+            .map(|name| format!("    \"{}\",\n", spelled(name)))
+            .collect();
+        let mut map = std::fs::read_to_string(self.root().join(MAP_FILENAME))
+            .expect("the map was written with the build");
+        map.push_str("\nLAUNCHER = \"");
+        map.push_str(&spelled("_by_runner.py"));
+        map.push_str("\"\n\nBY_CODE = [\n");
+        map.push_str(&files.concat());
+        map.push_str("]\n");
+        std::fs::write(self.root().join(MAP_FILENAME), map).expect("the map is written");
+    }
+
     /// `by run`'s runner, written into the build — the program `by run` starts
     ///
     /// launched with [`Self::arguments`], it runs [`Self::module`] as

@@ -251,6 +251,14 @@ happens
 runner as `program` and the module in `args`, because that is what `by run`
 hands its `--launcher`
 
+**a client of a basedpython build need not say it.** since `by` f566374c the
+build's map names its runner as `LAUNCHER`, and a script the map names is a
+launcher whatever the configuration says — compared canonically, because the
+map spells the temporary directory as `by` was handed it and the client as the
+runner was started. the field stays for a launcher that is not `by`'s: a
+wrapper of a team's own that runs a module as `__main__` has no map to name it,
+and a map from an older `by` names nothing
+
 the launcher's frames are then how the program was started rather than part of
 it, and bpd treats them the way it treats its own bootstrap. no stack reports
 them, a step never lands in them — a step over the program's last line lets it

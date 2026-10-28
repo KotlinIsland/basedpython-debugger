@@ -41,6 +41,10 @@ static ON: AtomicBool = AtomicBool::new(false);
 /// the library directories, and what each filename was found to be
 #[derive(Debug, Default)]
 struct State {
+    /// the files of `by`'s own python in a basedpython build, by the
+    /// filesystem's identity — the build's map names them as `BY_CODE`, and
+    /// they are a library's whatever directory the build is in
+    by_code: Vec<(String, crate::files::FileId)>,
     /// every directory whose files are a library's, each ending in a separator
     /// so that `/usr/lib/python3.14` does not claim `/usr/lib/python3.14x`
     roots: Vec<String>,
@@ -49,6 +53,7 @@ struct State {
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
+    by_code: Vec::new(),
     roots: Vec::new(),
     known: BTreeMap::new(),
 });
@@ -59,20 +64,46 @@ fn state() -> std::sync::MutexGuard<'static, State> {
         .expect("nothing panics holding the library table: every path through it is a lookup")
 }
 
+/// install the files of `by`'s own python a basedpython build's map names
+///
+/// by identity rather than by spelling: the map writes the path the way `by`
+/// was handed its temporary directory, `/var/folders/…` on macos, and the
+/// interpreter compiles the same file as `/private/var/folders/…`. a file that
+/// cannot be identified — gone since the map was verified a moment ago — has
+/// no code running from it to be counted
+pub(crate) fn by_code(files: &[std::path::PathBuf]) {
+    let mut state = state();
+    state.by_code = files
+        .iter()
+        .filter_map(|file| {
+            crate::files::identify(file)
+                .ok()
+                .map(|identity| (file.display().to_string(), identity))
+        })
+        .collect();
+    state.known.clear();
+}
+
 /// turn it on or off, and say what is counted as a library's
 pub(crate) fn set(python: Python<'_>, on: bool) -> PyResult<bpd_core::JustMyCode> {
     let roots = if on { roots(python)? } else { Vec::new() };
-    {
+    let by_code: Vec<String> = {
         let mut state = state();
         state.roots.clone_from(&roots);
         state.known.clear();
-    }
+        if on {
+            state.by_code.iter().map(|(file, _)| file.clone()).collect()
+        } else {
+            Vec::new()
+        }
+    };
     ON.store(on, Ordering::Relaxed);
     Ok(bpd_core::JustMyCode {
         on,
         libraries: roots
             .iter()
             .map(|root| root.trim_end_matches(std::path::MAIN_SEPARATOR).to_string())
+            .chain(by_code)
             .collect(),
     })
 }
@@ -92,7 +123,10 @@ pub(crate) fn skips(code: &Bound<'_, PyAny>) -> PyResult<bool> {
         || state
             .roots
             .iter()
-            .any(|root| file.starts_with(root.as_str()));
+            .any(|root| file.starts_with(root.as_str()))
+        || (!state.by_code.is_empty()
+            && crate::files::identify(std::path::Path::new(&file))
+                .is_ok_and(|identity| state.by_code.iter().any(|(_, own)| *own == identity)));
     state.known.insert(file, library);
     Ok(library)
 }

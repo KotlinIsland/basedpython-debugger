@@ -98,6 +98,17 @@ pub enum ParseError {
         found: &'static str,
     },
 
+    /// a name the map may carry is there and is not the shape it is
+    #[error("`{name}` is {found}, and {expected}")]
+    MalformedName {
+        /// the name
+        name: &'static str,
+        /// what it is
+        found: String,
+        /// what it is written as
+        expected: &'static str,
+    },
+
     /// an entry of a table is not the shape an entry is
     #[error("the `{name}` entry for `{key}` is {found}, and {expected}")]
     MalformedEntry {
@@ -132,6 +143,69 @@ pub(super) struct Digests {
     pub(super) source: String,
     /// of the python bytes it wrote
     pub(super) generated: String,
+}
+
+/// what a source map says about the files of its build that are `by`'s own
+///
+/// both names are newer than the two tables, and a map from a `by` that writes
+/// neither is read as one that says nothing: no launcher named, no file of
+/// `by`'s named. that is the map's own silence rather than a guess about it
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct Own {
+    /// `LAUNCHER`: the runner `by run` starts, which runs the program as
+    /// `__main__`. `None` when the map does not name one — a `by build` tree
+    /// writes `None`, and an older `by` writes nothing
+    pub(super) launcher: Option<PathBuf>,
+    /// `BY_CODE`: every python file `by` wrote into the tree that is not the
+    /// program's — the runner, the runtime's helpers, its plugins, the map
+    pub(super) by_code: Vec<PathBuf>,
+}
+
+/// read `LAUNCHER` and `BY_CODE`, as [`Own`] describes them
+pub(super) fn own(text: &str) -> Result<Own, ParseError> {
+    let assignments = Reader::new(text).module()?;
+    let named = |name: &str| {
+        assignments
+            .iter()
+            .find(|(assigned, _)| assigned == name)
+            .map(|(_, value)| value)
+    };
+    let launcher = match named("LAUNCHER") {
+        None | Some(Literal::None) => None,
+        Some(Literal::Str(path)) => Some(PathBuf::from(path)),
+        Some(other) => {
+            return Err(ParseError::MalformedName {
+                name: "LAUNCHER",
+                found: other.describe().to_owned(),
+                expected: "it is the runner's path as a string, or `None`",
+            });
+        }
+    };
+    let by_code = match named("BY_CODE") {
+        None => Vec::new(),
+        Some(Literal::List(paths)) => {
+            let mut files = Vec::with_capacity(paths.len());
+            for path in paths {
+                let Literal::Str(path) = path else {
+                    return Err(ParseError::MalformedName {
+                        name: "BY_CODE",
+                        found: format!("a list holding {}", path.describe()),
+                        expected: "it is a list of paths, each a string",
+                    });
+                };
+                files.push(PathBuf::from(path));
+            }
+            files
+        }
+        Some(other) => {
+            return Err(ParseError::MalformedName {
+                name: "BY_CODE",
+                found: other.describe().to_owned(),
+                expected: "it is a list of paths, each a string",
+            });
+        }
+    };
+    Ok(Own { launcher, by_code })
 }
 
 /// the entries `SOURCEMAP` and `DIGESTS` describe between them, in file order
@@ -528,6 +602,49 @@ mod tests {
     /// a map with one entry, so a test can change one thing about it
     fn map(sourcemap: &str, digests: &str) -> String {
         format!("SOURCEMAP = {{{sourcemap}}}\nDIGESTS = {{{digests}}}\n")
+    }
+
+    #[test]
+    fn what_by_names_of_its_own_is_read_as_by_f566374c_writes_it() {
+        // the tail of a `_by_sourcemap.py` a `by run` tree carries, as `by`
+        // f566374c wrote it, comment and all
+        let written = format!(
+            "{}\
+             LAUNCHER = \"/var/folders/x/T/.tmp1/_by_runner.py\"\n\n\
+             # every file of by's own python in this tree, none of which is the program's code:\n\
+             # the launcher, the runtime's helpers, this map\n\
+             BY_CODE = [\n    \"/var/folders/x/T/.tmp1/_by_runner.py\",\n    \
+             \"/var/folders/x/T/.tmp1/_by_runtime.py\",\n]\n",
+            map("", "")
+        );
+        assert_eq!(
+            own(&written).expect("a well formed map"),
+            Own {
+                launcher: Some(PathBuf::from("/var/folders/x/T/.tmp1/_by_runner.py")),
+                by_code: vec![
+                    PathBuf::from("/var/folders/x/T/.tmp1/_by_runner.py"),
+                    PathBuf::from("/var/folders/x/T/.tmp1/_by_runtime.py"),
+                ],
+            }
+        );
+
+        // `by build` names no launcher, and an older `by` names nothing at all
+        let built = format!("{}LAUNCHER = None\nBY_CODE = []\n", map("", ""));
+        assert_eq!(own(&built).expect("a well formed map"), Own::default());
+        assert_eq!(
+            own(&map("", "")).expect("a well formed map"),
+            Own::default()
+        );
+
+        // and a shape it is not written in is refused by name
+        let wrong = format!("{}LAUNCHER = [\"/a\"]\n", map("", ""));
+        assert!(matches!(
+            own(&wrong),
+            Err(ParseError::MalformedName {
+                name: "LAUNCHER",
+                ..
+            })
+        ));
     }
 
     #[test]

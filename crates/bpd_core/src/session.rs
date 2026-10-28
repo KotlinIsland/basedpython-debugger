@@ -1049,7 +1049,9 @@ pub struct JustMyCode {
     /// whether only the program's own code is stopped and stepped in
     pub on: bool,
     /// the directories whose files are a library's, as the interpreter named
-    /// them: the standard library, and every site-packages `site` reports
+    /// them: the standard library, and every site-packages `site` reports —
+    /// and then, in a basedpython build, every file its map names in
+    /// `BY_CODE`, as the map spells it
     ///
     /// a file that is not a file — a frozen module, `<string>` — is a library's
     /// too, and is not in here because it has no directory

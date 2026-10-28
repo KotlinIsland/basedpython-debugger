@@ -111,13 +111,22 @@ told: `a_step_out_of_the_outermost_frame_lets_the_program_finish` gets
 ## line 0 is not a line, and a step goes through it
 
 no file has a line 0. the interpreter reports one for an instruction its line
-table gives no line, and `by run` does it on purpose: it compiles each staged
-module as its `.by` and gives every line the transpiler wrote on its own — a
-runtime helper like `_LazyFrom.__getattr__` or `_soundness_iter`, a lowering's
-scaffolding — line 0 of the `.by`. measured before this: a step into
+table gives no line, and `by run`'s runner does it on purpose: it compiles each
+staged module as its `.by` and gives every line the transpiler wrote on its own
+line 0 of the `.by`. measured against `by` 3df22464: a step into
 `origin = Point(0.0, 0.0)` landed on `_LazyFrom.__getattr__ main.by:0`,
 `_lazy_from_value main.by:0` and `_LazyFrom.__getattr__ main.by:0` again before
 it reached the dataclass `__init__` the line called
+
+**since `by` f566374c the runtime's helpers are not there any more.** a `by run`
+tree writes them to `_by_runtime.py`, at real lines, and the modules import
+them; measured on the same 400-step crawl, no landing and no frame is at line 0.
+they are `by`'s code rather than the program's, and the map names them in
+`BY_CODE`, which is what [just my code](#just-my-code) counts as a library's —
+so with it on a step goes through them, and with it off it lands in
+`_by_runtime.py` at the helper's own line. what `by` still gives line 0 is a
+helper pasted into a `by repl` input, and the rule below is for that and for any
+other code whose table gives an instruction no line
 
 so a step never lands at line 0, and goes through code that has none the way
 gdb's `step` goes through a function without line information:
@@ -308,8 +317,11 @@ program's comes first, which may be a callback rather than the caller
 a library is the interpreter's answer, read in the debuggee without importing
 anything: a `co_filename` that is not a file (a frozen module, `<string>`), or a
 file under the directory `os` was loaded from or a site-packages directory
-`site` reports. the answer names the directories, and DAP says them on the
-console
+`site` reports. in a basedpython build it is also every file the map names in
+`BY_CODE` — `by`'s runner, runtime, plugins and the map itself — compared by
+the filesystem's identity, because the map spells them `/var/folders/…` where
+the interpreter compiles `/private/var/folders/…`. the answer names the
+directories and those files, and DAP says them on the console
 
 ### uncaught
 

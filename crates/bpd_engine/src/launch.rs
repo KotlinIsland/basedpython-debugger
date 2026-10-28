@@ -1516,11 +1516,12 @@ impl Attached {
     fn map_debuggee(&mut self) -> Result<()> {
         const EXPECTED: &str = "the source map to be installed";
 
-        let files = self
+        let map = self
             .map
             .as_ref()
-            .unwrap_or_else(|| unreachable!("the map is installed before it is sent"))
-            .files();
+            .unwrap_or_else(|| unreachable!("the map is installed before it is sent"));
+        let files = map.files();
+        let by_code = map.by_code().to_vec();
         let sent = u32::try_from(files.len()).unwrap_or(u32::MAX);
 
         let mut aside = Aside::new();
@@ -1528,7 +1529,11 @@ impl Attached {
         // ahead of every other one: `ask` is where a session that has not been
         // sent the map yet is sent it, and going back through it here would be
         // this request waiting for itself
-        let answer = self.send_and_wait(&FromEngine::MapSources { files }, EXPECTED, &mut aside)?;
+        let answer = self.send_and_wait(
+            &FromEngine::MapSources { files, by_code },
+            EXPECTED,
+            &mut aside,
+        )?;
         self.pending_spawns.extend(aside.spawned);
         self.pending_blind.extend(aside.blind);
         self.pending_joined.extend(aside.joined);
@@ -2614,7 +2619,17 @@ fn start(
             OsString::from(child_hook.python_path()),
         ),
     ];
-    if program.is_launcher() {
+    // a launcher when the client said so, or when the build the program is in
+    // names it as the one: `by run` writes its runner into the map as
+    // `LAUNCHER`, so a client that hands bpd `_by_runner.py` needs to say
+    // nothing. the client's word stays, for a launcher that is not `by`'s — a
+    // wrapper of a team's own that runs a module as `__main__` has no map to
+    // name it
+    let named_by_the_build = match (program, &map) {
+        (Program::Script(path), Some(map)) => map.is_launcher(path),
+        _ => false,
+    };
+    if program.is_launcher() || named_by_the_build {
         environment.push((env::LAUNCHER.to_string(), OsString::from("1")));
     }
 

@@ -209,7 +209,8 @@ pub(crate) fn about_the_process(python: Python<'_>, request: FromEngine) -> PyRe
             let resolved = breakpoints::apply(python, breakpoints)?;
             attach::send(&FromAgent::BreakpointsResolved { resolved });
         }
-        FromEngine::MapSources { files } => {
+        FromEngine::MapSources { files, by_code } => {
+            crate::libraries::by_code(&by_code);
             let files = sources::install(files);
             attach::send(&FromAgent::SourcesMapped { files });
         }

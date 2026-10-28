@@ -536,6 +536,9 @@ pub enum FromEngine {
     MapSources {
         /// every `.by`/`.py` pair of the build, with the table between them
         files: Vec<bpd_core::MappedFile>,
+        /// every file of `by`'s own python in the build, which just-my-code
+        /// counts as a library's — `bpd_core::SourceMap::by_code`
+        by_code: Vec<std::path::PathBuf>,
     },
 
     /// what every thread of the debuggee is doing

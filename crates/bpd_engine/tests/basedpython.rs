@@ -660,6 +660,116 @@ fn a_step_never_lands_in_code_the_transpiler_wrote_and_goes_through_it_instead()
 }
 
 #[test]
+fn a_runner_the_build_names_as_its_launcher_is_one_without_being_told() {
+    // `by` writes `LAUNCHER` into the map since `f566374c`, so a client that
+    // hands bpd `_by_runner.py` as an ordinary script still gets the program's
+    // frames and none of the runner's. the map in
+    // `the_stack_is_the_by_the_interpreter_runs_and_the_runner_under_it_is_itself`
+    // names no launcher, which is an older `by`'s, and there the runner is
+    // still on the stack as itself
+    let build = build();
+    let runner = build.runner();
+    build.name_bys_own(&["_by_runner.py", "_by_sourcemap.py"]);
+    let mut debuggee = launch_program(&runner, &build.arguments());
+    set(
+        &mut debuggee,
+        bpd_test::debuggee::line_of(SOURCE, "print(answer)"),
+        &build.source,
+    );
+    run_to_stop(&mut debuggee);
+
+    let stack = debuggee.the_stack(None).expect("the stack was walked");
+    assert!(
+        stack
+            .frames
+            .iter()
+            .all(|frame| Path::new(&frame.file) == build.source),
+        "every frame is the program's, and the runner the map names is the \
+         launcher: {:?}",
+        stack.frames
+    );
+}
+
+/// a `.by` whose call goes through a helper of `by`'s runtime, which lives in a
+/// file of its own the way a `by run` tree's `_by_runtime.py` does
+const THROUGH_RUNTIME: &str = "\
+def double(x: int) -> int:
+    return x * 2
+
+
+def main() -> None:
+    value = apply(double, 4)  # through by's runtime
+    print(value)
+
+
+main()
+";
+
+/// the python `by` would have transpiled [`THROUGH_RUNTIME`] to
+const THROUGH_RUNTIME_GENERATED: &str = "\
+from _by_runtime import apply
+def double(x: int) -> int:
+    return x * 2
+
+
+def main() -> None:
+    value = apply(double, 4)
+    print(value)
+
+
+main()
+";
+
+#[test]
+fn just_my_code_counts_the_files_the_build_names_as_bys_own_as_a_libraries() {
+    // the runtime's helpers live in `_by_runtime.py` at real lines since
+    // `f566374c`, so they are no longer at line 0 for a step to go through —
+    // and they are not the program's. the map says so in `BY_CODE`, which is
+    // what counts them as a library's; nothing here matches a file name
+    let mut lines = vec![None];
+    lines.extend((0..10).map(Some));
+    for named in [true, false] {
+        let build = Build::pair(THROUGH_RUNTIME, THROUGH_RUNTIME_GENERATED, &lines);
+        std::fs::write(
+            build.root().join("_by_runtime.py"),
+            "def apply(f, x):\n    return f(x)\n",
+        )
+        .expect("the build directory is writable");
+        if named {
+            build.name_bys_own(&["_by_runner.py", "_by_runtime.py", "_by_sourcemap.py"]);
+        }
+        let mut debuggee = launch_program(&build.runner(), &build.arguments());
+        debuggee
+            .just_my_code(true)
+            .expect("the setting was answered");
+        let call = bpd_test::debuggee::line_of(THROUGH_RUNTIME, "# through by's runtime");
+        set(&mut debuggee, call, &build.source);
+        run_to_stop(&mut debuggee);
+        debuggee
+            .set_breakpoints(Vec::new())
+            .expect("the breakpoint set was cleared");
+
+        let (line, function) = landed(&mut debuggee, bpd_core::StepKind::In);
+        if named {
+            assert_eq!(
+                (line, function.as_str()),
+                (
+                    bpd_test::debuggee::line_of(THROUGH_RUNTIME, "return x * 2"),
+                    "double"
+                ),
+                "through `by`'s runtime to the program's function it calls"
+            );
+        } else {
+            assert_eq!(
+                function, "apply",
+                "the control: a map that names nothing of `by`'s leaves the runtime \
+                 the program's, and a step in lands in it"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_by_edited_after_the_launch_refuses_the_source_rather_than_showing_it() {
     // `bpd` checked this file at launch and the user is asking about now. an
     // editor that saved the `.by` in between leaves a file whose lines are

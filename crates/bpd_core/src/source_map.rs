@@ -276,6 +276,11 @@ pub struct SourceMap {
     directory: PathBuf,
     /// keyed by the canonical generated path, so a lookup is one comparison
     pairs: BTreeMap<PathBuf, MappedFile>,
+    /// the runner the map names as `LAUNCHER`, canonical, when it names one
+    launcher: Option<PathBuf>,
+    /// every file the map names in `BY_CODE`, canonical: `by`'s own python in
+    /// the tree, none of it the program's
+    by_code: Vec<PathBuf>,
 }
 
 /// why a location has no counterpart, which is never answered with a guess
@@ -554,6 +559,21 @@ impl SourceMap {
             path: path.clone(),
             source,
         })?;
+        let own = literal::own(&text).map_err(|source| MapError::Malformed {
+            path: path.clone(),
+            source,
+        })?;
+        // canonical, because the map spells a path the way `by` was handed its
+        // temporary directory — `/var/folders/…` on macos — and the interpreter
+        // names the same file `/private/var/folders/…`. a file the map names
+        // that is not there is the map describing a tree that is not this one,
+        // which is refused like a digest that does not match
+        let launcher = own.launcher.as_deref().map(canonical).transpose()?;
+        let by_code = own
+            .by_code
+            .iter()
+            .map(|file| canonical(file))
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut pairs = BTreeMap::new();
         let mut changed = Vec::new();
@@ -611,6 +631,8 @@ impl SourceMap {
         Ok(Self {
             directory: directory.to_path_buf(),
             pairs,
+            launcher,
+            by_code,
         })
     }
 
@@ -683,6 +705,26 @@ impl SourceMap {
     #[must_use]
     pub fn files(&self) -> Vec<MappedFile> {
         self.pairs.values().cloned().collect()
+    }
+
+    /// whether `program` is the runner this build names as its launcher
+    ///
+    /// compared canonically: the map writes the runner's path the way `by`
+    /// spelled its temporary directory, and a client hands bpd the path the way
+    /// the runner was started with it. a map from a `by` that names no launcher
+    /// answers `false` for everything
+    #[must_use]
+    pub fn is_launcher(&self, program: &Path) -> bool {
+        self.launcher.as_ref().is_some_and(|launcher| {
+            crate::path::resolved(program).is_ok_and(|program| &program == launcher)
+        })
+    }
+
+    /// every file of `by`'s own python in the tree, canonical — the runner, the
+    /// runtime's helpers, its plugins and the map. none of it is the program's
+    #[must_use]
+    pub fn by_code(&self) -> &[PathBuf] {
+        &self.by_code
     }
 
     /// the pair whose generated python is that file
