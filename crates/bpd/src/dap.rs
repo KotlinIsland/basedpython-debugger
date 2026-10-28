@@ -210,6 +210,13 @@ impl Launcher for Engine {
             &interpreter,
             &program_of(configuration),
             &arguments_of(configuration),
+            // the adapter refused `inheritStdin` over stdio before this, where
+            // this process's stdin is the protocol
+            if configuration.inherit_stdin {
+                bpd_engine::Stdin::Inherited
+            } else {
+                bpd_engine::Stdin::Empty
+            },
             // handed back rather than detached: the engine waits for these
             // before it reports the program over, so that a client is never
             // told a program has finished while a line it printed is still in

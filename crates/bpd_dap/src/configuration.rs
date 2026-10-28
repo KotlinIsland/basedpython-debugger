@@ -141,6 +141,24 @@ pub struct Configuration {
     #[serde(default)]
     pub console: Console,
 
+    /// give the program the stdin `bpd dap --listen` was started with, rather
+    /// than an empty one
+    ///
+    /// off by default, and refused over stdio, where that stdin is the protocol.
+    /// what it is for is a client that started the adapter itself and gave it a
+    /// stdin **for the program**: `by run --launcher` starts the launcher with
+    /// the stdin of the run, which in an IDE is the run's console, and a program
+    /// that calls `input()` reads what the person types there — as it would
+    /// under debugpy, which runs inside the program's own process
+    ///
+    /// it is the client saying so rather than bpd deciding it, because only the
+    /// client knows whose that stdin is: a listening adapter started from a
+    /// shell, a script or a CI job holds a stream that belongs to whatever
+    /// started it, and taking it without being told would be the debugger
+    /// reading somebody else's input
+    #[serde(default)]
+    pub inherit_stdin: bool,
+
     /// the custom events this client reads, by the names `bpd/understands`
     /// takes
     ///
@@ -252,6 +270,8 @@ mod tests {
         assert_eq!(configuration.python, PathBuf::from("python3"));
         assert!(!configuration.stop_on_entry);
         assert!(!configuration.stop_the_world);
+        assert!(configuration.just_my_code, "debugpy's default");
+        assert!(!configuration.inherit_stdin);
         assert!(!configuration.no_debug);
         // the debug console, which is what this adapter has always given a
         // debuggee. a default of either terminal would change what every

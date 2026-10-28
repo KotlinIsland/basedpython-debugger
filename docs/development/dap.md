@@ -223,18 +223,20 @@ the same configuration body is what a vs code `launch.json` entry holds:
 every field here is read. one that were parsed and ignored would be a setting a
 user could see accepted and never get
 
-| field            | default   | what it does                                           |
-| ---------------- | --------- | ------------------------------------------------------ |
-| `program`        | required  | the script to run                                      |
-| `args`           | `[]`      | arguments for the program, exactly as it receives them |
-| `launcher`       | `false`   | `program` starts the program rather than being it      |
-| `python`         | `python3` | the interpreter, resolved on `PATH` like any command   |
-| `stopOnEntry`    | `false`   | stay stopped before the first statement                |
-| `stopTheWorld`   | `false`   | hold every thread that can be held, for each stop      |
-| `debugChildren`  | `false`   | debug a child the program **forks** — see below        |
-| `console`        | see below | where the program runs, and what its streams are       |
-| `variables`      | see below | how much of a value to read                            |
-| `threadSettleMs` | `50`      | how far apart the two samples a thread census compares |
+| field            | default   | what it does                                            |
+| ---------------- | --------- | ------------------------------------------------------- |
+| `program`        | required  | the script to run                                       |
+| `args`           | `[]`      | arguments for the program, exactly as it receives them  |
+| `launcher`       | `false`   | `program` starts the program rather than being it       |
+| `justMyCode`     | `true`    | stop and step only in the program's own code            |
+| `inheritStdin`   | `false`   | the program reads the stdin `--listen` was started with |
+| `python`         | `python3` | the interpreter, resolved on `PATH` like any command    |
+| `stopOnEntry`    | `false`   | stay stopped before the first statement                 |
+| `stopTheWorld`   | `false`   | hold every thread that can be held, for each stop       |
+| `debugChildren`  | `false`   | debug a child the program **forks** — see below         |
+| `console`        | see below | where the program runs, and what its streams are        |
+| `variables`      | see below | how much of a value to read                             |
+| `threadSettleMs` | `50`      | how far apart the two samples a thread census compares  |
 
 `bpd` holds **every** program before its first statement — that is how a
 breakpoint binds against a real interpreter rather than against a guess about

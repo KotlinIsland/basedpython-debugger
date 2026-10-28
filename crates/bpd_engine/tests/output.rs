@@ -51,6 +51,7 @@ fn piped(fixture: &Fixture) -> (Debuggee, Collected) {
         interpreter(),
         &bpd_engine::Program::Script(fixture.path()),
         &[],
+        bpd_engine::Stdin::Empty,
         move |stdout, stderr| {
             Forwarders::on(
                 [

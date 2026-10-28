@@ -693,12 +693,22 @@ closed descriptor: with descriptor 0 not open, cpython sets `sys.stdin` to `None
 and `input()` raises `RuntimeError: input(): lost sys.stdin` instead, and the
 next file the program opened would be handed descriptor 0
 
-`--listen` inheriting was considered separately, because it is the one path
-where `bpd`'s stdin is not the protocol. it is refused for two reasons: the
-stream still belongs to another reader, and taking bytes from it is the same
-theft with a quieter victim — and it would make the **program** behave
-differently depending on which socket its client connected over, which is one
-adapter giving one program two answers about its own world
+`--listen` inheriting **by default** was considered separately, because it is
+the one path where `bpd`'s stdin is not the protocol. it is refused as a default
+for two reasons: the stream belongs to whatever started `bpd`, and taking bytes
+from it is the same theft with a quieter victim — and it would make the
+**program** behave differently depending on which socket its client connected
+over, which is one adapter giving one program two answers about its own world
+
+what is allowed is the client **saying** the stream is the program's, with
+`inheritStdin` in the launch. only the client knows whose that stdin is, and one
+case of it is common enough to be the reason the setting exists: `by run
+--launcher` starts `bpd dap --listen` with the stdin of the run, which in an IDE
+is the run's console. measured before this: `input()` raised `EOFError` under
+`bpd` where it read the console under debugpy, which runs inside the program's
+own process. over stdio it is refused at `launch`, naming `--listen`, because
+there the stdin is the protocol; `bpd mcp` cannot carry it at all, for the same
+reason, and says so in its coverage table
 
 a program that genuinely needs input has one honest route, and it is DAP's:
 `runInTerminal`, where the client starts the program in a terminal it owns and
@@ -711,7 +721,9 @@ from a file, an argument or the environment; that gap is
 [written down](dap.md#the-parity-rule-both-sided) rather than left to be noticed
 
 `a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds` in
-`crates/bpd/tests/dap.rs` runs on **both** transports and pins two of the three,
+`crates/bpd/tests/dap.rs` runs on **both** transports and pins two of the three
+— and `a_program_reads_the_adapters_stdin_when_the_client_says_it_is_the_programs`
+pins `inheritStdin`, read on loopback and refused on stdio —
 and `..._rather_than_the_servers` in `crates/bpd/tests/mcp.rs` pins the last. the
 loopback half is not vacuous: the listening adapter is started with a marked line
 in its own stdin, so a debuggee that inherited it reads the marker and the

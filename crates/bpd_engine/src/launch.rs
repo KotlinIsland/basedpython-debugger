@@ -2352,14 +2352,31 @@ pub fn launch_piped(
     interpreter: &Capabilities,
     program: &Program,
     args: &[OsString],
+    stdin: Stdin,
     on_spawn: impl FnOnce(std::process::ChildStdout, std::process::ChildStderr) -> Forwarders + 'static,
 ) -> Result<Launched> {
     start(
         interpreter,
         program,
         args,
-        Start::Here(Some(Box::new(on_spawn))),
+        Start::Here(Some((Box::new(on_spawn), stdin))),
     )
+}
+
+/// what a piped debuggee's stdin is
+///
+/// the output is taken over either way. what this decides is whether the
+/// program is given an empty stream or the one this process was started with,
+/// and that is a decision only the front end's client can make: it is the one
+/// that knows whose stream that is
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stdin {
+    /// `/dev/null`, which is what `python program.py < /dev/null` gives —
+    /// `input()` raises `EOFError` at the line that asked
+    Empty,
+    /// this process's own stdin, for a front end whose stdin is not its
+    /// protocol and whose client said the stream is the program's
+    Inherited,
 }
 
 /// hand the launch to somebody else, and wait for the agent it starts
@@ -2494,7 +2511,7 @@ enum Start<'a> {
     /// `None` leaves all three of the debuggee's standard streams inherited,
     /// which is what makes a run under `bpd launch` indistinguishable from a
     /// bare one
-    Here(Option<OnSpawn>),
+    Here(Option<(OnSpawn, Stdin)>),
 
     /// somebody else does, and this is how they are asked
     Elsewhere(StartIt<'a>),
@@ -2643,7 +2660,7 @@ fn spawned_here(
     interpreter: &Capabilities,
     arguments: &[OsString],
     environment: &[(String, OsString)],
-    piped: Option<OnSpawn>,
+    piped: Option<(OnSpawn, Stdin)>,
     listener: Listener,
     map: Option<bpd_core::SourceMap>,
 ) -> Result<Launched> {
@@ -2653,7 +2670,7 @@ fn spawned_here(
         command.env(name, value);
     }
 
-    if piped.is_some() {
+    if let Some((_, stdin)) = &piped {
         command
             // stdin goes with the other two, and it goes to `/dev/null` rather
             // than staying inherited. this process's stdin is either the
@@ -2675,7 +2692,13 @@ fn spawned_here(
             // `None` when descriptor 0 is not open, and then `input()` raises
             // `RuntimeError: input(): lost sys.stdin` — and descriptor 0 would
             // be handed to the next file the program opened
-            .stdin(std::process::Stdio::null())
+            //
+            // **unless the client said otherwise**, which only a front end
+            // whose stdin is not its protocol can carry — see `Stdin::Inherited`
+            .stdin(match stdin {
+                Stdin::Empty => std::process::Stdio::null(),
+                Stdin::Inherited => std::process::Stdio::inherit(),
+            })
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
     }
@@ -2686,7 +2709,7 @@ fn spawned_here(
     })?;
 
     let mut forwarders = None;
-    if let Some(hand_over) = piped {
+    if let Some((hand_over, _)) = piped {
         let stdout = child
             .stdout
             .take()

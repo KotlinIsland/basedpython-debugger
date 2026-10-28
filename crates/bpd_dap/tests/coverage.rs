@@ -86,6 +86,8 @@ struct Recorder {
     details: Vec<bpd_core::Detail>,
     /// whether each launch said its program was a launcher
     launchers: Vec<bool>,
+    /// whether each launch said the program reads the adapter's stdin
+    stdins: Vec<bool>,
     /// what every request was addressed to, beside what it asked for
     ///
     /// naming the session is a capability like any other, and one the adapter
@@ -286,6 +288,19 @@ fn every_capability_carried_inside_a_request_is_reached_or_says_why_not() {
             );
         }
     }
+}
+
+#[test]
+fn a_launch_naming_the_adapters_stdin_reaches_what_starts_the_program() {
+    // the claim `reach_of_facet` makes about `Facet::InheritedStdin`
+    let asked = Asked::default();
+    drive(&asked);
+    assert_eq!(
+        asked.lock().expect("the recorder is not poisoned").stdins,
+        [true],
+        "`{}` was asked for in the launch and never reached what starts the program",
+        Facet::InheritedStdin.name()
+    );
 }
 
 #[test]
@@ -924,6 +939,8 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
             "variables": { "children": 7 },
             // and the only route to starting the program through a launcher
             "launcher": true,
+            // and to the program reading the stdin the adapter was started with
+            "inheritStdin": true,
         }),
     );
     answer(
@@ -1531,6 +1548,11 @@ impl Launcher for Fake {
             .expect("the recorder is not poisoned")
             .launchers
             .push(configuration.launcher);
+        self.asked
+            .lock()
+            .expect("the recorder is not poisoned")
+            .stdins
+            .push(configuration.inherit_stdin);
         Ok(self.session(self.ending))
     }
 

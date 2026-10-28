@@ -146,6 +146,14 @@ fn every_attribute_the_plugin_leaves_out_is_one_it_could_not_honour() {
         // this plugin starts runs it through a launcher. the one launcher there
         // is, `by run`'s runner, is started by the basedpython plugin
         String::from("launcher"),
+        // the adapter's default applies, which is on — what debugpy and
+        // pycharm's own python debugger do. turning it off is a field this
+        // plugin's dialog has not grown, and an absent field is honest where
+        // one that did nothing would not be
+        String::from("justMyCode"),
+        // this plugin starts `bpd dap` on its pipes, where the adapter's stdin
+        // is the protocol, and the adapter refuses it there
+        String::from("inheritStdin"),
     ]
     .into();
 

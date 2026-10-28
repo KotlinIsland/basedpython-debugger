@@ -144,12 +144,14 @@ fn every_capability_carried_inside_a_request_reaches_the_session() {
     // have, and an agent has none — so it is named here rather than being
     // covered by a rule that would let the next gap through with it
     for facet in Facet::ALL {
-        if facet == Facet::Terminal {
+        // the other thing that is not a payload is a stdin of this server's
+        // own that is not the protocol, which it does not have: its stdin is MCP
+        if matches!(facet, Facet::Terminal | Facet::InheritedStdin) {
             assert!(
                 !reach_of_facet(facet).reaches(),
                 "`{}` is said to reach an agent, and this server has no terminal \
                  to give a debuggee — one it opened itself would be a \
-                 pseudo-terminal called a terminal",
+                 pseudo-terminal called a terminal — and no stdin that is not MCP",
                 facet.name()
             );
             continue;

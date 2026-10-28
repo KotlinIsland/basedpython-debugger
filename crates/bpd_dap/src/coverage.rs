@@ -223,6 +223,12 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // for anything about how the program is started
         Facet::Launcher => Reach::Direct("`launcher` in the `launch` configuration"),
 
+        // a field of the launch configuration too, and only on the transport
+        // whose stdin is not the protocol
+        Facet::InheritedStdin => {
+            Reach::Direct("`inheritStdin` in the `launch` configuration, under `bpd dap --listen`")
+        }
+
         // the one capability of the core that DAP cannot carry, and the reason
         // is DAP's rather than bpd's: `hitCondition` is free text whose meaning
         // is a per-client convention. `>5`, `=5`, `%5` and a bare `5` are read

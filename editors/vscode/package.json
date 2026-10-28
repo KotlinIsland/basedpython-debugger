@@ -87,6 +87,16 @@
                 "default": false,
                 "description": "stay stopped before the program's first statement. bpd holds every program there — it is how a breakpoint binds against a real interpreter — so this decides whether the client is told about it, not whether it happens"
               },
+              "justMyCode": {
+                "type": "boolean",
+                "default": true,
+                "description": "stop and step only in the program's own code: an exception a library raises and catches is not a stop, one it raises into the program stops where it arrives there, and a step in goes through a library's code to the next function of the program's it calls. a library is a frozen module, `<string>`, or a file under the standard library or a site-packages directory of the interpreter running the program"
+              },
+              "inheritStdin": {
+                "type": "boolean",
+                "default": false,
+                "description": "give the program the stdin `bpd dap --listen` was started with rather than an empty one. refused over stdio, where that stdin is the protocol. for a client that started the adapter itself with a stdin meant for the program, as `by run --launcher` does with the run's console"
+              },
               "launcher": {
                 "type": "boolean",
                 "default": false,

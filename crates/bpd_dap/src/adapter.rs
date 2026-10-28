@@ -983,6 +983,29 @@ impl Adapter {
             self.can_debug_children()?;
         }
 
+        // the adapter's own stdin is the protocol on stdio, and handing it to the
+        // program would make the program a second reader of the client's
+        // messages. and a terminal is the client's own, with its own stdin
+        if configuration.inherit_stdin {
+            if matches!(self.reachable, Reachable::Nowhere) {
+                return Err(Aborted::Refuse(
+                    "`inheritStdin` hands the program the stdin this adapter was started \
+                     with, and over stdio that stdin is the protocol: the program would \
+                     read the client's next message. it needs `bpd dap --listen`, where \
+                     the protocol is on the socket"
+                        .to_string(),
+                ));
+            }
+            if configuration.console.kind().is_some() {
+                return Err(Aborted::Refuse(
+                    "`inheritStdin` and a terminal `console` both say where the program's \
+                     input comes from, and they disagree: a terminal is its own stdin. \
+                     choose one"
+                        .to_string(),
+                ));
+            }
+        }
+
         if configuration.no_debug {
             return Err(Aborted::Refuse(
                 "`noDebug` asks for the program to be run without a debugger. bpd has \

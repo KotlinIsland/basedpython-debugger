@@ -181,6 +181,8 @@ fn every_contributed_attribute_declares_the_type_and_the_default_the_adapter_use
             }
             "stopOnEntry" => flag(schema, adapter.stop_on_entry),
             "launcher" => flag(schema, adapter.launcher),
+            "justMyCode" => flag(schema, adapter.just_my_code),
+            "inheritStdin" => flag(schema, adapter.inherit_stdin),
             "stopTheWorld" => flag(schema, adapter.stop_the_world),
             "debugChildren" => flag(schema, adapter.debug_children),
             "watchRecompositions" => flag(schema, adapter.watch_recompositions),

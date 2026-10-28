@@ -148,6 +148,15 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // an argument of the tool that starts the program
         Facet::Launcher => Reach::Direct("`launcher` on the `launch` tool"),
 
+        // the server speaks on its stdin, so there is no stdin of its own that is
+        // not the protocol to hand a program. an agent's program takes its input
+        // from a file, an argument or the environment
+        Facet::InheritedStdin => Reach::Unreachable {
+            why: "`bpd mcp` speaks MCP on its stdin, so the one stdin it has is the \
+                  protocol, and a program reading it would be reading the agent's \
+                  next call",
+        },
+
         // the capability DAP has no route for. an MCP tool takes JSON Schema
         // input, so the typed form goes across as itself and there is no
         // convention to guess at

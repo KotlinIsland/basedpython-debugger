@@ -76,6 +76,8 @@ impl Launcher for Engine {
             &interpreter,
             &program_of(configuration),
             &arguments,
+            // this server speaks on its stdin, so the program never gets it
+            bpd_engine::Stdin::Empty,
             move |stdout, stderr| {
                 Forwarders::on(vec![
                     forward(stdout, Stream::Stdout, &output),

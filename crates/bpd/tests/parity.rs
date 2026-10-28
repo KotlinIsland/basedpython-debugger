@@ -59,6 +59,12 @@ const JUSTIFIED: &[(&str, &str)] = &[
     // pseudo-terminal and calling it the agent's — `isatty()` answering `True`
     // about a thing that is not a terminal
     ("MCP", "running the debuggee on a terminal the client owns"),
+    // `bpd mcp` speaks on its stdin, so the one stdin it has is the protocol.
+    // DAP can carry it only because `--listen` moves its protocol to a socket
+    (
+        "MCP",
+        "the program reading the stdin the front end was started with",
+    ),
 ];
 
 /// everything the debugger says that one front end cannot pass on, and which

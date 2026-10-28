@@ -224,11 +224,21 @@ pub enum Facet {
     /// walks on through it, and an exception the program did not catch is
     /// reported from the runner's own module
     Launcher,
+
+    /// the debuggee reading the stdin the front end itself was started with
+    ///
+    /// a launch setting rather than a request, and a capability all the same:
+    /// a front end without it gives every program an empty stdin, and one that
+    /// is started **as** the program — `by run --launcher` starts `bpd dap
+    /// --listen` with the run's stdin, which in an IDE is its console — leaves a
+    /// program calling `input()` with `EOFError` where it would have read what
+    /// the person typed
+    InheritedStdin,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
@@ -242,6 +252,7 @@ impl Facet {
         Self::ManyFilesAtOnce,
         Self::Remap,
         Self::Launcher,
+        Self::InheritedStdin,
     ];
 
     /// what to call this capability in a message about it
@@ -262,6 +273,7 @@ impl Facet {
             Self::Launcher => {
                 "starting the program through a launcher whose frames are not its own"
             }
+            Self::InheritedStdin => "the program reading the stdin the front end was started with",
         }
     }
 }

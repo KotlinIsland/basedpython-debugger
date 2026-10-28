@@ -96,6 +96,7 @@ over_each_transport!(
     a_capability_that_is_not_advertised_is_refused_rather_than_guessed_at,
     a_client_is_refused_the_same_interpreter_the_command_line_is,
     a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds,
+    a_program_reads_the_adapters_stdin_when_the_client_says_it_is_the_programs,
     everything_a_program_printed_is_on_the_wire_before_it_is_reported_over,
     a_refused_launch_ends_the_session_instead_of_leaving_it_open,
     the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program,
@@ -2228,6 +2229,61 @@ fn a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds(transport: 
          or `/dev/null` as `{terminal}`: {said:?}"
     );
 
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+fn a_program_reads_the_adapters_stdin_when_the_client_says_it_is_the_programs(
+    transport: Transport,
+) {
+    // `by run --launcher` starts `bpd dap --listen` with the stdin of the run,
+    // which in an IDE is the run's console — measured before this: `input()`
+    // raised `EOFError` under bpd where it read the console under debugpy. the
+    // client is what knows that stream is the program's, so it says so
+    let fixture = Fixture::new("reader", STDIN_PROBE);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({}));
+    let launched = client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "inheritStdin": true,
+        }),
+    );
+
+    if transport == Transport::Stdio {
+        // over stdio this process's stdin is the protocol, and the program would
+        // read the client's next message
+        assert_eq!(launched["success"], false, "{launched}");
+        assert!(
+            launched["message"]
+                .as_str()
+                .is_some_and(|said| said.contains("--listen")),
+            "the refusal says what would make it possible: {launched}"
+        );
+        client.event("terminated");
+        client.request("disconnect", &serde_json::json!({}));
+        client.finish();
+        return;
+    }
+
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+    let exited = client.event("exited");
+    assert_eq!(exited["body"]["exitCode"], 0, "the probe runs to the end");
+    client.event("terminated");
+
+    let said = client.output();
+    assert!(
+        said.contains(NOT_THE_DEBUGGEES),
+        "the program read the stdin the adapter was started with: {said:?}"
+    );
+    assert!(
+        !said.contains("Content-Length"),
+        "and nothing of the protocol: {said:?}"
+    );
     client.request("disconnect", &serde_json::json!({}));
     client.finish();
 }
