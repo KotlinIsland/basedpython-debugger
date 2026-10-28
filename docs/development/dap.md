@@ -631,6 +631,19 @@ that: the entries of a stop are forgotten when its thread is resumed, and asking
 again is refused with "ask for the stack again" rather than resolved against
 whatever is at that index now
 
+### the console runs statements, and nothing else does
+
+DAP's `evaluate` says where it comes from in `context`. from the console —
+`repl` — text that is not an expression runs as statements in the frame: an
+assignment, an `import`, a `for`, answered `None`, with an expression still
+evaluated as one first, which is pydevd's order. measured in the IDE before
+this: `s.radius = 5.0` was `SyntaxError (<bpd evaluation>)`. from a hover, a
+watch or anywhere else it stays an expression, because a statement there would
+change the program for having been looked at. a write to a local goes through
+`f_locals`, which since cpython 3.13 is the frame's own (PEP 667), so the
+program sees it when it runs on — `crates/bpd_engine/tests/statements.rs` reads
+it back out of the program's own output
+
 ### a hit condition is a string with no agreed meaning
 
 DAP carries one as free text, and `>5`, `=5`, `%5` and a bare `5` are read

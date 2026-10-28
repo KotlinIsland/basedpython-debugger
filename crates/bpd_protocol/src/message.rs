@@ -628,6 +628,11 @@ pub enum FromEngine {
         expression: String,
         /// how much of the result to read
         detail: Detail,
+        /// run text that is not an expression as statements — see
+        /// `bpd_core::Request::Evaluate`. absent is off, which is what every
+        /// request that only wants to see something means
+        #[serde(default)]
+        statements: bool,
     },
 
     /// the source around one frame's current line
@@ -1284,6 +1289,7 @@ mod tests {
                 frame: FrameId { stop: 1, depth: 0 },
                 expression: "x".to_string(),
                 detail: Detail::default(),
+                statements: false,
             })
         );
     }

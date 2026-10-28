@@ -86,6 +86,8 @@ struct Recorder {
     details: Vec<bpd_core::Detail>,
     /// whether each launch said its program was a launcher
     launchers: Vec<bool>,
+    /// whether each evaluation asked for statements
+    statements: Vec<bool>,
     /// whether each launch said the program reads the adapter's stdin
     stdins: Vec<bool>,
     /// what every request was addressed to, beside what it asked for
@@ -288,6 +290,20 @@ fn every_capability_carried_inside_a_request_is_reached_or_says_why_not() {
             );
         }
     }
+}
+
+#[test]
+fn an_evaluation_from_the_console_asks_for_statements_and_a_hover_does_not() {
+    // the claim `reach_of_facet` makes about `Facet::Statements`
+    let asked = Asked::default();
+    drive(&asked);
+    let statements = asked
+        .lock()
+        .expect("the recorder is not poisoned")
+        .statements
+        .clone();
+    assert!(statements.contains(&true), "{statements:?}");
+    assert!(statements.contains(&false), "{statements:?}");
 }
 
 #[test]
@@ -1010,6 +1026,13 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
         &mut reader,
         "evaluate",
         serde_json::json!({ "expression": "greeting|upper", "frameId": template_frame }),
+    );
+    // from the console, which is the one place a statement is run
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "evaluate",
+        serde_json::json!({ "expression": "x = 1", "frameId": template_frame, "context": "repl" }),
     );
 
     let scopes = answer(
@@ -1737,9 +1760,15 @@ impl Session for FakeSession {
                 recorder.breakpoints.clone_from(breakpoints);
             }
             match &request {
-                Request::Variables { detail, .. }
-                | Request::Evaluate { detail, .. }
-                | Request::SetVariable { detail, .. } => recorder.details.push(*detail),
+                Request::Evaluate {
+                    detail, statements, ..
+                } => {
+                    recorder.details.push(*detail);
+                    recorder.statements.push(*statements);
+                }
+                Request::Variables { detail, .. } | Request::SetVariable { detail, .. } => {
+                    recorder.details.push(*detail);
+                }
                 Request::Query { query, .. } => recorder.details.push(query.detail),
                 _ => {}
             }

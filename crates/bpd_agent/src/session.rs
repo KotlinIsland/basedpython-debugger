@@ -154,8 +154,9 @@ fn answer(
             frame,
             expression,
             detail,
+            statements,
         } => {
-            let answer = stopped.evaluate(frame, &expression, detail)?;
+            let answer = stopped.evaluate(frame, &expression, detail, statements)?;
             attach::send(&answer);
         }
         FromEngine::SetVariable {

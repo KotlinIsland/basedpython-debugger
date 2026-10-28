@@ -423,8 +423,20 @@ impl Debuggee {
             Request::Diff { before, after } => Ok(Response::Difference(
                 self.attached[at].compare(&before, &after)?,
             )),
+            Request::Evaluate {
+                frame,
+                expression,
+                detail,
+                statements,
+            } => Ok(Response::Evaluated(self.attached[at].evaluate_in(
+                frame,
+                &expression,
+                detail,
+                statements,
+                reporting,
+            )?)),
             other => {
-                unreachable!("`reading` is only ever handed one of its three, and got {other:?}")
+                unreachable!("`reading` is only ever handed one of its four, and got {other:?}")
             }
         }
     }
@@ -622,16 +634,6 @@ impl Debuggee {
             Request::TemplateContext { frame, detail } => Ok(Response::TemplateContext(
                 self.attached[at].read_template_context(frame, detail, reporting)?,
             )),
-            Request::Evaluate {
-                frame,
-                expression,
-                detail,
-            } => Ok(Response::Evaluated(self.attached[at].evaluate_in(
-                frame,
-                &expression,
-                detail,
-                reporting,
-            )?)),
             Request::SetVariable {
                 frame,
                 scope,
@@ -666,9 +668,10 @@ impl Debuggee {
             // the three that read state rather than moving the program, lifted
             // out together: this match is at the length where one more arm stops
             // being readable, and these three share a shape
-            Request::RunScript { .. } | Request::Query { .. } | Request::Diff { .. } => {
-                self.reading(at, request, reporting)
-            }
+            Request::RunScript { .. }
+            | Request::Query { .. }
+            | Request::Diff { .. }
+            | Request::Evaluate { .. } => self.reading(at, request, reporting),
         }
     }
 
@@ -942,6 +945,7 @@ impl Debuggee {
             frame,
             expression: expression.to_string(),
             detail,
+            statements: false,
         })? {
             Response::Evaluated(result) => Ok(result),
             other => unreachable!("an evaluation was answered with {other:?}"),
@@ -1714,6 +1718,7 @@ impl Attached {
         frame: FrameId,
         expression: &str,
         detail: Detail,
+        statements: bool,
         reporting: &mut dyn Reporting,
     ) -> Result<Evaluated> {
         const EXPECTED: &str = "the value of an expression";
@@ -1722,6 +1727,7 @@ impl Attached {
             frame,
             expression: expression.to_string(),
             detail,
+            statements,
         };
         match self.ask(&request, EXPECTED, reporting)? {
             FromAgent::Evaluated { result, .. } => Ok(result),

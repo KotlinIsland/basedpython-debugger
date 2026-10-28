@@ -655,7 +655,13 @@ impl Run<'_> {
             stop: self.cursor.stop,
             depth: frame,
         };
-        self.debuggee.attached[self.at].evaluate_in(frame, expression, detail, self.reporting)
+        self.debuggee.attached[self.at].evaluate_in(
+            frame,
+            expression,
+            detail,
+            false,
+            self.reporting,
+        )
     }
 
     // ---- letting the thread go -------------------------------------------

@@ -803,6 +803,15 @@ pub fn tools() -> Vec<Tool> {
                     "description": "the expression. python in a python frame, \
                                     and django template syntax in a template one",
                 });
+                properties["statements"] = serde_json::json!({
+                    "type": "boolean",
+                    "description": "when the text is not an expression, run it as \
+                                    statements in the frame — an assignment, an \
+                                    `import`, a `for` — and answer `None`. an \
+                                    expression is still evaluated as one first. \
+                                    false when left out, so looking never changes \
+                                    the program",
+                });
                 object(properties, &["expression"])
             },
         },

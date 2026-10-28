@@ -2594,10 +2594,15 @@ impl Adapter {
         };
 
         let detail = self.configuration().variables;
+        // statements only from the console. DAP names where an evaluation comes
+        // from, and a hover or a watch that ran an assignment would change the
+        // program for having been looked at
+        let statements = message.arguments["context"].as_str() == Some("repl");
         let evaluated = match self.ask(Request::Evaluate {
             frame,
             expression,
             detail,
+            statements,
         })? {
             Response::Evaluated(evaluated) => evaluated,
             other => unreachable!("an evaluation was answered with {other:?}"),

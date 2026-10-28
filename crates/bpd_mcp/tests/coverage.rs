@@ -75,6 +75,8 @@ struct Recorder {
     details: Vec<Detail>,
     /// whether each launch said its program was a launcher
     launchers: Vec<bool>,
+    /// whether each evaluation asked for statements
+    statements: Vec<bool>,
     /// what every request was addressed to, beside what it asked for
     ///
     /// naming the session is a capability like any other, and one the server
@@ -133,6 +135,30 @@ fn every_capability_of_the_core_is_reachable_through_a_tool() {
 }
 
 #[test]
+fn the_launcher_and_statements_reach_the_session_as_they_were_asked() {
+    let asked = Asked::default();
+    drive(&asked);
+    let recorded = asked.lock().expect("the recorder is not poisoned");
+
+    // statements, read off what the evaluation really asked
+    assert_eq!(
+        recorded.statements,
+        [true],
+        "`{}` never reached the session",
+        Facet::Statements.name()
+    );
+
+    // the launcher, read off what the launch really handed whatever starts the
+    // program rather than off the table that claims it
+    assert_eq!(
+        recorded.launchers,
+        [true],
+        "`{}` was asked for in the launch and never reached what starts the program",
+        Facet::Launcher.name()
+    );
+}
+
+#[test]
 fn every_capability_carried_inside_a_request_reaches_the_session() {
     let asked = Asked::default();
     let client = drive(&asked);
@@ -163,15 +189,6 @@ fn every_capability_carried_inside_a_request_reaches_the_session() {
             facet.name()
         );
     }
-
-    // the launcher, read off what the launch really handed whatever starts the
-    // program rather than off the table that claims it
-    assert_eq!(
-        recorded.launchers,
-        [true],
-        "`{}` was asked for in the launch and never reached what starts the program",
-        Facet::Launcher.name()
-    );
 
     // the trade, read off what really came back rather than off the table that
     // claims it. an agent that asked for a replacement under a live frame and
@@ -505,7 +522,11 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
     );
     client.call(
         "evaluate",
-        &serde_json::json!({ "expression": "total + 1", "detail": { "children": 7 } }),
+        &serde_json::json!({
+            "expression": "total + 1",
+            "detail": { "children": 7 },
+            "statements": true,
+        }),
     );
     client.call(
         "set_variable",
@@ -1746,9 +1767,15 @@ impl FakeSession {
             Request::SetBreakpoints { breakpoints } => {
                 recorder.breakpoints.extend(breakpoints.iter().cloned());
             }
-            Request::Variables { detail, .. }
-            | Request::Evaluate { detail, .. }
-            | Request::SetVariable { detail, .. } => recorder.details.push(*detail),
+            Request::Evaluate {
+                detail, statements, ..
+            } => {
+                recorder.details.push(*detail);
+                recorder.statements.push(*statements);
+            }
+            Request::Variables { detail, .. } | Request::SetVariable { detail, .. } => {
+                recorder.details.push(*detail);
+            }
             Request::Query { query, .. } => recorder.details.push(query.detail),
             _ => {}
         }

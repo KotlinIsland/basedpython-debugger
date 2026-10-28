@@ -234,11 +234,19 @@ pub enum Facet {
     /// program calling `input()` with `EOFError` where it would have read what
     /// the person typed
     InheritedStdin,
+
+    /// running statements where an expression is evaluated —
+    /// [`Request::Evaluate`]'s `statements`
+    ///
+    /// a field of one request, and a capability all the same: a front end
+    /// without it can evaluate every expression and cannot assign a local,
+    /// import a module or run a loop in the frame, which is what a console is
+    Statements,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
@@ -253,6 +261,7 @@ impl Facet {
         Self::Remap,
         Self::Launcher,
         Self::InheritedStdin,
+        Self::Statements,
     ];
 
     /// what to call this capability in a message about it
@@ -274,6 +283,7 @@ impl Facet {
                 "starting the program through a launcher whose frames are not its own"
             }
             Self::InheritedStdin => "the program reading the stdin the front end was started with",
+            Self::Statements => "running statements where an expression is evaluated",
         }
     }
 }
@@ -767,6 +777,7 @@ pub fn surface() -> Vec<Request> {
             frame,
             expression: "1".to_string(),
             detail: Detail::default(),
+            statements: false,
         },
         Request::SetVariable {
             frame,

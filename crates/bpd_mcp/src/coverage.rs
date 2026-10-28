@@ -151,6 +151,8 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // the server speaks on its stdin, so there is no stdin of its own that is
         // not the protocol to hand a program. an agent's program takes its input
         // from a file, an argument or the environment
+        Facet::Statements => Reach::Direct("`statements` on the `evaluate` tool"),
+
         Facet::InheritedStdin => Reach::Unreachable {
             why: "`bpd mcp` speaks MCP on its stdin, so the one stdin it has is the \
                   protocol, and a program reading it would be reading the agent's \

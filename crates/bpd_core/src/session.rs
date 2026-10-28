@@ -342,6 +342,14 @@ pub enum Request {
         expression: String,
         /// how much of the result to read
         detail: Detail,
+        /// run the text as **statements** in the frame when it is not an
+        /// expression — an assignment, an `import`, a `for` — and answer `None`
+        ///
+        /// what pydevd's evaluate does and a console needs. off, text that is
+        /// not an expression is the `SyntaxError` it is, which is what a hover
+        /// or a watch wants: a statement there would change the program for
+        /// having been looked at
+        statements: bool,
     },
 
     /// start or stop recording where the program goes

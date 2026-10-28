@@ -49,6 +49,7 @@ struct Handles {
     get_frames: Py<PyAny>,
     compile: Py<PyAny>,
     eval: Py<PyAny>,
+    exec: Py<PyAny>,
     int_repr: Py<PyAny>,
     float_repr: Py<PyAny>,
     repr: Py<PyAny>,
@@ -328,6 +329,7 @@ pub(crate) fn install(
             .unbind(),
         compile: builtins.getattr("compile")?.unbind(),
         eval: builtins.getattr("eval")?.unbind(),
+        exec: builtins.getattr("exec")?.unbind(),
         // the unbound slots, not `str()` and not `repr()`: a subclass is free
         // to override either, and then the number bpd reported would not be
         // the number the object holds
@@ -557,6 +559,33 @@ pub(crate) fn compile_expression(
         .bind(python)
         .call1((source, filename, "eval"))?
         .unbind())
+}
+
+/// compile statements, as `exec` takes them
+pub(crate) fn compile_statements(
+    python: Python<'_>,
+    source: &str,
+    filename: &str,
+) -> PyResult<Py<PyAny>> {
+    Ok(handles()
+        .compile
+        .bind(python)
+        .call1((source, filename, "exec"))?
+        .unbind())
+}
+
+/// run statements compiled by [`compile_statements`] in two namespaces
+pub(crate) fn execute(
+    python: Python<'_>,
+    code: &Py<PyAny>,
+    globals: &Bound<'_, PyAny>,
+    locals: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    handles()
+        .exec
+        .bind(python)
+        .call1((code.bind(python), globals, locals))?;
+    Ok(())
 }
 
 /// the exact digits of an integer, whatever its type says about itself

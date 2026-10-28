@@ -508,6 +508,7 @@ impl<'a> Server<'a> {
                         frame,
                         expression: args.expression,
                         detail: args.detail,
+                        statements: args.statements,
                     },
                 )? {
                     Response::Evaluated(result) => Ok(render::evaluated(&result)),
@@ -1801,6 +1802,8 @@ struct EvaluateArgs {
     expression: String,
     #[serde(default)]
     detail: Detail,
+    #[serde(default)]
+    statements: bool,
 }
 
 #[derive(serde::Deserialize)]

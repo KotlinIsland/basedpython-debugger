@@ -202,7 +202,7 @@ impl Attached {
             stop,
             depth: wanted.frame,
         };
-        let result = self.evaluate_in(frame, &wanted.expression, detail, reporting)?;
+        let result = self.evaluate_in(frame, &wanted.expression, detail, false, reporting)?;
         Ok(Answer {
             expression: wanted.expression.clone(),
             frame: wanted.frame,

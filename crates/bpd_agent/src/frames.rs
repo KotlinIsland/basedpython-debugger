@@ -703,6 +703,7 @@ impl<'py> Stopped<'py> {
         id: FrameId,
         expression: &str,
         detail: Detail,
+        statements: bool,
     ) -> PyResult<FromAgent> {
         // the frame decides the language. against a template frame the text is
         // template syntax and django resolves it, because that is what the same
@@ -733,7 +734,7 @@ impl<'py> Stopped<'py> {
         };
         let place = Place::of(&frame)?;
 
-        let result = match place.evaluate(self.python, expression) {
+        let result = match place.evaluate(self.python, expression, statements) {
             Ok(value) => Evaluated::Value {
                 value: Reader::new(self.python, detail).read(&value, expression)?,
             },
@@ -778,7 +779,7 @@ impl<'py> Stopped<'py> {
             Err(reason) => return Ok(FromAgent::Refused { reason }),
         };
         let place = Place::of(&frame)?;
-        match place.evaluate(self.python, expression) {
+        match place.evaluate(self.python, expression, false) {
             Ok(target) => Ok(FromAgent::Retaining {
                 retainers: crate::retainers::holding(self.python, &target, world::mode())?,
             }),
@@ -1275,7 +1276,7 @@ impl<'py> Stopped<'py> {
         }
 
         let result = match place
-            .evaluate(self.python, value)
+            .evaluate(self.python, value, false)
             .and_then(|new| place.write(scope, name, &new))
         {
             Ok(()) => match place.read(scope, name)? {
@@ -1918,13 +1919,39 @@ impl<'py> Place<'py> {
     /// this is the one place the merged mapping is the right answer: it is what
     /// `LOAD_NAME` sees, and resolving a name any other way is how a debugger
     /// reads a variable from the wrong scope
-    fn evaluate(&self, python: Python<'py>, expression: &str) -> PyResult<Bound<'py, PyAny>> {
+    ///
+    /// with `statements`, text that does not compile as an expression is
+    /// compiled as statements and run in the same two namespaces, and the answer
+    /// is `None`. an expression is still evaluated as one first, so `x` answers
+    /// `x` and only `x = 1` runs as an assignment — which is pydevd's order. a
+    /// write to a local goes through `f_locals`, which since cpython 3.13 is
+    /// the frame's own (PEP 667) rather than a copy that is thrown away
+    fn evaluate(
+        &self,
+        python: Python<'py>,
+        expression: &str,
+        statements: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         // the program's own code runs here, so this thread's breakpoints are
         // held off for the same reason a condition holds them off: a stop
         // inside an expression of the debugger's would be a stop whose stack is
         // half debugger
         let _suppressed = conditions::suppress();
-        let code = events::compile_expression(python, expression, "<bpd evaluation>")?;
+        let code = match events::compile_expression(python, expression, "<bpd evaluation>") {
+            Ok(code) => code,
+            Err(error)
+                if statements
+                    && error.is_instance_of::<pyo3::exceptions::PySyntaxError>(python) =>
+            {
+                // the error the statements raise is the one reported, because
+                // the text was asked to be statements: a half-written `for`
+                // is a mistake in a `for`, not in an expression
+                let code = events::compile_statements(python, expression, "<bpd evaluation>")?;
+                events::execute(python, &code, &self.globals, &self.locals)?;
+                return Ok(python.None().into_bound(python));
+            }
+            Err(error) => return Err(error),
+        };
         events::evaluate(python, &code, &self.globals, &self.locals)
     }
 }
