@@ -393,6 +393,23 @@ every one of them is a field of `bpd_core::Detail`:
     however far the client has opened it, and every line in it can show what
     its value holds
 
+**the layout is PyCharm's own python debugger's**, measured on 263.7607 against
+the same frame — a closure, an object whose class holds a value, and names not
+bound yet:
+
+|                                           | PyCharm (pydevd)            | bpd before                               | bpd now                                |
+| ----------------------------------------- | --------------------------- | ---------------------------------------- | -------------------------------------- |
+| the frame's names                         | one flat list               | `local`, `cell`, `free`, `global` groups | `locals` (all three) and `global`      |
+| `total`, `s` before they are assigned     | not shown                   | two variables reading "unbound"          | one `(not bound yet)` line naming both |
+| an object's class data, `name = "square"` | among its children          | absent                                   | among its children                     |
+| functions and modules                     | a "Special Variables" group | listed                                   | listed                                 |
+
+the three scopes are still three underneath: a value opened from `locals` is
+re-read from the scope it is in, and `setVariable` writes there. a class's data
+is read off the class dictionaries in method resolution order — not a dunder,
+not callable, not a descriptor, not shadowed by the instance — because that is
+what `obj.name` reads without running anything
+
 a container's line is **what it holds**, written the way the program would
 print it — `[1.0, 3.5]`, `{'k': [1.0, 3.5]}`, `(1,)`, `set()`,
 `deque([1, 2])` — up to about a hundred characters, with what does not fit or

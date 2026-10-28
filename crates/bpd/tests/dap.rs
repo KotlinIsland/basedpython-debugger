@@ -98,6 +98,7 @@ over_each_transport!(
     a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds,
     a_program_reads_the_adapters_stdin_when_the_client_says_it_is_the_programs,
     a_container_shows_what_it_holds_and_never_a_notice_in_its_place,
+    a_frames_names_are_one_list_and_an_object_shows_what_its_class_gives_it,
     everything_a_program_printed_is_on_the_wire_before_it_is_reported_over,
     a_refused_launch_ends_the_session_instead_of_leaving_it_open,
     the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program,
@@ -215,8 +216,9 @@ fn a_breakpoint_is_hit_a_local_is_written_and_the_program_sees_the_write(transpo
         .collect();
     assert_eq!(
         named,
-        vec!["local", "cell", "free", "global"],
-        "python resolves a name by which of these it is, so all four are offered"
+        vec!["locals", "global"],
+        "the frame's own names as one list, as pycharm's python debugger shows \
+         them, and the module's apart"
     );
     let local = scopes["body"]["scopes"][0]["variablesReference"].clone();
 
@@ -2363,6 +2365,120 @@ fn a_container_shows_what_it_holds_and_never_a_notice_in_its_place(transport: Tr
         &serde_json::json!({ "variablesReference": variable(&read, "named")["variablesReference"] }),
     );
     assert_eq!(variable(&opened, "k")["value"], "[1.0, 3.5]", "{opened}");
+
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    client.event("exited");
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+/// a frame with a closure, an object whose class holds a value, and names not
+/// bound yet — the program `PyCharm`'s own debugger was measured against
+const LAYOUT: &str = r#"class Shape:
+    name = "shape"
+
+    def area(self):
+        return 0.0
+
+
+class Square(Shape):
+    name = "square"
+
+    def __init__(self, side):
+        self.side = side
+
+
+def total_area(shapes):
+    def area_of(s):
+        return s.area() + len(shapes)
+
+    first = shapes[0]
+    total = 0.0  # held here
+    for s in shapes:
+        total += area_of(s)
+    return total, first
+
+
+total_area([Square(2.0), Square(3.0)])
+"#;
+
+fn a_frames_names_are_one_list_and_an_object_shows_what_its_class_gives_it(transport: Transport) {
+    // measured on PyCharm 263.7607's own python debugger with the same frame:
+    // one flat list of the frame's names — `shapes`, a cell, among them — no
+    // `total` or `s` before they are bound, and an object's children holding
+    // `name` from its class beside `side` from itself. bpd showed three scope
+    // groups, two unbound names as variables, and no `name`
+    let fixture = Fixture::new("layout", LAYOUT);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line_of(LAYOUT, "# held here") } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let stopped = client.event("stopped");
+    let thread = stopped["body"]["threadId"].clone();
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    let frame = stack["body"]["stackFrames"][0]["id"].clone();
+    let scopes = client.request("scopes", &serde_json::json!({ "frameId": frame }));
+    let locals = scopes["body"]["scopes"][0]["variablesReference"].clone();
+    let read = client.request(
+        "variables",
+        &serde_json::json!({ "variablesReference": locals }),
+    );
+    let names: Vec<&str> = read["body"]["variables"]
+        .as_array()
+        .expect("variables are a list")
+        .iter()
+        .filter_map(|variable| variable["name"].as_str())
+        .collect();
+    for name in ["shapes", "area_of", "first"] {
+        assert!(
+            names.contains(&name),
+            "`{name}` is one of the frame's names: {read}"
+        );
+    }
+    assert!(
+        !names.contains(&"total") && !names.contains(&"s"),
+        "a name that holds nothing yet is not a variable: {read}"
+    );
+    let unbound = variable(&read, "(not bound yet)")["value"]
+        .as_str()
+        .expect("a value is a string")
+        .to_string();
+    assert!(
+        unbound.contains("total") && unbound.contains('s'),
+        "and it is still said, on one line: {unbound}"
+    );
+
+    let first = client.request(
+        "variables",
+        &serde_json::json!({ "variablesReference": variable(&read, "first")["variablesReference"] }),
+    );
+    assert_eq!(variable(&first, "side")["value"], "2.0", "{first}");
+    assert_eq!(
+        variable(&first, "name")["value"],
+        "\"square\" (6 characters)",
+        "the nearest class's value, which is what `first.name` reads: {first}"
+    );
+
+    // a write to the cell goes to the cell: the closure reads it
+    let written = client.request(
+        "setVariable",
+        &serde_json::json!({ "variablesReference": locals, "name": "shapes", "value": "shapes[:1]" }),
+    );
+    assert_eq!(written["success"], true, "{written}");
 
     client.request("continue", &serde_json::json!({ "threadId": thread }));
     client.event("exited");

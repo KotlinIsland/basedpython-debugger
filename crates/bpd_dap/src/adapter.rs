@@ -2299,28 +2299,32 @@ impl Adapter {
             None => return Err(stale(reference)),
         };
 
-        // all four, always. python resolves a name by which of these it is, and
-        // hiding one that happens to be empty would mean reading it first —
-        // which is the request the client is about to make anyway
-        let scopes: Vec<serde_json::Value> = [
-            (Scope::Local, "locals"),
-            (Scope::Cell, "locals"),
-            (Scope::Free, "locals"),
-            (Scope::Global, "globals"),
-        ]
-        .into_iter()
-        .map(|(scope, hint)| {
+        // the frame's own names as one list, and the module's apart from them.
+        // PyCharm's python debugger shows a frame's locals flat — measured on
+        // 263.7607 with a closure in the frame — and DAP gave it three groups,
+        // `local`, `cell` and `free`, one of them usually empty. what python
+        // resolves a name by is still the scope it is in: a value opened from
+        // the list is re-read from that scope, and a write goes to it
+        let scopes = vec![
             serde_json::json!({
-                "name": scope.to_string(),
-                "presentationHint": hint,
-                "variablesReference": self.handles.add(Handle::Scope { frame, scope }),
+                "name": "locals",
+                "presentationHint": "locals",
+                "variablesReference": self.handles.add(Handle::Locals { frame }),
+                "expensive": false,
+            }),
+            serde_json::json!({
+                "name": Scope::Global.to_string(),
+                "presentationHint": "globals",
+                "variablesReference": self.handles.add(Handle::Scope {
+                    frame,
+                    scope: Scope::Global,
+                }),
                 // a module namespace begins with `__builtins__`, and a client
                 // that opened it without being asked would spend the whole
                 // byte budget on it
-                "expensive": scope == Scope::Global,
-            })
-        })
-        .collect();
+                "expensive": true,
+            }),
+        ];
 
         self.respond(message, Some(serde_json::json!({ "scopes": scopes })))?;
         Ok(())
@@ -2401,7 +2405,16 @@ impl Adapter {
             .clone();
 
         let variables = match handle {
-            Handle::Scope { frame, scope } => self.read_scope(frame, scope, &[])?,
+            Handle::Scope { frame, scope } => {
+                let mut listed = self.read_scope(frame, scope, &[])?;
+                for variable in &mut listed {
+                    if let Some(fields) = variable.as_object_mut() {
+                        fields.remove("unbound");
+                    }
+                }
+                listed
+            }
+            Handle::Locals { frame } => self.read_locals(frame)?,
             Handle::Nested { frame, scope, path } => self.read_scope(frame, scope, &path)?,
             Handle::Stored { stop, value } => {
                 let mut listed = Vec::new();
@@ -2504,6 +2517,76 @@ impl Adapter {
         Ok(listed)
     }
 
+    /// the local, cell and free names of a frame as one list
+    ///
+    /// each name listed from the scope it is in, so opening one re-reads it
+    /// there. a name the frame has and holds nothing under yet — a local not
+    /// assigned at this line — is not a variable to show, and `PyCharm` shows
+    /// none; they are named together on one line at the end rather than left
+    /// out, because a name that is not there and a name that holds nothing are
+    /// different facts
+    fn read_locals(&mut self, frame: FrameId) -> Result<Vec<serde_json::Value>, Aborted> {
+        let mut listed = Vec::new();
+        let mut unbound = Vec::new();
+        for scope in [Scope::Local, Scope::Cell, Scope::Free] {
+            let (read, names) = self.read_scope_listing(frame, scope)?;
+            listed.extend(read);
+            unbound.extend(names);
+        }
+        if !unbound.is_empty() {
+            listed.push(serde_json::json!({
+                "name": "(not bound yet)",
+                "value": format!(
+                    "{} — names of this frame that hold nothing at this line",
+                    unbound.join(", ")
+                ),
+                "variablesReference": 0,
+            }));
+        }
+        Ok(listed)
+    }
+
+    /// which of a frame's local, cell and free scopes has this name
+    fn scope_holding(&mut self, frame: FrameId, name: &str) -> Result<Scope, Aborted> {
+        for scope in [Scope::Local, Scope::Cell, Scope::Free] {
+            let read = match self.ask(Request::Variables {
+                frame,
+                scope,
+                detail: Detail {
+                    depth: 0,
+                    ..self.configuration().variables
+                },
+            })? {
+                Response::Variables(read) => read,
+                other => unreachable!("a scope read was answered with {other:?}"),
+            };
+            if read.entries.iter().any(|entry| entry.name == name)
+                || read.unbound.iter().any(|unbound| unbound == name)
+            {
+                return Ok(scope);
+            }
+        }
+        Err(Aborted::Refuse(format!(
+            "{frame} has no local, cell or free name `{name}` to write"
+        )))
+    }
+
+    /// one scope's names as variables, and the names it holds nothing under
+    fn read_scope_listing(
+        &mut self,
+        frame: FrameId,
+        scope: Scope,
+    ) -> Result<(Vec<serde_json::Value>, Vec<String>), Aborted> {
+        let mut listed = self.read_scope(frame, scope, &[])?;
+        let unbound: Vec<String> = listed
+            .iter()
+            .filter(|variable| variable["unbound"] == true)
+            .filter_map(|variable| variable["name"].as_str().map(ToString::to_string))
+            .collect();
+        listed.retain(|variable| variable["unbound"] != true);
+        Ok((listed, unbound))
+    }
+
     fn read_scope(
         &mut self,
         frame: FrameId,
@@ -2594,6 +2677,8 @@ impl Adapter {
                 "name": name,
                 "value": "unbound — the scope has this name and the frame holds nothing under it at this line",
                 "variablesReference": 0,
+                // read by `read_locals`, which names these together instead
+                "unbound": true,
             }));
         }
         for name in &read.unreadable {
@@ -2629,6 +2714,7 @@ impl Adapter {
 
         let (frame, scope) = match self.handles.get(reference) {
             Some(Handle::Scope { frame, scope }) => (*frame, *scope),
+            Some(Handle::Locals { frame }) => (*frame, self.scope_holding(*frame, &name)?),
             Some(_) => {
                 return Err(Aborted::Refuse(format!(
                     "{reference} names something inside a value, and bpd writes a \

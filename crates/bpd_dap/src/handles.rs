@@ -70,6 +70,16 @@ pub enum Handle {
         index: u32,
     },
 
+    /// the local, cell and free scopes of one frame, listed as one
+    ///
+    /// what `PyCharm`'s own python debugger shows: one flat list of the frame's
+    /// names. the three stay three underneath — a value opened from here is
+    /// re-read from the scope it really is in, and a write goes to it
+    Locals {
+        /// which frame
+        frame: FrameId,
+    },
+
     /// one scope of one frame
     Scope {
         /// which frame
@@ -143,7 +153,8 @@ impl Handle {
             | Self::Nested { frame, .. }
             | Self::TemplateLayer { frame, .. }
             | Self::Goto { frame, .. }
-            | Self::StepTarget { frame, .. } => frame.stop,
+            | Self::StepTarget { frame, .. }
+            | Self::Locals { frame } => frame.stop,
             Self::Stored { stop, .. } => *stop,
         }
     }

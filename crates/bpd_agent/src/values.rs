@@ -13,7 +13,8 @@
 //! there are exactly two ways program code can run from in here, and both are
 //! in the request:
 //!
-//! - `attributes` reads an object's `__dict__`. for an ordinary object that is
+//! - `attributes` reads an object's `__dict__`, and the plain data its classes
+//!   hold under names it does not — see [`class_attributes`]. for an ordinary object that is
 //!   a slot read that reaches no `__getattr__`, no property and no descriptor.
 //!   a type is free to make `__dict__` its own code, and then this runs it
 //! - `repr` calls `__repr__`, which is arbitrary user code. it is off by
@@ -411,8 +412,10 @@ impl<'py> Reader<'py> {
             }
         };
 
+        let items = stored.items();
+        class_attributes(object, &stored, &items)?;
         self.enter(object, path);
-        let (attributes, omitted) = self.named(&stored.items(), path, depth - 1)?;
+        let (attributes, omitted) = self.named(&items, path, depth - 1)?;
         self.leave();
         Ok(Content::Object {
             attributes,
@@ -563,6 +566,62 @@ impl<'py> Reader<'py> {
             .pop()
             .expect("every `leave` follows the `enter` that pushed for it");
     }
+}
+
+/// add to `items` the data attributes an object has through its class
+///
+/// what `obj.name` reads when the instance has no `name` of its own and the
+/// class holds a plain value under it — `PyCharm` lists them among an object's
+/// children, and an object whose class sets `name = "square"` has a `name`.
+/// read off each class's own dictionary in method resolution order, the first
+/// class that holds a name deciding, and only what reading runs nothing for:
+///
+/// - not a name the instance holds itself, which shadows it
+/// - not a dunder, which is the class's machinery rather than the object's data
+/// - not a callable — a method, a nested class — which is behaviour
+/// - not a descriptor: a value whose type defines `__get__` is a property, a
+///   `classmethod` or a slot, and what `obj.name` reads through one is the
+///   descriptor's code, which reading a value never runs
+///
+/// `object` itself is left out: everything there is a dunder or a method
+fn class_attributes(
+    object: &Bound<'_, PyAny>,
+    stored: &Bound<'_, PyDict>,
+    items: &Bound<'_, PyList>,
+) -> PyResult<()> {
+    let python = object.py();
+    let base = python.get_type::<PyAny>();
+    let mut seen: Vec<String> = Vec::new();
+    for class in object.get_type().getattr("__mro__")?.try_iter()? {
+        let class = class?;
+        if class.is(&base) {
+            continue;
+        }
+        let namespace = class.getattr("__dict__")?;
+        for pair in namespace.call_method0("items")?.try_iter()? {
+            let pair = pair?;
+            let key = pair.get_item(0)?;
+            let Ok(name) = key.cast::<PyString>() else {
+                continue;
+            };
+            let name = name.to_string_lossy().into_owned();
+            if seen.contains(&name) {
+                continue;
+            }
+            seen.push(name.clone());
+            let value = pair.get_item(1)?;
+            let dunder = name.starts_with("__") && name.ends_with("__");
+            if dunder
+                || stored.contains(&key)?
+                || value.is_callable()
+                || value.get_type().hasattr("__get__")?
+            {
+                continue;
+            }
+            items.append((name, value))?;
+        }
+    }
+    Ok(())
 }
 
 /// `type(value)`, qualified by its module unless it is a builtin
