@@ -68,6 +68,28 @@ pub struct Frame {
     pub kind: FrameKind,
 }
 
+/// what a location at line `0` is, said once for every front end
+///
+/// no file has a line 0. the interpreter reports one for an instruction its
+/// line table gives no line, and `by run` does it on purpose: it compiles a
+/// staged module as its `.by` and gives every line the transpiler wrote on its
+/// own — a runtime helper, a lowering's scaffolding — line 0, because no line
+/// of the `.by` is behind it. a client shown `file:0` opens the file at the top
+/// and points at a line that has nothing to do with the code
+pub const NO_LINE: &str = "no line: the interpreter reports line 0, which no file has, for code no \
+                           source line is behind. `by run` gives code the transpiler wrote on its \
+                           own — a runtime helper — line 0 of the `.by`";
+
+/// a location as a reader is shown it: `file:line`, or the file and that the
+/// location is at no line of it — see [`NO_LINE`]
+pub fn place(file: &str, line: u32) -> String {
+    if line == 0 {
+        format!("{file}, at no line of it")
+    } else {
+        format!("{file}:{line}")
+    }
+}
+
 impl Frame {
     /// what to call this frame in one word
     ///

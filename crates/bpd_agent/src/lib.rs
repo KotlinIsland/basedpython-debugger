@@ -611,9 +611,10 @@ fn on_line<'py>(
         // whose condition was false would be the one place a thread escapes
         left_armed_here(python)?;
         world::park(python, thread);
-    } else if pause::pausing() && !frames::is_launchers(code) && pause::claim() {
-        // a launcher's line is not the program's, so a pause is left for the
-        // first line that is — which the launcher is about to run
+    } else if pause::pausing() && line != 0 && !frames::is_launchers(code) && pause::claim() {
+        // a launcher's line is not the program's, and line 0 is not a line —
+        // see `bpd_core::NO_LINE` — so a pause is left for the first line that
+        // is both
         pause::disarm(python)?;
         left_armed_here(python)?;
         session::stop(
@@ -1088,7 +1089,7 @@ fn uncaught(
 fn at_of(code: &Bound<'_, PyAny>, frame: &Bound<'_, PyAny>) -> PyResult<sources::Reported> {
     Ok(sources::locate(
         code.getattr("co_filename")?.extract()?,
-        frame.getattr("f_lineno")?.extract()?,
+        frames::line_now(frame)?,
     ))
 }
 

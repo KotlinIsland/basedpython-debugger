@@ -244,6 +244,20 @@ pub(crate) fn is_launchers(code: &Bound<'_, PyAny>) -> bool {
         .is_some_and(|launcher| launcher.codes.contains(&(code.as_ptr() as usize)))
 }
 
+/// the line a frame is on now, with `0` for none
+///
+/// `f_lineno` is `None` for an instruction the line table gives no line, and an
+/// integer otherwise — and `0` is what a table that names a line nobody wrote
+/// says, which `by run` does for every line the transpiler wrote on its own. both
+/// are "no line", and both come back as `0`, which no source file has
+pub(crate) fn line_now(frame: &Bound<'_, PyAny>) -> PyResult<u32> {
+    let line = frame.getattr("f_lineno")?;
+    if line.is_none() {
+        return Ok(0);
+    }
+    line.extract()
+}
+
 /// whether the program was entered **from** this frame
 ///
 /// the bootstrap, and — when the program was started through a launcher — the
@@ -1626,10 +1640,7 @@ fn describe(slot: &Slot<'_>, id: FrameId) -> PyResult<Frame> {
             // the `_by_runner.py` shim `by run` starts — comes back untouched,
             // because dressing one as basedpython would be inventing a source
             // file for it
-            let at = sources::locate(
-                code.getattr("co_filename")?.extract()?,
-                frame.getattr("f_lineno")?.extract()?,
-            );
+            let at = sources::locate(code.getattr("co_filename")?.extract()?, line_now(frame)?);
             Ok(Frame {
                 id,
                 file: at.file,
@@ -1675,7 +1686,7 @@ fn describe(slot: &Slot<'_>, id: FrameId) -> PyResult<Frame> {
 /// and the frame chain of the `os.fork()` caller is what says where it is
 pub(crate) fn file_and_line(frame: &Bound<'_, PyAny>) -> PyResult<(String, u32)> {
     let file = frame.getattr("f_code")?.getattr("co_filename")?.extract()?;
-    let line = frame.getattr("f_lineno")?.extract()?;
+    let line = line_now(frame)?;
     let at = sources::locate(file, line);
     Ok((at.file, at.line))
 }
@@ -1690,10 +1701,7 @@ pub(crate) fn describe_where(frame: &Bound<'_, PyAny>) -> PyResult<Where> {
     // a `Where` is a sample of a thread bpd is not holding, and there is no
     // frame id on it to ask anything more about. it is the same location a
     // frame of the same code would report, which is what the rule asks for
-    let at = sources::locate(
-        code.getattr("co_filename")?.extract()?,
-        frame.getattr("f_lineno")?.extract()?,
-    );
+    let at = sources::locate(code.getattr("co_filename")?.extract()?, line_now(frame)?);
     Ok(Where {
         file: at.file,
         line: at.line,

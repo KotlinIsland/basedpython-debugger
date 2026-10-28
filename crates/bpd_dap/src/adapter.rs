@@ -1558,7 +1558,7 @@ impl Adapter {
                     "name": frame.name(),
                     "line": frame.line,
                     "column": 1,
-                    "source": mapped_source_of(&frame.file, frame.mapping.as_ref()),
+                    "source": located_source_of(&frame.file, frame.line, frame.mapping.as_ref()),
                 })
             })
             .collect();
@@ -3691,27 +3691,36 @@ fn stopped_for(reason: &StopReason) -> (&'static str, String, Vec<u32>) {
             line,
         } => (
             "breakpoint",
-            format!("breakpoint {breakpoints:?} at {file}:{line}"),
+            format!(
+                "breakpoint {breakpoints:?} at {}",
+                bpd_core::place(file, *line)
+            ),
             breakpoints.clone(),
         ),
         StopReason::Stepped { kind, file, line } => (
             "step",
-            format!("{kind} landed at {file}:{line}"),
+            format!("{kind} landed at {}", bpd_core::place(file, *line)),
             Vec::new(),
         ),
         StopReason::Paused { file, line } => (
             "pause",
-            format!("held at {file}:{line} — the first thread to reach a line"),
+            format!(
+                "held at {} — the first thread to reach a line",
+                bpd_core::place(file, *line)
+            ),
             Vec::new(),
         ),
         StopReason::Raised { error, file, line } => (
             "exception",
-            format!("{error} raised at {file}:{line}"),
+            format!("{error} raised at {}", bpd_core::place(file, *line)),
             Vec::new(),
         ),
         StopReason::Uncaught { error, file, line } => (
             "exception",
-            format!("{error} is leaving the program at {file}:{line}"),
+            format!(
+                "{error} is leaving the program at {}",
+                bpd_core::place(file, *line)
+            ),
             Vec::new(),
         ),
         // DAP has no reason of its own for it, and `entry` is what it is:
@@ -3973,6 +3982,30 @@ fn mapped_source_of(file: &str, mapping: Option<&bpd_core::Mapping>) -> serde_js
     let mut source = source_of(file);
     if let Some(mapping) = mapping {
         source["origin"] = serde_json::Value::String(mapping.to_string());
+    }
+    source
+}
+
+/// a DAP source for a frame at `line` of `file`
+///
+/// a frame at no line — line `0`, see [`bpd_core::NO_LINE`] — keeps the file's
+/// **name** and gives up its **path**. DAP's rule is that a frame's `line` is 0
+/// only when it has no source to be a line of, and a client handed a path opens
+/// the file and puts the frame at its top: measured in the IDE as
+/// `_LazyFrom.__getattr__ main.by:0`. the name still says which file the code
+/// is in, and `origin` says why there is no line
+fn located_source_of(
+    file: &str,
+    line: u32,
+    mapping: Option<&bpd_core::Mapping>,
+) -> serde_json::Value {
+    let mut source = mapped_source_of(file, mapping);
+    if line == 0 {
+        if let Some(fields) = source.as_object_mut() {
+            fields.remove("path");
+        }
+        source["origin"] = serde_json::Value::String(bpd_core::NO_LINE.to_string());
+        source["presentationHint"] = serde_json::Value::String("deemphasize".to_string());
     }
     source
 }

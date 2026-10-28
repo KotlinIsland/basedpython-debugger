@@ -86,6 +86,12 @@ fn located(frame: &bpd_core::Frame) -> serde_json::Value {
         "file": frame.file,
         "line": frame.line,
     });
+    // line 0 is not a line, and an agent handed one reads it as the top of the
+    // file. it is `null`, with the sentence that says why beside it
+    if frame.line == 0 {
+        rendered["line"] = serde_json::Value::Null;
+        rendered["no_line"] = serde_json::json!(bpd_core::NO_LINE);
+    }
     // what a source map made of the two fields above, when one did. an agent
     // reading `demo.by:11` needs to be able to find out where the interpreter
     // really is — the map is the reason the two differ, and an answer that
@@ -1062,6 +1068,29 @@ mod tests {
             only["moved"].is_null(),
             "it bound on the line that was asked for: {only}"
         );
+    }
+
+    #[test]
+    fn a_frame_at_no_line_is_not_handed_to_an_agent_as_line_zero() {
+        // `by run` gives code the transpiler wrote line 0 of the `.by`, and an
+        // agent handed `line: 0` reads the top of the file
+        let mut helper = frame(1);
+        helper.line = 0;
+        let rendered = stack(&Stack {
+            in_a_task: false,
+            scheduled_by: Vec::new(),
+            scheduling_cut: false,
+            frames: vec![frame(0), helper],
+            depth: 2,
+            mode: Mode::NonStop,
+        });
+        let frames = rendered["frames"]
+            .as_array()
+            .expect("the frames are a list");
+        assert_eq!(frames[0]["line"], 4, "{rendered}");
+        assert!(frames[0]["no_line"].is_null(), "{rendered}");
+        assert!(frames[1]["line"].is_null(), "{rendered}");
+        assert_eq!(frames[1]["no_line"], bpd_core::NO_LINE, "{rendered}");
     }
 
     #[test]

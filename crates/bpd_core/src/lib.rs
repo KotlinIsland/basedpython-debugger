@@ -53,8 +53,8 @@ pub use error::{Error, Result};
 pub use exception::{PythonError, TracebackFrame};
 pub use fact::{Class, Fact, Facts, Limit, Mutation, Observed, Silence, Silent, Stability};
 pub use frame::{
-    Coverage, Depth, Frame, FrameId, FrameKind, Kept, Retainer, Retainers, Scheduling, Scope,
-    TASK_NOT_SEEN, Trail, Visited,
+    Coverage, Depth, Frame, FrameId, FrameKind, Kept, NO_LINE, Retainer, Retainers, Scheduling,
+    Scope, TASK_NOT_SEEN, Trail, Visited, place,
 };
 pub use jump::{
     Access, Address, Again, Blocked, Discarded, Jump, Jumped, Reset, Restarted, Restarting,

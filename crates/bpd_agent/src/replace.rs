@@ -1207,7 +1207,7 @@ impl Live {
                         .or_default()
                         .push(LiveFrame::Suspended {
                             kind: *name,
-                            line: frame.getattr("f_lineno")?.extract()?,
+                            line: crate::frames::line_now(&frame)?,
                             started: offset >= 0,
                         });
                 }

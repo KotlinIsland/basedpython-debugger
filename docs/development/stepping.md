@@ -108,6 +108,45 @@ land. it is **given up**, and what the program does next is what the client is
 told: `a_step_out_of_the_outermost_frame_lets_the_program_finish` gets
 `Exited`, not a stop that never came
 
+## line 0 is not a line, and a step goes through it
+
+no file has a line 0. the interpreter reports one for an instruction its line
+table gives no line, and `by run` does it on purpose: it compiles each staged
+module as its `.by` and gives every line the transpiler wrote on its own — a
+runtime helper like `_LazyFrom.__getattr__` or `_soundness_iter`, a lowering's
+scaffolding — line 0 of the `.by`. measured before this: a step into
+`origin = Point(0.0, 0.0)` landed on `_LazyFrom.__getattr__ main.by:0`,
+`_lazy_from_value main.by:0` and `_LazyFrom.__getattr__ main.by:0` again before
+it reached the dataclass `__init__` the line called
+
+so a step never lands at line 0, and goes through code that has none the way
+gdb's `step` goes through a function without line information:
+
+- a frame a step takes up at no line — entered, or returned into — is one it
+    **passes through**. cpython may offer it no line event at all, so this is
+    decided as the step takes the frame up rather than at a line that may never
+    come
+- a step in that is passing through still enters the next frame that is called,
+    so a step into a call through a helper lands in the function the helper
+    calls
+- a step in that comes back out of a frame it passed through, having entered
+    nothing, is still a step in from where it started. it goes on to the next
+    line, or into the next call, and not back onto the line it was asked about —
+    re-arming a frame part way through a line can offer that line again, and it
+    is not a landing
+- a step out or over keeps its own landing: back through the helper to the
+    instruction after the call that was made from a line
+
+the launcher's code is passed through the same way — see
+[launching](launching.md#a-launcher-is-a-script-whose-frames-are-not-the-programs) —
+and so is a pause, which waits for a line that is one
+
+a frame at no line is still **reported** where it is, because the frames on
+either side of it are the program's. what it is not given is a line: DAP gets
+the file's name and no path, so an editor does not open the file at its top,
+with `origin` saying why, and MCP gets `line: null` with the same sentence as
+`no_line`. it is `bpd_core::NO_LINE`, written once
+
 ## comprehensions are not something to step into
 
 since cpython 3.12 and PEP 709, list, dict and set comprehensions are **inlined**

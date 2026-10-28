@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bpd_test::basedpython::{Build, SOURCE};
+use bpd_test::basedpython::{Build, SOURCE, THROUGH};
 use bpd_test::debuggee::{Fixture, line_of};
 
 /// the binary this test run built, not whatever `bpd` is on PATH
@@ -84,6 +84,7 @@ over_each_transport!(
     a_by_breakpoint_set_before_the_launch_binds_where_by_run_compiles_the_by_and_hits,
     a_by_breakpoint_in_a_module_by_run_imports_is_held_until_the_import_binds_it,
     a_by_program_started_through_its_runner_as_a_launcher_is_only_its_own_frames,
+    a_frame_at_no_line_says_so_rather_than_naming_line_zero_of_a_file,
     an_editor_can_run_a_whole_investigation_the_way_an_agent_can,
     an_editor_can_ask_what_changed_between_two_stops,
     an_editor_can_ask_why_the_ui_recomposed_and_be_handed_the_next_record_as_data,
@@ -1070,6 +1071,62 @@ fn a_by_program_started_through_its_runner_as_a_launcher_is_only_its_own_frames(
         "the step stopped somewhere on the way out: {:#?}",
         client.seen
     );
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+fn a_frame_at_no_line_says_so_rather_than_naming_line_zero_of_a_file(transport: Transport) {
+    // `by run` compiles a line the transpiler wrote on its own onto line 0 of
+    // the `.by`, because no line of it is behind it. measured in the IDE before
+    // this: `_LazyFrom.__getattr__ main.by:0` and `_soundness_iter main.by:0`,
+    // a place an editor opens at the top of the file. DAP's own rule is that a
+    // frame's line is 0 only when it has no source to be a line of
+    let build = Build::through();
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.request(
+        "launch",
+        &serde_json::json!({
+            "program": build.runner(),
+            "python": interpreter(),
+            "args": words(&build.arguments()),
+            "launcher": true,
+        }),
+    );
+    client.event("initialized");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": build.source },
+            "breakpoints": [ { "line": line_of(THROUGH, "return x * 2") } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let stopped = client.event("stopped");
+    let thread = stopped["body"]["threadId"].clone();
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    let helper = &stack["body"]["stackFrames"][1];
+    assert_eq!(helper["name"], "apply", "{stack}");
+    assert_eq!(helper["line"], 0, "{stack}");
+    assert!(
+        helper["source"]["path"].is_null(),
+        "a frame at no line names no file to open at line 0: {helper}"
+    );
+    assert_eq!(
+        helper["source"]["name"], "demo.by",
+        "and still says which file the code is in: {helper}"
+    );
+    let origin = helper["source"]["origin"].as_str().unwrap_or_default();
+    assert!(
+        origin.contains("no line"),
+        "the source says why there is no line: {helper}"
+    );
+
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    client.event("exited");
     client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));
     client.finish();

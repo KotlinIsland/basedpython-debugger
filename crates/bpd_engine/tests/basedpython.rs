@@ -20,7 +20,7 @@ use bpd_core::Running;
 use bpd_core::source_map::Mapping;
 use bpd_core::{Binding, Resolved, SourceBreakpoint, StopReason, Unbound};
 use bpd_engine::{Debuggee, Launched};
-use bpd_test::basedpython::{Build, GENERATED, SOURCE, line_table};
+use bpd_test::basedpython::{Build, GENERATED, SOURCE, THROUGH, line_table};
 
 /// a `.by` that raises, so a traceback has more than one frame of the build
 ///
@@ -582,6 +582,76 @@ fn a_frame_in_code_the_transpiler_wrote_is_line_zero_and_has_no_source_to_show()
     assert!(
         matches!(why, bpd_core::Unverified::TranspilerWritten { function, .. } if function == "boom"),
         "{why:?}"
+    );
+}
+
+/// where a step landed, as the `.by` line and the function it is in
+fn landed(debuggee: &mut Debuggee, kind: bpd_core::StepKind) -> (u32, String) {
+    debuggee.the_step(kind).expect("the step was armed");
+    match debuggee
+        .wait(&mut bpd_test::reporting::Unreported)
+        .expect("the step was waited for")
+    {
+        Running::Stopped { stop, .. } => {
+            let StopReason::Stepped { line, .. } = stop.reason else {
+                panic!("expected the step to land, got {:?}", stop.reason)
+            };
+            let stack = debuggee.the_stack(Some(1)).expect("the stack was answered");
+            (line, stack.frames[0].name().to_string())
+        }
+        other => panic!("expected the step to land, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_step_never_lands_in_code_the_transpiler_wrote_and_goes_through_it_instead() {
+    // line 0 is not a line. it is what `by run` gives an instruction no line of
+    // the `.by` is behind, and a step that stopped there would be holding the
+    // program at a place the editor cannot show — measured before this: a step
+    // into a call landed on `_LazyFrom.__getattr__ main.by:0` three times
+    // before it reached the function the line called. gdb's `step` goes through
+    // a function with no line information for the same reason
+    let build = Build::through();
+    let mut debuggee = by_run(&build);
+    let first = bpd_test::debuggee::line_of(THROUGH, "# through a helper that calls nothing");
+    let call = bpd_test::debuggee::line_of(THROUGH, "# through the helper");
+    set(&mut debuggee, first, &build.source);
+    run_to_stop(&mut debuggee);
+    debuggee
+        .set_breakpoints(Vec::new())
+        .expect("the breakpoint set was cleared");
+
+    // in, on a line whose only call is into helpers that call nothing of the
+    // program's: there is nothing to step into, so it is a step to the next line
+    // — and not a stop half way through the line it was asked about
+    assert_eq!(
+        landed(&mut debuggee, bpd_core::StepKind::In),
+        (call, "main".to_string()),
+        "the step in stopped somewhere other than the next line"
+    );
+
+    // in: through the helper, to the first line of the function it calls
+    let body = bpd_test::debuggee::line_of(THROUGH, "return x * 2");
+    assert_eq!(
+        landed(&mut debuggee, bpd_core::StepKind::In),
+        (body, "double".to_string()),
+        "the step in stopped in the helper rather than going through it"
+    );
+
+    // and the helper is still on the stack between them, reported as what it is
+    let stack = debuggee.the_stack(None).expect("the stack was answered");
+    let helper = &stack.frames[1];
+    assert_eq!(
+        (helper.name(), helper.line),
+        ("apply", 0),
+        "the helper is the frame the callee returns into: {stack:?}"
+    );
+
+    // out: back through the helper to the line that made the call
+    assert_eq!(
+        landed(&mut debuggee, bpd_core::StepKind::Out),
+        (call, "main".to_string()),
+        "the step out stopped in the helper rather than going through it"
     );
 }
 

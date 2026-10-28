@@ -138,6 +138,76 @@ pub fn line_table() -> Vec<Option<u32>> {
     ]
 }
 
+/// a `.by` whose call goes through a helper the transpiler wrote on its own
+///
+/// `apply` is what a lowering or a runtime check puts between a call and its
+/// callee — `by` emits `_soundness_iter`, `_LazyFrom.__getattr__` and others
+/// like it — and `by run` compiles it onto line 0 of the `.by`, because no line
+/// of the `.by` is behind it
+pub const THROUGH: &str = "\
+def double(x: int) -> int:
+    return x * 2
+
+
+def main() -> None:
+    seed = fetch(4)  # through a helper that calls nothing of the program's
+    value = apply(double, seed)  # through the helper
+    print(value)
+
+
+main()
+";
+
+/// the python `by` would have transpiled [`THROUGH`] to, helper first
+pub const THROUGH_GENERATED: &str = "\
+def fetch(x):
+    return inner(x)
+def inner(x):
+    return x
+def apply(f, x):
+    return f(x)
+
+
+def double(x: int) -> int:
+    return x * 2
+
+
+def main() -> None:
+    seed = fetch(4)
+    value = apply(double, seed)
+    print(value)
+
+
+main()
+";
+
+/// which `.by` line each line of [`THROUGH_GENERATED`] came from
+#[must_use]
+pub fn through_table() -> Vec<Option<u32>> {
+    vec![
+        // the helpers, which no `.by` line is behind
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(0), // def double
+        Some(1), // return x * 2
+        Some(2),
+        Some(3),
+        Some(4), // def main
+        Some(5), // seed = fetch(4)
+        Some(6), // value = apply(double, seed)
+        Some(7), // print(value)
+        Some(8),
+        Some(9),
+        Some(10), // main()
+    ]
+}
+
 /// a basedpython build directory: the `.by`, the python, and the map
 ///
 /// the fields are public because the tests assert about the paths themselves —
@@ -171,6 +241,12 @@ impl Build {
     #[must_use]
     pub fn demo() -> Self {
         Self::pair(SOURCE, GENERATED, &line_table())
+    }
+
+    /// the build of [`THROUGH`], [`THROUGH_GENERATED`] and [`through_table`]
+    #[must_use]
+    pub fn through() -> Self {
+        Self::pair(THROUGH, THROUGH_GENERATED, &through_table())
     }
 
     /// a build of `by` and `py`, mapped by `lines`

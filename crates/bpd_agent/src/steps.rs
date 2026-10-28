@@ -115,6 +115,17 @@ struct Step {
     landing: Landing,
     /// whether a frame this thread enters is what it follows next
     entering: bool,
+    /// whether the frame it follows is one it is only passing through — code at
+    /// no line, or the launcher's — rather than one it could land in
+    through: bool,
+    /// the line of the frame it follows that is not a landing, because the
+    /// step came back into the middle of it from a frame it passed through
+    ///
+    /// re-arming a frame part way through a line can offer that line again, and
+    /// a step in that came back out of a helper it could not land in has not
+    /// left the line it was asked about. what it lands on is a different line,
+    /// or a call — which is `step` in gdb, that goes on until the line changes
+    not_again: Option<u32>,
 }
 
 thread_local! {
@@ -156,6 +167,8 @@ pub(crate) fn arm(python: Python<'_>, thread: u64, kind: StepKind) -> PyResult<(
             Landing::Line
         },
         entering: matches!(kind, StepKind::In),
+        through: false,
+        not_again: None,
     };
 
     armed::hold(
@@ -225,8 +238,43 @@ fn reaching(python: Python<'_>, waited: Landing) -> PyResult<Option<StepKind>> {
             follow(python, step, frame, Landing::NotYet)?;
             return Ok(Outcome::Carry);
         }
+
+        // **line 0 is not a line.** it is what an instruction no source line is
+        // behind reports — `by run` gives every line the transpiler wrote on its
+        // own line 0 of the `.by` — and a step held there would be a stop the
+        // editor cannot show. so it goes on to the next line that is one, which
+        // for a helper with none at all is the line its caller resumes on. gdb's
+        // `step` goes through a function without line information for the same
+        // reason. a return that came back into such a line waits for the next
+        // line rather than the next instruction
+        let line = frames::line_now(&frame)?;
+        if line == 0 {
+            if waited == Landing::Instruction {
+                follow(python, step, frame, Landing::Line)?;
+            }
+            return Ok(Outcome::Carry);
+        }
+        if waited == Landing::Line && step.not_again == Some(line) {
+            return Ok(Outcome::Carry);
+        }
         Ok(Outcome::Land)
     })
+}
+
+/// a step in that is passing through code it cannot land in still lands in the
+/// first frame that code calls
+///
+/// following a frame stops a step in from entering others, because the frame it
+/// follows is where it has already arrived. a frame passed through is not
+/// arrived at: what a step into a call through a helper is looking for is the
+/// function the helper calls
+fn go_on_entering(python: Python<'_>, step: &mut Step) -> PyResult<()> {
+    if step.kind != StepKind::In || step.entering {
+        return Ok(());
+    }
+    step.entering = true;
+    armed::amend(step.thread, |interest| interest.entering = true);
+    session::refresh_events(python)
 }
 
 /// this thread entered a frame — a call, a resumption, or a `throw()` into one
@@ -271,7 +319,21 @@ pub(crate) fn left_frame(python: Python<'_>, finish: Finish) -> PyResult<()> {
             // is what the client is told about
             return Ok(Outcome::Abandon);
         }
-        follow(python, step, caller, finish.landing())?;
+        // a step in that went through a frame it could not land in, and came
+        // out again without entering anything, is still a step in from where it
+        // started: it goes on to the next line, or into the next call, rather
+        // than stopping mid-way through the line it was asked about
+        let passed_through = step.through && step.kind == StepKind::In;
+        let landing = if passed_through {
+            Landing::Line
+        } else {
+            finish.landing()
+        };
+        follow(python, step, caller.clone(), landing)?;
+        if passed_through {
+            step.not_again = Some(frames::line_now(&caller)?);
+            go_on_entering(python, step)?;
+        }
         Ok(Outcome::Carry)
     })?;
     Ok(())
@@ -330,9 +392,15 @@ fn follow(
     landing: Landing,
 ) -> PyResult<()> {
     let code = frame.getattr("f_code")?;
+    // a frame the step cannot land in is one it passes through: the launcher's
+    // code, and code at no line. decided here, as the step takes the frame up,
+    // because cpython may offer such a frame no line event at all — a table
+    // that gives every instruction line 0 has none to offer
+    step.through = frames::is_launchers(&code) || frames::line_now(&frame)? == 0;
     step.frame = frame.unbind();
     step.landing = landing;
     step.entering = false;
+    step.not_again = None;
 
     let stale = std::mem::take(&mut step.armed);
     armed::amend(step.thread, |interest| {
@@ -344,6 +412,9 @@ fn follow(
     }
 
     watch(python, step, &code)?;
+    if step.through {
+        go_on_entering(python, step)?;
+    }
     session::refresh_events(python)
 }
 

@@ -39,7 +39,7 @@ pub(crate) fn around(
 ) -> PyResult<Source> {
     let code = frame.getattr("f_code")?;
     let file: String = code.getattr("co_filename")?.extract()?;
-    let line: u32 = frame.getattr("f_lineno")?.extract()?;
+    let line: u32 = crate::frames::line_now(frame)?;
 
     if let Some(table) = crate::sources::staged_as(&file) {
         return staged(python, &code, file, line, around, &table);
