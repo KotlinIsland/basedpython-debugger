@@ -9,6 +9,14 @@
 use bpd_core::{Content, Omitted, Value};
 
 /// the one line shown beside a variable's name
+///
+/// a container is shown as **what it holds**, the way the program would print
+/// it — `[1.0, 3.14159]`, `{'square': 144.0}` — rather than as its type and a
+/// count. measured in the IDE before this: every list and dict read
+/// `list[6] — the depth of 0 that was applied ran out here. ask again with a
+/// larger 'depth'`, which is bpd's notice where the program's value goes. what
+/// the line cannot hold is counted on it — `… 4 more` — and a reason that is
+/// not "there was not room" is still said after it
 pub fn summary(value: &Value) -> String {
     let (shown, omitted) = match &value.content {
         Content::None => ("None".to_string(), None),
@@ -28,12 +36,10 @@ pub fn summary(value: &Value) -> String {
             length,
             omitted,
         } => (format!("b'{hex}' ({length} bytes)"), omitted.as_ref()),
-        Content::Sequence {
-            length, omitted, ..
-        } => (format!("{}[{length}]", value.kind), omitted.as_ref()),
-        Content::Mapping {
-            length, omitted, ..
-        } => (format!("{}{{{length}}}", value.kind), omitted.as_ref()),
+        Content::Sequence { omitted, .. } | Content::Mapping { omitted, .. } => {
+            let mut room = PREVIEW;
+            (preview(value, &mut room), said_beside(omitted.as_ref()))
+        }
         Content::Object { omitted, .. } => (value.kind.clone(), omitted.as_ref()),
         Content::Repr {
             text,
@@ -54,6 +60,132 @@ pub fn summary(value: &Value) -> String {
         Some(omitted) if shown.is_empty() => format!("not read — {omitted}"),
         Some(omitted) => format!("{shown} — {omitted}"),
         None => shown,
+    }
+}
+
+/// how many characters a container's preview grows to before the rest of it is
+/// counted rather than shown
+///
+/// one line beside a name, so about what an editor's variables view shows
+/// before it cuts the line itself — and a cut of the editor's would say nothing
+/// about how much was left out
+const PREVIEW: usize = 100;
+
+/// the reason a container was cut that its preview does not already say
+///
+/// a depth or a child limit that ran out is items that were not read, and the
+/// preview counts those where they would have been. a budget, a cycle or a type
+/// with nothing to read is a different fact, and is said after it
+fn said_beside(omitted: Option<&Omitted>) -> Option<&Omitted> {
+    omitted.filter(|omitted| !matches!(omitted, Omitted::Depth { .. } | Omitted::Children { .. }))
+}
+
+/// a value as the program would print it, in at most about `room` characters
+///
+/// what does not fit, or was not read, is counted where it would have been:
+/// `[1, 2, … 98 more]`. a value nothing was read of is `<list, not read>` —
+/// never an empty container, which would be a claim about what it holds
+fn preview(value: &Value, room: &mut usize) -> String {
+    let text = match &value.content {
+        Content::None => "None".to_string(),
+        Content::Bool { value } => (if *value { "True" } else { "False" }).to_string(),
+        Content::Int {
+            text,
+            omitted: None,
+        }
+        | Content::Float { text }
+        | Content::Repr { text, .. } => text.clone(),
+        Content::Str {
+            text,
+            characters,
+            omitted,
+        } => {
+            let cut = if omitted.is_some() || text.chars().count() < *characters {
+                "…"
+            } else {
+                ""
+            };
+            format!("'{}{cut}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
+        }
+        Content::Bytes {
+            hex,
+            length,
+            omitted,
+        } => {
+            let cut = if omitted.is_some() || hex.len() / 2 < *length {
+                "…"
+            } else {
+                ""
+            };
+            format!("bytes({length}: {hex}{cut})")
+        }
+        Content::Sequence { items, length, .. } => {
+            let (open, close) = brackets(&value.kind, length.min(&items.len()).to_owned());
+            let mut shown = Vec::new();
+            for item in items {
+                if *room == 0 {
+                    break;
+                }
+                shown.push(preview(item, room));
+            }
+            joined(&value.kind, open, close, &shown, *length)
+        }
+        Content::Mapping {
+            entries, length, ..
+        } => {
+            let mut shown = Vec::new();
+            for pair in entries {
+                if *room == 0 {
+                    break;
+                }
+                let key = preview(&pair.key, room);
+                let item = preview(&pair.value, room);
+                shown.push(format!("{key}: {item}"));
+            }
+            joined(&value.kind, "{", "}", &shown, *length)
+        }
+        Content::Unread { .. } => format!("<{}, not read>", value.kind),
+        // an object, an integer whose digits were not read, and a form this
+        // adapter has not been taught — `Content` is `#[non_exhaustive]` — are
+        // their type and nothing that would claim to be their value
+        _ => format!("<{}>", value.kind),
+    };
+    *room = room.saturating_sub(text.chars().count() + 2);
+    text
+}
+
+/// how a sequence of this type is written, and its brackets
+fn brackets(kind: &str, items: usize) -> (&'static str, &'static str) {
+    match kind {
+        // a one-element tuple is `(x,)`, and `(x)` is not a tuple
+        "tuple" if items == 1 => ("(", ",)"),
+        "tuple" => ("(", ")"),
+        "set" | "frozenset" => ("{", "}"),
+        _ => ("[", "]"),
+    }
+}
+
+/// the items shown, and a count of the ones that are not
+///
+/// the builtins are written as their literals and anything else as its type
+/// around one — `deque([1, 2])`, `OrderedDict({'a': 1})` — which is how most of
+/// them print themselves. an empty set is `set()`, because `{}` is a dict
+fn joined(kind: &str, open: &str, close: &str, shown: &[String], length: usize) -> String {
+    let rest = length.saturating_sub(shown.len());
+    let mut inside = shown.join(", ");
+    if rest > 0 {
+        if !inside.is_empty() {
+            inside.push_str(", ");
+        }
+        inside.push_str("… ");
+        inside.push_str(&rest.to_string());
+        inside.push_str(" more");
+    }
+    match kind {
+        "list" | "tuple" | "dict" => format!("{open}{inside}{close}"),
+        "set" if !inside.is_empty() => format!("{open}{inside}{close}"),
+        _ if inside.is_empty() => format!("{kind}()"),
+        _ => format!("{kind}({open}{inside}{close})"),
     }
 }
 
@@ -171,6 +303,64 @@ mod tests {
             !expandable(&by_children),
             "no depth answers a child limit, and the omission says to raise it"
         );
+    }
+
+    fn int(text: &str) -> Value {
+        value(
+            "int",
+            Content::Int {
+                text: text.to_string(),
+                omitted: None,
+            },
+        )
+    }
+
+    #[test]
+    fn a_container_is_shown_as_what_it_holds_with_what_was_not_read_counted() {
+        // the children limit cut two of five: they are counted where they
+        // would have been, rather than the line ending as though it were whole
+        let cut = value(
+            "list",
+            Content::Sequence {
+                items: vec![int("1"), int("2"), int("3")],
+                length: 5,
+                omitted: Some(Omitted::Children {
+                    length: 5,
+                    limit: 3,
+                }),
+            },
+        );
+        assert_eq!(summary(&cut), "[1, 2, 3, … 2 more]");
+
+        // a nested container the depth did not reach is said to be unread —
+        // never shown empty, which would be a claim about what it holds
+        let nested = value(
+            "list",
+            Content::Sequence {
+                items: vec![value(
+                    "dict",
+                    Content::Unread {
+                        omitted: Omitted::Depth { limit: 1 },
+                    },
+                )],
+                length: 1,
+                omitted: None,
+            },
+        );
+        assert_eq!(summary(&nested), "[<dict, not read>]");
+
+        // and a reason that is not "there was not room" is still said
+        let budget = value(
+            "list",
+            Content::Sequence {
+                items: vec![int("1")],
+                length: 9,
+                omitted: Some(Omitted::Budget { limit: 8 }),
+            },
+        );
+        let said = summary(&budget);
+        assert!(said.starts_with("[1, … 8 more] — "), "said {said}");
+        assert!(said.contains("budget"), "said {said}");
     }
 
     #[test]

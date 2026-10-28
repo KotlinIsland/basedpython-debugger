@@ -97,6 +97,7 @@ over_each_transport!(
     a_client_is_refused_the_same_interpreter_the_command_line_is,
     a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_bpds,
     a_program_reads_the_adapters_stdin_when_the_client_says_it_is_the_programs,
+    a_container_shows_what_it_holds_and_never_a_notice_in_its_place,
     everything_a_program_printed_is_on_the_wire_before_it_is_reported_over,
     a_refused_launch_ends_the_session_instead_of_leaving_it_open,
     the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program,
@@ -2284,6 +2285,88 @@ fn a_program_reads_the_adapters_stdin_when_the_client_says_it_is_the_programs(
         !said.contains("Content-Length"),
         "and nothing of the protocol: {said:?}"
     );
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+/// containers of every builtin shape, nested, one too long for a line
+const CONTAINERS: &str = r#"def show():
+    floats = [1.0, 3.5]
+    named = {"k": floats}
+    single = (1,)
+    nothing = set()
+    long = list(range(500))
+    return floats, named, single, nothing, long  # held here
+
+
+show()
+"#;
+
+fn a_container_shows_what_it_holds_and_never_a_notice_in_its_place(transport: Transport) {
+    // measured in the IDE before this: every list and dict in the variables
+    // view read `list[6] — the depth of 0 that was applied ran out here. ask
+    // again with a larger 'depth'`, which is bpd's notice where the program's
+    // value goes, and opening one was the only way to see anything in it
+    let fixture = Fixture::new("containers", CONTAINERS);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line_of(CONTAINERS, "# held here") } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let stopped = client.event("stopped");
+    let thread = stopped["body"]["threadId"].clone();
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    let frame = stack["body"]["stackFrames"][0]["id"].clone();
+    let scopes = client.request("scopes", &serde_json::json!({ "frameId": frame }));
+    let local = scopes["body"]["scopes"][0]["variablesReference"].clone();
+    let read = client.request(
+        "variables",
+        &serde_json::json!({ "variablesReference": local }),
+    );
+
+    assert_eq!(variable(&read, "floats")["value"], "[1.0, 3.5]", "{read}");
+    assert_eq!(
+        variable(&read, "named")["value"],
+        "{'k': [1.0, 3.5]}",
+        "{read}"
+    );
+    assert_eq!(variable(&read, "single")["value"], "(1,)", "{read}");
+    assert_eq!(variable(&read, "nothing")["value"], "set()", "{read}");
+    let long = variable(&read, "long")["value"]
+        .as_str()
+        .expect("a value is a string")
+        .to_string();
+    assert!(
+        long.starts_with("[0, 1, 2, ") && long.ends_with(" more]"),
+        "what does not fit on the line is counted rather than dropped: {long}"
+    );
+    assert!(
+        !read.to_string().contains("ran out here"),
+        "no notice stands where a value goes: {read}"
+    );
+
+    // and opening one shows its items, which are what it holds
+    let opened = client.request(
+        "variables",
+        &serde_json::json!({ "variablesReference": variable(&read, "named")["variablesReference"] }),
+    );
+    assert_eq!(variable(&opened, "k")["value"], "[1.0, 3.5]", "{opened}");
+
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    client.event("exited");
+    client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));
     client.finish();
 }

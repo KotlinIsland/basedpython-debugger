@@ -379,9 +379,22 @@ every one of them is a field of `bpd_core::Detail`:
     cannot interrupt it once it has started, so a `__repr__` that hangs hangs the
     debuggee
 - `depth` applies where a value is read once and kept — an evaluated
-    expression, and the value a write left behind. the variables *tree* is a
-    different thing: opening a node re-reads its scope one level deeper, so how
-    far it goes is however far the client has opened it
+    expression, and the value a write left behind — and in the variables *tree*
+    it is how far **below** the level being listed each read goes, at least one.
+    opening a node re-reads its scope from there, so how far the tree goes is
+    however far the client has opened it, and every line in it can show what
+    its value holds
+
+a container's line is **what it holds**, written the way the program would
+print it — `[1.0, 3.5]`, `{'k': [1.0, 3.5]}`, `(1,)`, `set()`,
+`deque([1, 2])` — up to about a hundred characters, with what does not fit or
+was not read counted where it would have been: `[0, 1, 2, … 480 more]`. a
+container the depth did not reach inside another is `<dict, not read>`, never
+an empty one. measured in the IDE before this: every list and dict read
+`list[6] — the depth of 0 that was applied ran out here`, which is bpd's notice
+where the program's value goes. a budget, a cycle or a type with nothing to
+read is still said after the preview, because those are not "there was not
+room"
 
 ## where DAP's model and bpd's differ
 

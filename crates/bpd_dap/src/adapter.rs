@@ -2407,10 +2407,19 @@ impl Adapter {
         scope: Scope,
         path: &[Step],
     ) -> Result<Vec<serde_json::Value>, Aborted> {
+        // read to the depth the configuration asks for **below** the level being
+        // listed, and at least one: a variable's line shows what it holds, and
+        // what a container holds is one level below it. reading to exactly the
+        // level listed — which this used to — left every container's line as
+        // the depth notice and nothing of the program's
+        let below = self.configuration().variables.depth.max(1);
         let detail = Detail {
-            depth: u32::try_from(path.len()).map_err(|_| {
-                Aborted::from("a value cannot be expanded four billion levels down")
-            })?,
+            depth: u32::try_from(path.len())
+                .ok()
+                .and_then(|listed| listed.checked_add(below))
+                .ok_or_else(|| {
+                    Aborted::from("a value cannot be expanded four billion levels down")
+                })?,
             ..self.configuration().variables
         };
 
