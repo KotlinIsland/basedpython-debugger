@@ -474,6 +474,46 @@ second()
 }
 
 #[test]
+fn a_breakpoint_moves_onto_a_line_whose_lambda_or_generator_runs_in_the_same_definition() {
+    // a lambda and a generator expression are code objects of their own, each
+    // spanning only the line it is written on — which is a line the function
+    // around it runs too. moving onto that line moves nowhere in time, and was
+    // refused as a move into `<genexpr>` before this
+    const INLINE: &str = r"def total(xs):
+    # the sum
+    whole = sum(x for x in xs)
+
+    key = sorted(xs, key=lambda x: -x)
+    return whole, key
+
+
+total([1, 2])
+";
+    let fixture = Fixture::new("inline", INLINE);
+    let comment = line_of(INLINE, "# the sum");
+    let blank = line_of(INLINE, "whole = sum") + 1;
+
+    let mut debuggee = launch(&fixture);
+    let resolved = debuggee
+        .set_breakpoints(at(&fixture.path(), &[(1, comment), (2, blank)]))
+        .expect("the breakpoint request was answered");
+
+    for (resolution, next, inside) in [
+        (&resolved[0], line_of(INLINE, "whole = sum"), "total"),
+        (&resolved[1], line_of(INLINE, "key = sorted"), "total"),
+    ] {
+        let (line, sites) = bound(resolution);
+        assert_eq!(line, next, "{resolution:?}");
+        assert!(
+            sites.iter().any(|site| site.qualname == inside),
+            "the move binds in the function the line runs in: {sites:?}"
+        );
+    }
+
+    finish(debuggee);
+}
+
+#[test]
 fn two_breakpoints_that_land_on_one_line_are_both_reported() {
     let fixture = Fixture::new("widget", WIDGET);
     let comment = line_of(WIDGET, "# a comment, which is not executable");

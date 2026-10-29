@@ -109,9 +109,12 @@ rather than against numbers written down here:
     import, and stopped there before either function had run — it said it had
     moved, and where it went was another moment as well as another line. a
     blank line between two statements of one function is inside exactly the
-    definitions they are, and still moves. when more than one definition's edge
-    is in between, the widest is named, because a `def` line is where cpython
-    3.14's one-line `__annotate__` for the function begins as well
+    definitions they are, and still moves. a code object whose every line is
+    also run by the code around the asked-for line is no edge: a lambda or a
+    generator expression inside a statement, and cpython 3.14's one-line
+    `__annotate__` on a `def` line, run at the moment that statement does, so a
+    comment above `total = sum(x for x in xs)` moves onto it. when more than one
+    definition's edge is in between, the widest is named
 
 a line of `0` is never a breakpoint. cpython attributes a module's leading
 `RESUME` to line 0, source lines are 1-based, and a breakpoint bound there could

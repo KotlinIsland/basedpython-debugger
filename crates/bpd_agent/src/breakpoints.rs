@@ -590,23 +590,44 @@ fn resolve(
 /// a move goes no further than the definitions the asked-for line is in. every
 /// unit of the file is a definition — the module, a class body, a function, a
 /// lambda — and its lines run from its first to the last its code runs on. one
-/// that holds exactly one of the two lines is an edge the move would cross
+/// that holds exactly one of the two lines is an edge the move would cross —
+/// unless every line its code runs on is also run by a unit that holds the
+/// asked-for line. that is a lambda or a generator expression inside a
+/// statement, and cpython 3.14's `__annotate__` on a `def` line: what runs
+/// there runs in the code around it too, at the same time, so it is no edge
 ///
-/// the widest edge is the one named. a `def` line is where its function begins
-/// and also where cpython 3.14's `__annotate__` for it does, which spans that
-/// one line, and the function is the definition a person means
+/// the widest edge is the one named, because the definition a person means is
+/// the outermost one the move leaves or enters
 fn crossing(request: &SourceBreakpoint, line: u32, units: &[code::Unit]) -> Option<Unbound> {
     if line == request.line {
         return None;
     }
+    let span = |unit: &code::Unit| {
+        let last = unit.lines.keys().copied().filter(|&at| at != 0).max()?;
+        Some((unit.first_line, last))
+    };
+    let around: Vec<&code::Unit> = units
+        .iter()
+        .filter(|unit| {
+            span(unit).is_some_and(|(first, last)| (first..=last).contains(&request.line))
+        })
+        .collect();
+    let inline = |unit: &code::Unit| {
+        unit.lines.keys().filter(|&&at| at != 0).all(|at| {
+            around
+                .iter()
+                .any(|other| !std::ptr::eq(*other, unit) && other.lines.contains_key(at))
+        })
+    };
     let (_, definition, into) = units
         .iter()
+        .filter(|unit| !inline(unit))
         .filter_map(|unit| {
-            let last = unit.lines.keys().copied().filter(|&at| at != 0).max()?;
-            let holds = |at: u32| unit.first_line <= at && at <= last;
+            let (first, last) = span(unit)?;
+            let holds = |at: u32| first <= at && at <= last;
             (holds(request.line) != holds(line)).then(|| {
                 (
-                    last.saturating_sub(unit.first_line),
+                    last.saturating_sub(first),
                     unit.qualname.clone(),
                     holds(line),
                 )
