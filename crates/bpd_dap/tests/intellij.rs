@@ -154,6 +154,11 @@ fn every_attribute_the_plugin_leaves_out_is_one_it_could_not_honour() {
         // this plugin starts `bpd dap` on its pipes, where the adapter's stdin
         // is the protocol, and the adapter refuses it there
         String::from("inheritStdin"),
+        // a run configuration has no exception breakpoints of its own: the
+        // IDE's are the platform's, sent as `setExceptionBreakpoints`. the
+        // rules a plugin sends beside them come from those breakpoints, which
+        // this registration does not read
+        String::from("exceptionClasses"),
     ]
     .into();
 

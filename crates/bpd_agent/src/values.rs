@@ -642,7 +642,7 @@ fn is_descriptor(value: &Bound<'_, PyAny>) -> PyResult<bool> {
 /// end in for a metaclass that adds nothing, and calling them reads the type's
 /// storage and runs nothing else. `type` itself is an instance of `type`, so
 /// looking them up on it reaches no program code either
-fn type_own<'py>(class: &Bound<'py, PyAny>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+pub(crate) fn type_own<'py>(class: &Bound<'py, PyAny>, name: &str) -> PyResult<Bound<'py, PyAny>> {
     let python = class.py();
     python
         .get_type::<pyo3::types::PyType>()

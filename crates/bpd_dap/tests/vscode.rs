@@ -187,6 +187,30 @@ fn every_contributed_attribute_declares_the_type_and_the_default_the_adapter_use
             "debugChildren" => flag(schema, adapter.debug_children),
             "watchRecompositions" => flag(schema, adapter.watch_recompositions),
             "threadSettleMs" => whole(schema, adapter.thread_settle_ms),
+            // a list of rules, each exactly the fields the core reads of one,
+            // all of them required because none of them has a default there
+            "exceptionClasses" => {
+                assert_eq!(schema["type"], "array");
+                assert!(
+                    schema["default"].is_null(),
+                    "absent is no rules, and a declared empty list would be a second \
+                     way of saying it"
+                );
+                let rule = &schema["items"];
+                assert_eq!(rule["additionalProperties"], false);
+                assert_eq!(
+                    declared(rule),
+                    fields_of::<bpd_core::ExceptionClass>(),
+                    "a rule is offered exactly as the core reads one"
+                );
+                let required: BTreeSet<String> = rule["required"]
+                    .as_array()
+                    .expect("a rule says which fields it needs")
+                    .iter()
+                    .map(|field| field.as_str().expect("a field name").to_string())
+                    .collect();
+                assert_eq!(required, fields_of::<bpd_core::ExceptionClass>());
+            }
             "variables" => {
                 assert_eq!(schema["type"], "object");
                 assert!(

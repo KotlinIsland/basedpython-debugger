@@ -237,15 +237,13 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
              names, with `always`, `unhandled` or `never`",
         ),
 
-        // an exception option is a path and a break mode and nothing else, and
-        // `breakpointModes` attach to filters, not to options. so a rule from
-        // DAP ignores library files exactly when `justMyCode` is on
-        Facet::ExceptionClassLibraries => Reach::Unreachable {
-            why: "an `ExceptionOptions` is a path and a `breakMode`, and DAP's \
-                  `breakpointModes` attach to filters rather than to options, so \
-                  there is no field for one class's library choice. a rule from DAP \
-                  follows the session's `justMyCode`",
-        },
+        // an exception option is a path and a break mode and nothing else, so
+        // the library choice comes in beside it, on the rules no IDE's DAP
+        // layer sends
+        Facet::ExceptionClassLibraries => Reach::Direct(
+            "`libraries` on each rule of `bpd/setExceptionClasses`, or of \
+             `exceptionClasses` in the `launch` configuration",
+        ),
 
         // a field of the launch configuration too, and only on the transport
         // whose stdin is not the protocol

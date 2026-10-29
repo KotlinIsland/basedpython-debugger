@@ -231,10 +231,19 @@ pub(crate) fn about_the_process(python: Python<'_>, request: FromEngine) -> PyRe
             }
             exceptions::watch(raised, uncaught, classes);
             refresh_events(python)?;
+            let classes = exceptions::classes()
+                .into_iter()
+                .map(|rule| {
+                    Ok(bpd_core::ArmedClass {
+                        found: exceptions::found(python, &rule.name)?,
+                        rule,
+                    })
+                })
+                .collect::<PyResult<_>>()?;
             attach::send(&FromAgent::ExceptionBreakpointsSet {
                 raised,
                 uncaught,
-                classes: exceptions::classes(),
+                classes,
             });
         }
         FromEngine::DebugChildren { on } => debug_children(python, on)?,

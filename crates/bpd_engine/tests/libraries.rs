@@ -322,6 +322,148 @@ fn a_rule_for_a_class_decides_for_it_and_its_subclasses_in_place_of_the_filters(
     );
 }
 
+const NAMES: &str = r"import json
+import os
+
+looked = []
+
+
+class Loud(type):
+    def __getattribute__(cls, name):
+        looked.append(name)
+        return super().__getattribute__(name)
+
+
+class Mine(Exception):
+    class Inner(Exception):
+        pass
+
+
+class Watched(Exception, metaclass=Loud):
+    class Inner(Exception):
+        pass
+
+
+class Plain:
+    pass
+
+
+Alias = Mine
+
+
+def function():
+    pass
+
+
+ready = 1
+";
+
+#[test]
+fn what_a_rules_name_finds_is_read_off_the_program_without_importing_or_running_anything() {
+    use bpd_core::ClassFound;
+
+    let fixture = Fixture::new("names", NAMES);
+    let mut debuggee = launch(&fixture);
+    held_at(&mut debuggee, &fixture, line_of(NAMES, "ready = 1"));
+
+    let names = [
+        "LookupError",
+        "json.decoder.JSONDecodeError",
+        "__main__.Mine.Inner",
+        "__main__.Watched.Inner",
+        "__main__.Alias",
+        "os.error",
+        "__main__.function",
+        "__main__.Plain",
+        "NoSuchError",
+        "email.errors.MessageError",
+        "__main__..Mine",
+    ];
+    let set = debuggee
+        .set_exception_rules(
+            false,
+            false,
+            names.iter().map(|name| rule(name, true, true)).collect(),
+        )
+        .expect("the exception breakpoints were set");
+    let found: Vec<(&str, ClassFound)> = set
+        .classes
+        .iter()
+        .map(|armed| (armed.rule.name.as_str(), armed.found.clone()))
+        .collect();
+    let unresolved = |why: &str| ClassFound::Unresolved {
+        why: why.to_string(),
+    };
+    assert_eq!(
+        found,
+        [
+            ("LookupError", ClassFound::Class),
+            ("json.decoder.JSONDecodeError", ClassFound::Class),
+            ("__main__.Mine.Inner", ClassFound::Class),
+            ("__main__.Watched.Inner", ClassFound::Class),
+            (
+                "__main__.Alias",
+                ClassFound::Renamed {
+                    named: "__main__.Mine".to_string()
+                }
+            ),
+            (
+                "os.error",
+                ClassFound::Renamed {
+                    named: "OSError".to_string()
+                }
+            ),
+            (
+                "__main__.function",
+                ClassFound::NotAnException {
+                    what: "a `function`, not a class".to_string()
+                }
+            ),
+            (
+                "__main__.Plain",
+                ClassFound::NotAnException {
+                    what: "a class that does not derive from `BaseException`".to_string()
+                }
+            ),
+            ("NoSuchError", unresolved("`builtins` has no `NoSuchError`")),
+            (
+                "email.errors.MessageError",
+                unresolved("`email.errors` is not imported; `email` is not imported")
+            ),
+            (
+                "__main__..Mine",
+                unresolved("`__main__..Mine` is not a dotted name, so nothing can be called it")
+            ),
+        ],
+        "every rule is held, and each says what its name is in the program now"
+    );
+
+    // looking was all it did: the module it did not find is still not
+    // imported, and the metaclass that records every attribute asked of its
+    // class was asked nothing
+    let frame = debuggee
+        .the_stack(Some(1))
+        .expect("the stack was answered")
+        .frames[0]
+        .id;
+    for (expression, expected) in [
+        ("'email.errors' in __import__('sys').modules", false),
+        ("looked == []", true),
+    ] {
+        match debuggee
+            .evaluate(frame, expression, bpd_core::Detail::default())
+            .expect("the expression was evaluated")
+        {
+            bpd_core::Evaluated::Value { value } => assert_eq!(
+                value.content,
+                bpd_core::Content::Bool { value: expected },
+                "`{expression}` after the rules were set"
+            ),
+            bpd_core::Evaluated::Raised { error } => panic!("`{expression}` raised {error}"),
+        }
+    }
+}
+
 #[test]
 fn a_rule_that_ignores_library_files_stops_where_a_libraries_raise_arrives() {
     let fixture = Fixture::new("classes", CLASSES);

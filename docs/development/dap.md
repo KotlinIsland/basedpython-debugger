@@ -223,20 +223,21 @@ the same configuration body is what a vs code `launch.json` entry holds:
 every field here is read. one that were parsed and ignored would be a setting a
 user could see accepted and never get
 
-| field            | default   | what it does                                            |
-| ---------------- | --------- | ------------------------------------------------------- |
-| `program`        | required  | the script to run                                       |
-| `args`           | `[]`      | arguments for the program, exactly as it receives them  |
-| `launcher`       | `false`   | `program` starts the program rather than being it       |
-| `justMyCode`     | `true`    | stop and step only in the program's own code            |
-| `inheritStdin`   | `false`   | the program reads the stdin `--listen` was started with |
-| `python`         | `python3` | the interpreter, resolved on `PATH` like any command    |
-| `stopOnEntry`    | `false`   | stay stopped before the first statement                 |
-| `stopTheWorld`   | `false`   | hold every thread that can be held, for each stop       |
-| `debugChildren`  | `false`   | debug a child the program **forks** — see below         |
-| `console`        | see below | where the program runs, and what its streams are        |
-| `variables`      | see below | how much of a value to read                             |
-| `threadSettleMs` | `50`      | how far apart the two samples a thread census compares  |
+| field              | default   | what it does                                            |
+| ------------------ | --------- | ------------------------------------------------------- |
+| `program`          | required  | the script to run                                       |
+| `args`             | `[]`      | arguments for the program, exactly as it receives them  |
+| `launcher`         | `false`   | `program` starts the program rather than being it       |
+| `justMyCode`       | `true`    | stop and step only in the program's own code            |
+| `inheritStdin`     | `false`   | the program reads the stdin `--listen` was started with |
+| `python`           | `python3` | the interpreter, resolved on `PATH` like any command    |
+| `stopOnEntry`      | `false`   | stay stopped before the first statement                 |
+| `stopTheWorld`     | `false`   | hold every thread that can be held, for each stop       |
+| `debugChildren`    | `false`   | debug a child the program **forks** — see below         |
+| `console`          | see below | where the program runs, and what its streams are        |
+| `variables`        | see below | how much of a value to read                             |
+| `threadSettleMs`   | `50`      | how far apart the two samples a thread census compares  |
+| `exceptionClasses` | none      | a rule per exception class, beside the filters — below  |
 
 `bpd` holds **every** program before its first statement — that is how a
 breakpoint binds against a real interpreter rather than against a guess about
@@ -666,8 +667,92 @@ whatever is at that index now
 `bpd_core::ExceptionClass` rule: the class is the last segment of its path,
 `always` stops at the raise, `unhandled` where it leaves the program, `never`
 at neither, and `userUnhandled` is refused by name. each gets its own entry in
-the response, after the filters', verified when the agent holds it. the whole
-of it is [stepping](stepping.md#a-rule-per-class)
+the response, after the filters', verified when the agent holds it and the
+program has the class — see below. the whole of it is
+[stepping](stepping.md#a-rule-per-class)
+
+### and a rule per class has a way in of its own
+
+an IDE's DAP layer can own `setExceptionBreakpoints`. the intellij platform's
+does: it sends the request itself, before the launch and again on every change,
+with `filters` and never `exceptionOptions`, and a plugin can neither add to it
+nor send its own without replacing the platform's filters. an option has no
+field for a class's library choice either. so the rules have a second way in,
+which no platform sends — `exceptionClasses` in the launch configuration, armed
+before the program runs a line, and a request that replaces them at any time
+after:
+
+```json
+{
+  "command": "bpd/setExceptionClasses",
+  "arguments": {
+    "classes": [
+      {
+        "name": "KeyError",
+        "raised": true,
+        "uncaught": false,
+        "libraries": false
+      }
+    ]
+  }
+}
+```
+
+each rule is exactly a `bpd_core::ExceptionClass`, all four fields required —
+the shape MCP's `classes` takes. the two ways in **replace only their own
+half**: `setExceptionBreakpoints` sets the filters and the options and leaves the
+rules alone, and `bpd/setExceptionClasses` sets the rules and leaves the filters
+and options alone. the agent holds one table, sent as the rules and then each
+option no rule names, so where both name a class the rule decides — it is the
+one that can say what it does about a library's raise. everything past that is
+how one table decides: the nearest class of the exception's method resolution
+order wins
+
+the answer is one entry per rule, in the order asked, each a DAP `Breakpoint`'s
+three fields with the rule's `name` beside them:
+
+```json
+{
+  "classes": [
+    { "name": "KeyError", "verified": true },
+    {
+      "name": "email.errors.MessageError",
+      "verified": false,
+      "reason": "pending",
+      "message": "no class the program has now is `email.errors.MessageError`: `email.errors` is not imported; `email` is not imported. the rule is held, …"
+    },
+    {
+      "name": "os.error",
+      "verified": false,
+      "reason": "failed",
+      "message": "`os.error` is a class that gives itself the name `OSError`, … name it `OSError`"
+    }
+  ]
+}
+```
+
+`verified` is the agent holding exactly this rule **and** the program having the
+class now. a class the program does not have yet is `pending`, the word a
+breakpoint in a module not imported yet gets: the rule is held and decides for
+the class the moment one is raised. `failed` is a rule that will not decide as
+asked — its name is an alias, or something that is not an exception class, or
+another rule for the same class comes first. what the program has is read off
+`sys.modules` and the namespaces under it without importing anything, so asking
+again later — the same set, sent again — is how a `pending` rule is seen to
+resolve. before there is a program every rule is `pending` and held until there
+is one; the launch's own rules are answered nowhere, so a client that wants
+their verdicts sends them again
+
+an options entry of `setExceptionBreakpoints` is answered the same way, and one
+a rule of the same class decides in place of is `failed` and says so. a debugged
+child starts with the rules its parent holds when it forks, not the ones the
+parent was launched with
+
+**finding out whether a bpd has it**: send `bpd/setExceptionClasses`. a bpd
+without it refuses it as `` bpd's DAP adapter does not implement
+`bpd/setExceptionClasses` ``, and ignores `exceptionClasses` in a launch —
+`Configuration` does not deny unknown fields, because a launch carries the
+client's own keys
 
 ### the console runs statements, and nothing else does
 

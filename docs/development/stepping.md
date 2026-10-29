@@ -408,14 +408,44 @@ beside them, and a rule decides for its class **in place of** the filters:
     session's just-my-code is; an exception no rule names takes the filter's,
     which is just-my-code
 
-DAP carries rules as `exceptionOptions`: the last segment of an option's path is
-the class (vs code writes `Python Exceptions` above it), `always` stops at the
-raise, `unhandled` where it leaves the program, and `never` at neither.
-`userUnhandled` is refused by name, because bpd stops where an exception leaves
-the program and not where it leaves the program's code. an option has no field
-for one class's library choice, and `breakpointModes` attach to filters rather
-than options, so a rule from DAP ignores library files exactly when `justMyCode`
-is on. MCP carries `libraries` on each rule
+DAP carries rules two ways. as `exceptionOptions`: the last segment of an
+option's path is the class (vs code writes `Python Exceptions` above it),
+`always` stops at the raise, `unhandled` where it leaves the program, and
+`never` at neither. `userUnhandled` is refused by name, because bpd stops where
+an exception leaves the program and not where it leaves the program's code. an
+option has no field for one class's library choice, and `breakpointModes`
+attach to filters rather than options, so an option ignores library files
+exactly when `justMyCode` is on. and as rules of their own, `exceptionClasses`
+in the launch and `bpd/setExceptionClasses` after it, which carry `libraries`
+and which no IDE's DAP layer sends — each way in replaces only its own half, and
+where both name a class the rule decides. [DAP](dap.md#and-a-rule-per-class-has-a-way-in-of-its-own)
+has the whole of it. MCP carries `libraries` on each rule of
+`set_exception_breakpoints`
+
+### what a rule's name finds
+
+a rule decides for a class **by the name the class gives itself** — its
+`__module__` and `__qualname__`, read through `type`'s own descriptors so a
+metaclass is not asked — so a rule is armed whatever its name turns out to be.
+what can be known when it is set is whether the program already has that class,
+and every answer says, per rule:
+
+| found              | what it means                                                                                                                                |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `class`            | an exception class of the program's, which gives itself this name                                                                            |
+| `unresolved`       | nothing imported now has the name: the module is not imported yet, or the class is one no module holds. `why` says what was looked in        |
+| `not_an_exception` | the name is something else — a function, a class not derived from `BaseException`                                                            |
+| `renamed`          | an alias, like `os.error` for `OSError`: `named` is what the class calls itself, and the rule needs that name, because it never decides here |
+
+it is read out of `sys.modules` and the namespaces under it, every split of the
+name into a module and a qualified name tried with the longest module first, so
+`json.decoder.JSONDecodeError` is found in `json.decoder` and
+`__main__.Outer.Inner` through `Outer`'s own namespace. nothing is imported to
+answer, because importing a module to check a name is running the program's code
+for it, and no `__getattr__` of the program's is run.
+`what_a_rules_name_finds_is_read_off_the_program_without_importing_or_running_anything`
+in `crates/bpd_engine/tests/libraries.rs` checks each answer and that a module
+it did not find is still not imported
 
 ### uncaught
 

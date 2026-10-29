@@ -311,8 +311,33 @@ fn an_exception_option_reaches_the_session_as_a_rule_for_its_class() {
             .iter()
             .map(|rule| (rule.name.as_str(), rule.raised, rule.uncaught))
             .collect::<Vec<_>>(),
-        [("KeyError", true, false)],
-        "the last segment of the path is the class, and `always` stops where one is raised"
+        [("ValueError", true, false), ("KeyError", true, false)],
+        "the last segment of the path is the class, and `always` stops where one is \
+         raised — sent after the rule `bpd/setExceptionClasses` set, which it did not \
+         replace"
+    );
+}
+
+#[test]
+fn a_rule_from_bpd_set_exception_classes_reaches_the_session_with_its_own_library_choice() {
+    // the claim `reach_of_facet` makes about `Facet::ExceptionClassLibraries`.
+    // the launch left `justMyCode` on, so an option ignores library files and
+    // the rule says on its own that it does not
+    let asked = Asked::default();
+    drive(&asked);
+    let classes = asked
+        .lock()
+        .expect("the recorder is not poisoned")
+        .classes
+        .clone();
+    assert_eq!(
+        classes
+            .iter()
+            .map(|rule| (rule.name.as_str(), rule.libraries))
+            .collect::<Vec<_>>(),
+        [("ValueError", true), ("KeyError", false)],
+        "{}",
+        Facet::ExceptionClassLibraries.name()
     );
 }
 
@@ -1024,6 +1049,16 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
                 "breakMode": "always",
             }],
         }),
+    );
+    // the other way a rule per class comes in, and the only one that carries a
+    // class's own library choice
+    answer(
+        &mut client_writes,
+        &mut reader,
+        "bpd/setExceptionClasses",
+        serde_json::json!({ "classes": [
+            { "name": "ValueError", "raised": true, "uncaught": false, "libraries": true },
+        ] }),
     );
     answer(
         &mut client_writes,
@@ -1865,7 +1900,13 @@ impl Session for FakeSession {
                 Response::ExceptionBreakpoints(bpd_core::ExceptionBreakpoints {
                     raised,
                     uncaught,
-                    classes,
+                    classes: classes
+                        .into_iter()
+                        .map(|rule| bpd_core::ArmedClass {
+                            rule,
+                            found: bpd_core::ClassFound::Class,
+                        })
+                        .collect(),
                 })
             }
             Request::DebugChildren { on } => Response::DebuggingChildren { on },

@@ -107,6 +107,33 @@
                 "default": false,
                 "description": "hold every thread that can be held for the duration of each stop. off by default: a stop holds one thread and the rest of the program keeps running. a thread parked in a C call cannot be held and is named rather than counted as held"
               },
+              "exceptionClasses": {
+                "type": "array",
+                "description": "a rule per exception class, armed before the program runs a line. each decides for its class and every subclass, the nearest class's rule deciding, in place of the raised and uncaught filters. beside the exception options rather than through them: where both name a class, this one decides",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name", "raised", "uncaught", "libraries"],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "description": "the class as module.QualName, or a builtin's bare name: ValueError, json.decoder.JSONDecodeError"
+                    },
+                    "raised": {
+                      "type": "boolean",
+                      "description": "stop where one is raised"
+                    },
+                    "uncaught": {
+                      "type": "boolean",
+                      "description": "stop where one leaves the program"
+                    },
+                    "libraries": {
+                      "type": "boolean",
+                      "description": "stop where a library's code raises one, rather than where it first arrives in the program's own code"
+                    }
+                  }
+                }
+              },
               "debugChildren": {
                 "type": "boolean",
                 "default": false,

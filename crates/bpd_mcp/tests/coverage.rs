@@ -1452,7 +1452,13 @@ impl Session for FakeSession {
                 Response::ExceptionBreakpoints(bpd_core::ExceptionBreakpoints {
                     raised,
                     uncaught,
-                    classes,
+                    classes: classes
+                        .into_iter()
+                        .map(|rule| bpd_core::ArmedClass {
+                            rule,
+                            found: bpd_core::ClassFound::Class,
+                        })
+                        .collect(),
                 })
             }
             Request::DebugChildren { on } => Response::DebuggingChildren { on },

@@ -85,6 +85,7 @@ use bpd_core::{
 
 use crate::capabilities::capabilities;
 use crate::configuration::Configuration;
+use crate::exceptions::{self, Exceptions};
 use crate::handles::{Handle, Handles, Step};
 use crate::render::{expandable, summary};
 use crate::session::{
@@ -431,14 +432,14 @@ struct Adapter {
     /// where it really went. an id that is not in here was answered against a
     /// real session and needs no second answer
     unarmed: BTreeSet<u32>,
-    /// the exception filters asked for while there was no program, if any
+    /// what the two requests that set exception rules last asked for
     ///
-    /// held for the reason the breakpoints are. `setExceptionBreakpoints` is
-    /// part of the same configuration phase and arrives in the same place, and
-    /// an adapter that held one and dropped the other would be a debugger that
-    /// stops on breakpoints and not on exceptions depending on which client
-    /// asked
-    exceptions: Option<Filters>,
+    /// held while there is no program for the reason the breakpoints are.
+    /// `setExceptionBreakpoints` is part of the same configuration phase and
+    /// arrives in the same place, and an adapter that held one and dropped the
+    /// other would be a debugger that stops on breakpoints and not on
+    /// exceptions depending on which client asked
+    exceptions: Exceptions,
     /// whether the recomposition stream was last asked on or off while there
     /// was no program, if it was asked at all
     ///
@@ -462,19 +463,6 @@ enum Arrival {
     /// client where it is held, whatever `stopOnEntry` the parent's
     /// configuration carried, rather than in letting it go
     TakenUp,
-}
-
-/// what one `setExceptionBreakpoints` asked for
-///
-/// the two bpd offers, as booleans rather than as the client's strings: the
-/// names are validated where the request arrives, and what is kept is the
-/// question [`Request::SetExceptionBreakpoints`] asks
-#[derive(Debug, Clone)]
-struct Filters {
-    raised: bool,
-    uncaught: bool,
-    /// one rule per class `exceptionOptions` named
-    classes: Vec<bpd_core::ExceptionClass>,
 }
 
 impl Adapter {
@@ -505,7 +493,7 @@ impl Adapter {
             worlds: BTreeMap::new(),
             breakpoints: FileBreakpoints::default(),
             unarmed: BTreeSet::new(),
-            exceptions: None,
+            exceptions: Exceptions::default(),
             watch: None,
         }
     }
@@ -801,6 +789,10 @@ impl Adapter {
             Some("gotoTargets") => self.goto_targets(message),
             Some("goto") => self.goto(message),
             Some("bpd/understands") => self.understands(message),
+            // a rule per class beside the filters rather than through them: an
+            // IDE's DAP layer owns `setExceptionBreakpoints`, sends it on every
+            // change, and has no field for a class's library choice
+            Some("bpd/setExceptionClasses") => self.set_exception_classes(message),
             Some("restartFrame") => self.restart_frame(message),
             Some("exceptionInfo") => self.exception_info(message),
             // DAP has no request for a debug script and never will, so this is
@@ -964,6 +956,13 @@ impl Adapter {
         // watch the client asked for with its own request
         if configuration.watch_recompositions {
             self.watch = Some(true);
+        }
+        // the launch's rules are the set until a `bpd/setExceptionClasses`
+        // replaces it, and a launch that names none is not a launch that asked
+        // for none: it leaves a set asked for earlier alone
+        if let Some(classes) = &configuration.exception_classes {
+            self.exceptions.classes.clone_from(classes);
+            self.exceptions.held = true;
         }
     }
 
@@ -1223,8 +1222,8 @@ impl Adapter {
     /// configured afterwards has an empty set here, and a round trip to say so
     /// would be a round trip for nothing
     fn arm_what_was_held(&mut self) -> Answered {
-        if let Some(filters) = self.exceptions.take() {
-            self.arm_exception_filters(filters)?;
+        if std::mem::take(&mut self.exceptions.held) {
+            self.arm_exception_filters()?;
         }
         // off is the agent's own default, so a watch asked off has nothing to
         // arm and a round trip to say so would be a round trip for nothing
@@ -1256,28 +1255,15 @@ impl Adapter {
     /// that wants to know what is armed asks again. what this does guarantee is
     /// that the filters really are armed on the program, which is the half a
     /// client cannot check for itself
-    fn arm_exception_filters(&mut self, mut filters: Filters) -> Answered {
-        // a rule asked for before the launch took its library filter from a
-        // configuration that did not exist yet, and the one that does decides
-        let libraries = !self.configuration().just_my_code;
-        for class in &mut filters.classes {
-            class.libraries = libraries;
-        }
-        let armed = match self.ask(Request::SetExceptionBreakpoints {
-            raised: filters.raised,
-            uncaught: filters.uncaught,
-            classes: filters.classes.clone(),
-        })? {
-            Response::ExceptionBreakpoints(armed) => armed,
-            other => unreachable!("exception breakpoints were answered with {other:?}"),
-        };
+    fn arm_exception_filters(&mut self) -> Answered {
+        let armed = self.arm_exceptions()?;
         // read back off the agent, the way the request itself reads it back. a
         // client that asked for a filter the debuggee did not take is told
         // here, because its `setExceptionBreakpoints` has long been answered
         // and this is the only channel left
         for (asked, took, name) in [
-            (filters.raised, armed.raised, "raised"),
-            (filters.uncaught, armed.uncaught, "uncaught"),
+            (self.exceptions.raised, armed.raised, "raised"),
+            (self.exceptions.uncaught, armed.uncaught, "uncaught"),
         ] {
             if asked && !took {
                 self.say(&format!(
@@ -1525,15 +1511,13 @@ impl Adapter {
             }
         }
 
-        let classes = self.exception_classes(&message.arguments["exceptionOptions"])?;
-        let filters = Filters {
-            raised: named.contains(&"raised"),
-            uncaught: named.contains(&"uncaught"),
-            classes,
-        };
-        // one answer per filter and then one per exception option, which is the
-        // order DAP's response is read in
-        let options = filters.classes.len();
+        let options = Self::exception_options(&message.arguments["exceptionOptions"])?;
+        // only this request's half. the rules `bpd/setExceptionClasses` set are
+        // not this request's to replace, and a client that never sends that one
+        // has none
+        self.exceptions.raised = named.contains(&"raised");
+        self.exceptions.uncaught = named.contains(&"uncaught");
+        self.exceptions.options = options;
 
         // the same configuration phase `setBreakpoints` arrives in, and held
         // the same way. `verified: false` for every filter, because it is: with
@@ -1541,22 +1525,22 @@ impl Adapter {
         // rule that what is armed is what the agent says is armed does not stop
         // applying because there is no agent to ask
         if self.session.is_none() {
-            self.exceptions = Some(filters);
-            let waiting: Vec<serde_json::Value> = (0..named.len() + options)
+            self.exceptions.held = true;
+            let mut waiting: Vec<serde_json::Value> = named
+                .iter()
                 .map(|_| serde_json::json!({ "verified": false }))
                 .collect();
+            waiting.extend(
+                self.exceptions
+                    .options
+                    .iter()
+                    .map(|_| exceptions::waiting()),
+            );
             self.respond(message, Some(serde_json::json!({ "breakpoints": waiting })))?;
             return Ok(());
         }
 
-        let armed = match self.ask(Request::SetExceptionBreakpoints {
-            raised: filters.raised,
-            uncaught: filters.uncaught,
-            classes: filters.classes.clone(),
-        })? {
-            Response::ExceptionBreakpoints(armed) => armed,
-            other => unreachable!("exception breakpoints were answered with {other:?}"),
-        };
+        let armed = self.arm_exceptions()?;
 
         // read back off the agent rather than echoed from the request: what is
         // armed is what the agent says is armed
@@ -1570,12 +1554,25 @@ impl Adapter {
                 serde_json::json!({ "verified": on })
             })
             .collect();
-        verified.extend(
-            filters
-                .classes
-                .iter()
-                .map(|asked| serde_json::json!({ "verified": armed.classes.contains(asked) })),
-        );
+        // one answer per filter and then one per exception option, which is the
+        // order DAP's response is read in. an option is answered as the rule it
+        // became, which took the session's library choice
+        let just_my_code = self.configuration().just_my_code;
+        verified.extend(self.exceptions.options.iter().map(|option| {
+            let asked = bpd_core::ExceptionClass {
+                libraries: !just_my_code,
+                ..option.clone()
+            };
+            exceptions::verdict(
+                &asked,
+                &armed.classes,
+                &format!(
+                    "a rule `exceptionClasses` or `bpd/setExceptionClasses` set for `{}` \
+                     decides for it in this option's place",
+                    option.name
+                ),
+            )
+        }));
 
         self.respond(
             message,
@@ -1597,17 +1594,15 @@ impl Adapter {
     /// DAP has nowhere in an option for `PyCharm`'s "ignore library files", so a
     /// rule from here ignores them exactly when `justMyCode` is on. MCP carries
     /// it per class
-    fn exception_classes(
-        &self,
+    fn exception_options(
         options: &serde_json::Value,
     ) -> Result<Vec<bpd_core::ExceptionClass>, Aborted> {
         let Some(options) = options.as_array() else {
             return Ok(Vec::new());
         };
-        let libraries = self
-            .configuration
-            .as_ref()
-            .is_some_and(|configuration| !configuration.just_my_code);
+        // the session's, and decided when the rules are sent — see
+        // [`Exceptions::options`]
+        let libraries = false;
         let mut classes = Vec::new();
         for option in options {
             let (raised, uncaught) = match option["breakMode"].as_str() {
@@ -1658,6 +1653,68 @@ impl Adapter {
             }
         }
         Ok(classes)
+    }
+
+    /// replace the rules `exceptionClasses` set, and nothing else
+    ///
+    /// the half of the exception setting no IDE's DAP layer sends, which is the
+    /// whole of why it is a request of its own: see [`crate::exceptions`]. each
+    /// rule is answered in the order it was asked, as a DAP `Breakpoint` with
+    /// its `name` beside it
+    fn set_exception_classes(&mut self, message: &Incoming) -> Answered {
+        let classes: Vec<bpd_core::ExceptionClass> =
+            serde_json::from_value(message.arguments["classes"].clone()).map_err(|error| {
+                Aborted::Refuse(format!(
+                    "`bpd/setExceptionClasses` takes `classes`, a list of rules each with \
+                     `name`, `raised`, `uncaught` and `libraries`: {error}"
+                ))
+            })?;
+        self.exceptions.classes.clone_from(&classes);
+        // so that a debugged child's session starts with the rules its parent
+        // has now, rather than with the ones the parent was launched with
+        if let Some(configuration) = &mut self.configuration {
+            configuration.exception_classes = Some(classes.clone());
+        }
+
+        let answers: Vec<serde_json::Value> = if self.session.is_none() {
+            self.exceptions.held = true;
+            classes.iter().map(|_| exceptions::waiting()).collect()
+        } else {
+            let armed = self.arm_exceptions()?;
+            classes
+                .iter()
+                .map(|asked| {
+                    exceptions::verdict(
+                        asked,
+                        &armed.classes,
+                        "another rule for the same class decides in this one's place: \
+                         the first of them in the list",
+                    )
+                })
+                .collect()
+        };
+        let answers: Vec<serde_json::Value> = classes
+            .iter()
+            .zip(answers)
+            .map(|(asked, mut answer)| {
+                answer["name"] = asked.name.clone().into();
+                answer
+            })
+            .collect();
+        self.respond(message, Some(serde_json::json!({ "classes": answers })))
+    }
+
+    /// send the agent both halves of the exception setting, as one table
+    fn arm_exceptions(&mut self) -> Result<bpd_core::ExceptionBreakpoints, Aborted> {
+        let classes = self.exceptions.merged(self.configuration().just_my_code);
+        match self.ask(Request::SetExceptionBreakpoints {
+            raised: self.exceptions.raised,
+            uncaught: self.exceptions.uncaught,
+            classes,
+        })? {
+            Response::ExceptionBreakpoints(armed) => Ok(armed),
+            other => unreachable!("exception breakpoints were answered with {other:?}"),
+        }
     }
 
     fn threads(&mut self, message: &Incoming) -> Answered {

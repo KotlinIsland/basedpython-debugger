@@ -182,6 +182,23 @@ pub struct Configuration {
     #[serde(default)]
     pub watch_recompositions: bool,
 
+    /// a rule per exception class, armed before the program runs a line
+    ///
+    /// `PyCharm`'s exception breakpoints: each one decides for its class and
+    /// every subclass of it, the nearest class's rule deciding, with its own
+    /// choice about a library's raise — see [`bpd_core::ExceptionClass`], whose
+    /// fields these are. the same rules `bpd/setExceptionClasses` replaces
+    /// later, and the same ones MCP's `set_exception_breakpoints` takes as
+    /// `classes`
+    ///
+    /// a second way in beside `setExceptionBreakpoints` rather than through
+    /// it, because an IDE's DAP layer owns that request and has no field for a
+    /// class's library choice. neither replaces the other's half, and where
+    /// both name a class this one decides — see
+    /// [a rule per class](../../../docs/development/stepping.md#a-rule-per-class)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exception_classes: Option<Vec<bpd_core::ExceptionClass>>,
+
     /// run the program without debugging it
     ///
     /// refused rather than ignored. bpd has no path that launches a program

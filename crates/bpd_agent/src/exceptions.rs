@@ -58,9 +58,9 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bpd_core::ExceptionClass;
+use bpd_core::{ClassFound, ExceptionClass};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyModule};
 
 include!(concat!(env!("OUT_DIR"), "/opcodes.rs"));
 
@@ -160,15 +160,9 @@ pub(crate) enum Decision {
 pub(crate) fn decide(exception: &Bound<'_, PyAny>, at_the_edge: bool) -> PyResult<Decision> {
     let rules = rules();
     if !rules.is_empty() {
-        for class in exception.get_type().getattr("__mro__")?.try_iter()? {
-            let class = class?;
-            let module: String = class.getattr("__module__")?.extract()?;
-            let qualname: String = class.getattr("__qualname__")?.extract()?;
-            let name = if module == "builtins" {
-                qualname
-            } else {
-                format!("{module}.{qualname}")
-            };
+        let mro = crate::values::type_own(exception.get_type().as_any(), "__mro__")?;
+        for class in mro.try_iter()? {
+            let name = class_name(&class?)?;
             if let Some(rule) = rules.iter().find(|rule| rule.name == name) {
                 let stops = if at_the_edge {
                     rule.uncaught
@@ -193,6 +187,118 @@ pub(crate) fn decide(exception: &Bound<'_, PyAny>, at_the_edge: bool) -> PyResul
     } else {
         Decision::Pass
     })
+}
+
+/// the name a rule matches a class by: `module.QualName`, or a builtin's bare
+/// `QualName`
+///
+/// read through `type`'s own descriptors, so a metaclass's `__getattribute__`
+/// is not run to find out what a class is called — this runs in the `RAISE`
+/// callback, once per class of an exception's method resolution order
+fn class_name(class: &Bound<'_, PyAny>) -> PyResult<String> {
+    let module: String = crate::values::type_own(class, "__module__")?.extract()?;
+    let qualname: String = crate::values::type_own(class, "__qualname__")?.extract()?;
+    Ok(if module == "builtins" {
+        qualname
+    } else {
+        format!("{module}.{qualname}")
+    })
+}
+
+/// what a rule's name names in the program now
+///
+/// every way of reading the name as a module and a qualified name inside it is
+/// tried, the longest module first: `a.b.C` is `C` in `a.b`, or `b.C` in `a`. a
+/// module is only looked for in `sys.modules`, and a name inside one only in
+/// its namespace and the namespaces of the classes under it, so nothing is
+/// imported and no `__getattr__` of the program's is run to answer. a name with
+/// no module is a builtin's, because that is how [`decide`] names one
+pub(crate) fn found(python: Python<'_>, name: &str) -> PyResult<ClassFound> {
+    let parts: Vec<&str> = name.split('.').collect();
+    if parts.iter().any(|part| part.is_empty()) {
+        return Ok(ClassFound::Unresolved {
+            why: format!("`{name}` is not a dotted name, so nothing can be called it"),
+        });
+    }
+    let readings: Vec<(String, &[&str])> = if parts.len() == 1 {
+        vec![(String::from("builtins"), &parts[..])]
+    } else {
+        (1..parts.len())
+            .rev()
+            .map(|split| (parts[..split].join("."), &parts[split..]))
+            .collect()
+    };
+
+    let modules = PyModule::import(python, "sys")?.getattr("modules")?;
+    let mut missed = Vec::new();
+    for (module, inside) in readings {
+        let Some(held) = modules
+            .get_item(&module)
+            .ok()
+            .filter(|held| !held.is_none())
+        else {
+            missed.push(format!("`{module}` is not imported"));
+            continue;
+        };
+        let Ok(held) = held.cast::<PyModule>() else {
+            missed.push(format!("`{module}` in `sys.modules` is not a module"));
+            continue;
+        };
+        let Some(object) = within(&held.dict().into_any(), inside)? else {
+            missed.push(format!("`{module}` has no `{}`", inside.join(".")));
+            continue;
+        };
+        let Ok(class) = object.cast::<pyo3::types::PyType>() else {
+            let kind = object
+                .get_type()
+                .fully_qualified_name()?
+                .to_string_lossy()
+                .into_owned();
+            return Ok(ClassFound::NotAnException {
+                what: format!("a `{kind}`, not a class"),
+            });
+        };
+        if !class.is_subclass_of::<pyo3::exceptions::PyBaseException>()? {
+            return Ok(ClassFound::NotAnException {
+                what: String::from("a class that does not derive from `BaseException`"),
+            });
+        }
+        let named = class_name(class.as_any())?;
+        return Ok(if named == name {
+            ClassFound::Class
+        } else {
+            ClassFound::Renamed { named }
+        });
+    }
+    Ok(ClassFound::Unresolved {
+        why: missed.join("; "),
+    })
+}
+
+/// the object a qualified name names inside a namespace, if it names one
+///
+/// a class's namespace is read through `type`'s own `__dict__`, so a
+/// metaclass is not asked
+fn within<'py>(
+    namespace: &Bound<'py, PyAny>,
+    qualname: &[&str],
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let mut namespace = namespace.clone();
+    let mut object = None;
+    for part in qualname {
+        if let Some(outer) = &object {
+            let outer: &Bound<'py, PyAny> = outer;
+            if !outer.is_instance_of::<pyo3::types::PyType>() {
+                return Ok(None);
+            }
+            namespace = crate::values::type_own(outer, "__dict__")?;
+        }
+        let Ok(found) = namespace.get_item(*part) else {
+            return Ok(None);
+        };
+        object = Some(found);
+    }
+    Ok(object)
 }
 
 /// whether this `RAISE` event is an exception being raised, rather than one

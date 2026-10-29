@@ -81,9 +81,10 @@ pub use script::{
     Script, Step, Transcript,
 };
 pub use session::{
-    Addressed, ContextLayer, ExceptionBreakpoints, ExceptionClass, Exit, Forwarded, Joined,
-    JustMyCode, Reporting, Request, Response, Running, SessionId, Shadowed, Stack, StepInTarget,
-    TemplateContext, Threads, Variables, WorldStopped, exit_code, only_session, only_stop,
+    Addressed, ArmedClass, ClassFound, ContextLayer, ExceptionBreakpoints, ExceptionClass, Exit,
+    Forwarded, Joined, JustMyCode, Reporting, Request, Response, Running, SessionId, Shadowed,
+    Stack, StepInTarget, TemplateContext, Threads, Variables, WorldStopped, exit_code,
+    only_session, only_stop,
 };
 pub use source_map::{Located, MapError, MappedFile, Mapping, Run, SourceMap, Unmapped};
 pub use spawn::{Blindspot, Spawn, Verdict};

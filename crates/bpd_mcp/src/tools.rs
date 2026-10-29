@@ -475,7 +475,14 @@ pub fn tools() -> Vec<Tool> {
                 as an exception leaves the program's outermost frame, which is \
                 the first moment it is knowable that nothing caught it.\n\n\
                 both are paid for process-wide while they are on: the events \
-                behind them cannot be armed per code object."
+                behind them cannot be armed per code object.\n\n\
+                each rule of `classes` comes back with `found`, what its name is \
+                in the program now, read without importing anything: `class`, \
+                `unresolved` with `why` — not imported yet, or a class no module \
+                holds; the rule still decides for a class of that name when one \
+                is raised — `not_an_exception` with `what`, or `renamed` with \
+                `named`, an alias whose class calls itself `named`, which is the \
+                name the rule needs."
                 .to_string(),
             schema: object(
                 serde_json::json!({

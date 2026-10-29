@@ -52,6 +52,7 @@ pub mod adapter;
 pub mod capabilities;
 pub mod configuration;
 pub mod coverage;
+pub mod exceptions;
 pub mod handles;
 pub mod listen;
 pub mod render;

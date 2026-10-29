@@ -103,6 +103,7 @@ over_each_transport!(
     everything_a_program_printed_is_on_the_wire_before_it_is_reported_over,
     a_refused_launch_ends_the_session_instead_of_leaving_it_open,
     the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program,
+    a_rule_per_class_comes_in_beside_the_filters_and_neither_replaces_the_other,
 );
 
 /// a program with a local worth writing to, and a marker after the breakpoint
@@ -2653,6 +2654,164 @@ fn a_terminal_is_refused_when_the_client_never_said_it_had_one() {
 
     client.request("disconnect", &serde_json::json!({}));
     client.finish();
+}
+
+/// a program that raises and catches a `KeyError` of its own and a
+/// `JSONDecodeError` of `json`'s, twice over, and then lets one go
+const CLASSES: &str = r#"import json
+
+
+def lookup(table):
+    try:
+        return table["missing"]  # a KeyError
+    except KeyError:
+        return None
+
+
+def parse():
+    try:
+        json.loads("{")
+    except ValueError:
+        pass
+
+
+lookup({})
+parse()
+lookup({})
+parse()
+raise RuntimeError("the end")  # uncaught
+"#;
+
+/// where a stop is, as the top frame's file and line
+fn stopped_at(client: &mut Client) -> (String, u64) {
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "exception", "{stopped}");
+    let thread = stopped["body"]["threadId"].clone();
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    let top = &stack["body"]["stackFrames"][0];
+    let file = top["source"]["path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the top frame names its file: {stack}"))
+        .to_string();
+    let line = top["line"].as_u64().expect("the top frame has a line");
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    (file, line)
+}
+
+fn a_rule_per_class_comes_in_beside_the_filters_and_neither_replaces_the_other(
+    transport: Transport,
+) {
+    // the intellij platform owns `setExceptionBreakpoints`: it sends it before
+    // the launch and on every change, with filters and nothing else. a plugin
+    // can add to the launch and send requests of its own, and those are the
+    // two ways a rule per class comes in — with the library choice
+    // `exceptionOptions` has no field for
+    let fixture = Fixture::new("classes", CLASSES);
+    let program = fixture.path().display().to_string();
+    let mut client = Client::start(transport);
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.event("initialized");
+    let filters = serde_json::json!({ "filters": ["uncaught"] });
+    client.request("setExceptionBreakpoints", &filters);
+    client.request("configurationDone", &serde_json::json!({}));
+    let launched = client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "exceptionClasses": [
+                { "name": "LookupError", "raised": true, "uncaught": false, "libraries": false },
+                {
+                    "name": "json.decoder.JSONDecodeError",
+                    "raised": true,
+                    "uncaught": false,
+                    "libraries": true,
+                },
+            ],
+        }),
+    );
+    assert_eq!(launched["success"], true, "{launched}");
+
+    // the `KeyError` by the rule for `LookupError`, and the `JSONDecodeError`
+    // **inside json** although just-my-code is on: that rule said a library's
+    // raise is a stop, which is the half DAP's own options cannot say
+    let (file, line) = stopped_at(&mut client);
+    assert_eq!(
+        (file.as_str(), line),
+        (
+            program.as_str(),
+            u64::from(line_of(CLASSES, "# a KeyError"))
+        )
+    );
+    let (file, _) = stopped_at(&mut client);
+    assert!(
+        file.ends_with("json/decoder.py"),
+        "the rule that takes library files stops where json raised, and stopped in {file}"
+    );
+
+    // replaced, and answered rule by rule: a class the program has, one it
+    // does not have yet, and an alias whose class calls itself something else
+    let replaced = client.request(
+        "bpd/setExceptionClasses",
+        &serde_json::json!({ "classes": [
+            { "name": "KeyError", "raised": true, "uncaught": false, "libraries": false },
+            { "name": "email.errors.MessageError", "raised": true, "uncaught": false, "libraries": false },
+            { "name": "os.error", "raised": true, "uncaught": false, "libraries": false },
+        ] }),
+    );
+    assert_eq!(replaced["success"], true, "{replaced}");
+    let answers = replaced["body"]["classes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("one answer per rule: {replaced}"));
+    let read: Vec<(&str, bool, &str)> = answers
+        .iter()
+        .map(|answer| {
+            (
+                answer["name"].as_str().expect("each answer names its rule"),
+                answer["verified"] == true,
+                answer["reason"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(
+        read,
+        [
+            ("KeyError", true, ""),
+            ("email.errors.MessageError", false, "pending"),
+            ("os.error", false, "failed"),
+        ],
+        "{replaced}"
+    );
+    let renamed = answers[2]["message"].as_str().unwrap_or_default();
+    assert!(
+        renamed.contains("name it `OSError`"),
+        "an alias says the name that works: {renamed}"
+    );
+
+    // and the platform sends its filters again, as it does on any change. that
+    // replaces its own half and not the rules
+    client.request("setExceptionBreakpoints", &filters);
+
+    // the `KeyError` by the rule that replaced the first two, nothing for the
+    // `JSONDecodeError` the rules no longer name, and the uncaught one by the
+    // platform's filter, which no rule touched
+    let (file, line) = stopped_at(&mut client);
+    assert_eq!(
+        (file.as_str(), line),
+        (
+            program.as_str(),
+            u64::from(line_of(CLASSES, "# a KeyError"))
+        )
+    );
+    let (file, line) = stopped_at(&mut client);
+    assert_eq!(
+        (file.as_str(), line),
+        (program.as_str(), u64::from(line_of(CLASSES, "# uncaught")))
+    );
+    client.event("exited");
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish_after_the_program_exited(1);
 }
 
 /// the interpreter the built agent matches

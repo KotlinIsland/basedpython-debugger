@@ -1571,8 +1571,55 @@ pub struct ExceptionBreakpoints {
     pub raised: bool,
     /// stopping where an exception leaves the outermost frame
     pub uncaught: bool,
-    /// the rules for one class each, as the agent holds them
-    pub classes: Vec<ExceptionClass>,
+    /// the rules for one class each, as the agent holds them, with what each
+    /// one's class is in the debuggee now
+    pub classes: Vec<ArmedClass>,
+}
+
+/// one rule as the agent holds it, and what its name finds in the debuggee
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArmedClass {
+    /// the rule
+    #[serde(flatten)]
+    pub rule: ExceptionClass,
+    /// what the rule's name names in the debuggee, when it was set
+    #[serde(flatten)]
+    pub found: ClassFound,
+}
+
+/// what a rule's name names in the debuggee, read when the rule was set
+///
+/// a rule decides for a class **by the name the class gives itself** —
+/// `__module__` and `__qualname__`, the module left off a builtin — at every
+/// exception it meets. so a rule is armed whatever this says, and this is what
+/// can be known about it now: whether the program already has that class. it
+/// is read out of `sys.modules` and the namespaces under it and imports
+/// nothing, because a debugger that imported a module to check a name would be
+/// running the program's code for it
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "found", rename_all = "snake_case")]
+pub enum ClassFound {
+    /// an exception class of the program's, which gives itself the rule's name
+    Class,
+    /// nothing imported now has that name. the module may not be imported
+    /// yet, or the class may be one no module holds — one defined inside a
+    /// function — so the rule decides for a class of that name if one is raised
+    Unresolved {
+        /// what was looked in, and what was not there
+        why: String,
+    },
+    /// the name is something other than an exception class
+    NotAnException {
+        /// what it is
+        what: String,
+    },
+    /// the name is a class that gives itself another name — an alias, like
+    /// `os.error` for `OSError` — and a rule matches the class's own name, so
+    /// this one never decides for it
+    Renamed {
+        /// the name the class gives itself, which is the one a rule needs
+        named: String,
+    },
 }
 
 /// what to do about exceptions of one class, in place of the two filters

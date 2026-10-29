@@ -85,9 +85,10 @@ pub enum FromAgent {
         raised: bool,
         /// stopping where an exception leaves the outermost frame
         uncaught: bool,
-        /// the rules for one class each, as the agent holds them
+        /// the rules for one class each, as the agent holds them, with what
+        /// each one's name finds in the debuggee
         #[serde(default)]
-        classes: Vec<bpd_core::ExceptionClass>,
+        classes: Vec<bpd_core::ArmedClass>,
     },
 
     /// whether a forked child of this process becomes a session of its own
