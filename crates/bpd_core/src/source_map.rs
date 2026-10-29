@@ -121,6 +121,31 @@ pub struct MappedFile {
     ///
     /// `None` is prelude the transpiler emitted that no `.by` line is behind
     pub lines: Vec<Option<u32>>,
+    /// which byte columns of each generated line are the `.by`'s own text,
+    /// indexed by zero-based generated line — the map's `COLUMNS`
+    ///
+    /// `None` when the map has no `COLUMNS` table at all, which is a map from a
+    /// `by` that predates columns: its runner gives every location the whole of
+    /// its `.by` line. a map **with** the table and no entry for this file is
+    /// `Some` and empty, and every column of it is the transpiler's — that is
+    /// what the runner reads it as
+    #[serde(default)]
+    pub columns: Option<Vec<Vec<Run>>>,
+}
+
+/// one run of a generated line's columns — `(start, end, by_line, by_column)`
+/// in the map, every number zero-based and every column a byte offset
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Run {
+    /// the first column of the generated line the run covers
+    pub start: u32,
+    /// the column after the last one it covers
+    pub end: u32,
+    /// where in the `.by` its text was copied from, as `(line, column)`
+    ///
+    /// `None` for a qualifier the transpiler wrote in front of the author's
+    /// name — `_by_lazy.` — which reads the object the name did
+    pub from: Option<(u32, u32)>,
 }
 
 impl MappedFile {
@@ -617,6 +642,7 @@ impl SourceMap {
                     source,
                     digest: digests.source,
                     lines: entry.lines,
+                    columns: entry.columns,
                 },
             );
         }

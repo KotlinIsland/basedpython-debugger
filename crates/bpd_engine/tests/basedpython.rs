@@ -769,6 +769,140 @@ fn just_my_code_counts_the_files_the_build_names_as_bys_own_as_a_libraries() {
     }
 }
 
+/// a `.by` whose line the transpiler rewrote: a lazy name, and a soundness
+/// check around a comprehension's iterable — what `by` a110d7d8 generates for
+/// `xs = [classify(s) for s in [1, 2]]`
+const COLUMNED: &str = "\
+def classify(p: int) -> str:
+    return \"small\" if p < 3 else \"big\"
+
+
+def main() -> None:
+    xs = [classify(s) for s in [1, 2]]  # held here
+    print(xs)
+
+
+main()
+";
+
+/// the python behind [`COLUMNED`], with the transpiler's helpers in front
+const COLUMNED_GENERATED: &str = "\
+import types
+_by_lazy = types.SimpleNamespace()
+def _soundness_iter(it, t):
+    return iter(it)
+def classify(p: int) -> str:
+    return \"small\" if p < 3 else \"big\"
+
+
+def main() -> None:
+    xs = [_by_lazy.classify(s) for s in _soundness_iter([1, 2], int)]
+    print(xs)
+
+
+_by_lazy.classify = classify
+main()
+";
+
+/// a build of [`COLUMNED`] with the map's `COLUMNS`, and the runner that reads it
+fn columned() -> (Build, PathBuf) {
+    let lines = vec![
+        None,
+        None,
+        None,
+        None,
+        Some(0),
+        Some(1),
+        Some(2),
+        Some(3),
+        Some(4),
+        Some(5),
+        Some(6),
+        Some(7),
+        Some(8),
+        None,
+        Some(9),
+    ];
+    let build = Build::pair(COLUMNED, COLUMNED_GENERATED, &lines);
+    let width = |text: &str, line: usize| {
+        u32::try_from(text.lines().nth(line).expect("the line is there").len())
+            .expect("a line fits")
+    };
+    let mut runs: Vec<Vec<bpd_test::basedpython::ColumnRun>> = vec![Vec::new(); 15];
+    for (generated, by) in [(4, 0), (5, 1), (8, 4), (10, 6), (14, 9)] {
+        runs[generated] = vec![(0, width(COLUMNED_GENERATED, generated), Some((by, 0)))];
+    }
+    // `    xs = [` copied, `_by_lazy.` a qualifier, `classify(s) for s in `
+    // copied, `_soundness_iter(` the transpiler's, `[1, 2]` copied, `, int)`
+    // the transpiler's, `]` copied
+    runs[9] = vec![
+        (0, 10, Some((5, 0))),
+        (10, 19, None),
+        (19, 40, Some((5, 10))),
+        (56, 62, Some((5, 31))),
+        (68, 69, Some((5, 37))),
+    ];
+    let runner = build.columns(&runs);
+    (build, runner)
+}
+
+#[test]
+fn a_frame_compiled_with_the_authors_columns_is_proved_the_way_the_runner_compiled_it() {
+    // the source beside a frame is proved by compiling the generated python the
+    // way `by run` did and finding the frame's code object, line table and all.
+    // since `by` a110d7d8 that line table holds the `.by`'s own columns, and a
+    // relining that gave every location the whole line — which is what bpd did
+    // — no longer finds the frame's code, and the source is refused. the runner
+    // here is `by`'s own, captured, so this is bpd against it rather than
+    // against a copy of itself
+    let (build, runner) = columned();
+    let mut debuggee = launch_program(&runner, &build.arguments());
+    let held = bpd_test::debuggee::line_of(COLUMNED, "# held here");
+    set(&mut debuggee, held, &build.source);
+    run_to_stop(&mut debuggee);
+
+    let source = the_source(&mut debuggee, 1);
+    assert!(
+        matches!(source, bpd_core::Source::Lines { .. }),
+        "the frame's code is the runner's, columns included: {source:?}"
+    );
+}
+
+#[test]
+fn a_by_lines_calls_are_named_by_the_text_the_author_wrote() {
+    // measured against `by` f566374c, before columns: the comprehension's line
+    // offered `_soundness_iter` and `_by_lazy.classify`. the first is a call the
+    // transpiler wrote, and the second is the author's `classify` read through
+    // the lazy-import holder
+    let (build, runner) = columned();
+    let mut debuggee = launch_program(&runner, &build.arguments());
+    let held = bpd_test::debuggee::line_of(COLUMNED, "# held here");
+    set(&mut debuggee, held, &build.source);
+    let stop = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
+        Running::Stopped { stop, .. } => stop.stop,
+        other => panic!("expected the breakpoint, got {other:?}"),
+    };
+
+    let targets = debuggee
+        .step_in_targets(bpd_core::FrameId { stop, depth: 0 })
+        .expect("the targets were answered");
+    let named: Vec<(&str, Option<(u32, u32)>)> = targets
+        .iter()
+        .map(|target| (target.label.as_str(), target.columns))
+        .collect();
+    let text = COLUMNED.lines().nth(5).expect("the held line");
+    let at =
+        u32::try_from(text.find("classify(s)").expect("the call is there")).expect("a column fits");
+    assert_eq!(
+        named,
+        [("classify", Some((at + 1, at + 1 + 11)))],
+        "the author's call, at the author's columns, and nothing of the transpiler's"
+    );
+}
+
 #[test]
 fn a_by_edited_after_the_launch_refuses_the_source_rather_than_showing_it() {
     // `bpd` checked this file at launch and the user is asking about now. an

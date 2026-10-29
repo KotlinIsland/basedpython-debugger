@@ -56,6 +56,19 @@ use bpd_core::source_map::MAP_FILENAME;
 /// `crates/ty/src/by_commands.rs`
 pub const RUNNER: &str = include_str!("by_runner.py");
 
+/// `_by_runner.py` as `by` `a110d7d8` writes it: the runner that reads the map's
+/// `COLUMNS` and gives a location the author's own `.by` columns
+///
+/// captured beside [`RUNNER`] rather than in its place, because a build from a
+/// `by` before columns is still one bpd debugs, and that build's runner is the
+/// older one. it imports `COLUMNS` from the map and `_by_project` from the tree,
+/// which [`Build::columns`] writes
+pub const RUNNER_WITH_COLUMNS: &str = include_str!("by_runner_columns.py");
+
+/// one run of a generated line's columns: start, end, and the zero-based `.by`
+/// line and column its text was copied from — `None` for a qualifier
+pub type ColumnRun = (u32, u32, Option<(u32, u32)>);
+
 /// the `.by` a person wrote
 ///
 /// what is in it barely matters — the interpreter never reads it — but it is
@@ -318,6 +331,45 @@ impl Build {
         map.push_str(&files.concat());
         map.push_str("]\n");
         std::fs::write(self.root().join(MAP_FILENAME), map).expect("the map is written");
+    }
+
+    /// add `COLUMNS` to the map, and write the runner that reads it
+    ///
+    /// `runs` is each generated line's runs, `(start, end, from)`, with `from`
+    /// the zero-based `.by` line and column the text was copied from, or `None`
+    /// for a qualifier — the shape `by` a110d7d8 writes. the runner returned is
+    /// [`RUNNER_WITH_COLUMNS`], with the `_by_project.py` it imports
+    #[must_use]
+    pub fn columns(&self, runs: &[Vec<ColumnRun>]) -> PathBuf {
+        let lines: Vec<String> = runs
+            .iter()
+            .map(|line| {
+                let runs: Vec<String> = line
+                    .iter()
+                    .map(|(start, end, from)| match from {
+                        Some((line, column)) => format!("({start}, {end}, {line}, {column})"),
+                        None => format!("({start}, {end}, None, None)"),
+                    })
+                    .collect();
+                format!("[{}]", runs.join(", "))
+            })
+            .collect();
+        let mut map = std::fs::read_to_string(self.root().join(MAP_FILENAME))
+            .expect("the map was written with the build");
+        map.push_str("\nCOLUMNS = {\n    \"");
+        map.push_str(&in_a_map(&self.generated));
+        map.push_str("\": [");
+        map.push_str(&lines.join(", "));
+        map.push_str("],\n}\n");
+        std::fs::write(self.root().join(MAP_FILENAME), map).expect("the map is written");
+        std::fs::write(
+            self.root().join("_by_project.py"),
+            format!("ROOT = \"{}\"\nCARRIED = {{}}\n", in_a_map(&self.root())),
+        )
+        .expect("the project file is written");
+        let path = self.root().join("_by_runner.py");
+        std::fs::write(&path, RUNNER_WITH_COLUMNS).expect("the runner is written");
+        path
     }
 
     /// `by run`'s runner, written into the build — the program `by run` starts

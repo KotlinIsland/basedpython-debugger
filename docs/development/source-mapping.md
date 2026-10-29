@@ -76,6 +76,22 @@ several generated lines, and a `.by` line can become none at all
 `DIGESTS` is a second table keyed identically. `bpd` recomputes both from the
 files on disk before it trusts a single line
 
+three names came later, and a map that has none of them is read as one that
+says nothing about them:
+
+- `LAUNCHER` and `BY_CODE` name the runner and every file of `by`'s own
+    python in the tree — see [launching](launching.md) and
+    [stepping](stepping.md#just-my-code)
+- `COLUMNS`, keyed as the other two, says which byte columns of each generated
+    line are the `.by`'s own text: runs `(start, end, by_line, by_column)`, and
+    `(start, end, None, None)` for a qualifier like `_by_lazy.`. a runner that
+    reads it gives a location the author's `.by` columns, so bpd's own
+    compile of a module of the build — what proves the source beside a frame,
+    and what a code replacement assigns — reads it the same way, with the
+    runner's `_by_span` ported line for line and checked against the runner's
+    own text over every span of a build. it is what names a smart step into
+    target in the `.by`'s words
+
 #### how bpd finds the map
 
 **by finding it.** `by run` transpiles into one directory and writes the map into

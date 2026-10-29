@@ -9,14 +9,20 @@
 //!
 //! ## a module `by run` compiled as its `.by`
 //!
-//! the runner moves every location of such a module onto the `.by` line it
-//! came from and gives it the **whole** of that line, so the frame's own
-//! positions have no columns to read a call from. the bytecode is the generated
-//! python's, unchanged, so the generated python is compiled again — the way
-//! [`crate::source`] proves a frame — and the code object with the same name
-//! and the same bytecode is the one whose positions are read. the label is
-//! then the generated python's text for the call, and the target carries no
-//! columns, because the frame the client sees has none
+//! since `by` a110d7d8 the runner gives each location the author's own `.by`
+//! columns — the text they wrote, with a qualifier like `_by_lazy.` in front of
+//! a name left out — and a location of code the transpiler wrote the `.by` line
+//! with no columns. so the frame's positions are read as they are, the label is
+//! the `.by`'s own text, and a call with no columns is the transpiler's and is
+//! not offered: `_soundness_iter` around a comprehension's iterable is no call
+//! the author can see on the line
+//!
+//! a build from a `by` before columns — a map with no `COLUMNS` — gave every
+//! location the **whole** of its `.by` line, so there the generated python is
+//! compiled again — the way [`crate::source`] proves a frame — and the code
+//! object with the same name and the same bytecode is the one whose positions
+//! are read. the label is the generated python's text for the call, and the
+//! target carries no columns, because the frame the client sees has none
 
 use bpd_core::StepInTarget;
 use pyo3::prelude::*;
@@ -59,14 +65,26 @@ pub(crate) fn of(python: Python<'_>, frame: &Bound<'_, PyAny>) -> PyResult<Vec<S
     }
 
     let reported = crate::sources::locate(file.clone(), line).line;
-    let (text_of, columns_too) = match crate::sources::staged_as(&file) {
-        Some(table) => (generated_positions(python, &code, &table)?, false),
-        None => (own_positions(&code, &file)?, true),
+    // three shapes of file, by what its positions hold
+    let (text_of, columns_too, only_the_authors) = match crate::sources::staged_as(&file) {
+        // a `.by` whose runner read the map's `COLUMNS`: the code's own
+        // positions are the `.by`'s, columns and all, for text the author
+        // wrote — and a call the transpiler wrote, `_soundness_iter` around a
+        // comprehension's iterable, has none. that call is not one the author
+        // can see on the line, and stepping into it is stepping into `by`'s
+        // runtime, so it is not offered
+        Some(table) if table.columns.is_some() => (own_positions(&code, &file)?, true, true),
+        // a `.by` from a `by` before columns: every location is the whole line
+        Some(table) => (generated_positions(python, &code, &table)?, false, false),
+        None => (own_positions(&code, &file)?, true, false),
     };
 
     let mut targets = Vec::with_capacity(calls.len());
     for offset in calls {
         let found = text_of.iter().find(|call| call.offset == offset);
+        if only_the_authors && found.is_none() {
+            continue;
+        }
         let (label, columns) = match found {
             Some(call) => (
                 callee(&call.text),

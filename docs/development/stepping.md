@@ -170,15 +170,22 @@ is entered the step is an ordinary step in, which is what goes through a library
 or the launcher on the way. a call into a builtin enters no python frame, and
 the step lands where a step over would
 
-a module `by run` compiled as its `.by` has no columns: the runner gives every
-location the whole of its `.by` line. the bytecode is the generated python's,
-unchanged, so the generated python is compiled again and the code object with
-the same name and bytecode gives the positions — the label is the generated
-python's text and the target carries no columns. measured under `by` f566374c,
-that text shows the lowering: `Point(0.0, 0.0)` is offered as `_by_lazy.Point`,
-and `[classify(s) for s in shapes]` as `_soundness_iter` and
-`_by_lazy.classify`. naming them as the `.by` does needs `.by` columns in the
-relined code, which only `by` has
+a module `by run` compiled as its `.by` is named in the `.by`'s own words. since
+`by` a110d7d8 the map carries `COLUMNS` — which byte columns of each generated
+line are text the `.by` spells — and the runner gives each location the
+author's columns, a qualifier like `_by_lazy.` left out, or the `.by` line with
+no columns for code the transpiler wrote. so the frame's own positions are read,
+the label is the `.by` text, the target carries `.by` columns, and a call with no
+columns is the transpiler's and is not offered. measured on `byproj`:
+
+| line                                     | `by` f566374c                          | `by` a110d7d8             |
+| ---------------------------------------- | -------------------------------------- | ------------------------- |
+| `origin = Point(0.0, 0.0)`               | `_by_lazy.Point`                       | `Point`, columns 14–29    |
+| `labels = [classify(s) for s in shapes]` | `_soundness_iter`, `_by_lazy.classify` | `classify`, columns 15–26 |
+
+a build from a `by` before columns has a map with no `COLUMNS` and a runner that
+gives every location the whole line, and there the generated python is compiled
+again and its positions name the call, without columns, as before
 
 DAP: `supportsStepInTargetsRequest`, `stepInTargets` answering `{id, label,
 line, column?, endColumn?}`, and `stepIn` with `targetId`. MCP: `step_in_targets`

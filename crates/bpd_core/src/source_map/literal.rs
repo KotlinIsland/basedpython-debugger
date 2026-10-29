@@ -134,6 +134,8 @@ pub(super) struct Entry {
     pub(super) lines: Vec<Option<u32>>,
     /// the digests of the pair, when `DIGESTS` carries one for it
     pub(super) digests: Option<Digests>,
+    /// the column runs of each generated line — see `MappedFile::columns`
+    pub(super) columns: Option<Vec<Vec<super::Run>>>,
 }
 
 /// the two digests one entry of `DIGESTS` carries, algorithm prefix and all
@@ -218,6 +220,11 @@ pub(super) fn tables(text: &str) -> Result<Vec<Entry>, ParseError> {
     let assignments = Reader::new(text).module()?;
     let sourcemap = table(&assignments, "SOURCEMAP")?;
     let all_digests = table(&assignments, "DIGESTS")?;
+    // newer than the other two, and absent from a map an older `by` wrote
+    let all_columns = match assignments.iter().find(|(name, _)| name == "COLUMNS") {
+        None => None,
+        Some(_) => Some(table(&assignments, "COLUMNS")?),
+    };
 
     let mut entries = Vec::with_capacity(sourcemap.len());
     for (key, value) in sourcemap {
@@ -254,14 +261,77 @@ pub(super) fn tables(text: &str) -> Result<Vec<Entry>, ParseError> {
             }
         }
         let digests = digest_for(all_digests, key)?;
+        let columns = match all_columns {
+            None => None,
+            Some(all) => Some(columns_for(all, key, &generated)?),
+        };
         entries.push(Entry {
             generated,
             source: PathBuf::from(source),
             lines: table,
             digests,
+            columns,
         });
     }
     Ok(entries)
+}
+
+/// the column runs for one entry of a map that has `COLUMNS`
+///
+/// an entry `COLUMNS` has nothing for is a file every column of which is the
+/// transpiler's, which is how the runner reads one: no runs on any line
+fn columns_for(
+    all: &[(Literal, Literal)],
+    key: &Literal,
+    generated: &std::path::Path,
+) -> Result<Vec<Vec<super::Run>>, ParseError> {
+    let Some((_, value)) = all.iter().find(|(candidate, _)| candidate == key) else {
+        return Ok(Vec::new());
+    };
+    let malformed = |found: String| ParseError::MalformedEntry {
+        name: "COLUMNS",
+        key: generated.display().to_string(),
+        found,
+        expected: "an entry is a list of lines, each a list of \
+                   `(start, end, by_line, by_column)` runs",
+    };
+    let Literal::List(lines) = value else {
+        return Err(malformed(value.describe().to_owned()));
+    };
+    let mut read = Vec::with_capacity(lines.len());
+    for line in lines {
+        let Literal::List(runs) = line else {
+            return Err(malformed(format!("a line that is {}", line.describe())));
+        };
+        let mut parsed = Vec::with_capacity(runs.len());
+        for run in runs {
+            let from = match run {
+                Literal::Tuple(parts) => match &parts[..] {
+                    [
+                        Literal::Int(start),
+                        Literal::Int(end),
+                        Literal::Int(line),
+                        Literal::Int(column),
+                    ] => (*start, *end, Some((*line, *column))),
+                    [
+                        Literal::Int(start),
+                        Literal::Int(end),
+                        Literal::None,
+                        Literal::None,
+                    ] => (*start, *end, None),
+                    _ => return Err(malformed(format!("a run of {} values", parts.len()))),
+                },
+                other => return Err(malformed(format!("a run that is {}", other.describe()))),
+            };
+            parsed.push(super::Run {
+                start: from.0,
+                end: from.1,
+                from: from.2,
+            });
+        }
+        read.push(parsed);
+    }
+    Ok(read)
 }
 
 /// the digests for one entry, when `DIGESTS` carries one for it
@@ -602,6 +672,52 @@ mod tests {
     /// a map with one entry, so a test can change one thing about it
     fn map(sourcemap: &str, digests: &str) -> String {
         format!("SOURCEMAP = {{{sourcemap}}}\nDIGESTS = {{{digests}}}\n")
+    }
+
+    #[test]
+    fn the_column_runs_are_read_as_by_a110d7d8_writes_them_and_absent_is_not_empty() {
+        let sourcemap = "\"/b/demo.py\": (\"/a/demo.by\", [0, 1]),";
+        let digests = "\"/b/demo.py\": {\"by\": \"sha256:aa\", \"py\": \"sha256:bb\"},";
+
+        // no `COLUMNS` at all: a map from a `by` before columns
+        let older = tables(&map(sourcemap, digests)).expect("a well formed map");
+        assert_eq!(older[0].columns, None);
+
+        // a table with nothing for the file: every column the transpiler's
+        let empty = format!("{}COLUMNS = {{}}\n", map(sourcemap, digests));
+        assert_eq!(
+            tables(&empty).expect("a well formed map")[0].columns,
+            Some(Vec::new())
+        );
+
+        let written = format!(
+            "{}COLUMNS = {{\n    \"/b/demo.py\": [[], [(0, 4, 1, 0), (4, 13, None, None), (13, 20, 1, 4)]],\n}}\n",
+            map(sourcemap, digests)
+        );
+        let run = |start, end, from| super::super::Run { start, end, from };
+        assert_eq!(
+            tables(&written).expect("a well formed map")[0].columns,
+            Some(vec![
+                Vec::new(),
+                vec![
+                    run(0, 4, Some((1, 0))),
+                    run(4, 13, None),
+                    run(13, 20, Some((1, 4)))
+                ],
+            ])
+        );
+
+        let wrong = format!(
+            "{}COLUMNS = {{\"/b/demo.py\": [[(0, 4, 1)]]}}\n",
+            map(sourcemap, digests)
+        );
+        assert!(matches!(
+            tables(&wrong),
+            Err(ParseError::MalformedEntry {
+                name: "COLUMNS",
+                ..
+            })
+        ));
     }
 
     #[test]

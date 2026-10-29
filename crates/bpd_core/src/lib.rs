@@ -85,7 +85,7 @@ pub use session::{
     JustMyCode, Reporting, Request, Response, Running, SessionId, Shadowed, Stack, StepInTarget,
     TemplateContext, Threads, Variables, WorldStopped, exit_code, only_session, only_stop,
 };
-pub use source_map::{Located, MapError, MappedFile, Mapping, SourceMap, Unmapped};
+pub use source_map::{Located, MapError, MappedFile, Mapping, Run, SourceMap, Unmapped};
 pub use spawn::{Blindspot, Spawn, Verdict};
 pub use stop::{Abandoned, Holding, Mode, Part, Reported, StepKind, Stop, StopReason};
 pub use thread::{Progress, ThreadState, Where, Which};
