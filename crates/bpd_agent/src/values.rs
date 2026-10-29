@@ -584,6 +584,10 @@ impl<'py> Reader<'py> {
 ///   descriptor's code, which reading a value never runs
 ///
 /// `object` itself is left out: everything there is a dunder or a method
+///
+/// every class is read through `type`'s own descriptors — see [`type_own`] —
+/// and never by looking an attribute up on it, which goes through its
+/// metaclass and so through whatever code the program gave that
 fn class_attributes(
     object: &Bound<'_, PyAny>,
     stored: &Bound<'_, PyDict>,
@@ -591,13 +595,13 @@ fn class_attributes(
 ) -> PyResult<()> {
     let python = object.py();
     let base = python.get_type::<PyAny>();
-    let mut seen: Vec<String> = Vec::new();
-    for class in object.get_type().getattr("__mro__")?.try_iter()? {
+    let mut seen = std::collections::HashSet::new();
+    for class in type_own(object.get_type().as_any(), "__mro__")?.try_iter()? {
         let class = class?;
         if class.is(&base) {
             continue;
         }
-        let namespace = class.getattr("__dict__")?;
+        let namespace = type_own(&class, "__dict__")?;
         for pair in namespace.call_method0("items")?.try_iter()? {
             let pair = pair?;
             let key = pair.get_item(0)?;
@@ -605,23 +609,46 @@ fn class_attributes(
                 continue;
             };
             let name = name.to_string_lossy().into_owned();
-            if seen.contains(&name) {
+            let dunder = name.starts_with("__") && name.ends_with("__");
+            if !seen.insert(name.clone()) || dunder || stored.contains(&key)? {
                 continue;
             }
-            seen.push(name.clone());
             let value = pair.get_item(1)?;
-            let dunder = name.starts_with("__") && name.ends_with("__");
-            if dunder
-                || stored.contains(&key)?
-                || value.is_callable()
-                || value.get_type().hasattr("__get__")?
-            {
+            if value.is_callable() || is_descriptor(&value)? {
                 continue;
             }
             items.append((name, value))?;
         }
     }
     Ok(())
+}
+
+/// whether `value`'s type defines `__get__` anywhere in its method resolution
+/// order, read the way [`class_attributes`] reads a class
+fn is_descriptor(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    for class in type_own(value.get_type().as_any(), "__mro__")?.try_iter()? {
+        if type_own(&class?, "__dict__")?.contains("__get__")? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// what `type`'s own descriptor for `name` reads off `class`
+///
+/// `class.__mro__` and `class.__dict__` are attribute lookups on a class, and
+/// those go through its metaclass — a `__getattribute__` or a `__getattr__`
+/// the program wrote. `type`'s getset descriptors are what that lookup would
+/// end in for a metaclass that adds nothing, and calling them reads the type's
+/// storage and runs nothing else. `type` itself is an instance of `type`, so
+/// looking them up on it reaches no program code either
+fn type_own<'py>(class: &Bound<'py, PyAny>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    let python = class.py();
+    python
+        .get_type::<pyo3::types::PyType>()
+        .getattr("__dict__")?
+        .get_item(name)?
+        .call_method1("__get__", (class,))
 }
 
 /// `type(value)`, qualified by its module unless it is a builtin

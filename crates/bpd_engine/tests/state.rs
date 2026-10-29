@@ -1205,3 +1205,73 @@ fn a_module_frames_locals_are_its_globals_because_that_is_what_they_are() {
 
     to_exit(&mut debuggee);
 }
+
+/// class data whose type, and whose class, have metaclasses that run code on
+/// a lookup — what a read of an object's class data must not reach
+const METACLASSES: &str = r#"CALLS = []
+
+
+class Loud(type):
+    def __getattr__(cls, name):
+        CALLS.append(name)
+        raise AttributeError(name)
+
+    def __getattribute__(cls, name):
+        if name in ("__dict__", "__mro__"):
+            CALLS.append(name)
+        return type.__getattribute__(cls, name)
+
+
+class Tag(metaclass=Loud):
+    pass
+
+
+class Holder(metaclass=Loud):
+    tag = Tag()
+    size = 3
+
+
+held = Holder()
+done = len(CALLS)  # held here
+"#;
+
+#[test]
+fn reading_an_objects_class_data_runs_none_of_its_metaclasses_code() {
+    // a class attribute's type is asked for `__get__`, and each class of the
+    // object for its `__dict__` and `__mro__`. through attribute lookup on a
+    // type, each of those reaches the metaclass — and `values` promises only
+    // `attributes` and `repr` run program code
+    let fixture = Fixture::new("metaclasses", METACLASSES);
+    let mut debuggee = launch(&fixture);
+    stop_at(
+        &mut debuggee,
+        &fixture.path(),
+        line_of(METACLASSES, "# held here"),
+    );
+    let frame = debuggee
+        .the_stack(Some(1))
+        .expect("the stack was answered")
+        .frames[0]
+        .id;
+    let before = digits_of(&evaluated(&mut debuggee, frame, "len(CALLS)")).to_string();
+    let holder = evaluated(&mut debuggee, frame, "held");
+    let Content::Object { attributes, .. } = &holder.content else {
+        panic!("expected an object, got {holder:?}")
+    };
+    let names: Vec<&str> = attributes
+        .iter()
+        .map(|attribute| attribute.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"tag") && names.contains(&"size"),
+        "the class's data is among the object's children: {names:?}"
+    );
+    let after = digits_of(&evaluated(&mut debuggee, frame, "len(CALLS)")).to_string();
+    assert_eq!(
+        before,
+        after,
+        "the metaclasses ran during the read: {:?}",
+        evaluated(&mut debuggee, frame, "CALLS")
+    );
+    to_exit(&mut debuggee);
+}
