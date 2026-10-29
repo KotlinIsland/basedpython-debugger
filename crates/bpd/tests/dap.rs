@@ -99,6 +99,7 @@ over_each_transport!(
     a_program_reads_the_adapters_stdin_when_the_client_says_it_is_the_programs,
     a_container_shows_what_it_holds_and_never_a_notice_in_its_place,
     a_frames_names_are_one_list_and_an_object_shows_what_its_class_gives_it,
+    writing_a_name_of_the_locals_list_runs_no_repr_to_find_its_scope,
     everything_a_program_printed_is_on_the_wire_before_it_is_reported_over,
     a_refused_launch_ends_the_session_instead_of_leaving_it_open,
     the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program,
@@ -2663,6 +2664,78 @@ fn interpreter() -> String {
 }
 
 /// one variable of a `variables` response, by name
+/// a local whose `__repr__` leaves a mark, beside one to write
+const LOUD_REPR: &str = r#"import pathlib
+
+HERE = pathlib.Path(__file__).parent
+
+
+class Loud:
+    def __repr__(self):
+        (HERE / "repr_ran").write_text("x")
+        return "Loud()"
+
+
+def work():
+    loud = Loud()
+    count = 1  # held here
+    return loud, count
+
+
+work()
+"#;
+
+fn writing_a_name_of_the_locals_list_runs_no_repr_to_find_its_scope(transport: Transport) {
+    // the flat `locals` list has to find which of local, cell and free holds a
+    // name before it writes it. that was three reads of every value in the
+    // frame, with the configuration's `repr` — so a write of `count` ran
+    // `Loud.__repr__`, which nothing asked to see
+    let fixture = Fixture::new("loud_repr", LOUD_REPR);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "variables": { "repr": true },
+        }),
+    );
+    client.event("initialized");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line_of(LOUD_REPR, "# held here") } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let stopped = client.event("stopped");
+    let thread = stopped["body"]["threadId"].clone();
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    let frame = stack["body"]["stackFrames"][0]["id"].clone();
+    let scopes = client.request("scopes", &serde_json::json!({ "frameId": frame }));
+    let locals = scopes["body"]["scopes"][0]["variablesReference"].clone();
+
+    let written = client.request(
+        "setVariable",
+        &serde_json::json!({ "variablesReference": locals, "name": "loud", "value": "None" }),
+    );
+    assert_eq!(written["success"], true, "{written}");
+    assert!(
+        !fixture.directory().join("repr_ran").exists(),
+        "finding the scope of `loud` ran `__repr__` on the frame's values"
+    );
+
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    client.event("exited");
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
 fn variable<'a>(response: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
     response["body"]["variables"]
         .as_array()

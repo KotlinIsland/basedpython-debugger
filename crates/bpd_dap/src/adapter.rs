@@ -2547,6 +2547,11 @@ impl Adapter {
     }
 
     /// which of a frame's local, cell and free scopes has this name
+    ///
+    /// read for the names alone: nothing opened, no text, no instance
+    /// dictionary and no `repr`, whatever the configuration reads values with.
+    /// finding where a name is runs none of the program's code, and a budget
+    /// that cut the list short would hide the name being looked for
     fn scope_holding(&mut self, frame: FrameId, name: &str) -> Result<Scope, Aborted> {
         for scope in [Scope::Local, Scope::Cell, Scope::Free] {
             let read = match self.ask(Request::Variables {
@@ -2554,7 +2559,11 @@ impl Adapter {
                 scope,
                 detail: Detail {
                     depth: 0,
-                    ..self.configuration().variables
+                    children: 0,
+                    text: 0,
+                    budget: u32::MAX,
+                    attributes: false,
+                    repr: false,
                 },
             })? {
                 Response::Variables(read) => read,

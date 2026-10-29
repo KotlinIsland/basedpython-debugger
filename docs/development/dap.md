@@ -405,10 +405,14 @@ bound yet:
 | functions and modules                     | a "Special Variables" group | listed                                   | listed                                 |
 
 the three scopes are still three underneath: a value opened from `locals` is
-re-read from the scope it is in, and `setVariable` writes there. a class's data
+re-read from the scope it is in, and `setVariable` writes there — the scope found
+by reading the names alone, with no `repr` whatever the configuration asks for,
+so a write runs none of the program's code to find where it goes. a class's data
 is read off the class dictionaries in method resolution order — not a dunder,
 not callable, not a descriptor, not shadowed by the instance — because that is
-what `obj.name` reads without running anything
+what `obj.name` reads without running anything. each class is read through
+`type`'s own `__mro__` and `__dict__` descriptors rather than by looking them up
+on it, which would go through a metaclass the program wrote
 
 a container's line is **what it holds**, written the way the program would
 print it — `[1.0, 3.5]`, `{'k': [1.0, 3.5]}`, `(1,)`, `set()`,
