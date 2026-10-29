@@ -39,6 +39,13 @@ impl std::fmt::Display for Where {
 pub enum Progress {
     /// bpd is holding this thread, so it did not move because bpd stopped it
     Held,
+    /// bpd is holding this thread **with the world**: a stop stopped the world
+    /// and this thread is parked until that stop is resumed
+    ///
+    /// held, and not a stop of its own — it has no frames to ask about and is
+    /// not resumed by itself. a thread that was in a C call when the world was
+    /// stopped is never this: nothing can hold it, so it is running
+    Parked,
     /// it was somewhere else in the second sample
     Moved,
     /// it was in the same place in both samples

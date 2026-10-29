@@ -78,9 +78,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bpd_core::{
-    Addressed, Binding, Detail, Evaluated, Forwarded, FrameId, LogRecord, Reporting, Request,
-    Resolved, Response, Running, Scope, SessionId, SourceBreakpoint, StepKind, Stop, StopReason,
-    Suspend, Value, Which, exit_code,
+    Addressed, Binding, Detail, Evaluated, Forwarded, FrameId, LogRecord, Progress, Reporting,
+    Request, Resolved, Response, Running, Scope, SessionId, SourceBreakpoint, StepKind, Stop,
+    StopReason, Suspend, Value, Which, exit_code,
 };
 
 use crate::capabilities::capabilities;
@@ -1806,11 +1806,17 @@ impl Adapter {
                     Some(at) => at.to_string(),
                     None => "no python frame of the program's".to_string(),
                 };
-                let name = match state.held {
-                    Some(stop) => {
+                // DAP's `Thread` is an id and a name and nothing else, so the
+                // name is where a thread's state can go at all
+                let name = match (state.held, state.progress) {
+                    (Some(stop), _) => {
                         format!("{} — held at stop {stop}, in {where_it_was}", state.thread)
                     }
-                    None => format!(
+                    (None, Progress::Parked) => format!(
+                        "{} — held while the world is stopped, in {where_it_was}",
+                        state.thread
+                    ),
+                    (None, _) => format!(
                         "{} — running, {:?} over {}ms, in {where_it_was}",
                         state.thread,
                         state.progress,

@@ -53,6 +53,8 @@ pub(crate) fn census(python: Python<'_>, settle: Duration) -> PyResult<FromAgent
         let held = stops::held_for(thread);
         let progress = if held.is_some() {
             Progress::Held
+        } else if world::parked(thread) {
+            Progress::Parked
         } else if first.get(&thread) == Some(&spot) {
             Progress::Still
         } else {

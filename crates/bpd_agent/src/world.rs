@@ -85,6 +85,11 @@ pub(crate) fn mode() -> Mode {
     }
 }
 
+/// whether this thread is parked with the world right now
+pub(crate) fn parked(thread: u64) -> bool {
+    state().parked.contains(&thread)
+}
+
 /// hold this thread until the world is released
 ///
 /// the GIL is released first, so parking a thread does not stop the ones that

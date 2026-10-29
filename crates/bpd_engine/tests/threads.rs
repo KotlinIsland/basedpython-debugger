@@ -770,6 +770,32 @@ fn stopping_the_world_holds_what_it_can_and_never_counts_a_native_thread_as_held
         "every read says which mode it was taken in, and what was still moving"
     );
 
+    // and asked what the threads are doing, a parked thread is held — not a
+    // running thread that happened not to move. the one in a C call is the one
+    // still running
+    let census = debuggee
+        .threads(SETTLE)
+        .expect("the threads were reported on");
+    for (name, thread) in [("spinner", spinner), ("flipper", flipper)] {
+        let state = census.get(thread);
+        assert_eq!(
+            state.map(|state| (state.held, state.progress)),
+            Some((None, Progress::Parked)),
+            "`{name}` is parked with the world, held and not a stop of its own"
+        );
+    }
+    assert_eq!(
+        census.get(stop.thread).map(|state| state.progress),
+        Some(Progress::Held)
+    );
+    assert!(
+        matches!(
+            census.get(sleeper).map(|state| state.progress),
+            Some(Progress::Still | Progress::Moved)
+        ),
+        "the thread in a C call is running: {census:?}"
+    );
+
     // the world is released when the stop that asked for it is, and the threads
     // pick up where they left off
     let flipped = missing(&fixture, "flipper_done");

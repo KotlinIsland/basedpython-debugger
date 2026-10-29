@@ -238,6 +238,28 @@ rest of the process, inside a line callback, holding whatever the program had
 locked. `a_disarm_that_fails_still_lets_the_parked_threads_go` refuses the
 disarm and requires the thread back
 
+### a parked thread is held, and says so
+
+asked what the threads are doing while the world is stopped, a thread parked
+with it is `parked` — held, until the stop that stopped the world is resumed,
+and not a stop of its own. it used to come back as a running thread that was
+`still`, which is a held thread labelled as one bpd was not holding. the census
+reads it off the agent's own list of parked threads at the second sample, so a
+thread in a C call, which never parks, is still reported as running
+
+DAP's `Thread` is an id and a name and nothing more, so the name carries it, as
+it already carried a stop's held thread:
+
+```text
+6141046784 — held while the world is stopped, in app/worker.py:7 in work
+8341347712 — held at stop 2, in app/main.py:12 in hit
+```
+
+with `allThreadsStopped: true` on the `stopped` event when nothing was left
+running. MCP's `threads` answers `"progress": "parked"`. a breakpoint whose
+[suspend policy](breakpoints.md#what-a-hit-holds) is `thread` or `none` stops
+no world, so beside its held thread the rest read as running
+
 ### a thread in a C call cannot be stopped, and is never counted as held
 
 a thread parked in `lock.acquire()`, `sock.recv()` or `time.sleep()` has already

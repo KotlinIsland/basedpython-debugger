@@ -2971,6 +2971,27 @@ fn a_breakpoints_location_says_what_its_hit_holds_and_the_policy_outlives_the_se
         let held = stopped["body"]["threadId"].clone();
         let stack = client.request("stackTrace", &serde_json::json!({ "threadId": held }));
         assert_eq!(stack["body"]["stackFrames"][0]["line"], line, "{stack}");
+        // and the thread list says the same: the main thread held at its stop,
+        // and the worker held with the world or running, never a held thread
+        // labelled as a running one that did not move
+        let threads = client.request("threads", &serde_json::json!({}));
+        let names: Vec<&str> = threads["body"]["threads"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a thread list: {threads}"))
+            .iter()
+            .map(|thread| thread["name"].as_str().expect("a thread has a name"))
+            .collect();
+        let worker = if everything {
+            "— held while the world is stopped"
+        } else {
+            "— running"
+        };
+        assert_eq!(names.len(), 2, "{threads}");
+        assert!(
+            names.iter().any(|name| name.contains("— held at stop"))
+                && names.iter().any(|name| name.contains(worker)),
+            "`{policy}`: {names:?}"
+        );
         std::thread::sleep(Duration::from_millis(300));
         client.request("continue", &serde_json::json!({ "threadId": held }));
     }

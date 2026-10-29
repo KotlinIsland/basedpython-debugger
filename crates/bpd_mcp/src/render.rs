@@ -553,7 +553,8 @@ pub fn threads(census: &Threads) -> serde_json::Value {
         "note": "everything here about a thread bpd is not holding is a sample \
                  taken twice, `settle_ms` apart. `still` means it was in the \
                  same place both times, which is where to look rather than what \
-                 is wrong",
+                 is wrong. `held` is a thread a stop holds, and `parked` one \
+                 held with the world a stop stopped, until that stop is resumed",
     })
 }
 
