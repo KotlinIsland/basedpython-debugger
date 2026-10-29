@@ -1046,7 +1046,12 @@ fn on_raise<'py>(
     // first arrives in the program's own code, which is the `RAISE` cpython
     // raises again in that frame — so it is left unrecorded here, and that
     // event is the new raise. one a library catches never arrives at all
-    if conditions::evaluating() || !exceptions::raised_armed() {
+    //
+    // the launcher's own code raising is the same: it is how the program was
+    // started, and a stop in it would be a stop in code no stack of the
+    // program's reports. what it raises into the program — its import hook
+    // failing — is a stop where it arrives there
+    if conditions::evaluating() || !exceptions::raised_armed() || frames::is_launchers(code) {
         return Ok(python.None().into_bound(python));
     }
     let exceptions::Decision::Stop { libraries } = exceptions::decide(exception, false)? else {
@@ -1056,13 +1061,6 @@ fn on_raise<'py>(
         return Ok(python.None().into_bound(python));
     }
     if !exceptions::newly_raised(python, code, offset, exception)? {
-        return Ok(python.None().into_bound(python));
-    }
-
-    // the launcher's own code raising is the launcher's business: it is how
-    // the program was started, and a stop in it would be a stop in code no
-    // stack of the program's reports
-    if frames::is_launchers(code) {
         return Ok(python.None().into_bound(python));
     }
 

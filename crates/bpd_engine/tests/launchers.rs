@@ -49,6 +49,8 @@ class Loader:
 
 class Hook:
     def find_spec(self, name, path=None, target=None):
+        if name == "broken":
+            raise ImportError("the launcher cannot import broken")
         if name != "helper":
             return None
         return importlib.util.spec_from_file_location(
@@ -101,6 +103,14 @@ const RAISING: &str = r#"def fail():
 fail()  # leaves the program
 "#;
 
+/// a program whose import the launcher's own hook fails
+const IMPORTER: &str = r"try:
+    import broken  # the launcher's hook raises
+except ImportError:
+    pass
+last = 1
+";
+
 fn interpreter() -> &'static Capabilities {
     bpd_test::agent::matching_interpreter()
 }
@@ -111,6 +121,7 @@ fn written() -> (Fixture, PathBuf, PathBuf) {
     let program = fixture.sibling("program", PROGRAM);
     let helper = fixture.sibling("helper", HELPER);
     fixture.sibling("raising", RAISING);
+    fixture.sibling("importer", IMPORTER);
     (fixture, program, helper)
 }
 
@@ -324,4 +335,41 @@ fn an_exception_the_program_does_not_catch_stops_in_its_outermost_frame() {
             );
         }
     }
+}
+
+#[test]
+fn an_exception_the_launchers_code_raises_into_the_program_stops_where_it_arrives() {
+    // the launcher's raise is not the program's, so it is not a stop there. it
+    // is one where the exception arrives in the program's own code — which is
+    // the import that called the hook, once the import system between them is
+    // a library's. recording it as reported in the launcher's frame left the
+    // program's frame thinking it had been reported, and nothing stopped at all
+    let (fixture, _, _) = written();
+    let importer = fixture.directory().join("importer.py");
+
+    let mut debuggee = launch(&fixture, "importer", true);
+    debuggee
+        .just_my_code(true)
+        .expect("just-my-code was turned on");
+    debuggee
+        .set_exception_breakpoints(true, false)
+        .expect("the exception breakpoints were set");
+    let reason = match debuggee
+        .run(&mut bpd_test::reporting::Unreported)
+        .expect("the debuggee was resumed")
+    {
+        Running::Stopped { stop, .. } => stop.reason,
+        other => panic!("expected the import's failure to stop the program, got {other:?}"),
+    };
+    let StopReason::Raised { error, file, line } = &reason else {
+        panic!("expected a raise, got {reason:?}")
+    };
+    assert_eq!(error.kind, "ImportError");
+    assert_eq!(
+        (Path::new(file), *line),
+        (
+            importer.as_path(),
+            line_of(IMPORTER, "# the launcher's hook raises")
+        )
+    );
 }
