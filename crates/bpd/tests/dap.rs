@@ -2827,7 +2827,8 @@ fn a_rule_per_class_comes_in_beside_the_filters_and_neither_replaces_the_other(
 }
 
 /// a worker that counts while the main thread reaches three breakpoints, and
-/// says after each how far the worker got while it was there
+/// says after each how far the worker got while it was there — and first how
+/// far it gets with nothing held, which is what those are judged against
 const SUSPENDING: &str = r#"import threading
 import time
 
@@ -2854,6 +2855,8 @@ def reach(policy):
 worker = threading.Thread(target=work)
 worker.start()
 running.wait()
+for _ in reach("free"):
+    time.sleep(0.3)
 for _ in reach("all"):
     pass  # all
 for _ in reach("thread"):
@@ -3021,18 +3024,31 @@ fn a_breakpoints_location_says_what_its_hit_holds_and_the_policy_outlives_the_se
 
     // measured off the program's own clock: while the main thread was held at
     // `all` the worker hardly moved, and while it was held at `thread` it went
-    // on counting
+    // on counting. how fast it counts is the machine's — its loop came round
+    // every 1.3ms on an m-series mac and every 9ms on ci's macos 3.14t runner,
+    // where a fixed 50 failed with 43 counted — so the worker's pace with
+    // nothing held is what a hold is judged against
     let output = client.output();
+    let (moved_free, held_free) = reached(&output, "free");
     let (moved_all, held_all) = reached(&output, "all");
     let (moved_thread, held_thread) = reached(&output, "thread");
-    assert!(held_all >= 0.3 && held_thread >= 0.3, "{output}");
+    assert!(
+        held_free >= 0.3 && held_all >= 0.3 && held_thread >= 0.3,
+        "{output}"
+    );
+    let pace = f64::from(u32::try_from(moved_free).expect("a count")) / held_free;
+    assert!(
+        pace * held_all >= 20.0,
+        "the worker counts too slowly here for a stopped world to show: {output}"
+    );
     assert!(
         moved_all < 5,
         "the worker counted {moved_all} while the world was stopped: {output}"
     );
     assert!(
-        moved_thread > 50,
-        "the worker counted {moved_thread} while only the main thread was held: {output}"
+        f64::from(u32::try_from(moved_thread).expect("a count")) >= pace * held_thread / 2.0,
+        "the worker counted {moved_thread} while only the main thread was held, under half \
+         its pace with nothing held: {output}"
     );
     reached(&output, "none");
 
