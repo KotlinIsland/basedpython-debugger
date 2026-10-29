@@ -1,6 +1,6 @@
 //! magic bytes, version negotiation, and length prefixed frames
 
-use std::io::{self, Read, Write};
+use std::io::{self, IoSlice, Read, Write};
 
 /// the framing this build speaks
 ///
@@ -188,8 +188,22 @@ pub fn write_frame<W: Write>(writer: &mut W, payload: &[u8]) -> Result<()> {
     }
     let length = u32::try_from(payload.len()).expect("the length is bounded by MAX_FRAME_LEN");
 
-    writer.write_all(&length.to_le_bytes())?;
-    writer.write_all(payload)?;
+    // one vectored write, so a frame leaves as one: a length written on its
+    // own is a segment the reader can do nothing with, and the payload behind
+    // it waits on that segment's acknowledgement wherever nagle is on. vectored
+    // rather than copied into one buffer, because framing allocates nothing —
+    // `tests/allocation.rs` holds it to that
+    let length = length.to_le_bytes();
+    let mut parts = [IoSlice::new(&length), IoSlice::new(payload)];
+    let mut left: &mut [IoSlice<'_>] = &mut parts;
+    while !left.is_empty() {
+        match writer.write_vectored(left) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero).into()),
+            Ok(written) => IoSlice::advance_slices(&mut left, written),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     writer.flush()?;
     Ok(())
 }

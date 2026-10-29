@@ -571,6 +571,11 @@ impl Session {
         stream
             .set_nonblocking(false)
             .map_err(|source| Error::Listen { source })?;
+        // the agent's end says why: a request and its answer are each held back
+        // by nagle until the other side acknowledges, which linux delays
+        stream
+            .set_nodelay(true)
+            .map_err(|source| Error::Listen { source })?;
         stream
             .set_read_timeout(Some(patience))
             .map_err(|source| Error::Listen { source })?;

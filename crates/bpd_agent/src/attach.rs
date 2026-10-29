@@ -226,6 +226,12 @@ pub(crate) fn attach(endpoint: &str, token_hex: &str) -> io::Result<()> {
 /// that is correct and one that has to be kept in step with it
 fn connect(endpoint: &str, token: &[u8; TOKEN_LEN]) -> io::Result<()> {
     let mut stream = TcpStream::connect(endpoint)?;
+    // every message on this connection is a request or the answer to one, and
+    // the next is not written until the last has arrived. nagle holds a small
+    // write back until what went before it is acknowledged, and linux delays
+    // that acknowledgement by up to 40ms, so a stop's `stopTheWorld` took 88ms
+    // where it takes 1 — the rest of the program ran on in between
+    stream.set_nodelay(true)?;
 
     // the agent announces itself first: an engine that is listening for
     // something else finds out before it has sent anything

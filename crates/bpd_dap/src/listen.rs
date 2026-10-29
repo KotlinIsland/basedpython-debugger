@@ -269,6 +269,13 @@ impl Listening {
     /// the stream: authenticating costs the client nothing, and the message it
     /// authenticated with is the `initialize` it was going to send anyway
     fn admit(&self, stream: &TcpStream) -> Result<Admitted, String> {
+        // a client waits on each answer before it asks again, and nagle would
+        // hold an answer back until the client acknowledged the one before it,
+        // which linux delays by up to 40ms. the control connection to the
+        // agent is set the same way, for the same reason
+        stream
+            .set_nodelay(true)
+            .map_err(|error| format!("the connection would not take `TCP_NODELAY`: {error}"))?;
         let reading = stream
             .try_clone()
             .map_err(|error| format!("the connection could not be split to read it: {error}"))?;

@@ -437,6 +437,11 @@ impl<W: Write> Writer<W> {
 
         let body = serde_json::to_vec(&message)
             .expect("a message built from json values and strings serialises");
+        // the header and the body in one write, so a message leaves as one
+        // rather than as a header the client can do nothing with, ahead of a
+        // body that waits on that header's acknowledgement wherever nagle is on
+        let mut framed = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        framed.extend_from_slice(&body);
 
         // **a client that is gone is not a failed write.** on unix the last
         // message to a client whose process has exited goes into a socket
@@ -449,8 +454,9 @@ impl<W: Write> Writer<W> {
         // there is nothing to deliver and nowhere to deliver it, so this says
         // what unix says. the session then ends the way it always does: the
         // next read finds the client gone and answers `None`
-        let written = write!(self.output, "Content-Length: {}\r\n\r\n", body.len())
-            .and_then(|()| self.output.write_all(&body))
+        let written = self
+            .output
+            .write_all(&framed)
             .and_then(|()| self.output.flush());
         match written {
             Ok(()) => Ok(()),
