@@ -77,12 +77,19 @@ static ANY_RAISED: AtomicBool = AtomicBool::new(false);
 static ANY_UNCAUGHT: AtomicBool = AtomicBool::new(false);
 
 /// the rules for single classes
-static RULES: std::sync::Mutex<Vec<ExceptionClass>> = std::sync::Mutex::new(Vec::new());
+///
+/// shared rather than copied out: `decide` runs in the `RAISE` callback of
+/// every frame an exception passes through, and takes the rules without
+/// holding the lock while it calls into the interpreter
+static RULES: std::sync::Mutex<Option<std::sync::Arc<[ExceptionClass]>>> =
+    std::sync::Mutex::new(None);
 
-fn rules() -> std::sync::MutexGuard<'static, Vec<ExceptionClass>> {
+fn rules() -> std::sync::Arc<[ExceptionClass]> {
     RULES
         .lock()
         .expect("nothing panics holding the exception rules: every path through them is a copy")
+        .clone()
+        .unwrap_or_else(|| std::sync::Arc::from([]))
 }
 
 thread_local! {
@@ -110,12 +117,15 @@ pub(crate) fn watch(raised: bool, uncaught: bool, classes: Vec<ExceptionClass>) 
     UNCAUGHT.store(uncaught, Ordering::Relaxed);
     ANY_RAISED.store(classes.iter().any(|rule| rule.raised), Ordering::Relaxed);
     ANY_UNCAUGHT.store(classes.iter().any(|rule| rule.uncaught), Ordering::Relaxed);
-    *rules() = classes;
+    *RULES
+        .lock()
+        .expect("nothing panics holding the exception rules: every path through them is a copy") =
+        Some(classes.into());
 }
 
 /// the rules for single classes, as they were set
 pub(crate) fn classes() -> Vec<ExceptionClass> {
-    rules().clone()
+    rules().to_vec()
 }
 
 /// whether `RAISE` has to be armed: the filter, or any class's rule
@@ -148,7 +158,7 @@ pub(crate) enum Decision {
 /// as `except KeyError:` before `except LookupError:` would — and an exception
 /// no rule names is the filter's. the filter's library rule is just-my-code
 pub(crate) fn decide(exception: &Bound<'_, PyAny>, at_the_edge: bool) -> PyResult<Decision> {
-    let rules = rules().clone();
+    let rules = rules();
     if !rules.is_empty() {
         for class in exception.get_type().getattr("__mro__")?.try_iter()? {
             let class = class?;

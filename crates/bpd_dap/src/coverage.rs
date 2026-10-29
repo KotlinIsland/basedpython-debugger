@@ -224,8 +224,6 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // for anything about how the program is started
         Facet::Launcher => Reach::Direct("`launcher` in the `launch` configuration"),
 
-        // a field of the launch configuration too, and only on the transport
-        // whose stdin is not the protocol
         // DAP names where an evaluation comes from, and the console is the one
         // place a statement belongs: a hover or a watch that assigned would
         // change the program for having been looked at
@@ -249,6 +247,8 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
                   follows the session's `justMyCode`",
         },
 
+        // a field of the launch configuration too, and only on the transport
+        // whose stdin is not the protocol
         Facet::InheritedStdin => {
             Reach::Direct("`inheritStdin` in the `launch` configuration, under `bpd dap --listen`")
         }

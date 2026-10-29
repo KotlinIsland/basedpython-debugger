@@ -149,9 +149,6 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // an argument of the tool that starts the program
         Facet::Launcher => Reach::Direct("`launcher` on the `launch` tool"),
 
-        // the server speaks on its stdin, so there is no stdin of its own that is
-        // not the protocol to hand a program. an agent's program takes its input
-        // from a file, an argument or the environment
         Facet::Statements => Reach::Direct("`statements` on the `evaluate` tool"),
         Facet::ExceptionClasses => Reach::Direct("`classes` on `set_exception_breakpoints`"),
         Facet::StepTarget => Reach::Direct("`target` on `step_in`, from `step_in_targets`"),
@@ -159,6 +156,9 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
             Reach::Direct("`libraries` on each of `set_exception_breakpoints`'s `classes`")
         }
 
+        // the server speaks on its stdin, so there is no stdin of its own that is
+        // not the protocol to hand a program. an agent's program takes its input
+        // from a file, an argument or the environment
         Facet::InheritedStdin => Reach::Unreachable {
             why: "`bpd mcp` speaks MCP on its stdin, so the one stdin it has is the \
                   protocol, and a program reading it would be reading the agent's \
