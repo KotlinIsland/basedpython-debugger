@@ -30,11 +30,11 @@
 //! same moment is a real hit and is treated as one
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use bpd_core::{
-    Evaluation, HitCondition, LogRecord, Part, PythonError, SourceBreakpoint, TracebackFrame,
-    Unbound,
+    Evaluation, HitCondition, LogRecord, Part, PythonError, SourceBreakpoint, Suspend,
+    TracebackFrame, Unbound,
 };
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyKeyError;
@@ -84,6 +84,8 @@ pub(crate) enum Fired {
     Logged(LogRecord),
     /// the program should stop here
     Stop,
+    /// the breakpoint acted and holds nothing: its suspend policy is none
+    Passed,
     /// an expression raised, and there is no answer to report
     Failed(Raised),
 }
@@ -145,6 +147,11 @@ pub(crate) struct Plan {
     condition: Option<Condition>,
     hits: Option<HitCondition>,
     log: Option<Template>,
+    /// whether a hit that acts holds the thread, rather than letting it run on
+    ///
+    /// the one part of a breakpoint that changes without the rest of it, so it
+    /// is changed in place and the hit counter survives a change of policy
+    holds: AtomicBool,
     /// how many hits have qualified, across every thread
     count: AtomicU64,
 }
@@ -172,8 +179,15 @@ impl Plan {
             condition,
             hits: request.hits,
             log,
+            holds: AtomicBool::new(request.suspend != Suspend::None),
             count: AtomicU64::new(0),
         })
+    }
+
+    /// hold what `suspend` says from the next hit on
+    pub(crate) fn suspend(&self, suspend: Suspend) {
+        self.holds
+            .store(suspend != Suspend::None, Ordering::Relaxed);
     }
 
     /// how the condition will be answered, for the client to see
@@ -216,7 +230,11 @@ impl Plan {
         }
 
         let Some(template) = &self.log else {
-            return Ok(Fired::Stop);
+            return Ok(if self.holds.load(Ordering::Relaxed) {
+                Fired::Stop
+            } else {
+                Fired::Passed
+            });
         };
         let (globals, locals) = place.namespaces()?;
         match template.render(python, &globals, &locals) {

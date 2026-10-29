@@ -420,6 +420,52 @@ does not claim, and the thing that bites — **the held thread still holds its
 locks** — is on the [threads](threads.md) page, along with the explicit
 stop-the-world mode
 
+## what a hit holds
+
+the default above is one of three, and a breakpoint can say which it is —
+`PyCharm`'s suspend policy, `bpd_core::Suspend` on the breakpoint:
+
+| suspend  | what a hit that would stop holds                                                                               |
+| -------- | -------------------------------------------------------------------------------------------------------------- |
+| `thread` | the thread that hit it. the default, and what every stop holds without one                                     |
+| `all`    | that thread, and every other thread that can be held — the stop is a stop of the world, released on its resume |
+| `none`   | nothing. the hit is counted, its log message written and what waits for it armed, and the thread runs on       |
+
+measured before any of it was built, on a program whose worker thread counts
+while the main thread sits at a breakpoint for 1.5 s, against pycharm 263.7607's
+own debugger — its bundled pydevd, sent the `CMD_SET_BREAK` the IDE sends, with
+the policy as `SuspendPolicy.name()` — and against bpd as it was:
+
+| debugger               | policy                   | the worker counted while held | `allThreadsStopped` |
+| ---------------------- | ------------------------ | ----------------------------- | ------------------- |
+| pycharm's pydevd       | `ALL`                    | 0                             | —                   |
+| pycharm's pydevd       | `THREAD`                 | 1026                          | —                   |
+| bpd, every stop        | (none: a stop holds one) | 1049                          | `false`             |
+| bpd, `stopTheWorld` on | (none: every stop)       | 0 – 1                         | `true`              |
+
+so bpd could already do both — a stop holds one thread, and stop-the-world holds
+the rest — and what was missing was choosing per breakpoint. pydevd suspends the
+other threads at their next traced line once a stop is made, and `all` here is
+the same mechanism `stopTheWorld` is: the front end asks for the world before it
+reports the stop, a thread parked in a C call cannot be held and is named, and
+`allThreadsStopped` is true only when nothing was left running. pydevd's `NONE`
+holds the thread all the same — measured, it sends the suspend it sends for
+`THREAD` and waits for the IDE to resume it — and `none` here never holds it, so
+the thread does not wait out a round trip to an IDE for a stop nobody asked for
+
+the agent reads only whether a hit holds, and changes it **in place**: a policy
+that is all that changed about a breakpoint keeps its hit count and what it is
+waiting for. a breakpoint that cannot answer — its condition or its log message
+raised — still stops, because that is how it says so.
+`a_breakpoint_that_holds_nothing_counts_logs_and_arms_and_never_stops` in
+`crates/bpd_engine/tests/conditions.rs` is the agent's half
+
+MCP carries `suspend` on each breakpoint of `set_breakpoints`, and a stop of an
+`all` breakpoint answers with the `world` it held. DAP's `SourceBreakpoint` has
+no field for one, and an IDE's DAP layer owns `setBreakpoints`, so DAP says it
+beside the breakpoints, by location — see
+[DAP](dap.md#what-a-hit-holds-is-said-by-location)
+
 ## the shape of a request
 
 the engine sends the **complete** set, not a delta. a debugger that accumulates

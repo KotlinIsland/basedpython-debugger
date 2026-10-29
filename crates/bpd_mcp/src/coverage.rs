@@ -152,6 +152,7 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         Facet::Statements => Reach::Direct("`statements` on the `evaluate` tool"),
         Facet::ExceptionClasses => Reach::Direct("`classes` on `set_exception_breakpoints`"),
         Facet::StepTarget => Reach::Direct("`target` on `step_in`, from `step_in_targets`"),
+        Facet::Suspend => Reach::Direct("`suspend` on each breakpoint of `set_breakpoints`"),
         Facet::ExceptionClassLibraries => {
             Reach::Direct("`libraries` on each of `set_exception_breakpoints`'s `classes`")
         }

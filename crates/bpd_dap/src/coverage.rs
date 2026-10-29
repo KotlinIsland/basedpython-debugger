@@ -231,6 +231,13 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
 
         Facet::StepTarget => Reach::Direct("`targetId` on `stepIn`, minted by `stepInTargets`"),
 
+        // DAP's `SourceBreakpoint` has no field for it, so it is said beside the
+        // breakpoints, by the location a client sets one at
+        Facet::Suspend => Reach::Direct(
+            "`suspendPolicies` in the `launch` configuration and \
+             `bpd/setSuspendPolicies`, by file and line",
+        ),
+
         // DAP's own field for a rule per exception class
         Facet::ExceptionClasses => Reach::Direct(
             "`exceptionOptions` on `setExceptionBreakpoints`: the last path segment's \

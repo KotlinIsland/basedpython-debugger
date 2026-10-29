@@ -19,7 +19,7 @@ use std::path::Path;
 use bpd_core::python::Capabilities;
 use bpd_core::{
     Binding, Evaluation, HitCondition, Part, Resolved, Running, SourceBreakpoint, StopReason,
-    Unbound,
+    Suspend, Unbound,
 };
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::debuggee::{Fixture, line_of};
@@ -464,6 +464,68 @@ fn a_breakpoint_that_changed_starts_counting_again() {
         passes_that_stopped(&mut debuggee, &visited),
         [("6".to_string(), vec![1])],
         "the count restarted at the fourth pass, so its third hit is the sixth"
+    );
+}
+
+#[test]
+fn a_breakpoint_that_holds_nothing_counts_logs_and_arms_and_never_stops() {
+    let fixture = Fixture::new("counted", COUNTED);
+    let visited = fixture.directory().join("visited");
+    let at_line = line_of(COUNTED, "return marker");
+    let above = line_of(COUNTED, "marker = value");
+    let every_third = || {
+        SourceBreakpoint::at(1, fixture.path(), at_line).counting(HitCondition::Every {
+            count: NonZeroU32::new(3).expect("3 is not zero"),
+        })
+    };
+
+    // one that holds nothing on its third hit, one that logs and holds
+    // nothing, and one waiting for the first — which arms it by acting, not by
+    // stopping
+    let mut debuggee = launch(&fixture);
+    debuggee
+        .set_breakpoints(vec![
+            every_third().suspending(Suspend::None),
+            SourceBreakpoint::at(2, fixture.path(), above)
+                .logging("at {value}")
+                .suspending(Suspend::None),
+            SourceBreakpoint::at(3, fixture.path(), above)
+                .when("value > 7")
+                .after(1),
+        ])
+        .expect("the breakpoint request was answered");
+    let mut logged = bpd_test::reporting::Logs::default();
+    let first = match debuggee.run(&mut logged).expect("the debuggee was resumed") {
+        Running::Stopped { stop, .. } => stop,
+        other => panic!("expected the breakpoint waiting for the first, got {other:?}"),
+    };
+    assert_eq!(stopped_for(&first.reason), [3], "{:?}", first.reason);
+    assert_eq!(
+        std::fs::read_to_string(&visited).expect("the line above the stop has run"),
+        "8",
+        "nothing stopped on the third or sixth pass, and the first acting armed the third"
+    );
+    assert_eq!(
+        logged
+            .records
+            .iter()
+            .map(|record| record.message.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "at 1", "at 2", "at 3", "at 4", "at 5", "at 6", "at 7", "at 8"
+        ],
+        "the log was written at every pass, and none of them stopped"
+    );
+
+    // the same breakpoint holding its thread now: its count is the one it had,
+    // so its next third hit is the ninth pass rather than the third after this
+    debuggee
+        .set_breakpoints(vec![every_third()])
+        .expect("the breakpoint request was answered");
+    assert_eq!(
+        passes_that_stopped(&mut debuggee, &visited),
+        [("9".to_string(), vec![1])],
+        "a change of policy changes nothing else about a breakpoint"
     );
 }
 

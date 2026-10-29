@@ -159,6 +159,9 @@ fn every_attribute_the_plugin_leaves_out_is_one_it_could_not_honour() {
         // rules a plugin sends beside them come from those breakpoints, which
         // this registration does not read
         String::from("exceptionClasses"),
+        // a breakpoint's suspend policy is the platform's breakpoint's, which
+        // this registration does not read either
+        String::from("suspendPolicies"),
     ]
     .into();
 

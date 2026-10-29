@@ -80,7 +80,7 @@ use std::time::{Duration, Instant};
 use bpd_core::{
     Addressed, Binding, Detail, Evaluated, Forwarded, FrameId, LogRecord, Reporting, Request,
     Resolved, Response, Running, Scope, SessionId, SourceBreakpoint, StepKind, Stop, StopReason,
-    Value, Which, exit_code,
+    Suspend, Value, Which, exit_code,
 };
 
 use crate::capabilities::capabilities;
@@ -793,6 +793,10 @@ impl Adapter {
             // IDE's DAP layer owns `setExceptionBreakpoints`, sends it on every
             // change, and has no field for a class's library choice
             Some("bpd/setExceptionClasses") => self.set_exception_classes(message),
+            // what a breakpoint's hit holds, beside the breakpoints: DAP's
+            // `SourceBreakpoint` has no field for it, and an IDE's DAP layer
+            // owns `setBreakpoints`
+            Some("bpd/setSuspendPolicies") => self.set_suspend_policies(message),
             Some("restartFrame") => self.restart_frame(message),
             Some("exceptionInfo") => self.exception_info(message),
             // DAP has no request for a debug script and never will, so this is
@@ -963,6 +967,21 @@ impl Adapter {
         if let Some(classes) = &configuration.exception_classes {
             self.exceptions.classes.clone_from(classes);
             self.exceptions.held = true;
+        }
+        self.breakpoints.default = if configuration.stop_the_world {
+            Suspend::All
+        } else {
+            Suspend::Thread
+        };
+        // the same rule as the rules: the launch's policies are the set until a
+        // `bpd/setSuspendPolicies` replaces it, and a launch naming none leaves
+        // one asked for earlier alone. they are read when the breakpoints are
+        // armed, which comes after this
+        if let Some(policies) = &configuration.suspend_policies {
+            self.breakpoints.policies = policies
+                .iter()
+                .map(|policy| ((policy.path.clone(), policy.line), policy.suspend))
+                .collect();
         }
     }
 
@@ -1478,7 +1497,7 @@ impl Adapter {
             .map(|breakpoint| {
                 let found = resolved.iter().find(|entry| entry.id == breakpoint.id);
                 match found {
-                    Some(found) => rendered_breakpoint(found, breakpoint),
+                    Some(found) => self.told(found, breakpoint),
                     // the answer names every breakpoint of the set, so one that
                     // is missing is the agent contradicting itself rather than
                     // a breakpoint that is merely unbound
@@ -1702,6 +1721,61 @@ impl Adapter {
             })
             .collect();
         self.respond(message, Some(serde_json::json!({ "classes": answers })))
+    }
+
+    /// replace every location's suspend policy
+    ///
+    /// the whole set rather than a delta, as every other set here is. each
+    /// policy is answered in the order asked with the breakpoint it applies to
+    /// now — or `waiting`, when there is none at that location yet. the
+    /// breakpoints are sent to the agent again with what they now hold, which
+    /// changes nothing else about them: a breakpoint keeps its hit count
+    fn set_suspend_policies(&mut self, message: &Incoming) -> Answered {
+        let policies: Vec<crate::SuspendPolicy> =
+            serde_json::from_value(message.arguments["policies"].clone()).map_err(|error| {
+                Aborted::Refuse(format!(
+                    "`bpd/setSuspendPolicies` takes `policies`, a list each with `path`, \
+                     `line` and `suspend` — `all`, `thread` or `none`: {error}"
+                ))
+            })?;
+        self.breakpoints.policies = policies
+            .iter()
+            .map(|policy| ((policy.path.clone(), policy.line), policy.suspend))
+            .collect();
+        // so that a debugged child's session starts with the policies its
+        // parent has now
+        if let Some(configuration) = &mut self.configuration {
+            configuration.suspend_policies = Some(policies.clone());
+        }
+
+        // the set the agent holds is the same set, holding something else. its
+        // bindings are the ones already reported — what a set resolves to
+        // changes with the set and with what is loaded, and a load reports
+        // itself — so the answer is not reported again
+        if self.session.is_some() && !self.breakpoints.by_file.is_empty() {
+            let whole = self.breakpoints.all();
+            match self.ask(Request::SetBreakpoints { breakpoints: whole })? {
+                Response::BreakpointsResolved { .. } => {}
+                other => unreachable!("a breakpoint set was answered with {other:?}"),
+            }
+        }
+
+        let answers: Vec<serde_json::Value> = policies
+            .iter()
+            .map(|policy| {
+                let mut answer = serde_json::json!({
+                    "path": policy.path,
+                    "line": policy.line,
+                    "suspend": policy.suspend,
+                });
+                match self.breakpoints.at(&policy.path, policy.line) {
+                    Some(id) => answer["breakpoint"] = id.into(),
+                    None => answer["waiting"] = true.into(),
+                }
+                answer
+            })
+            .collect();
+        self.respond(message, Some(serde_json::json!({ "policies": answers })))
     }
 
     /// send the agent both halves of the exception setting, as one table
@@ -3553,7 +3627,17 @@ impl Adapter {
         for stop in fresh {
             self.reasons.insert(stop.stop, stop.reason.clone());
 
-            let whole_program = if self.configuration().stop_the_world {
+            // a breakpoint's own policy decides for the stops it makes, and the
+            // session's `stopTheWorld` for every other stop
+            let all = match &stop.reason {
+                StopReason::Breakpoint { breakpoints, .. } => breakpoints.iter().any(|id| {
+                    self.breakpoints
+                        .requested(*id)
+                        .is_some_and(|breakpoint| breakpoint.suspend == Suspend::All)
+                }),
+                _ => self.configuration().stop_the_world,
+            };
+            let whole_program = if all {
                 let settle = self.configuration().settle();
                 let stopped = match self.ask(Request::StopTheWorld {
                     stop: stop.stop,
@@ -3604,6 +3688,21 @@ impl Adapter {
         Ok(())
     }
 
+    /// a breakpoint as the client is told it, and its policy carried to the
+    /// line it is told the breakpoint moved to
+    fn told(&mut self, resolved: &Resolved, requested: &SourceBreakpoint) -> serde_json::Value {
+        let body = rendered_breakpoint(resolved, requested);
+        if let Some(line) = body["line"]
+            .as_u64()
+            .and_then(|line| u32::try_from(line).ok())
+            && line != requested.line
+        {
+            self.breakpoints
+                .moved(&requested.file, requested.line, line);
+        }
+        body
+    }
+
     /// say what loading a file changed about the breakpoint set
     fn rebound(&mut self, rebound: &[Resolved]) -> Answered {
         for resolved in rebound {
@@ -3611,7 +3710,7 @@ impl Adapter {
             let Some(requested) = requested else {
                 continue;
             };
-            let body = rendered_breakpoint(resolved, &requested);
+            let body = self.told(resolved, &requested);
             self.event(
                 "breakpoint",
                 &serde_json::json!({ "reason": "changed", "breakpoint": body }),
@@ -4681,6 +4780,17 @@ struct Wanted {
 struct FileBreakpoints {
     by_file: BTreeMap<PathBuf, Vec<SourceBreakpoint>>,
     next: u32,
+    /// the suspend policy of each location a client gave one, by the file and
+    /// line it sets the breakpoint at
+    ///
+    /// apart from the breakpoints rather than on them, because they arrive
+    /// apart: an IDE's DAP layer sends `setBreakpoints` itself, again whenever a
+    /// file's set changes, and has no field for a policy. a location is what
+    /// both requests name and what outlives a set sent again
+    policies: BTreeMap<(PathBuf, u32), Suspend>,
+    /// what a breakpoint no policy names holds: the whole program when
+    /// `stopTheWorld` is on, its thread when it is off
+    default: Suspend,
 }
 
 impl FileBreakpoints {
@@ -4707,8 +4817,44 @@ impl FileBreakpoints {
         self.link(file, wanted);
         self.by_file
             .get(file)
-            .cloned()
             .unwrap_or_else(|| unreachable!("the file was just inserted"))
+            .iter()
+            .map(|breakpoint| self.policed(breakpoint))
+            .collect()
+    }
+
+    /// a breakpoint as it was asked for, holding what its location's policy says
+    fn policed(&self, breakpoint: &SourceBreakpoint) -> SourceBreakpoint {
+        let suspend = self
+            .policies
+            .get(&(breakpoint.file.clone(), breakpoint.line))
+            .copied()
+            .unwrap_or(self.default);
+        breakpoint.clone().suspending(suspend)
+    }
+
+    /// the breakpoint set at a location now, if there is one
+    fn at(&self, file: &Path, line: u32) -> Option<u32> {
+        self.by_file
+            .get(file)?
+            .iter()
+            .find(|breakpoint| breakpoint.line == line)
+            .map(|breakpoint| breakpoint.id)
+    }
+
+    /// carry a location's policy to the line its breakpoint moved to
+    ///
+    /// a client that is told a breakpoint moved moves its own there and sends
+    /// the file's set again, now naming the new line. the policy goes with it,
+    /// so the breakpoint does not hold something else in between — unless the
+    /// new line has a policy of its own, which is the client's word about it
+    fn moved(&mut self, file: &Path, from: u32, to: u32) {
+        let Some(suspend) = self.policies.get(&(file.to_path_buf(), from)).copied() else {
+            return;
+        };
+        self.policies
+            .entry((file.to_path_buf(), to))
+            .or_insert(suspend);
     }
 
     /// turn each `after` file and line into the id that breakpoint holds now
@@ -4739,7 +4885,11 @@ impl FileBreakpoints {
 
     /// every breakpoint that should be armed now
     fn all(&self) -> Vec<SourceBreakpoint> {
-        self.by_file.values().flatten().cloned().collect()
+        self.by_file
+            .values()
+            .flatten()
+            .map(|breakpoint| self.policed(breakpoint))
+            .collect()
     }
 
     /// what was asked for under an id, for a report that names it later
@@ -4748,7 +4898,7 @@ impl FileBreakpoints {
             .values()
             .flatten()
             .find(|breakpoint| breakpoint.id == id)
-            .cloned()
+            .map(|breakpoint| self.policed(breakpoint))
     }
 }
 

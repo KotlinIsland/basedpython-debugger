@@ -7,7 +7,8 @@ gdb calls this non-stop mode and DAP exposes it as
 server should go on serving while one of its handlers is inspected
 
 stop-the-world is available as an explicit mode, because a coherent view of a
-data structure needs it
+data structure needs it — asked for at a stop, for every stop, or by a
+breakpoint whose [suspend policy](breakpoints.md#what-a-hit-holds) is `all`
 
 this page is mostly about the *cost* of that choice, because the cost is real
 and a debugger that did not report it would be lying by omission

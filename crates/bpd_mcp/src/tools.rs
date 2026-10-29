@@ -458,6 +458,20 @@ pub fn tools() -> Vec<Tool> {
                                      — rather than merely being passed, and it \
                                      is permanent and per process",
                                 ),
+                                "suspend": {
+                                    "type": "string",
+                                    "enum": ["all", "thread", "none"],
+                                    "default": "thread",
+                                    "description": "what a hit holds. `thread` \
+                                        holds the thread that hit it and the rest \
+                                        run on. `all` holds every thread that can \
+                                        be held as well, before the stop is \
+                                        answered — the answer's `world` says \
+                                        which, as `stop_the_world` would. `none` \
+                                        holds nothing: the hit is counted, a \
+                                        `log` is written and what waits for it is \
+                                        armed, and the program runs on",
+                                },
                             }),
                             &["file", "line"],
                         ),

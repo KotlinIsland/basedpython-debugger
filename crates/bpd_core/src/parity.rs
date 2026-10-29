@@ -258,11 +258,18 @@ pub enum Facet {
     /// stepping into one chosen call of the line — [`Request::Step`]'s
     /// `target`, named by [`Request::StepInTargets`]
     StepTarget,
+
+    /// what a breakpoint's hit holds — [`SourceBreakpoint::suspend`]
+    ///
+    /// a field of a breakpoint, and `PyCharm`'s suspend policy: a front end
+    /// without it stops one thread at every breakpoint, and cannot offer a
+    /// breakpoint that holds the whole program or one that holds nothing
+    Suspend,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
@@ -281,6 +288,7 @@ impl Facet {
         Self::ExceptionClasses,
         Self::ExceptionClassLibraries,
         Self::StepTarget,
+        Self::Suspend,
     ];
 
     /// what to call this capability in a message about it
@@ -305,6 +313,7 @@ impl Facet {
             Self::Statements => "running statements where an expression is evaluated",
             Self::ExceptionClasses => "a rule per exception class",
             Self::StepTarget => "stepping into one chosen call of the line",
+            Self::Suspend => "what a breakpoint's hit holds",
             Self::ExceptionClassLibraries => {
                 "a class's exception rule ignoring library files on its own"
             }

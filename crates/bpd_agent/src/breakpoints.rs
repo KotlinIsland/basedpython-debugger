@@ -190,7 +190,19 @@ fn set(
         .map(|request| Pending {
             identity: files::identify(&request.file),
             plan: match previous.get(&request.id) {
-                Some((before, plan)) if *before == request => plan.clone(),
+                // the suspend policy is changed in place, so a breakpoint whose
+                // policy was all that changed keeps its count too
+                Some((before, plan))
+                    if SourceBreakpoint {
+                        suspend: request.suspend,
+                        ..before.clone()
+                    } == request =>
+                {
+                    if let Ok(plan) = plan {
+                        plan.suspend(request.suspend);
+                    }
+                    plan.clone()
+                }
                 _ => Plan::compile(python, &request).map(Arc::new),
             },
             request,

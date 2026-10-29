@@ -782,6 +782,7 @@ fn fire_the_breakpoints(
                 fired.acted.push(plan.id);
                 fired.stopping.push(plan.id);
             }
+            conditions::Fired::Passed => fired.acted.push(plan.id),
             conditions::Fired::Logged(record) => {
                 fired.acted.push(plan.id);
                 session::log(record);
@@ -838,6 +839,7 @@ fn rendering_a_template_node(python: Python<'_>) -> PyResult<()> {
                     acted.push(plan.id);
                     stopping.push(plan.id);
                 }
+                conditions::Fired::Passed => acted.push(plan.id),
                 conditions::Fired::Logged(record) => {
                     acted.push(plan.id);
                     session::log(record);

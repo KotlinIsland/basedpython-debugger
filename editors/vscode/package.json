@@ -107,6 +107,32 @@
                 "default": false,
                 "description": "hold every thread that can be held for the duration of each stop. off by default: a stop holds one thread and the rest of the program keeps running. a thread parked in a C call cannot be held and is named rather than counted as held"
               },
+              "suspendPolicies": {
+                "type": "array",
+                "description": "what a breakpoint's hit holds, by the file and line the breakpoint is set at: all holds every thread that can be held, thread holds the one that hit it, none holds nothing and the hit is still counted and logged. a breakpoint no policy names holds what stopTheWorld says, and a policy for a line with no breakpoint waits for one",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["path", "line", "suspend"],
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "the file, spelled as the breakpoint's source path"
+                    },
+                    "line": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295,
+                      "description": "the line the breakpoint is set at"
+                    },
+                    "suspend": {
+                      "type": "string",
+                      "enum": ["all", "thread", "none"],
+                      "description": "what a hit holds"
+                    }
+                  }
+                }
+              },
               "exceptionClasses": {
                 "type": "array",
                 "description": "a rule per exception class, armed before the program runs a line. each decides for its class and every subclass, the nearest class's rule deciding, in place of the raised and uncaught filters. beside the exception options rather than through them: where both name a class, this one decides",

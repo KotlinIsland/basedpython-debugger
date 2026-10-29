@@ -319,6 +319,28 @@ fn an_exception_option_reaches_the_session_as_a_rule_for_its_class() {
 }
 
 #[test]
+fn a_suspend_policy_reaches_the_session_on_the_breakpoint_at_its_location() {
+    let asked = Asked::default();
+    drive(&asked);
+    let recorded = asked.lock().expect("the recorder is not poisoned");
+    // what each hit holds, read off what really arrived: the policy the launch
+    // named for line 9, and the session's `stopTheWorld` for line 3, which no
+    // policy names. an adapter that read the policies and never put them on a
+    // breakpoint would send `thread` for both
+    let suspends: Vec<(u32, bpd_core::Suspend)> = recorded
+        .breakpoints
+        .iter()
+        .map(|breakpoint| (breakpoint.line, breakpoint.suspend))
+        .collect();
+    assert!(
+        suspends.contains(&(9, bpd_core::Suspend::None))
+            && suspends.contains(&(3, bpd_core::Suspend::All)),
+        "`{}` never reached the session: {suspends:?}",
+        Facet::Suspend.name()
+    );
+}
+
+#[test]
 fn a_rule_from_bpd_set_exception_classes_reaches_the_session_with_its_own_library_choice() {
     // the claim `reach_of_facet` makes about `Facet::ExceptionClassLibraries`.
     // the launch left `justMyCode` on, so an option ignores library files and
@@ -1020,6 +1042,8 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
             "launcher": true,
             // and to the program reading the stdin the adapter was started with
             "inheritStdin": true,
+            // and to what a breakpoint's hit holds, by the location it is set at
+            "suspendPolicies": [{ "path": "/tmp/fake.py", "line": 9, "suspend": "none" }],
         }),
     );
     answer(

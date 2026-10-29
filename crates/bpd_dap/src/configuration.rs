@@ -199,6 +199,19 @@ pub struct Configuration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exception_classes: Option<Vec<bpd_core::ExceptionClass>>,
 
+    /// what a breakpoint's hit holds, by the location of the breakpoint
+    ///
+    /// `PyCharm`'s suspend policy. DAP's `SourceBreakpoint` has no field for
+    /// one and an IDE's DAP layer owns `setBreakpoints`, so it is said beside
+    /// the breakpoints, by the file and line a client sets one at — which is
+    /// what survives the client sending a file's breakpoints again. the same
+    /// set `bpd/setSuspendPolicies` replaces later. a breakpoint no policy names
+    /// holds what `stopTheWorld` says, and a policy that names a line with no
+    /// breakpoint waits for one — see
+    /// [suspend policies](../../../docs/development/breakpoints.md#what-a-hit-holds)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend_policies: Option<Vec<SuspendPolicy>>,
+
     /// run the program without debugging it
     ///
     /// refused rather than ignored. bpd has no path that launches a program
@@ -206,6 +219,18 @@ pub struct Configuration {
     /// run would be measuring something it did not ask for
     #[serde(default)]
     pub no_debug: bool,
+}
+
+/// what the breakpoint at one location holds when it is hit
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuspendPolicy {
+    /// the file, spelled as the client spells it in `setBreakpoints`
+    pub path: PathBuf,
+    /// the line the client sets the breakpoint at
+    pub line: u32,
+    /// what a hit holds
+    pub suspend: bpd_core::Suspend,
 }
 
 /// where a debuggee's standard streams come from

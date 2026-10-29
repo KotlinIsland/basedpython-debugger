@@ -441,6 +441,91 @@ fn a_hit_condition_the_dap_adapter_cannot_carry_reaches_the_agent_typed() {
     client.finish();
 }
 
+/// a worker that counts while the main thread passes two breakpoints
+const TWO_THREADS: &str = r#"import threading
+import time
+
+progress = [0]
+running = threading.Event()
+done = threading.Event()
+
+
+def work():
+    running.set()
+    while not done.is_set():
+        progress[0] += 1
+        time.sleep(0.001)
+
+
+worker = threading.Thread(target=work)
+worker.start()
+running.wait()
+passed = "none"  # holds nothing
+held = "all"  # holds everything
+done.set()
+worker.join()
+"#;
+
+#[test]
+fn a_breakpoint_that_holds_everything_answers_with_the_world_it_held() {
+    // the suspend policy carried on the breakpoint itself, which is where an
+    // MCP tool's JSON Schema input can put it. `none` never stops, and `all`
+    // holds the rest of the program before the stop is answered
+    let fixture = Fixture::new("two_threads", TWO_THREADS);
+    let mut client = Client::start();
+    client.ask("initialize", &serde_json::json!({}));
+    client.call(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.call(
+        "set_breakpoints",
+        &serde_json::json!({
+            "breakpoints": [ {
+                "file": fixture.path(),
+                "line": line_of(TWO_THREADS, "# holds nothing"),
+                "suspend": "none",
+            }, {
+                "file": fixture.path(),
+                "line": line_of(TWO_THREADS, "# holds everything"),
+                "suspend": "all",
+            } ],
+        }),
+    );
+
+    let hit = client.call("continue_", &serde_json::json!({ "deadline_ms": GENEROUS }));
+    assert_eq!(hit["outcome"], "stopped", "continue_ gave {hit}");
+    assert_eq!(
+        hit["reason"]["breakpoint"]["breakpoints"],
+        serde_json::json!([2]),
+        "the first breakpoint holds nothing, so the second is the first stop: {hit}"
+    );
+    assert_eq!(hit["world"]["whole_program"], true, "{hit}");
+
+    // and held it is: the worker does not count while the world is stopped
+    let read = |client: &mut Client| {
+        let read = client.call(
+            "evaluate",
+            &serde_json::json!({ "expression": "progress[0]" }),
+        );
+        read["result"]["value"]["content"]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("progress is an int and read as {read}"))
+            .to_string()
+    };
+    let before = read(&mut client);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        read(&mut client),
+        before,
+        "the worker ran while the world was held"
+    );
+
+    let ended = client.call("continue_", &serde_json::json!({ "deadline_ms": GENEROUS }));
+    assert_eq!(ended["outcome"], "exited", "continue_ gave {ended}");
+    client.finish();
+}
+
 /// a program that charges five amounts, three of them negative, writing a
 /// marker from inside each call
 const CHARGES: &str = r#"import pathlib

@@ -238,6 +238,7 @@ user could see accepted and never get
 | `variables`        | see below | how much of a value to read                             |
 | `threadSettleMs`   | `50`      | how far apart the two samples a thread census compares  |
 | `exceptionClasses` | none      | a rule per exception class, beside the filters — below  |
+| `suspendPolicies`  | none      | what each breakpoint's hit holds, by location — below   |
 
 `bpd` holds **every** program before its first statement — that is how a
 breakpoint binds against a real interpreter rather than against a guess about
@@ -440,7 +441,9 @@ client that did not know would render a stop that never happened, and label
 every read with a mode it was not taken in
 
 with `stopTheWorld` set, every stop asks the agent to hold the rest of the
-program, and `allThreadsStopped` is true — **only when it really was**. a thread
+program, and `allThreadsStopped` is true — **only when it really was**. a
+breakpoint's own suspend policy decides for the stops it makes, below, and
+`stopTheWorld` for every other stop and every breakpoint no policy names. a thread
 parked in a C call has released the GIL and reaches no monitoring event, so
 nothing can hold it; when there is one, the client gets an `output` event naming
 it and `allThreadsStopped` stays false. see [threads](threads.md)
@@ -670,6 +673,78 @@ at neither, and `userUnhandled` is refused by name. each gets its own entry in
 the response, after the filters', verified when the agent holds it and the
 program has the class — see below. the whole of it is
 [stepping](stepping.md#a-rule-per-class)
+
+### what a hit holds is said by location
+
+a breakpoint's [suspend policy](breakpoints.md#what-a-hit-holds) — `all`,
+`thread` or `none` — has no field on DAP's `SourceBreakpoint`, and the intellij
+platform owns `setBreakpoints`: it sends a file's set itself, before the launch
+and again whenever it changes, re-minting every id. so a policy is said beside
+the breakpoints, keyed by what both requests name and what outlives a set sent
+again — the file, spelled as `setBreakpoints` spells its `source.path`, and the
+line the breakpoint is set at. `suspendPolicies` in the launch, and a request
+that replaces the whole set at any time after:
+
+```json
+{
+  "command": "bpd/setSuspendPolicies",
+  "arguments": {
+    "policies": [
+      { "path": "/srv/app/handlers.py", "line": 41, "suspend": "all" },
+      { "path": "/srv/app/handlers.py", "line": 57, "suspend": "none" }
+    ]
+  }
+}
+```
+
+answered one entry per policy, in the order asked, with the breakpoint it
+applies to now or `waiting` when there is none at that location yet:
+
+```json
+{
+  "policies": [
+    {
+      "path": "/srv/app/handlers.py",
+      "line": 41,
+      "suspend": "all",
+      "breakpoint": 3
+    },
+    {
+      "path": "/srv/app/handlers.py",
+      "line": 57,
+      "suspend": "none",
+      "waiting": true
+    }
+  ]
+}
+```
+
+- a breakpoint no policy names holds what `stopTheWorld` says: everything when
+    it is on, its thread when it is off. a policy decides for its breakpoint
+    either way, so `thread` under `stopTheWorld` holds one thread
+- a policy for a line with no breakpoint **waits** for one, and a breakpoint
+    set there later holds what it says. a breakpoint at a line with no policy
+    holds the default, and gains the policy when one arrives
+- **a policy follows a breakpoint bpd moves.** a breakpoint asked for at a line
+    that does not run is bound at the next one that does, and told so; a client
+    then moves its own there and sends the file's set again, naming the new
+    line. the policy of the line asked for is carried to the line it moved to —
+    unless that line has a policy of its own, which is the client's word about
+    it — so the breakpoint holds the same thing before and after the client
+    catches up
+- the breakpoints are sent to the agent again with what they now hold, which
+    changes nothing else: a breakpoint keeps its hit count. a debugged child
+    starts with the policies its parent holds when it forks
+
+`a_breakpoints_location_says_what_its_hit_holds_and_the_policy_outlives_the_set`
+in `crates/bpd/tests/dap.rs` drives all of it in the intellij order against a
+real interpreter, and measures the worker thread off the program's own clock:
+under 5 counts while held at `all`, over 50 at `thread`
+
+**finding out whether a bpd has it**: send `bpd/setSuspendPolicies`. a bpd
+without it refuses it as `` bpd's DAP adapter does not implement
+`bpd/setSuspendPolicies` `` — measured against the build before it — and ignores
+`suspendPolicies` in a launch
 
 ### and a rule per class has a way in of its own
 

@@ -185,6 +185,24 @@ fn the_launcher_and_statements_reach_the_session_as_they_were_asked() {
 }
 
 #[test]
+fn a_suspend_policy_reaches_the_session_on_its_breakpoint() {
+    let asked = Asked::default();
+    drive(&asked);
+    let recorded = asked.lock().expect("the recorder is not poisoned");
+    // what a hit holds, read off what really arrived
+    let suspends: Vec<bpd_core::Suspend> = recorded
+        .breakpoints
+        .iter()
+        .map(|breakpoint| breakpoint.suspend)
+        .collect();
+    assert!(
+        suspends.contains(&bpd_core::Suspend::None),
+        "`{}` never reached the session: {suspends:?}",
+        Facet::Suspend.name()
+    );
+}
+
+#[test]
 fn every_capability_carried_inside_a_request_reaches_the_session() {
     let asked = Asked::default();
     let client = drive(&asked);
@@ -501,6 +519,8 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
                 "file": "/tmp/fake.py",
                 "line": 9,
                 "after": 1,
+                // and what its hit holds
+                "suspend": "none",
             } ],
         }),
     );

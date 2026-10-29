@@ -838,6 +838,7 @@ impl<'a> Server<'a> {
                     hits: wanted.hits,
                     log: wanted.log,
                     after: wanted.after,
+                    suspend: wanted.suspend,
                 }
             })
             .collect();
@@ -908,6 +909,21 @@ impl<'a> Server<'a> {
             Running::Stopped { stop, .. } => {
                 let mut stopped = render::stop(&stop);
                 stopped["outcome"] = "stopped".into();
+                // a breakpoint whose policy is `all` holds the rest of the
+                // program before anything is read off this stop, as the
+                // `stop_the_world` tool would
+                if self.suspends_all(&stop.reason) {
+                    match self.ask_in(
+                        session,
+                        Request::StopTheWorld {
+                            stop: stop.stop,
+                            settle: Threads::SETTLE,
+                        },
+                    )? {
+                        Response::WorldStopped(world) => stopped["world"] = render::world(&world),
+                        other => unreachable!("stopping the world was answered with {other:?}"),
+                    }
+                }
                 self.with_frames(&mut stopped, session, stop.stop, frames)?;
                 stopped
             }
@@ -981,6 +997,17 @@ impl<'a> Server<'a> {
             answer["rebound"] = serde_json::json!(render::breakpoints(&rebound, &self.requested));
         }
         Ok(answer)
+    }
+
+    /// whether a stop was made by a breakpoint whose policy is to hold every
+    /// thread
+    fn suspends_all(&self, reason: &bpd_core::StopReason) -> bool {
+        let bpd_core::StopReason::Breakpoint { breakpoints, .. } = reason else {
+            return false;
+        };
+        self.requested.iter().any(|breakpoint| {
+            breakpoints.contains(&breakpoint.id) && breakpoint.suspend == bpd_core::Suspend::All
+        })
     }
 
     /// add the top of a stop's stack to an answer about it
@@ -1712,6 +1739,9 @@ struct Wanted {
     /// they appear — so the thing to name is where the earlier one is
     #[serde(default)]
     after: Option<u32>,
+    /// what a hit holds — see [`bpd_core::Suspend`]
+    #[serde(default)]
+    suspend: bpd_core::Suspend,
 }
 
 #[derive(serde::Deserialize)]

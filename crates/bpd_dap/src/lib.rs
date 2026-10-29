@@ -61,7 +61,7 @@ pub mod wire;
 
 pub use adapter::serve;
 pub use capabilities::capabilities;
-pub use configuration::{Configuration, Console};
+pub use configuration::{Configuration, Console, SuspendPolicy};
 pub use coverage::{carriage_of, reach_of, reach_of_facet, surface};
 pub use listen::Listening;
 pub use session::{

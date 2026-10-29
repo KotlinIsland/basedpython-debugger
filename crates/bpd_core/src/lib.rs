@@ -47,7 +47,7 @@ pub mod value;
 
 pub use breakpoint::{
     Binding, Evaluation, HitCondition, LogRecord, NoArming, Resolved, Site, SourceBreakpoint,
-    Unbound,
+    Suspend, Unbound,
 };
 pub use error::{Error, Result};
 pub use exception::{PythonError, TracebackFrame};

@@ -187,30 +187,8 @@ fn every_contributed_attribute_declares_the_type_and_the_default_the_adapter_use
             "debugChildren" => flag(schema, adapter.debug_children),
             "watchRecompositions" => flag(schema, adapter.watch_recompositions),
             "threadSettleMs" => whole(schema, adapter.thread_settle_ms),
-            // a list of rules, each exactly the fields the core reads of one,
-            // all of them required because none of them has a default there
-            "exceptionClasses" => {
-                assert_eq!(schema["type"], "array");
-                assert!(
-                    schema["default"].is_null(),
-                    "absent is no rules, and a declared empty list would be a second \
-                     way of saying it"
-                );
-                let rule = &schema["items"];
-                assert_eq!(rule["additionalProperties"], false);
-                assert_eq!(
-                    declared(rule),
-                    fields_of::<bpd_core::ExceptionClass>(),
-                    "a rule is offered exactly as the core reads one"
-                );
-                let required: BTreeSet<String> = rule["required"]
-                    .as_array()
-                    .expect("a rule says which fields it needs")
-                    .iter()
-                    .map(|field| field.as_str().expect("a field name").to_string())
-                    .collect();
-                assert_eq!(required, fields_of::<bpd_core::ExceptionClass>());
-            }
+            "suspendPolicies" => suspend_policies(schema),
+            "exceptionClasses" => exception_classes(schema),
             "variables" => {
                 assert_eq!(schema["type"], "object");
                 assert!(
@@ -227,6 +205,55 @@ fn every_contributed_attribute_declares_the_type_and_the_default_the_adapter_use
             ),
         }
     }
+}
+
+/// a list of suspend policies, each exactly the fields the adapter reads of one,
+/// and the words of a suspend the core's own
+fn suspend_policies(schema: &serde_json::Value) {
+    assert_eq!(schema["type"], "array");
+    assert!(schema["default"].is_null(), "absent is no policies");
+    let policy = &schema["items"];
+    assert_eq!(policy["additionalProperties"], false);
+    assert_eq!(declared(policy), fields_of::<bpd_dap::SuspendPolicy>());
+    let words: Vec<bpd_core::Suspend> =
+        serde_json::from_value(policy["properties"]["suspend"]["enum"].clone())
+            .expect("every word offered is one the core reads");
+    assert_eq!(
+        words,
+        [
+            bpd_core::Suspend::All,
+            bpd_core::Suspend::Thread,
+            bpd_core::Suspend::None
+        ]
+    );
+    let line = &policy["properties"]["line"];
+    assert_eq!(line["type"], "integer");
+    assert_eq!(line["maximum"], serde_json::json!(u32::MAX));
+}
+
+/// a list of exception rules, each exactly the fields the core reads of one,
+/// all of them required because none of them has a default there
+fn exception_classes(schema: &serde_json::Value) {
+    assert_eq!(schema["type"], "array");
+    assert!(
+        schema["default"].is_null(),
+        "absent is no rules, and a declared empty list would be a second \
+         way of saying it"
+    );
+    let rule = &schema["items"];
+    assert_eq!(rule["additionalProperties"], false);
+    assert_eq!(
+        declared(rule),
+        fields_of::<bpd_core::ExceptionClass>(),
+        "a rule is offered exactly as the core reads one"
+    );
+    let required: BTreeSet<String> = rule["required"]
+        .as_array()
+        .expect("a rule says which fields it needs")
+        .iter()
+        .map(|field| field.as_str().expect("a field name").to_string())
+        .collect();
+    assert_eq!(required, fields_of::<bpd_core::ExceptionClass>());
 }
 
 #[test]

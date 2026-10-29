@@ -62,6 +62,40 @@ pub struct SourceBreakpoint {
     /// this one
     #[serde(default)]
     pub after: Option<u32>,
+    /// what a hit that would stop holds
+    ///
+    /// `PyCharm`'s suspend policy, per breakpoint. a stop holds one thread by
+    /// default and the rest of the program runs on, which is
+    /// [`Suspend::Thread`]
+    #[serde(default)]
+    pub suspend: Suspend,
+}
+
+/// what a breakpoint's hit holds
+///
+/// `PyCharm`'s "suspend: all, thread", and the suspend box unticked. measured
+/// against pycharm 263.7607's own debugger, which suspends the other threads at
+/// their next traced line for `ALL` and leaves them running for `THREAD`
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Suspend {
+    /// the thread that hit it, and every other thread that can be held — the
+    /// stop is a stop of the world, released when this one is resumed
+    ///
+    /// the agent holds the thread as it holds one for [`Suspend::Thread`], and
+    /// a front end holds the rest with [`crate::Request::StopTheWorld`] before
+    /// it reports the stop, which is what it already does for every stop when
+    /// told to. a thread parked in a C call cannot be held and is named instead
+    All,
+    /// the thread that hit it, and nothing else
+    #[default]
+    Thread,
+    /// nothing: the hit is counted, its log message is written and what waits
+    /// for it is armed, and the thread runs on
+    ///
+    /// a breakpoint that cannot answer — its condition or its log message
+    /// raised — still stops, because that is how it says so
+    None,
 }
 
 impl SourceBreakpoint {
@@ -75,6 +109,7 @@ impl SourceBreakpoint {
             hits: None,
             log: None,
             after: None,
+            suspend: Suspend::Thread,
         }
     }
 
@@ -103,6 +138,13 @@ impl SourceBreakpoint {
     #[must_use]
     pub fn logging(mut self, template: impl Into<String>) -> Self {
         self.log = Some(template.into());
+        self
+    }
+
+    /// hold what `suspend` says on a hit, rather than the one thread
+    #[must_use]
+    pub const fn suspending(mut self, suspend: Suspend) -> Self {
+        self.suspend = suspend;
         self
     }
 }

@@ -410,6 +410,8 @@ impl Run<'_> {
             // a `run_to` arms its own breakpoint and waits for it. one that
             // waited for another breakpoint would be a step that never returns
             after: None,
+            // and it holds the thread it is waiting for, which is what it is for
+            suspend: bpd_core::Suspend::Thread,
         });
 
         let resolved =

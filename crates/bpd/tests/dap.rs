@@ -104,6 +104,7 @@ over_each_transport!(
     a_refused_launch_ends_the_session_instead_of_leaving_it_open,
     the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program,
     a_rule_per_class_comes_in_beside_the_filters_and_neither_replaces_the_other,
+    a_breakpoints_location_says_what_its_hit_holds_and_the_policy_outlives_the_set,
 );
 
 /// a program with a local worth writing to, and a marker after the breakpoint
@@ -2812,6 +2813,200 @@ fn a_rule_per_class_comes_in_beside_the_filters_and_neither_replaces_the_other(
     client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));
     client.finish_after_the_program_exited(1);
+}
+
+/// a worker that counts while the main thread reaches three breakpoints, and
+/// says after each how far the worker got while it was there
+const SUSPENDING: &str = r#"import threading
+import time
+
+progress = [0]
+running = threading.Event()
+done = threading.Event()
+
+
+def work():
+    running.set()
+    while not done.is_set():
+        progress[0] += 1
+        time.sleep(0.001)
+
+
+def reach(policy):
+    before = progress[0]
+    started = time.monotonic()
+    yield
+    held = time.monotonic() - started
+    print(policy, progress[0] - before, f"{held:.2f}", flush=True)
+
+
+worker = threading.Thread(target=work)
+worker.start()
+running.wait()
+for _ in reach("all"):
+    pass  # all
+for _ in reach("thread"):
+    pass  # thread
+for _ in reach("none"):
+    # none, asked for here
+    pass  # none
+done.set()
+worker.join()
+"#;
+
+/// what the program printed for one of its three breakpoints: how far the
+/// worker got while the main thread was there, and for how long it was
+fn reached(output: &str, policy: &str) -> (u64, f64) {
+    let line = output
+        .lines()
+        .find(|line| line.starts_with(&format!("{policy} ")))
+        .unwrap_or_else(|| panic!("the program never reached `{policy}`: {output}"));
+    let words: Vec<&str> = line.split(' ').collect();
+    (
+        words[1].parse().expect("a count"),
+        words[2].parse().expect("a duration"),
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "it is one session end to end, in the order the intellij platform \
+              and a plugin beside it send their halves, and the order is what \
+              is under test"
+)]
+fn a_breakpoints_location_says_what_its_hit_holds_and_the_policy_outlives_the_set(
+    transport: Transport,
+) {
+    // pycharm's suspend policy, in the order the intellij platform and a plugin
+    // beside it send their halves: the platform sends `setBreakpoints` with no
+    // field for a policy, before the launch and again whenever a file's set
+    // changes, and the plugin names each location's policy in the launch and
+    // with a request of its own
+    let fixture = Fixture::new("suspending", SUSPENDING);
+    let file = fixture.path().display().to_string();
+    let all = line_of(SUSPENDING, "pass  # all");
+    let thread = line_of(SUSPENDING, "pass  # thread");
+    let asked = line_of(SUSPENDING, "# none, asked for here");
+    let none = line_of(SUSPENDING, "pass  # none");
+    let policies = serde_json::json!([
+        { "path": file, "line": all, "suspend": "all" },
+        { "path": file, "line": thread, "suspend": "thread" },
+        { "path": file, "line": asked, "suspend": "none" },
+    ]);
+    let breakpoints = |lines: &[u32]| {
+        serde_json::json!({
+            "source": { "path": file },
+            "breakpoints": lines.iter().map(|line| serde_json::json!({ "line": line }))
+                .collect::<Vec<_>>(),
+        })
+    };
+
+    let mut client = Client::start(transport);
+    client.request("initialize", &serde_json::json!({ "adapterID": "bpd" }));
+    client.event("initialized");
+    client.request("setBreakpoints", &breakpoints(&[all, thread]));
+    client.request("configurationDone", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "stopOnEntry": true,
+            "suspendPolicies": policies,
+        }),
+    );
+    let entry = client.event("stopped");
+    assert_eq!(entry["body"]["reason"], "entry", "{entry}");
+
+    // the same set again, answered location by location: the two with a
+    // breakpoint name it, and the one with none yet waits for one
+    let set = client.request(
+        "bpd/setSuspendPolicies",
+        &serde_json::json!({ "policies": policies }),
+    );
+    assert_eq!(set["success"], true, "{set}");
+    let answered: Vec<(u64, bool, bool)> = set["body"]["policies"]
+        .as_array()
+        .unwrap_or_else(|| panic!("one answer per policy: {set}"))
+        .iter()
+        .map(|answer| {
+            (
+                answer["line"].as_u64().expect("each answer names its line"),
+                answer["breakpoint"].is_u64(),
+                answer["waiting"] == true,
+            )
+        })
+        .collect();
+    assert_eq!(
+        answered,
+        [
+            (u64::from(all), true, false),
+            (u64::from(thread), true, false),
+            (u64::from(asked), false, true),
+        ],
+        "{set}"
+    );
+
+    // a breakpoint arrives on the line the third policy waited for, and moves
+    // off the comment to the line that runs. the client moves its own there
+    // and sends the file again, naming the new line and no policy for it
+    let moved = client.request("setBreakpoints", &breakpoints(&[all, thread, asked]));
+    assert_eq!(
+        moved["body"]["breakpoints"][2]["line"], none,
+        "a comment is not executable: {moved}"
+    );
+    client.request("setBreakpoints", &breakpoints(&[all, thread, none]));
+    let thread_id = entry["body"]["threadId"].clone();
+    client.request("continue", &serde_json::json!({ "threadId": thread_id }));
+
+    // `all` holds the world, and says so; `thread` holds the main thread and
+    // the worker runs on; `none` holds nothing at all
+    for (policy, line, everything) in [("all", all, true), ("thread", thread, false)] {
+        let stopped = client.event("stopped");
+        assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+        assert_eq!(
+            stopped["body"]["allThreadsStopped"], everything,
+            "`{policy}`: {stopped}"
+        );
+        let held = stopped["body"]["threadId"].clone();
+        let stack = client.request("stackTrace", &serde_json::json!({ "threadId": held }));
+        assert_eq!(stack["body"]["stackFrames"][0]["line"], line, "{stack}");
+        std::thread::sleep(Duration::from_millis(300));
+        client.request("continue", &serde_json::json!({ "threadId": held }));
+    }
+    client.event("exited");
+    assert!(
+        client
+            .seen
+            .iter()
+            .filter(|message| message["event"] == "stopped")
+            .count()
+            == 3,
+        "the entry and two breakpoints, and nothing at the breakpoint whose \
+         policy is none: {:?}",
+        client.seen
+    );
+
+    // measured off the program's own clock: while the main thread was held at
+    // `all` the worker hardly moved, and while it was held at `thread` it went
+    // on counting
+    let output = client.output();
+    let (moved_all, held_all) = reached(&output, "all");
+    let (moved_thread, held_thread) = reached(&output, "thread");
+    assert!(held_all >= 0.3 && held_thread >= 0.3, "{output}");
+    assert!(
+        moved_all < 5,
+        "the worker counted {moved_all} while the world was stopped: {output}"
+    );
+    assert!(
+        moved_thread > 50,
+        "the worker counted {moved_thread} while only the main thread was held: {output}"
+    );
+    reached(&output, "none");
+
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish_after_the_program_exited(0);
 }
 
 /// the interpreter the built agent matches
