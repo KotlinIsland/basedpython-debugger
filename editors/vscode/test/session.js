@@ -218,7 +218,7 @@ async function run() {
   );
   assert.equal(top.name, "accumulate");
 
-  const locals = await variables(session, item.frameId, "local");
+  const locals = await variables(session, item.frameId, "locals");
   const total = locals.find((one) => one.name === "total");
   assert.ok(
     total,
