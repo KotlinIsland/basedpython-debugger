@@ -163,9 +163,16 @@ pub(super) struct Own {
     pub(super) by_code: Vec<PathBuf>,
 }
 
-/// read `LAUNCHER` and `BY_CODE`, as [`Own`] describes them
-pub(super) fn own(text: &str) -> Result<Own, ParseError> {
+/// what a map says: the entries of its tables, and what it names of `by`'s own
+///
+/// the text is parsed once, and both are read off the one parse
+pub(super) fn read(text: &str) -> Result<(Vec<Entry>, Own), ParseError> {
     let assignments = Reader::new(text).module()?;
+    Ok((tables(&assignments)?, own(&assignments)?))
+}
+
+/// read `LAUNCHER` and `BY_CODE`, as [`Own`] describes them
+fn own(assignments: &[(String, Literal)]) -> Result<Own, ParseError> {
     let named = |name: &str| {
         assignments
             .iter()
@@ -216,14 +223,13 @@ pub(super) fn own(text: &str) -> Result<Own, ParseError> {
 /// rather than being dropped: which entry could not be verified is what the
 /// caller refuses by name, and one that quietly went missing would look like a
 /// file the map was never about
-pub(super) fn tables(text: &str) -> Result<Vec<Entry>, ParseError> {
-    let assignments = Reader::new(text).module()?;
-    let sourcemap = table(&assignments, "SOURCEMAP")?;
-    let all_digests = table(&assignments, "DIGESTS")?;
+fn tables(assignments: &[(String, Literal)]) -> Result<Vec<Entry>, ParseError> {
+    let sourcemap = table(assignments, "SOURCEMAP")?;
+    let all_digests = table(assignments, "DIGESTS")?;
     // newer than the other two, and absent from a map an older `by` wrote
     let all_columns = match assignments.iter().find(|(name, _)| name == "COLUMNS") {
         None => None,
-        Some(_) => Some(table(&assignments, "COLUMNS")?),
+        Some(_) => Some(table(assignments, "COLUMNS")?),
     };
 
     let mut entries = Vec::with_capacity(sourcemap.len());
@@ -263,7 +269,7 @@ pub(super) fn tables(text: &str) -> Result<Vec<Entry>, ParseError> {
         let digests = digest_for(all_digests, key)?;
         let columns = match all_columns {
             None => None,
-            Some(all) => Some(columns_for(all, key, &generated)?),
+            Some(all) => Some(columns_for(all, key, &generated, table.len())?),
         };
         entries.push(Entry {
             generated,
@@ -279,11 +285,18 @@ pub(super) fn tables(text: &str) -> Result<Vec<Entry>, ParseError> {
 /// the column runs for one entry of a map that has `COLUMNS`
 ///
 /// an entry `COLUMNS` has nothing for is a file every column of which is the
-/// transpiler's, which is how the runner reads one: no runs on any line
+/// transpiler's, which is how the runner reads one: no runs on any line, and
+/// so is a line past the last one the entry has
+///
+/// what the runner relies on is checked rather than assumed: a run covers at
+/// least one column, a line's runs are in order and cover each column once, and
+/// there are no more lines than `SOURCEMAP` has for the file. runs that break
+/// any of that describe no file the runner relined
 fn columns_for(
     all: &[(Literal, Literal)],
     key: &Literal,
     generated: &std::path::Path,
+    lines_mapped: usize,
 ) -> Result<Vec<Vec<super::Run>>, ParseError> {
     let Some((_, value)) = all.iter().find(|(candidate, _)| candidate == key) else {
         return Ok(Vec::new());
@@ -298,12 +311,18 @@ fn columns_for(
     let Literal::List(lines) = value else {
         return Err(malformed(value.describe().to_owned()));
     };
+    if lines.len() > lines_mapped {
+        return Err(malformed(format!(
+            "{} lines, where `SOURCEMAP` maps {lines_mapped}",
+            lines.len()
+        )));
+    }
     let mut read = Vec::with_capacity(lines.len());
     for line in lines {
         let Literal::List(runs) = line else {
             return Err(malformed(format!("a line that is {}", line.describe())));
         };
-        let mut parsed = Vec::with_capacity(runs.len());
+        let mut parsed: Vec<super::Run> = Vec::with_capacity(runs.len());
         for run in runs {
             let from = match run {
                 Literal::Tuple(parts) => match &parts[..] {
@@ -323,11 +342,19 @@ fn columns_for(
                 },
                 other => return Err(malformed(format!("a run that is {}", other.describe()))),
             };
-            parsed.push(super::Run {
-                start: from.0,
-                end: from.1,
-                from: from.2,
-            });
+            let (start, end, from) = from;
+            if start >= end {
+                return Err(malformed(format!("a run from column {start} to {end}")));
+            }
+            if let Some(before) = parsed.last()
+                && start < before.end
+            {
+                return Err(malformed(format!(
+                    "a run from column {start} after one that ends at {}",
+                    before.end
+                )));
+            }
+            parsed.push(super::Run { start, end, from });
         }
         read.push(parsed);
     }
@@ -669,6 +696,16 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
 
+    /// the tables of a map's text, read the way [`read`] reads them
+    fn tables(text: &str) -> Result<Vec<Entry>, ParseError> {
+        read(text).map(|(entries, _)| entries)
+    }
+
+    /// what a map's text names of `by`'s own, read the way [`read`] reads it
+    fn own(text: &str) -> Result<Own, ParseError> {
+        read(text).map(|(_, own)| own)
+    }
+
     /// a map with one entry, so a test can change one thing about it
     fn map(sourcemap: &str, digests: &str) -> String {
         format!("SOURCEMAP = {{{sourcemap}}}\nDIGESTS = {{{digests}}}\n")
@@ -718,6 +755,46 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn column_runs_that_cannot_describe_the_generated_file_are_refused() {
+        // the runner reads a line's runs in order, each covering its columns
+        // once. a run that ends before it starts, runs out of order or over one
+        // another, and more lines than `SOURCEMAP` has for the file, describe no
+        // file the runner could have relined — and a map is total or absent
+        let sourcemap = "\"/b/demo.py\": (\"/a/demo.by\", [0, 1]),";
+        let digests = "\"/b/demo.py\": {\"by\": \"sha256:aa\", \"py\": \"sha256:bb\"},";
+        for (runs, why) in [
+            ("[[(4, 2, 0, 0)]]", "a run that ends before it starts"),
+            ("[[(0, 0, 0, 0)]]", "a run that covers nothing"),
+            ("[[(4, 8, 0, 4), (0, 4, 0, 0)]]", "runs out of order"),
+            ("[[(0, 6, 0, 0), (4, 8, 0, 4)]]", "runs over one another"),
+            ("[[], [], []]", "more lines than the file has"),
+        ] {
+            let written = format!(
+                "{}COLUMNS = {{\"/b/demo.py\": {runs}}}\n",
+                map(sourcemap, digests)
+            );
+            assert!(
+                matches!(
+                    tables(&written),
+                    Err(ParseError::MalformedEntry {
+                        name: "COLUMNS",
+                        ..
+                    })
+                ),
+                "{why} was accepted"
+            );
+        }
+        let fewer = format!(
+            "{}COLUMNS = {{\"/b/demo.py\": [[(0, 4, 0, 0), (4, 6, None, None)]]}}\n",
+            map(sourcemap, digests)
+        );
+        assert!(
+            tables(&fewer).is_ok(),
+            "a line it has no runs for is the transpiler's"
+        );
     }
 
     #[test]

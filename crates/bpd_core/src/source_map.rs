@@ -580,11 +580,7 @@ impl SourceMap {
             path: path.clone(),
             source,
         })?;
-        let tables = literal::tables(&text).map_err(|source| MapError::Malformed {
-            path: path.clone(),
-            source,
-        })?;
-        let own = literal::own(&text).map_err(|source| MapError::Malformed {
+        let (tables, own) = literal::read(&text).map_err(|source| MapError::Malformed {
             path: path.clone(),
             source,
         })?;

@@ -90,7 +90,10 @@ says nothing about them:
     and what a code replacement assigns — reads it the same way, with the
     runner's `_by_span` ported line for line and checked against the runner's
     own text over every span of a build. it is what names a smart step into
-    target in the `.by`'s words
+    target in the `.by`'s words. what the runner relies on is checked when the
+    map is read: a run covers at least one column, a line's runs are in order
+    and cover each column once, and there are no more lines than `SOURCEMAP`
+    maps. a map that breaks any of it is refused as malformed, naming the file
 
 #### how bpd finds the map
 
