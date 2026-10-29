@@ -1,0 +1,11 @@
+# every text file is checked out exactly as it is stored, with LF, on every
+# platform. git for windows checks text out with CRLF by default, and a file
+# read with `include_str!` keeps those bytes where rustc normalises a literal's:
+# `by_runner_columns.py` is `by`'s runner captured byte for byte, and its
+# `_by_span` was cut out of it at "\n\n\ndef " and not found on any windows job
+* text=auto eol=lf
+
+# cmd reads a batch file's labels by its CRLF line endings
+*.bat text eol=crlf
+
+*.jar binary
