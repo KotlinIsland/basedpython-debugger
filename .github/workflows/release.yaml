@@ -18,7 +18,10 @@ jobs:
   version:
     name: the version, and whether this commit passed
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # longer than the hour `ci passed on this commit` waits for ci, below. at
+    # ten minutes the job was cancelled under a wait that was still allowed to
+    # go on — v0.0.1a3's release was, with ci queued twenty minutes behind it
+    timeout-minutes: 70
     permissions:
       contents: read
       # to read the conclusion of `ci` on this commit, below
