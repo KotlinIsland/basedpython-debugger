@@ -27,16 +27,35 @@
 //!
 //! the directories are handed back in the answer, so what was counted is
 //! something a client can see rather than something it has to trust
+//!
+//! ## the program's own code that is not a file
+//!
+//! `python -c` compiles the program under `<string>`, the same name `exec`
+//! gives the methods `dataclasses` writes. bpd compiles the command itself, so
+//! that code is known **by identity** — the way a launcher's is — and is the
+//! program's whatever its file name says
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 /// whether only the program's own code is stopped and stepped in
 static ON: AtomicBool = AtomicBool::new(false);
+
+/// the command bpd compiled as the program, when the program is one
+static COMMAND: OnceLock<crate::frames::CodeTree> = OnceLock::new();
+
+/// remember the code a `-c` program compiled to as the program's own
+///
+/// called once, with the code object the command compiled to, before it runs
+pub(crate) fn remember_command(code: &Bound<'_, PyAny>) -> PyResult<()> {
+    COMMAND
+        .set(crate::frames::CodeTree::of(code)?)
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("the program was entered twice"))
+}
 
 /// the library directories, and what each filename was found to be
 #[derive(Debug, Default)]
@@ -148,6 +167,9 @@ pub(crate) fn on() -> bool {
 /// the directories are read the first time they are needed, the way [`set`]
 /// reads them
 pub(crate) fn is_library(code: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if COMMAND.get().is_some_and(|command| command.holds(code)) {
+        return Ok(false);
+    }
     prepare(code.py())?;
     let file: String = code.getattr("co_filename")?.extract()?;
     let mut state = state();

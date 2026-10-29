@@ -381,6 +381,13 @@ the filesystem's identity, because the map spells them `/var/folders/…` where
 the interpreter compiles `/private/var/folders/…`. the answer names the
 directories and those files, and DAP says them on the console
 
+the one code that is not a file and is the program's is a `-c` command: cpython
+compiles it under `<string>`, the name `dataclasses` gives the methods it writes
+too. bpd compiles the command itself, so it knows that code **by identity**, the
+way it knows a launcher's, and it is the program's whatever its name says. what
+a frozen dataclass's `__setattr__` raises stops where it arrives in the command,
+and the command's own raise stops where it is
+
 ### a rule per class
 
 PyCharm's exception breakpoint is a class, "on raise", "on termination" and

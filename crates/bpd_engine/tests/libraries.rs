@@ -355,3 +355,63 @@ fn a_rule_that_ignores_library_files_stops_where_a_libraries_raise_arrives() {
         );
     }
 }
+
+#[test]
+fn a_command_programs_own_code_is_the_programs_though_it_is_not_a_file() {
+    // `python -c` compiles the program under `<string>`, which is also what
+    // `dataclasses` compiles the methods it writes under. the command's code is
+    // the program's by identity — bpd compiled it — so its raise stops where it
+    // is; a frozen dataclass's `__setattr__` is a library's, and what it raises
+    // stops where it arrives in the command
+    const COMMAND: &str = "import dataclasses\n\
+                           \n\
+                           @dataclasses.dataclass(frozen=True)\n\
+                           class Pair:\n    a: int\n\
+                           \n\
+                           def mine():\n    raise ValueError('the command raises')\n\
+                           \n\
+                           try:\n    Pair(1).a = 2  # frozen\nexcept AttributeError:\n    pass\n\
+                           try:\n    mine()\nexcept ValueError:\n    pass\n";
+    let assigned = line_of(COMMAND, "# frozen");
+    let raised = line_of(COMMAND, "raise ValueError");
+    for on in [true, false] {
+        let mut debuggee = match bpd_engine::launch(
+            bpd_test::agent::matching_interpreter(),
+            &bpd_engine::Program::Command(COMMAND.to_string()),
+            &[] as &[OsString],
+        ) {
+            Ok(Launched::Stopped(debuggee)) => debuggee,
+            other => panic!("the command did not stop at its entry: {other:?}"),
+        };
+        debuggee.just_my_code(on).expect("just-my-code was set");
+        debuggee
+            .set_exception_breakpoints(true, false)
+            .expect("the exception breakpoints were set");
+        let seen: Vec<(String, u32)> = raises(&mut debuggee)
+            .into_iter()
+            .filter(|(_, file, _)| file == "<string>")
+            .map(|(kind, _, line)| (kind, line))
+            .collect();
+        if on {
+            assert_eq!(
+                seen,
+                [
+                    ("dataclasses.FrozenInstanceError".to_string(), assigned),
+                    ("ValueError".to_string(), raised),
+                ],
+                "the command's own raise, and the library's where it arrives"
+            );
+        } else {
+            assert!(
+                seen.contains(&("ValueError".to_string(), raised)),
+                "{seen:?}"
+            );
+            assert!(
+                seen.iter()
+                    .any(|(kind, line)| kind == "dataclasses.FrozenInstanceError"
+                        && *line != assigned),
+                "the control: off, the dataclass's own code raises it: {seen:?}"
+            );
+        }
+    }
+}

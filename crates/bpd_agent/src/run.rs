@@ -265,6 +265,7 @@ fn command(python: Python<'_>, source: &str) -> PyResult<()> {
         .call1((&code, source, "<string>"))?;
 
     let main = install_main(&sys)?;
+    crate::libraries::remember_command(&code)?;
     watch_for(Entry::Compiled(code.clone().unbind()));
     builtins
         .getattr("exec")?

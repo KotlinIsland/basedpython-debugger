@@ -196,52 +196,60 @@ pub(crate) fn is_bootstrap(frame: &Bound<'_, PyAny>) -> bool {
 /// it runs is one of those objects, which is the exact answer: a file name would
 /// be a guess about which code is whose, and wrong for a program with a file of
 /// the same name
-struct Launcher {
-    /// the launcher's module code, which keeps every nested code object alive
-    /// and so keeps the addresses below meaning what they meant
+static LAUNCHER: OnceLock<CodeTree> = OnceLock::new();
+
+/// a code object bpd compiled, and every code object nested in it, known by
+/// identity
+pub(crate) struct CodeTree {
+    /// the outermost code, which keeps every nested code object alive and so
+    /// keeps the addresses below meaning what they meant
     _code: Py<PyAny>,
-    /// the address of every code object the launcher compiled to
+    /// the address of every code object in the tree
     codes: std::collections::BTreeSet<usize>,
 }
 
-static LAUNCHER: OnceLock<Launcher> = OnceLock::new();
+impl CodeTree {
+    /// `code` and every code object in its `co_consts`, recursively
+    pub(crate) fn of(code: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let kind = code.get_type();
+        let mut codes = std::collections::BTreeSet::new();
+        let mut pending = vec![code.clone()];
+        while let Some(one) = pending.pop() {
+            if !codes.insert(one.as_ptr() as usize) {
+                continue;
+            }
+            for constant in one.getattr("co_consts")?.try_iter()? {
+                let constant = constant?;
+                if constant.get_type().is(&kind) {
+                    pending.push(constant);
+                }
+            }
+        }
+        Ok(Self {
+            _code: code.clone().unbind(),
+            codes,
+        })
+    }
+
+    /// whether this code object is one of the tree's
+    pub(crate) fn holds(&self, code: &Bound<'_, PyAny>) -> bool {
+        self.codes.contains(&(code.as_ptr() as usize))
+    }
+}
 
 /// remember the launcher's code, so its frames are never reported as the
 /// program's
 ///
 /// called once, with the code object the script compiled to, before it runs
 pub(crate) fn remember_launcher(code: &Bound<'_, PyAny>) -> PyResult<()> {
-    let kind = code.get_type();
-    let mut codes = std::collections::BTreeSet::new();
-    let mut pending = vec![code.clone()];
-    while let Some(one) = pending.pop() {
-        if !codes.insert(one.as_ptr() as usize) {
-            continue;
-        }
-        for constant in one.getattr("co_consts")?.try_iter()? {
-            let constant = constant?;
-            if constant.get_type().is(&kind) {
-                pending.push(constant);
-            }
-        }
-    }
-    LAUNCHER
-        .set(Launcher {
-            _code: code.clone().unbind(),
-            codes,
-        })
-        .map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err(
-                "the program was entered through two launchers",
-            )
-        })
+    LAUNCHER.set(CodeTree::of(code)?).map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("the program was entered through two launchers")
+    })
 }
 
 /// whether this code object is the launcher's
 pub(crate) fn is_launchers(code: &Bound<'_, PyAny>) -> bool {
-    LAUNCHER
-        .get()
-        .is_some_and(|launcher| launcher.codes.contains(&(code.as_ptr() as usize)))
+    LAUNCHER.get().is_some_and(|launcher| launcher.holds(code))
 }
 
 /// the line a frame is on now, with `0` for none
