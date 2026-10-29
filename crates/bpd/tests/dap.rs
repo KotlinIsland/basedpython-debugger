@@ -2728,6 +2728,7 @@ fn a_rule_per_class_comes_in_beside_the_filters_and_neither_replaces_the_other(
                     "uncaught": false,
                     "libraries": true,
                 },
+                { "name": "os.error", "raised": true, "uncaught": false, "libraries": false },
             ],
         }),
     );
@@ -2743,6 +2744,14 @@ fn a_rule_per_class_comes_in_beside_the_filters_and_neither_replaces_the_other(
             program.as_str(),
             u64::from(line_of(CLASSES, "# a KeyError"))
         )
+    );
+    // nothing answers a launch's rules one by one, so a rule that will never
+    // decide is said on the console, by the time the program has stopped
+    let said = client.output();
+    assert!(
+        said.contains("the exception class rule for `os.error`")
+            && said.contains("name it `OSError`"),
+        "a launch's alias is said, with the name that works: {said:?}"
     );
     let (file, _) = stopped_at(&mut client);
     assert!(
@@ -3973,6 +3982,61 @@ fn debugging_a_forked_child_is_refused_on_a_transport_a_second_session_cannot_re
     client.finish();
 }
 
+/// set what a child should take from its parent as it is now rather than as
+/// it was launched: a breakpoint on the blank line `blank`, which bpd moves to
+/// the next line and the policy follows it there, and a rule per class. the
+/// rules are what this answers with
+#[cfg(unix)]
+fn changed_since_the_launch(client: &mut Client, program: &str, blank: u32) -> serde_json::Value {
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": program },
+            "breakpoints": [{ "line": blank }],
+        }),
+    );
+    let rules = serde_json::json!([
+        { "name": "KeyError", "raised": true, "uncaught": false, "libraries": false },
+    ]);
+    client.request(
+        "bpd/setExceptionClasses",
+        &serde_json::json!({ "classes": rules }),
+    );
+    rules
+}
+
+/// the exception rules and suspend policies a child's configuration carries
+/// are the ones the parent holds now rather than the ones it was launched with:
+/// the rules a request set since, and the policy carried to the line its
+/// breakpoint moved to, which no request named
+#[cfg(unix)]
+fn holds_what_its_parent_holds_now(
+    configuration: &serde_json::Value,
+    program: &str,
+    blank: u32,
+    rules: &serde_json::Value,
+) {
+    assert_eq!(configuration["exceptionClasses"], *rules, "{configuration}");
+    let policies: Vec<(String, u64, String)> = configuration["suspendPolicies"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the configuration carries the policies: {configuration}"))
+        .iter()
+        .map(|policy| {
+            (
+                policy["path"].as_str().unwrap_or_default().to_string(),
+                policy["line"].as_u64().unwrap_or_default(),
+                policy["suspend"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    for line in [blank, blank + 1] {
+        assert!(
+            policies.contains(&(program.to_string(), u64::from(line), "none".to_string())),
+            "line {line}'s policy reaches the child: {policies:?}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_forked_child_reaches_a_second_client_through_the_start_debugging_request() {
@@ -3988,15 +4052,21 @@ fn a_forked_child_reaches_a_second_client_through_the_start_debugging_request() 
         "initialize",
         &serde_json::json!({ "adapterID": "bpd", "supportsStartDebuggingRequest": true }),
     );
+    // a policy for the blank line above the fork, which holds nothing so the
+    // parent runs on to the fork
+    let program = fixture.path().display().to_string();
+    let blank = line_of(A_FORK, "pid = os.fork()") - 1;
     client.request(
         "launch",
         &serde_json::json!({
             "program": fixture.path(),
             "python": interpreter(),
             "debugChildren": true,
+            "suspendPolicies": [{ "path": program, "line": blank, "suspend": "none" }],
         }),
     );
     client.event("initialized");
+    let rules = changed_since_the_launch(&mut client, &program, blank);
     client.request("configurationDone", &serde_json::json!({}));
 
     let asked = client.reverse_request("startDebugging");
@@ -4013,6 +4083,7 @@ fn a_forked_child_reaches_a_second_client_through_the_start_debugging_request() 
     // the settings the parent's session was launched with come with it, which
     // is what makes a fork of a fork debugged too
     assert_eq!(configuration["debugChildren"], true, "{configuration}");
+    holds_what_its_parent_holds_now(&configuration, &program, blank, &rules);
 
     // and it says how to reach **this** adapter. a client that started a fresh
     // one would start a fresh engine, which does not hold the child

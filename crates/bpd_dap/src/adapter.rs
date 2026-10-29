@@ -1266,14 +1266,16 @@ impl Adapter {
         self.rebound(&corrected)
     }
 
-    /// arm the exception filters a client asked for before there was a program
+    /// arm the exception filters and rules a client asked for before there
+    /// was a program
     ///
     /// no event follows it. DAP has no `breakpoint` event for an exception
     /// filter — the `breakpoint` event carries a `Breakpoint`, which is a
     /// source location — so there is nowhere to put a correction, and a client
     /// that wants to know what is armed asks again. what this does guarantee is
     /// that the filters really are armed on the program, which is the half a
-    /// client cannot check for itself
+    /// client cannot check for itself, and that a rule that will not decide as
+    /// asked is said on the console rather than left `pending` for ever
     fn arm_exception_filters(&mut self) -> Answered {
         let armed = self.arm_exceptions()?;
         // read back off the agent, the way the request itself reads it back. a
@@ -1290,6 +1292,45 @@ impl Adapter {
                      started and the debuggee did not take it\n"
                 ))?;
             }
+        }
+        // a rule that is only `pending` decides when its class is raised, and
+        // is left as it was answered. one that never will is said, because the
+        // answer it was given said it would be armed and nothing else
+        let just_my_code = self.configuration().just_my_code;
+        let names = self
+            .exceptions
+            .classes
+            .iter()
+            .map(|rule| (&rule.name, "exception class rule"))
+            .chain(
+                self.exceptions
+                    .options
+                    .iter()
+                    .map(|option| (&option.name, "exception option")),
+            );
+        let verdicts = self
+            .exceptions
+            .class_verdicts(&armed.classes)
+            .into_iter()
+            .chain(
+                self.exceptions
+                    .option_verdicts(&armed.classes, just_my_code),
+            );
+        let failed: Vec<String> = names
+            .zip(verdicts)
+            .filter(|(_, verdict)| verdict["reason"] == "failed")
+            .map(|((name, kind), verdict)| {
+                format!(
+                    "the {kind} for `{name}` was set before the program started and will \
+                     not decide as asked: {}\n",
+                    verdict["message"]
+                        .as_str()
+                        .expect("a failed verdict says why")
+                )
+            })
+            .collect();
+        for said in failed {
+            self.say(&said)?;
         }
         Ok(())
     }
@@ -1576,22 +1617,10 @@ impl Adapter {
         // one answer per filter and then one per exception option, which is the
         // order DAP's response is read in. an option is answered as the rule it
         // became, which took the session's library choice
-        let just_my_code = self.configuration().just_my_code;
-        verified.extend(self.exceptions.options.iter().map(|option| {
-            let asked = bpd_core::ExceptionClass {
-                libraries: !just_my_code,
-                ..option.clone()
-            };
-            exceptions::verdict(
-                &asked,
-                &armed.classes,
-                &format!(
-                    "a rule `exceptionClasses` or `bpd/setExceptionClasses` set for `{}` \
-                     decides for it in this option's place",
-                    option.name
-                ),
-            )
-        }));
+        verified.extend(
+            self.exceptions
+                .option_verdicts(&armed.classes, self.configuration().just_my_code),
+        );
 
         self.respond(
             message,
@@ -1615,13 +1644,10 @@ impl Adapter {
     /// it per class
     fn exception_options(
         options: &serde_json::Value,
-    ) -> Result<Vec<bpd_core::ExceptionClass>, Aborted> {
+    ) -> Result<Vec<exceptions::ExceptionOption>, Aborted> {
         let Some(options) = options.as_array() else {
             return Ok(Vec::new());
         };
-        // the session's, and decided when the rules are sent — see
-        // [`Exceptions::options`]
-        let libraries = false;
         let mut classes = Vec::new();
         for option in options {
             let (raised, uncaught) = match option["breakMode"].as_str() {
@@ -1663,11 +1689,10 @@ impl Adapter {
                         "an exception path names classes as strings, and one was {name}"
                     )));
                 };
-                classes.push(bpd_core::ExceptionClass {
+                classes.push(exceptions::ExceptionOption {
                     name: name.to_string(),
                     raised,
                     uncaught,
-                    libraries,
                 });
             }
         }
@@ -1689,28 +1714,13 @@ impl Adapter {
                 ))
             })?;
         self.exceptions.classes.clone_from(&classes);
-        // so that a debugged child's session starts with the rules its parent
-        // has now, rather than with the ones the parent was launched with
-        if let Some(configuration) = &mut self.configuration {
-            configuration.exception_classes = Some(classes.clone());
-        }
 
         let answers: Vec<serde_json::Value> = if self.session.is_none() {
             self.exceptions.held = true;
             classes.iter().map(|_| exceptions::waiting()).collect()
         } else {
             let armed = self.arm_exceptions()?;
-            classes
-                .iter()
-                .map(|asked| {
-                    exceptions::verdict(
-                        asked,
-                        &armed.classes,
-                        "another rule for the same class decides in this one's place: \
-                         the first of them in the list",
-                    )
-                })
-                .collect()
+            self.exceptions.class_verdicts(&armed.classes)
         };
         let answers: Vec<serde_json::Value> = classes
             .iter()
@@ -1742,11 +1752,6 @@ impl Adapter {
             .iter()
             .map(|policy| ((policy.path.clone(), policy.line), policy.suspend))
             .collect();
-        // so that a debugged child's session starts with the policies its
-        // parent has now
-        if let Some(configuration) = &mut self.configuration {
-            configuration.suspend_policies = Some(policies.clone());
-        }
 
         // the set the agent holds is the same set, holding something else. its
         // bindings are the ones already reported — what a set resolves to
@@ -3636,11 +3641,9 @@ impl Adapter {
             // a breakpoint's own policy decides for the stops it makes, and the
             // session's `stopTheWorld` for every other stop
             let all = match &stop.reason {
-                StopReason::Breakpoint { breakpoints, .. } => breakpoints.iter().any(|id| {
-                    self.breakpoints
-                        .requested(*id)
-                        .is_some_and(|breakpoint| breakpoint.suspend == Suspend::All)
-                }),
+                StopReason::Breakpoint { breakpoints, .. } => {
+                    self.breakpoints.holds_everything(breakpoints)
+                }
                 _ => self.configuration().stop_the_world,
             };
             let whole_program = if all {
@@ -3839,8 +3842,24 @@ impl Adapter {
             // with, so the child's session carries the same settings its
             // parent's does — the same `stopTheWorld`, the same value bounds,
             // and the same `debugChildren`, which is what makes a fork of a
-            // fork debugged as well
-            let mut configuration = serde_json::to_value(self.configuration())
+            // fork debugged as well. the exception rules and suspend policies
+            // are the ones held now rather than the launch's: a request since
+            // may have replaced them, and a policy follows a breakpoint bpd
+            // moved, which no request said
+            let mut configuration = self.configuration().clone();
+            configuration.exception_classes = Some(self.exceptions.classes.clone());
+            configuration.suspend_policies = Some(
+                self.breakpoints
+                    .policies
+                    .iter()
+                    .map(|((path, line), suspend)| crate::SuspendPolicy {
+                        path: path.clone(),
+                        line: *line,
+                        suspend: *suspend,
+                    })
+                    .collect(),
+            );
+            let mut configuration = serde_json::to_value(&configuration)
                 .expect("a launch configuration is json and serialises");
             let extra = serde_json::json!({
                 "name": format!("bpd: forked child ({session})"),
@@ -4906,6 +4925,25 @@ impl FileBreakpoints {
             .find(|breakpoint| breakpoint.id == id)
             .map(|breakpoint| self.policed(breakpoint))
     }
+
+    /// whether a stop the breakpoints `ids` made holds the whole program
+    ///
+    /// a stop can name only ids a `setBreakpoints` has since re-minted — the
+    /// hit was on its way while the client sent the file's set again, as an
+    /// IDE's DAP layer does on any change — and then nothing here says what
+    /// those breakpoints held. such a stop holds what `stopTheWorld` says, as
+    /// every stop did before a breakpoint could say otherwise, rather than one
+    /// thread because no breakpoint was found to ask
+    fn holds_everything(&self, ids: &[u32]) -> bool {
+        let known: Vec<SourceBreakpoint> =
+            ids.iter().filter_map(|id| self.requested(*id)).collect();
+        if known.is_empty() {
+            return self.default == Suspend::All;
+        }
+        known
+            .iter()
+            .any(|breakpoint| breakpoint.suspend == Suspend::All)
+    }
 }
 
 /// the client's thread numbers, and the interpreter's
@@ -5008,6 +5046,44 @@ mod tests {
         let whole = breakpoints.all();
         assert_eq!(whole.len(), 1);
         assert_eq!(whole[0].file, PathBuf::from("/b.py"));
+    }
+
+    #[test]
+    fn a_stop_by_breakpoints_since_re_minted_holds_what_stop_the_world_says() {
+        let mut breakpoints = FileBreakpoints {
+            default: Suspend::All,
+            ..FileBreakpoints::default()
+        };
+        breakpoints
+            .policies
+            .insert((PathBuf::from("/a.py"), 1), Suspend::Thread);
+        let wanted = |line| Wanted {
+            after: None,
+            line,
+            condition: None,
+            log: None,
+        };
+        let stale = breakpoints.replace(Path::new("/a.py"), &[wanted(1)])[0].id;
+        let thread = breakpoints.replace(Path::new("/a.py"), &[wanted(1), wanted(2)]);
+        assert_ne!(stale, thread[0].id, "a set sent again re-mints every id");
+
+        assert!(
+            !breakpoints.holds_everything(&[thread[0].id]),
+            "a breakpoint's own policy decides"
+        );
+        assert!(
+            breakpoints.holds_everything(&[thread[1].id]),
+            "one no policy names holds what `stopTheWorld` says"
+        );
+        assert!(
+            breakpoints.holds_everything(&[stale]),
+            "a stop by an id the set no longer has holds what `stopTheWorld` says, \
+             not one thread for want of a breakpoint to ask"
+        );
+        assert!(
+            !breakpoints.holds_everything(&[stale, thread[0].id]),
+            "and a known breakpoint among them still decides"
+        );
     }
 
     #[test]

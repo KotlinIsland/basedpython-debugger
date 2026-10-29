@@ -815,8 +815,9 @@ another rule for the same class comes first. what the program has is read off
 `sys.modules` and the namespaces under it without importing anything, so asking
 again later — the same set, sent again — is how a `pending` rule is seen to
 resolve. before there is a program every rule is `pending` and held until there
-is one; the launch's own rules are answered nowhere, so a client that wants
-their verdicts sends them again
+is one. nothing answers the launch's own rules, or the ones held from before
+it, one by one once they are armed, so each that is `failed` then is said on the
+console with why; a client that wants every verdict sends them again
 
 an options entry of `setExceptionBreakpoints` is answered the same way, and one
 a rule of the same class decides in place of is `failed` and says so. a debugged

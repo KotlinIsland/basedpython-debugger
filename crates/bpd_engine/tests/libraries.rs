@@ -464,6 +464,48 @@ fn what_a_rules_name_finds_is_read_off_the_program_without_importing_or_running_
     }
 }
 
+/// a class whose name cannot be read, because its `__module__` is not a string
+const UNNAMED: &str = r#"class Odd(Exception):
+    pass
+
+
+Odd.__module__ = 5
+
+ready = 1
+try:
+    raise KeyError("the first rule's")  # a KeyError
+except KeyError:
+    pass
+"#;
+
+#[test]
+fn a_rule_whose_name_cannot_be_looked_up_refuses_the_set_and_leaves_the_rules_before_it() {
+    let fixture = Fixture::new("unnamed", UNNAMED);
+    let mut debuggee = launch(&fixture);
+    held_at(&mut debuggee, &fixture, line_of(UNNAMED, "ready = 1"));
+    debuggee
+        .set_exception_rules(false, false, vec![rule("KeyError", true, true)])
+        .expect("the exception breakpoints were set");
+
+    let refused =
+        debuggee.set_exception_rules(false, false, vec![rule("__main__.Odd", true, true)]);
+    assert!(
+        refused.is_err(),
+        "a class whose `__module__` is not a string has no name to compare: {refused:?}"
+    );
+
+    let program = fixture.path().display().to_string();
+    assert_eq!(
+        raises(&mut debuggee),
+        [(
+            "KeyError".to_string(),
+            program,
+            line_of(UNNAMED, "# a KeyError")
+        )],
+        "the refused set took nothing, so the rule before it still decides"
+    );
+}
+
 #[test]
 fn a_rule_that_ignores_library_files_stops_where_a_libraries_raise_arrives() {
     let fixture = Fixture::new("classes", CLASSES);

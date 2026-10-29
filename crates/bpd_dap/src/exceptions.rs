@@ -28,16 +28,40 @@ pub struct Exceptions {
     pub uncaught: bool,
     /// the classes `exceptionOptions` named, with what each one's break mode
     /// asks
-    ///
-    /// their library choice is the session's `justMyCode`, decided when they
-    /// are sent: an option has nowhere to say one, and one asked for before the
-    /// launch has no configuration yet to take it from
-    pub options: Vec<ExceptionClass>,
+    pub options: Vec<ExceptionOption>,
     /// the rules `exceptionClasses` and `bpd/setExceptionClasses` set
     pub classes: Vec<ExceptionClass>,
     /// whether either request has asked for anything since the agent was last
     /// told, because there was no agent to tell
     pub held: bool,
+}
+
+/// one class an `exceptionOptions` entry named, and what its break mode asks
+///
+/// no library choice, because an option has nowhere to say one: it is the
+/// session's `justMyCode`, decided when the option is sent as a rule, and one
+/// asked for before the launch has no configuration yet to take it from
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionOption {
+    /// the class, as the last segment of the option's path names it
+    pub name: String,
+    /// stopping where one is raised: `always`
+    pub raised: bool,
+    /// stopping where one leaves the program: `unhandled`
+    pub uncaught: bool,
+}
+
+impl ExceptionOption {
+    /// the rule this option is sent as, ignoring library files exactly when
+    /// `just_my_code` is on
+    pub fn rule(&self, just_my_code: bool) -> ExceptionClass {
+        ExceptionClass {
+            name: self.name.clone(),
+            raised: self.raised,
+            uncaught: self.uncaught,
+            libraries: !just_my_code,
+        }
+    }
 }
 
 impl Exceptions {
@@ -47,13 +71,49 @@ impl Exceptions {
         let mut table = self.classes.clone();
         for option in &self.options {
             if !table.iter().any(|rule| rule.name == option.name) {
-                table.push(ExceptionClass {
-                    libraries: !just_my_code,
-                    ..option.clone()
-                });
+                table.push(option.rule(just_my_code));
             }
         }
         table
+    }
+
+    /// what each rule `exceptionClasses` or `bpd/setExceptionClasses` set is
+    /// answered with, in the order they were asked
+    pub fn class_verdicts(&self, armed: &[ArmedClass]) -> Vec<serde_json::Value> {
+        self.classes
+            .iter()
+            .map(|asked| {
+                verdict(
+                    asked,
+                    armed,
+                    "another rule for the same class decides in this one's place: the \
+                     first of them in the list",
+                )
+            })
+            .collect()
+    }
+
+    /// what each `exceptionOptions` class is answered with, in the order they
+    /// were asked, as the rule it became
+    pub fn option_verdicts(
+        &self,
+        armed: &[ArmedClass],
+        just_my_code: bool,
+    ) -> Vec<serde_json::Value> {
+        self.options
+            .iter()
+            .map(|option| {
+                verdict(
+                    &option.rule(just_my_code),
+                    armed,
+                    &format!(
+                        "a rule `exceptionClasses` or `bpd/setExceptionClasses` set for `{}` \
+                         decides for it in this option's place",
+                        option.name
+                    ),
+                )
+            })
+            .collect()
     }
 }
 
@@ -137,8 +197,13 @@ mod tests {
 
     #[test]
     fn a_rule_decides_in_place_of_an_option_for_the_same_class_and_the_rest_are_both() {
+        let option = |name: &str| ExceptionOption {
+            name: name.to_string(),
+            raised: true,
+            uncaught: false,
+        };
         let exceptions = Exceptions {
-            options: vec![rule("KeyError", true, false), rule("OSError", true, false)],
+            options: vec![option("KeyError"), option("OSError")],
             classes: vec![
                 rule("KeyError", false, true),
                 rule("ValueError", true, true),

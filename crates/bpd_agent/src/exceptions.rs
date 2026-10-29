@@ -59,8 +59,9 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bpd_core::{ClassFound, ExceptionClass};
+use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 
 include!(concat!(env!("OUT_DIR"), "/opcodes.rs"));
 
@@ -230,13 +231,10 @@ pub(crate) fn found(python: Python<'_>, name: &str) -> PyResult<ClassFound> {
     };
 
     let modules = PyModule::import(python, "sys")?.getattr("modules")?;
+    let modules = modules.cast::<PyDict>()?;
     let mut missed = Vec::new();
     for (module, inside) in readings {
-        let Some(held) = modules
-            .get_item(&module)
-            .ok()
-            .filter(|held| !held.is_none())
-        else {
+        let Some(held) = modules.get_item(&module)?.filter(|held| !held.is_none()) else {
             missed.push(format!("`{module}` is not imported"));
             continue;
         };
@@ -293,10 +291,11 @@ fn within<'py>(
             }
             namespace = crate::values::type_own(outer, "__dict__")?;
         }
-        let Ok(found) = namespace.get_item(*part) else {
-            return Ok(None);
-        };
-        object = Some(found);
+        match namespace.get_item(*part) {
+            Ok(found) => object = Some(found),
+            Err(error) if error.is_instance_of::<PyKeyError>(namespace.py()) => return Ok(None),
+            Err(error) => return Err(error),
+        }
     }
     Ok(object)
 }

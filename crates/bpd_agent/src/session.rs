@@ -229,17 +229,25 @@ pub(crate) fn about_the_process(python: Python<'_>, request: FromEngine) -> PyRe
             if classes.iter().any(|rule| !rule.libraries) {
                 crate::libraries::prepare(python)?;
             }
+            // looked up before anything is armed, so a name that cannot be
+            // looked up refuses the request with the old rules still in place
+            // rather than answering an error for rules that did take
+            let found = classes
+                .iter()
+                .map(|rule| Ok((rule.name.clone(), exceptions::found(python, &rule.name)?)))
+                .collect::<PyResult<std::collections::HashMap<_, _>>>()?;
             exceptions::watch(raised, uncaught, classes);
             refresh_events(python)?;
             let classes = exceptions::classes()
                 .into_iter()
-                .map(|rule| {
-                    Ok(bpd_core::ArmedClass {
-                        found: exceptions::found(python, &rule.name)?,
-                        rule,
-                    })
+                .map(|rule| bpd_core::ArmedClass {
+                    found: found
+                        .get(&rule.name)
+                        .expect("every rule armed was one of this request's, each looked up above")
+                        .clone(),
+                    rule,
                 })
-                .collect::<PyResult<_>>()?;
+                .collect();
             attach::send(&FromAgent::ExceptionBreakpointsSet {
                 raised,
                 uncaught,
