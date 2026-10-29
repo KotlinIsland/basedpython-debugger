@@ -30,6 +30,7 @@
 
 use std::io::{BufRead, BufReader, Read as _, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2753,9 +2754,10 @@ fn a_rule_per_class_comes_in_beside_the_filters_and_neither_replaces_the_other(
             && said.contains("name it `OSError`"),
         "a launch's alias is said, with the name that works: {said:?}"
     );
+    // by path component, since windows names the same file `json\decoder.py`
     let (file, _) = stopped_at(&mut client);
     assert!(
-        file.ends_with("json/decoder.py"),
+        Path::new(&file).ends_with("json/decoder.py"),
         "the rule that takes library files stops where json raised, and stopped in {file}"
     );
 
