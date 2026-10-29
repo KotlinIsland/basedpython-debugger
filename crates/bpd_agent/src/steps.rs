@@ -425,6 +425,12 @@ fn follow(
     // that gives every instruction line 0 has none to offer
     let library = crate::libraries::skips(&code)?;
     step.through = library || frames::is_launchers(&code) || frames::line_now(&frame)? == 0;
+    // the chosen call is an offset of the frame whose line makes it. a frame
+    // taken up after that one has left has other code at that offset, so a
+    // target never made is a step in from here on
+    if !frame.is(step.frame.bind(frame.py())) {
+        step.target = None;
+    }
     step.frame = frame.unbind();
     step.landing = landing;
     step.entering = false;

@@ -1080,13 +1080,14 @@ pub struct StepInTarget {
     pub label: String,
     /// the line the call is on, as it is reported
     pub line: u32,
-    /// where in that line the call begins and ends, counting from one, when the
-    /// interpreter knows
+    /// where in that line the call begins and ends, in utf-16 code units
+    /// counting from one — DAP's unit for a column — when the interpreter knows
+    /// and the call is on one line
     ///
-    /// `None` for a module `by run` compiled as its `.by`: the runner gives
-    /// every location the whole of its `.by` line, so a column there would be
-    /// one the interpreter does not have. the label is still the generated
-    /// python's own text for the call
+    /// `None` for a module of a build from a `by` before columns: its runner
+    /// gives every location the whole of its `.by` line, so a column there
+    /// would be one the interpreter does not have. the label is still the
+    /// generated python's own text for the call
     pub columns: Option<(u32, u32)>,
 }
 

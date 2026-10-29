@@ -89,6 +89,33 @@ pub enum Refusal {
         wanted: String,
     },
 
+    /// the calls of a line were asked of a frame its thread is not executing
+    ///
+    /// a frame below the top is suspended in a call it has already made, and a
+    /// step in goes into a call of the executing frame's line. offering the
+    /// deeper frame's calls would offer targets no step can reach, and a step
+    /// into one would land where a step over does while claiming otherwise
+    NotTheSteppedFrame {
+        /// what was asked about
+        frame: FrameId,
+        /// the frame the thread is executing, whose line a step in is about
+        executing: FrameId,
+    },
+
+    /// the calls of a frame's line cannot be named, because its source is not
+    /// proved to be the text the frame is running
+    ///
+    /// a call is named by the source text its position spans. text read off a
+    /// file edited since it was compiled is some other text at those columns,
+    /// so the file is held to the proof a frame's source is — see
+    /// [`crate::Source`] — and what failed it is said here
+    CallsUnnamed {
+        /// what was asked about
+        frame: FrameId,
+        /// what stood in the way of the proof
+        why: crate::Unverified,
+    },
+
     /// the frame cannot be run again
     ///
     /// there are two ways to run one again and they fail for unrelated reasons:
@@ -317,6 +344,21 @@ impl std::fmt::Display for Refusal {
                  frame return runs its `finally` and `except` blocks, which is a \
                  different operation. ask about {executing}"
             ),
+            Self::NotTheSteppedFrame { frame, executing } => write!(
+                formatter,
+                "{frame} is not the frame that thread is executing — {executing} \
+                 is — and a step in goes into a call of the executing frame's \
+                 line. a deeper frame is suspended in a call it has already made, \
+                 so none of its calls is one a step can go into. ask about \
+                 {executing}"
+            ),
+            Self::CallsUnnamed { frame, why } => write!(
+                formatter,
+                "the calls of {frame}'s line cannot be named: {why}. a call is \
+                 named by the source text it spans, and text that is not proved \
+                 to be what the frame runs would name something else. a step in \
+                 with no target still goes into the next call"
+            ),
             Self::NotRestartable {
                 frame,
                 function,
@@ -471,6 +513,27 @@ mod tests {
                     "the template context",
                     "frame 3 of stop 1",
                 ],
+            ),
+            (
+                Refusal::NotTheSteppedFrame {
+                    frame,
+                    executing: FrameId { stop: 1, depth: 0 },
+                },
+                vec![
+                    "frame 2 of stop 1",
+                    "already made",
+                    "ask about frame 0 of stop 1",
+                ],
+            ),
+            (
+                Refusal::CallsUnnamed {
+                    frame,
+                    why: crate::Unverified::NotAFile {
+                        file: "/a/demo.py".to_string(),
+                        reason: "No such file or directory".to_string(),
+                    },
+                },
+                vec!["frame 2 of stop 1", "/a/demo.py", "no target"],
             ),
             (
                 Refusal::NotTheExecutingFrame {

@@ -605,8 +605,20 @@ impl Debuggee {
                 threads: self.attached[at].let_go(which, reporting)?,
             }),
             Request::Step { stop, kind, target } => {
-                if target.is_some() && kind != StepKind::In {
-                    return Err(bpd_core::Error::TargetedStepNotIn { kind }.into());
+                if let Some(target) = target {
+                    if kind != StepKind::In {
+                        return Err(bpd_core::Error::TargetedStepNotIn { kind }.into());
+                    }
+                    // the calls the line makes, read now: the thread is held, so
+                    // the answer is still true when the step is let go
+                    let offered: Vec<u32> = self.attached[at]
+                        .step_in_targets(FrameId { stop, depth: 0 }, reporting)?
+                        .iter()
+                        .map(|call| call.offset)
+                        .collect();
+                    if !offered.contains(&target) {
+                        return Err(bpd_core::Error::NoSuchStepTarget { target, offered }.into());
+                    }
                 }
                 Ok(Response::Resumed {
                     threads: self.attached[at].step_thread(stop, kind, target, reporting)?,

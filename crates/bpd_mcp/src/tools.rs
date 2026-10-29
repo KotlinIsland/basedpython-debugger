@@ -625,7 +625,10 @@ pub fn tools() -> Vec<Tool> {
             description: "every call of the frame's line at or after where it is, \
                 in the order the line makes them, each named by what it calls as \
                 the source spells it — `sum`, `self.area` — with the `offset` \
-                `step_in`'s `target` takes."
+                `step_in`'s `target` takes. `columns` are utf-16 code units counting \
+                from one, for a call on one line. only the executing frame has calls \
+                to offer, and a file edited since it was compiled is refused rather \
+                than named from text that is not what runs."
                 .to_string(),
             schema: object(
                 serde_json::json!({

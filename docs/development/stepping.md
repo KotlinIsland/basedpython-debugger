@@ -168,7 +168,30 @@ when its caller is the held frame stopped at that call's offset, so every other
 call of the line — and whatever it calls — runs through. once the call's frame
 is entered the step is an ordinary step in, which is what goes through a library
 or the launcher on the way. a call into a builtin enters no python frame, and
-the step lands where a step over would
+the step lands where a step over would. a call the line never makes — the right
+of an `or` whose left was true — leaves the target with the frame: once the
+step follows another frame it is a step in from there, because that frame's
+code has other calls at that offset
+
+what is offered is held to what the step can do:
+
+- only the **executing** frame has calls to offer. a deeper frame is suspended
+    in a call it already made, and its calls are refused by name
+    (`Refusal::NotTheSteppedFrame`) rather than offered as targets no step can
+    reach
+- a target is checked against the calls the line makes **before** the thread is
+    let go, and one that is not among them is refused with the offsets that are
+    (`Error::NoSuchStepTarget`). the thread stays held where it was
+- a label is the source's text at the call's columns, so the source is proved
+    the way a frame's [source](breakpoints.md) is — compiled, and the frame's
+    own code object found in what comes out; a `.by` checked against its digest
+    too. a file edited since it was compiled has other text at those columns,
+    and its calls are refused (`Refusal::CallsUnnamed`) with what failed the
+    proof. the label is cut at the bracket the call ends in, read the way the
+    tokenizer reads it: `print("(")` is `print`
+- columns are **utf-16 code units counting from one**, DAP's unit for a column,
+    and only for a call on one line. `naïve = compute(x)` puts `compute` at 9,
+    where its byte offset would have said 10
 
 a module `by run` compiled as its `.by` is named in the `.by`'s own words. since
 `by` a110d7d8 the map carries `COLUMNS` — which byte columns of each generated

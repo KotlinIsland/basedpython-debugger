@@ -272,6 +272,22 @@ pub enum Error {
         kind: crate::StepKind,
     },
 
+    /// a step into one call of the line named a call the line does not make
+    ///
+    /// checked against the calls the line makes before the thread is let go,
+    /// because a target that matches no call is a step in that never enters
+    /// anything and lands where a step over does while claiming otherwise
+    #[error(
+        "the held line makes no call at offset {target} that a step can go into. \
+         the calls it makes are at offsets {offered:?}: ask for them and name one"
+    )]
+    NoSuchStepTarget {
+        /// the offset that was named
+        target: u32,
+        /// the offsets of the calls the line does make
+        offered: Vec<u32>,
+    },
+
     /// the agent understood the request and would not answer it
     ///
     /// not a failure of `bpd`'s machinery: answering would have meant guessing

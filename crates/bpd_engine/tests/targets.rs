@@ -8,7 +8,7 @@
 
 use std::ffi::OsString;
 
-use bpd_core::{Binding, FrameId, Running, SourceBreakpoint, StopReason};
+use bpd_core::{Binding, FrameId, Refusal, Running, SourceBreakpoint, StopReason};
 use bpd_engine::{Debuggee, Launched};
 use bpd_test::basedpython::{Build, SOURCE};
 use bpd_test::debuggee::{Fixture, line_of};
@@ -186,5 +186,145 @@ fn a_by_lines_calls_are_named_by_the_generated_python_and_carry_no_columns() {
     assert_eq!(
         landed(&mut debuggee),
         (line_of(SOURCE, "total = a + b"), "add".to_string())
+    );
+}
+
+#[test]
+fn the_calls_of_a_frame_below_the_top_are_refused_as_no_step_can_reach_them() {
+    // a deeper frame is suspended in a call it already made. its calls were
+    // offered before this, and a step into one landed where a step over would
+    let fixture = Fixture::new("three", THREE);
+    let line = line_of(THREE, "tripled = x * 3");
+
+    let mut debuggee = launch(&fixture.path(), &[]);
+    let stop = held_at(&mut debuggee, &fixture.path(), line);
+    match debuggee.step_in_targets(FrameId { stop, depth: 1 }) {
+        Err(bpd_engine::Error::Session(bpd_core::Error::Refused {
+            reason: Refusal::NotTheSteppedFrame { executing, .. },
+        })) => assert_eq!(executing, FrameId { stop, depth: 0 }),
+        other => panic!("expected the deeper frame to be refused, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_step_into_a_call_the_line_does_not_make_is_refused_and_the_thread_stays_held() {
+    let fixture = Fixture::new("three", THREE);
+    let line = line_of(THREE, "# three calls");
+
+    let mut debuggee = launch(&fixture.path(), &[]);
+    let stop = held_at(&mut debuggee, &fixture.path(), line);
+    let offered: Vec<u32> = debuggee
+        .step_in_targets(FrameId { stop, depth: 0 })
+        .expect("the targets were answered")
+        .iter()
+        .map(|target| target.offset)
+        .collect();
+    let nowhere = offered.iter().max().expect("the line makes calls") + 2;
+    match debuggee.step_into(stop, nowhere) {
+        Err(bpd_engine::Error::Session(bpd_core::Error::NoSuchStepTarget {
+            target,
+            offered: said,
+        })) => {
+            assert_eq!(target, nowhere);
+            assert_eq!(said, offered);
+        }
+        other => panic!("expected the step to be refused, got {other:?}"),
+    }
+
+    // still held where it was: a real target goes where it says
+    debuggee
+        .step_into(stop, offered[1])
+        .expect("the step was armed");
+    assert_eq!(
+        landed(&mut debuggee),
+        (line_of(THREE, "tripled = x * 3"), "triple".to_string())
+    );
+}
+
+#[test]
+fn the_calls_of_a_file_edited_since_it_was_compiled_are_refused_rather_than_misnamed() {
+    let fixture = Fixture::new("three", THREE);
+    let line = line_of(THREE, "# three calls");
+
+    let mut debuggee = launch(&fixture.path(), &[]);
+    let stop = held_at(&mut debuggee, &fixture.path(), line);
+    std::fs::write(
+        fixture.path(),
+        THREE.replace("sum([double(1), triple(2)])", "max([triple(1), double(2)])"),
+    )
+    .expect("the file was edited");
+    match debuggee.step_in_targets(FrameId { stop, depth: 0 }) {
+        Err(bpd_engine::Error::Session(bpd_core::Error::Refused {
+            reason: Refusal::CallsUnnamed { why, .. },
+        })) => assert!(
+            matches!(why, bpd_core::Unverified::NotTheSameCode { .. }),
+            "{why}"
+        ),
+        other => panic!("expected the edited file's text to be refused, got {other:?}"),
+    }
+}
+
+/// a callback a library calls twice, the first time on a line whose chosen
+/// call is never made
+const CALLED_BACK: &str = r#"import copy
+
+
+def a():
+    return 1
+
+
+def b():
+    return 2
+
+
+class First:
+    def __deepcopy__(self, memo):
+        return a() or b()  # b is never called
+
+
+class Second:
+    def __deepcopy__(self, memo):
+        copied = Second()  # the next of the program's code
+        return copied
+
+
+def main():
+    copy.deepcopy([First(), Second()])
+    return 0
+
+
+main()
+"#;
+
+#[test]
+fn a_step_into_a_call_never_made_goes_on_as_a_step_in_once_its_frame_returns() {
+    // `b` is never called, and the frame returns into `copy` — a library's
+    // code, with just-my-code on — which calls the program back. the target
+    // was kept as the frame was left, and compared against the library's
+    // frames, so the step went past the callback it should have landed in
+    let fixture = Fixture::new("called_back", CALLED_BACK);
+    let line = line_of(CALLED_BACK, "# b is never called");
+
+    let mut debuggee = launch(&fixture.path(), &[]);
+    debuggee
+        .just_my_code(true)
+        .expect("just-my-code was turned on");
+    let stop = held_at(&mut debuggee, &fixture.path(), line);
+    let targets = debuggee
+        .step_in_targets(FrameId { stop, depth: 0 })
+        .expect("the targets were answered");
+    let b = targets
+        .iter()
+        .find(|target| target.label == "b")
+        .expect("`b` is a call of the line");
+    debuggee
+        .step_into(stop, b.offset)
+        .expect("the step was armed");
+    assert_eq!(
+        landed(&mut debuggee),
+        (
+            line_of(CALLED_BACK, "# the next of the program's code"),
+            "Second.__deepcopy__".to_string()
+        )
     );
 }

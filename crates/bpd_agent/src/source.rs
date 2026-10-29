@@ -45,40 +45,10 @@ pub(crate) fn around(
         return staged(python, &code, file, line, around, &table);
     }
 
-    let bytes = match std::fs::read(&file) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return Ok(Source::Unverified {
-                why: Unverified::NotAFile {
-                    file,
-                    reason: error.to_string(),
-                },
-            });
-        }
+    let (bytes, wanted) = match plain(python, &code, &file)? {
+        Ok(proved) => proved,
+        Err(why) => return Ok(Source::Unverified { why }),
     };
-
-    let compiled = match compile(python, &bytes, &file) {
-        Ok(compiled) => compiled,
-        Err(error) => {
-            return Ok(Source::Unverified {
-                why: Unverified::DoesNotCompile {
-                    file,
-                    error: capture(python, &error),
-                },
-            });
-        }
-    };
-
-    let wanted = Identity::of(&code)?;
-    if !matches(&compiled, &wanted)? {
-        return Ok(Source::Unverified {
-            why: Unverified::NotTheSameCode {
-                file,
-                function: wanted.qualname,
-                first_line: wanted.first_line,
-            },
-        });
-    }
 
     let (lowest, highest) = extent(&code, wanted.first_line)?;
 
@@ -126,46 +96,10 @@ fn staged(
     around: u32,
     table: &MappedFile,
 ) -> PyResult<Source> {
-    let generated = table.generated.display().to_string();
-    let read = |path: &str| {
-        std::fs::read(path).map_err(|error| Unverified::NotAFile {
-            file: path.to_string(),
-            reason: error.to_string(),
-        })
+    let (_, bytes, wanted) = match staged_proof(python, code, &file, table)? {
+        Ok(proved) => proved,
+        Err(why) => return Ok(Source::Unverified { why }),
     };
-    let (python_bytes, bytes) = match (read(&generated), read(&file)) {
-        (Ok(python_bytes), Ok(bytes)) => (python_bytes, bytes),
-        (Err(why), _) | (_, Err(why)) => return Ok(Source::Unverified { why }),
-    };
-    if bpd_core::source_map::digest(&bytes) != table.digest {
-        return Ok(Source::Unverified {
-            why: Unverified::NotTheSameSource { file, generated },
-        });
-    }
-
-    let compiled =
-        match crate::staged::compile(python, &python_bytes, &generated, &file, table, &bytes) {
-            Ok(compiled) => compiled,
-            Err(error) => {
-                return Ok(Source::Unverified {
-                    why: Unverified::DoesNotCompile {
-                        file: generated,
-                        error: capture(python, &error),
-                    },
-                });
-            }
-        };
-
-    let wanted = Identity::of(code)?;
-    if !matches(&compiled, &wanted)? {
-        return Ok(Source::Unverified {
-            why: Unverified::NotTheSameCode {
-                file,
-                function: wanted.qualname,
-                first_line: wanted.first_line,
-            },
-        });
-    }
 
     // the runner's line 0: code the transpiler wrote on its own, which no line of
     // the `.by` is behind. the proof above holds and there is nothing to show
@@ -302,13 +236,134 @@ fn mapped(file: &str, line: u32, lowest: u32, highest: u32) -> Result<Option<Map
     }))
 }
 
+/// the text a code object's positions are columns of, proved to be what it
+/// was compiled from — what naming a call by its source text needs
+pub(crate) enum Proved {
+    /// the code's own positions index into these bytes: a python file, or a
+    /// `.by` whose runner gave each location the author's own columns
+    Own(Vec<u8>),
+    /// a `.by` from a `by` before columns, whose positions span whole lines.
+    /// these are the generated python's bytes, which the code was compiled from
+    /// and whose own positions do have columns
+    Generated(Vec<u8>),
+}
+
+/// prove the text behind `code`, the way [`around`] proves a frame's source
+pub(crate) fn proved(
+    python: Python<'_>,
+    code: &Bound<'_, PyAny>,
+) -> PyResult<Result<Proved, Unverified>> {
+    let file: String = code.getattr("co_filename")?.extract()?;
+    if let Some(table) = crate::sources::staged_as(&file) {
+        return Ok(
+            staged_proof(python, code, &file, &table)?.map(|(python_bytes, bytes, _)| {
+                if table.columns.is_some() {
+                    Proved::Own(bytes)
+                } else {
+                    Proved::Generated(python_bytes)
+                }
+            }),
+        );
+    }
+    Ok(plain(python, code, &file)?.map(|(bytes, _)| Proved::Own(bytes)))
+}
+
+/// a python file's bytes, proved by compiling them and finding `code` in what
+/// comes out
+fn plain(
+    python: Python<'_>,
+    code: &Bound<'_, PyAny>,
+    file: &str,
+) -> PyResult<Result<(Vec<u8>, Identity), Unverified>> {
+    let bytes = match std::fs::read(file) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Ok(Err(Unverified::NotAFile {
+                file: file.to_string(),
+                reason: error.to_string(),
+            }));
+        }
+    };
+    let compiled = match compile(python, &bytes, file) {
+        Ok(compiled) => compiled,
+        Err(error) => {
+            return Ok(Err(Unverified::DoesNotCompile {
+                file: file.to_string(),
+                error: capture(python, &error),
+            }));
+        }
+    };
+    let wanted = Identity::of(code)?;
+    if !matches(&compiled, &wanted)? {
+        return Ok(Err(Unverified::NotTheSameCode {
+            file: file.to_string(),
+            function: wanted.qualname,
+            first_line: wanted.first_line,
+        }));
+    }
+    Ok(Ok((bytes, wanted)))
+}
+
+/// a staged `.by` module's generated python and `.by` bytes, the `.by` proved
+/// by its digest and the generated python by compiling it the way the runner
+/// does and finding `code` in what comes out
+fn staged_proof(
+    python: Python<'_>,
+    code: &Bound<'_, PyAny>,
+    file: &str,
+    table: &MappedFile,
+) -> PyResult<Result<(Vec<u8>, Vec<u8>, Identity), Unverified>> {
+    let generated = table.generated.display().to_string();
+    let read = |path: &str| {
+        std::fs::read(path).map_err(|error| Unverified::NotAFile {
+            file: path.to_string(),
+            reason: error.to_string(),
+        })
+    };
+    let (python_bytes, bytes) = match (read(&generated), read(file)) {
+        (Ok(python_bytes), Ok(bytes)) => (python_bytes, bytes),
+        (Err(why), _) | (_, Err(why)) => return Ok(Err(why)),
+    };
+    if bpd_core::source_map::digest(&bytes) != table.digest {
+        return Ok(Err(Unverified::NotTheSameSource {
+            file: file.to_string(),
+            generated,
+        }));
+    }
+
+    let compiled =
+        match crate::staged::compile(python, &python_bytes, &generated, file, table, &bytes) {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                return Ok(Err(Unverified::DoesNotCompile {
+                    file: generated,
+                    error: capture(python, &error),
+                }));
+            }
+        };
+
+    let wanted = Identity::of(code)?;
+    if !matches(&compiled, &wanted)? {
+        return Ok(Err(Unverified::NotTheSameCode {
+            file: file.to_string(),
+            function: wanted.qualname,
+            first_line: wanted.first_line,
+        }));
+    }
+    Ok(Ok((python_bytes, bytes, wanted)))
+}
+
 /// compile the file's bytes the way the import machinery does
 ///
 /// **bytes**, not text: a source file declares its own encoding under PEP 263
 /// and cpython is the thing that reads that declaration. `dont_inherit` is what
 /// `importlib._bootstrap_external.source_to_code` passes, so a `__future__`
 /// statement in the file decides the flags and nothing else does
-fn compile<'py>(python: Python<'py>, bytes: &[u8], file: &str) -> PyResult<Bound<'py, PyAny>> {
+pub(crate) fn compile<'py>(
+    python: Python<'py>,
+    bytes: &[u8],
+    file: &str,
+) -> PyResult<Bound<'py, PyAny>> {
     let arguments = PyTuple::new(
         python,
         [

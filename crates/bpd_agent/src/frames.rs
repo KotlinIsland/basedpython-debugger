@@ -427,13 +427,26 @@ impl<'py> Stopped<'py> {
     }
 
     /// the calls a frame's line is still to make — see [`crate::targets`]
+    ///
+    /// of the executing frame only: a step in goes into a call of its line,
+    /// and a deeper frame is suspended in a call it has already made
     pub(crate) fn step_in_targets(&mut self, id: FrameId) -> PyResult<FromAgent> {
-        let frame = match self.frame(id, "the calls a step in can choose between")? {
+        let frame = match self.executing(id, "the calls a step in can choose between")? {
             Ok(frame) => frame,
+            Err(Refusal::NotTheExecutingFrame {
+                frame, executing, ..
+            }) => {
+                return Ok(FromAgent::Refused {
+                    reason: Refusal::NotTheSteppedFrame { frame, executing },
+                });
+            }
             Err(reason) => return Ok(FromAgent::Refused { reason }),
         };
-        Ok(FromAgent::StepInTargets {
-            targets: crate::targets::of(self.python, &frame)?,
+        Ok(match crate::targets::of(self.python, &frame)? {
+            Ok(targets) => FromAgent::StepInTargets { targets },
+            Err(why) => FromAgent::Refused {
+                reason: Refusal::CallsUnnamed { frame: id, why },
+            },
         })
     }
 
