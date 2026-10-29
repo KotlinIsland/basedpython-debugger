@@ -193,12 +193,21 @@ thread.join()
 touch("finished")
 "#;
 
-/// wait until `thread` has stopped making progress, or say that it never did
+/// wait until `thread` has stopped making progress **on `line`**, or say that
+/// it never did
 ///
 /// for a thread that is about to block in a C call this is the only sound way
 /// to know it has got there: it announces itself *before* the blocking call,
 /// so the announcement is not the event worth waiting for
-fn settled(debuggee: &mut Debuggee, thread: u64) {
+///
+/// and still is not enough on its own. any C call on the way there is still
+/// for as long as it takes — the close of the file the announcement wrote, or
+/// a thread the scheduler did not run for a sample — and a thread still there
+/// goes on to a python line once it returns. measured with a 0.5s sleep put
+/// between the announcement and the blocking call: still at the sleep, and
+/// then held by the world it was about to be counted as running beside
+fn settled(debuggee: &mut Debuggee, thread: u64, line: u32) {
+    let mut last = None;
     for _ in 0..100 {
         let census = debuggee
             .threads(SETTLE)
@@ -206,11 +215,15 @@ fn settled(debuggee: &mut Debuggee, thread: u64) {
         let state = census
             .get(thread)
             .unwrap_or_else(|| panic!("the census left out thread {thread}"));
-        if state.progress == Progress::Still {
+        if state.progress == Progress::Still && state.at.as_ref().map(|at| at.line) == Some(line) {
             return;
         }
+        last = Some((state.progress, state.at.clone()));
     }
-    panic!("thread {thread} never stopped making progress, so it never parked");
+    panic!(
+        "thread {thread} never stopped making progress on line {line}, so it never parked \
+         there. the last sample was {last:?}"
+    );
 }
 
 #[test]
@@ -730,9 +743,11 @@ fn stopping_the_world_holds_what_it_can_and_never_counts_a_native_thread_as_held
     //
     // the census is what closes it: a thread inside `gate.acquire()` has
     // released the GIL and its frame cannot advance, so it settles on `Still`
-    // and stays there, while a thread in the window is `Moved`. this waits for
-    // the precondition rather than assuming it
-    settled(&mut debuggee, sleeper);
+    // on that line and stays there, while a thread in the window is `Moved` or
+    // still somewhere else. this waits for the precondition rather than
+    // assuming it. the sleeper's `gate.acquire()` is the indented one
+    let blocking = line_of(&source, "    gate.acquire()");
+    settled(&mut debuggee, sleeper, blocking);
 
     let stopped = debuggee
         .stop_the_world(stop.stop, Duration::from_secs(10))
