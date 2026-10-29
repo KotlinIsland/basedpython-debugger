@@ -266,7 +266,7 @@ fn the_calls_of_a_file_edited_since_it_was_compiled_are_refused_rather_than_misn
 
 /// a callback a library calls twice, the first time on a line whose chosen
 /// call is never made
-const CALLED_BACK: &str = r#"import copy
+const CALLED_BACK: &str = r"import copy
 
 
 def a():
@@ -294,7 +294,7 @@ def main():
 
 
 main()
-"#;
+";
 
 #[test]
 fn a_step_into_a_call_never_made_goes_on_as_a_step_in_once_its_frame_returns() {

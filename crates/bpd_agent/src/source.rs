@@ -96,7 +96,9 @@ fn staged(
     around: u32,
     table: &MappedFile,
 ) -> PyResult<Source> {
-    let (_, bytes, wanted) = match staged_proof(python, code, &file, table)? {
+    let Staged {
+        by: bytes, wanted, ..
+    } = match staged_proof(python, code, &file, table)? {
         Ok(proved) => proved,
         Err(why) => return Ok(Source::Unverified { why }),
     };
@@ -255,15 +257,13 @@ pub(crate) fn proved(
 ) -> PyResult<Result<Proved, Unverified>> {
     let file: String = code.getattr("co_filename")?.extract()?;
     if let Some(table) = crate::sources::staged_as(&file) {
-        return Ok(
-            staged_proof(python, code, &file, &table)?.map(|(python_bytes, bytes, _)| {
-                if table.columns.is_some() {
-                    Proved::Own(bytes)
-                } else {
-                    Proved::Generated(python_bytes)
-                }
-            }),
-        );
+        return Ok(staged_proof(python, code, &file, &table)?.map(|staged| {
+            if table.columns.is_some() {
+                Proved::Own(staged.by)
+            } else {
+                Proved::Generated(staged.python)
+            }
+        }));
     }
     Ok(plain(python, code, &file)?.map(|(bytes, _)| Proved::Own(bytes)))
 }
@@ -304,6 +304,16 @@ fn plain(
     Ok(Ok((bytes, wanted)))
 }
 
+/// a staged `.by` module's two files, both proved
+struct Staged {
+    /// the generated python the module was compiled from
+    python: Vec<u8>,
+    /// the `.by` its locations are lines of
+    by: Vec<u8>,
+    /// the code object found in what the generated python compiles to
+    wanted: Identity,
+}
+
 /// a staged `.by` module's generated python and `.by` bytes, the `.by` proved
 /// by its digest and the generated python by compiling it the way the runner
 /// does and finding `code` in what comes out
@@ -312,7 +322,7 @@ fn staged_proof(
     code: &Bound<'_, PyAny>,
     file: &str,
     table: &MappedFile,
-) -> PyResult<Result<(Vec<u8>, Vec<u8>, Identity), Unverified>> {
+) -> PyResult<Result<Staged, Unverified>> {
     let generated = table.generated.display().to_string();
     let read = |path: &str| {
         std::fs::read(path).map_err(|error| Unverified::NotAFile {
@@ -350,7 +360,11 @@ fn staged_proof(
             first_line: wanted.first_line,
         }));
     }
-    Ok(Ok((python_bytes, bytes, wanted)))
+    Ok(Ok(Staged {
+        python: python_bytes,
+        by: bytes,
+        wanted,
+    }))
 }
 
 /// compile the file's bytes the way the import machinery does

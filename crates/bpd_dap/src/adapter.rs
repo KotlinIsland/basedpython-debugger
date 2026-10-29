@@ -2559,11 +2559,11 @@ impl Adapter {
                 scope,
                 detail: Detail {
                     depth: 0,
-                    children: 0,
                     text: 0,
                     budget: u32::MAX,
                     attributes: false,
                     repr: false,
+                    ..self.configuration().variables
                 },
             })? {
                 Response::Variables(read) => read,

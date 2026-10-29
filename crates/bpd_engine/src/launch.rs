@@ -606,19 +606,7 @@ impl Debuggee {
             }),
             Request::Step { stop, kind, target } => {
                 if let Some(target) = target {
-                    if kind != StepKind::In {
-                        return Err(bpd_core::Error::TargetedStepNotIn { kind }.into());
-                    }
-                    // the calls the line makes, read now: the thread is held, so
-                    // the answer is still true when the step is let go
-                    let offered: Vec<u32> = self.attached[at]
-                        .step_in_targets(FrameId { stop, depth: 0 }, reporting)?
-                        .iter()
-                        .map(|call| call.offset)
-                        .collect();
-                    if !offered.contains(&target) {
-                        return Err(bpd_core::Error::NoSuchStepTarget { target, offered }.into());
-                    }
+                    self.attached[at].check_target(stop, kind, target, reporting)?;
                 }
                 Ok(Response::Resumed {
                     threads: self.attached[at].step_thread(stop, kind, target, reporting)?,
@@ -1689,6 +1677,34 @@ impl Attached {
                 Ok(threads)
             }
             other => Err(unexpected(&other, EXPECTED)),
+        }
+    }
+
+    /// refuse a step into a call unless it is a step in, and the call is one
+    /// the held line makes
+    ///
+    /// the calls are read now, while the thread is held, so the answer is
+    /// still true when the step is let go. a target that matched no call would
+    /// be a step in that never enters anything, landing where a step over does
+    fn check_target(
+        &mut self,
+        stop: u64,
+        kind: StepKind,
+        target: u32,
+        reporting: &mut dyn Reporting,
+    ) -> Result<()> {
+        if kind != StepKind::In {
+            return Err(bpd_core::Error::TargetedStepNotIn { kind }.into());
+        }
+        let offered: Vec<u32> = self
+            .step_in_targets(FrameId { stop, depth: 0 }, reporting)?
+            .iter()
+            .map(|call| call.offset)
+            .collect();
+        if offered.contains(&target) {
+            Ok(())
+        } else {
+            Err(bpd_core::Error::NoSuchStepTarget { target, offered }.into())
         }
     }
 
