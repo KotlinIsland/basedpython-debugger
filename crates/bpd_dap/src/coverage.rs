@@ -52,7 +52,7 @@ pub const fn reach_of(request: &Request) -> Reach {
         Request::JustMyCode { .. } => Reach::OnItsOwn(
             "at `configurationDone`, when `justMyCode` is on in the launch \
              configuration — which it is unless the configuration turns it off — \
-             with the directories counted as a library's said on the console",
+             and said on the console only when the debuggee did not take it",
         ),
 
         Request::Run { .. } => Reach::Composed {

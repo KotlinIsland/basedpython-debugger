@@ -1383,16 +1383,17 @@ impl Adapter {
         // are already decided by it. on unless the configuration says off, which
         // is debugpy's default and what a person stepping through their own
         // program expects; the agent's own default is off, so off is not sent
+        //
+        // a filter that took is not said. it is what the client asked for — the
+        // default, or a box ticked on its settings page — and the console it
+        // would be said on is the program's: no DAP category is kept out of it
+        // by every client (the intellij platform prints even `telemetry` there),
+        // so a line on every session is a line above every program's output.
+        // debugpy says nothing either. what is said is the filter not taking,
+        // which is the client's setting not being true
         if self.configuration().just_my_code {
             match self.ask(Request::JustMyCode { on: true })? {
-                Response::JustMyCode(set) if set.on => {
-                    self.say(&format!(
-                        "stopping and stepping only in the program's own code. a library's \
-                         is a file that is not a file, or one under {}. set `justMyCode` to \
-                         false to stop and step in every one\n",
-                        set.libraries.join(", ")
-                    ))?;
-                }
+                Response::JustMyCode(set) if set.on => {}
                 // read back off the agent rather than assumed. a client told it
                 // took would be shown stops in code it was told were skipped
                 Response::JustMyCode(_) => {

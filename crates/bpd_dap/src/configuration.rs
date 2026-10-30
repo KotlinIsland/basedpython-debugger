@@ -81,9 +81,8 @@ pub struct Configuration {
     /// arrives in the program, and a step in goes through a library's code to
     /// the next function of the program's it calls. a library is a file that is
     /// not a file — a frozen module, `<string>` — or one in the standard library
-    /// or a site-packages directory of the interpreter that runs the program,
-    /// and the console says which directories those were. off stops and steps
-    /// in everything
+    /// or a site-packages directory of the interpreter that runs the program.
+    /// off stops and steps in everything
     #[serde(default = "Configuration::on")]
     pub just_my_code: bool,
 

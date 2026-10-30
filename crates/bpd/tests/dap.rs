@@ -102,6 +102,7 @@ over_each_transport!(
     a_frames_names_are_one_list_and_an_object_shows_what_its_class_gives_it,
     writing_a_name_of_the_locals_list_runs_no_repr_to_find_its_scope,
     everything_a_program_printed_is_on_the_wire_before_it_is_reported_over,
+    just_my_code_on_by_default_leaves_the_console_to_the_program,
     a_refused_launch_ends_the_session_instead_of_leaving_it_open,
     the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program,
     a_rule_per_class_comes_in_beside_the_filters_and_neither_replaces_the_other,
@@ -2143,6 +2144,66 @@ fn everything_a_program_printed_is_on_the_wire_before_it_is_reported_over(transp
              what reached the client are not the same thing"
         );
     }
+
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+/// a program whose one line follows a library's code that raises and catches
+///
+/// `json.loads` of a number is not what makes it a library call worth having:
+/// the import of `json` is. the import system raises `KeyError`s at itself and
+/// catches them, which is exactly what just-my-code keeps from being a stop
+const ITS_OWN_LINE: &str = r#"import json
+
+print("the program's own line", json.loads("1"), flush=True)
+"#;
+
+fn just_my_code_on_by_default_leaves_the_console_to_the_program(transport: Transport) {
+    // `justMyCode` is on unless the configuration turns it off, so anything bpd
+    // says about it taking is said on every session — and a client puts bpd's
+    // `console` lines in the same console as the program's output. measured on
+    // c7d5cb3: the only `console` line of a plain session was the notice that
+    // the filter was on, naming three directories, above the program's first
+    // line. the filter taking is the client's own setting, and is not said
+    let fixture = Fixture::new("own_line", ITS_OWN_LINE);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+    let exited = client.event("exited");
+    assert_eq!(exited["body"]["exitCode"], 0, "the program runs to its end");
+
+    let by_category = |category: &str| -> Vec<&str> {
+        client
+            .seen
+            .iter()
+            .filter(|message| message["type"] == "event" && message["event"] == "output")
+            .filter(|message| message["body"]["category"] == category)
+            .filter_map(|message| message["body"]["output"].as_str())
+            .collect()
+    };
+    // exactly nothing: a filter the debuggee did **not** take is said here, as
+    // a refusal, so an empty console is also the filter having taken
+    assert_eq!(
+        by_category("console"),
+        Vec::<&str>::new(),
+        "bpd said something on the program's console of a session that asked for \
+         nothing but the defaults"
+    );
+    // `print()` writes `\r\n` on windows, and bpd passes on what the program
+    // wrote as it wrote it
+    assert_eq!(
+        by_category("stdout").concat().replace("\r\n", "\n"),
+        "the program's own line 1\n",
+        "the program's output is what it printed and nothing else"
+    );
 
     client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));

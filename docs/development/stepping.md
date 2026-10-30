@@ -379,7 +379,18 @@ file under the directory `os` was loaded from or a site-packages directory
 `BY_CODE` — `by`'s runner, runtime, plugins and the map itself — compared by
 the filesystem's identity, because the map spells them `/var/folders/…` where
 the interpreter compiles `/private/var/folders/…`. the answer names the
-directories and those files, and DAP says them on the console
+directories and those files, and MCP hands them to the agent that asked
+
+DAP does not say them. from c7d5cb3 it did, once in every session with the
+filter on — the default — and that line was above every program's output,
+because the console it goes on is the program's: the intellij platform prints
+every `output` category into it, `telemetry` included, and vs code's debug
+console is where bpd's capture of the program's stdout lands too. debugpy says
+nothing about the filter when a session starts — only, once, that a step in
+skipped a frame because of it — and a client's settings page already shows it.
+what DAP does say is the filter **not** taking,
+`` the debuggee did not take `justMyCode` `` on the console, because then the
+client's setting is not true
 
 the one code that is not a file and is the program's is a `-c` command: cpython
 compiles it under `<string>`, the name `dataclasses` gives the methods it writes

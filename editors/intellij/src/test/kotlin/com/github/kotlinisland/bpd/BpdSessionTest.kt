@@ -70,9 +70,6 @@ class BpdSessionTest : HeavyPlatformTestCase() {
             "stderr" to "bpd: the program wrote this on stderr",
         )
 
-    /** how bpd's console notice that just-my-code is on begins */
-    private val justMyCode = "stopping and stepping only in the program's own code. "
-
     /**
      * how long any one step of the session is given
      *
@@ -270,23 +267,17 @@ class BpdSessionTest : HeavyPlatformTestCase() {
             }
         }
 
-        // and nothing else is in there but bpd's one word on just-my-code, which
-        // is on unless the configuration says off and is said on the console
-        // before the program runs a line, naming where a library's code is.
-        // `bpd dap --listen 0` announces its port on its own stdout and
-        // `BpdConnection` reads that line off the pipe, so it is not the
-        // debuggee's output and never becomes an `output` event — this is what
-        // would say so if it ever did
-        val others = said(console(session)) - wrote.values.toSet()
+        // and nothing else is in there. `bpd dap --listen 0` announces its port
+        // on its own stdout and `BpdConnection` reads that line off the pipe, so
+        // it is not the debuggee's output and never becomes an `output` event —
+        // this is what would say so if it ever did. and just-my-code, on unless
+        // the configuration says off, is said here only when the debuggee did
+        // not take it: a notice that it took was the one line above every
+        // program's output, from c7d5cb3 until bpd stopped saying it
         assertEquals(
-            "the IDE console holds a line neither the program nor bpd's just-my-code notice wrote",
+            "the IDE console holds a line the program did not write",
             emptyList<String>(),
-            others.filterNot { it.startsWith(justMyCode) },
-        )
-        assertEquals(
-            "bpd says once on the IDE console that it stops only in the program's own code",
-            1,
-            others.size,
+            said(console(session)) - wrote.values.toSet(),
         )
 
         // the program has not run past the breakpoint, so it has not written its file
