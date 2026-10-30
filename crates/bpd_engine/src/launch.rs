@@ -22,8 +22,10 @@ mod script;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
-use std::sync::{Arc, Mutex};
+use std::process::{Command, ExitStatus};
+use std::sync::Arc;
+
+use crate::ending::Started;
 use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
@@ -139,7 +141,7 @@ struct Attached {
     /// the retained listener is a program bpd is **not** the parent of: there
     /// is nothing to signal, and nothing to reap for an exit status. every
     /// place that would otherwise assume a child says what it does instead
-    child: Option<Arc<Mutex<Child>>>,
+    child: Option<Arc<Started>>,
     session: Session,
     /// the stops held now, in the order the agent reported them
     held: Vec<Stop>,
@@ -1464,17 +1466,10 @@ impl Debuggee {
                     let Some(child) = self.attached[at].child.as_ref() else {
                         return Ok(Running::Ended { rebound });
                     };
-                    let status = child
-                        .lock()
-                        .expect(
-                            "nothing panics holding the debuggee: every path \
-                             through it is a kill or a wait",
-                        )
-                        .wait()
-                        .map_err(|source| Error::Spawn {
-                            interpreter: PathBuf::from("the debuggee"),
-                            source,
-                        })?;
+                    let status = child.child().wait().map_err(|source| Error::Spawn {
+                        interpreter: PathBuf::from("the debuggee"),
+                        source,
+                    })?;
                     // the program is reaped, and what it printed may still be
                     // in a pipe: this arm was reached because the **control
                     // connection** closed, and the descriptors carrying its
@@ -2287,16 +2282,10 @@ impl Attached {
         let Some(child) = self.child.as_ref() else {
             return Ok(self.session.hung_up()?.then_some(Exit::Unknown));
         };
-        let ended = child
-            .lock()
-            .expect(
-                "nothing panics holding the debuggee: every path through it is a kill or a wait",
-            )
-            .try_wait()
-            .map_err(|source| Error::Spawn {
-                interpreter: PathBuf::from("the debuggee"),
-                source,
-            })?;
+        let ended = child.child().try_wait().map_err(|source| Error::Spawn {
+            interpreter: PathBuf::from("the debuggee"),
+            source,
+        })?;
         Ok(ended.map(bpd_core::exit_code).map(Exit::Code))
     }
 
@@ -2863,13 +2852,14 @@ fn spawned_here(
             .stderr(std::process::Stdio::piped());
     }
 
-    let mut child = command.spawn().map_err(|source| Error::Spawn {
+    let started = crate::ending::spawn(&mut command).map_err(|source| Error::Spawn {
         interpreter: interpreter.to_start().to_path_buf(),
         source,
     })?;
 
     let mut forwarders = None;
     if let Some((hand_over, _)) = piped {
+        let mut child = started.child();
         let stdout = child
             .stdout
             .take()
@@ -2878,11 +2868,12 @@ fn spawned_here(
             .stderr
             .take()
             .expect("the command asked for a stderr pipe and cargo has not taken it");
+        drop(child);
         forwarders = Some(hand_over(stdout, stderr));
     }
 
     let session = listener.accept(|| {
-        let exited = child.try_wait().map_err(|source| Error::Spawn {
+        let exited = started.child().try_wait().map_err(|source| Error::Spawn {
             interpreter: interpreter.to_start().to_path_buf(),
             source,
         })?;
@@ -2894,6 +2885,7 @@ fn spawned_here(
         Err(error) => {
             // the debuggee is useless without its agent, and leaving it running
             // would strand a process nobody is holding
+            let mut child = started.child();
             let _kill = child.kill();
             let _reap = child.wait();
             return Err(error);
@@ -2903,7 +2895,7 @@ fn spawned_here(
     let stop = match session.expect_stop() {
         Ok(stop) => stop,
         Err(Error::AgentGone { .. }) => {
-            let status = child.wait().map_err(|source| Error::Spawn {
+            let status = started.child().wait().map_err(|source| Error::Spawn {
                 interpreter: interpreter.to_start().to_path_buf(),
                 source,
             })?;
@@ -2933,7 +2925,7 @@ fn spawned_here(
         map: None,
         attached: vec![Attached {
             held: vec![stop],
-            child: Some(Arc::new(Mutex::new(child))),
+            child: Some(started),
             ..Attached::connected(session)
         }],
         forwarders,

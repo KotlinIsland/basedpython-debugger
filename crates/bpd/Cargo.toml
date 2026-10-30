@@ -20,6 +20,15 @@ bpd_engine = { workspace = true }
 
 clap = { workspace = true }
 
+# passing on the signals that ask bpd to end, and telling whether a terminal
+# sent the program the same one already — see `src/signals.rs`
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs", "termios"] }
+signal-hook = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = { workspace = true }
+
 [dev-dependencies]
 bpd_test = { workspace = true }
 

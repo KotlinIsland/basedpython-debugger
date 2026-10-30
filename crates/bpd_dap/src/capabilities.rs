@@ -27,17 +27,20 @@
 //!   part way down. a client that paged from the middle would be answered from
 //!   a walk that started at the top anyway, which is a claim about cost that is
 //!   not true
-//! - **`supportsTerminateRequest`** — **not advertised, and serviced anyway.**
-//!   the adapter answers `terminate` exactly as it answers `disconnect`, because
-//!   a client that sends one has said the same thing either way and refusing it
-//!   would leave a session open that the client believes it has ended. what is
-//!   withheld is the *promise*: there is no graceful end. `disconnect` ends the
-//!   debuggee, and advertising a second request under a name that promises more
-//!   would be a promise nothing keeps
+//! - **`supportsTerminateRequest`** on windows — the request is serviced there,
+//!   and ends the debuggee the way `disconnect` does, because windows has no
+//!   signal a process can send another that it may handle and then end on its
+//!   own. the capability is the promise of a graceful end, and on windows
+//!   nothing keeps it
 
 /// the `initialize` response body
 pub fn capabilities() -> serde_json::Value {
     serde_json::json!({
+        // `terminate` asks the program to end the way it can handle — a
+        // `SIGTERM`, once — and gives it a few seconds before it is ended. see
+        // `read_client`. not on windows, where there is no such signal
+        "supportsTerminateRequest": cfg!(unix),
+
         // the client tells bpd when it has finished sending breakpoints, which
         // is what lets the program be held at entry until they are all bound
         "supportsConfigurationDoneRequest": true,
@@ -138,21 +141,24 @@ mod tests {
 
         // the list is written out rather than counted, so adding a capability
         // to the json without implementing the request behind it fails here
-        assert_eq!(
-            claimed,
-            vec![
-                "supportsConditionalBreakpoints",
-                "supportsConfigurationDoneRequest",
-                "supportsExceptionInfoRequest",
-                "supportsExceptionOptions",
-                "supportsGotoTargetsRequest",
-                "supportsLogPoints",
-                "supportsRestartFrame",
-                "supportsSetVariable",
-                "supportsSingleThreadExecutionRequests",
-                "supportsStepInTargetsRequest",
-            ]
-        );
+        let mut expected = vec![
+            "supportsConditionalBreakpoints",
+            "supportsConfigurationDoneRequest",
+            "supportsExceptionInfoRequest",
+            "supportsExceptionOptions",
+            "supportsGotoTargetsRequest",
+            "supportsLogPoints",
+            "supportsRestartFrame",
+            "supportsSetVariable",
+            "supportsSingleThreadExecutionRequests",
+            "supportsStepInTargetsRequest",
+        ];
+        // a graceful end needs a signal the program can handle, which only
+        // unix has
+        if cfg!(unix) {
+            expected.push("supportsTerminateRequest");
+        }
+        assert_eq!(claimed, expected);
     }
 
     #[test]

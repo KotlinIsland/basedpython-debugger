@@ -2346,6 +2346,10 @@ impl Interrupt for FakeInterrupt {
         Ok(())
     }
 
+    fn ask_to_end(&mut self) -> Result<bool, Failed> {
+        Ok(false)
+    }
+
     fn terminate(&mut self) -> Result<(), Failed> {
         Ok(())
     }

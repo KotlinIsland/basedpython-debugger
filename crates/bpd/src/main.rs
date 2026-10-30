@@ -13,6 +13,7 @@ mod dap;
 mod doctor;
 mod launch;
 mod mcp;
+mod signals;
 
 use std::process::ExitCode;
 
@@ -59,7 +60,17 @@ fn report_error(error: &dyn std::error::Error) {
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+    // the two commands that start a program in their own place: `launch`, and
+    // `dap`, which `by run` starts as its program. what is sent to end them is
+    // passed on to it — see `signals`
+    if matches!(command, Command::Launch(_) | Command::Dap(_))
+        && let Err(error) = signals::install()
+    {
+        report_error(&error);
+        return ExitCode::FAILURE;
+    }
+    match command {
         Command::Doctor(args) => doctor::run(&args),
         Command::Launch(args) => launch::run(&args),
         Command::Dap(args) => dap::run(&args),

@@ -14,6 +14,7 @@
 
 pub mod agent;
 pub mod cache;
+pub mod ending;
 pub mod launch;
 mod mapping;
 
@@ -29,6 +30,7 @@ use bpd_core::{Request, SessionId, Stop};
 use bpd_protocol::message::{FromAgent, FromEngine};
 use bpd_protocol::{TOKEN_LEN, frame, message};
 
+pub use ending::{Ending, Passed, pass_on};
 pub use launch::{
     Debuggee, Forwarders, Invocation, Launched, Program, Stdin, launch, launch_in_terminal,
     launch_piped,
@@ -905,14 +907,14 @@ pub struct Interrupt {
     session: SessionId,
     writing: Arc<Mutex<Writing>>,
     /// `None` when bpd did not start this process — see [`Self::terminate`]
-    child: Option<Arc<Mutex<std::process::Child>>>,
+    child: Option<Arc<ending::Started>>,
 }
 
 impl Interrupt {
     pub(crate) const fn new(
         session: SessionId,
         writing: Arc<Mutex<Writing>>,
-        child: Option<Arc<Mutex<std::process::Child>>>,
+        child: Option<Arc<ending::Started>>,
     ) -> Self {
         Self {
             session,
@@ -941,6 +943,34 @@ impl Interrupt {
         }
     }
 
+    /// ask the debuggee to end, the way it can handle: a `SIGTERM`
+    ///
+    /// what DAP's `terminate` is — *"typically a debug adapter implements
+    /// terminate by sending a software signal which the debuggee intercepts in
+    /// order to clean things up properly before terminating itself"*. it is sent
+    /// at most once, whether this asks first or a `SIGTERM` bpd was sent and
+    /// passed on did — see [`crate::ending`] — and `false` says it was not sent
+    /// this time: the program has ended, or was already asked
+    ///
+    /// nothing here waits for it to end. whoever asked decides how long the
+    /// program gets, and [`Self::terminate`] is what ends one that took longer
+    ///
+    /// on windows there is no such signal, and nothing is sent
+    ///
+    /// # errors
+    ///
+    /// when bpd did not start the process, for the reason [`Self::terminate`]
+    /// refuses one
+    pub fn ask_to_end(&mut self) -> Result<bool> {
+        let Some(held) = self.child.as_ref() else {
+            return Err(bpd_core::Error::NotOurProcess {
+                session: self.session,
+            }
+            .into());
+        };
+        Ok(ending::ask_to_end(held))
+    }
+
     /// end the debuggee, whatever it is doing
     ///
     /// the last resort rather than a resume: a program that will neither stop
@@ -964,9 +994,7 @@ impl Interrupt {
             }
             .into());
         };
-        let mut child = held.lock().expect(
-            "nothing panics holding the debuggee: every path through it is a kill or a wait",
-        );
+        let mut child = held.child();
         // std refuses to signal a child it has already reaped, which is what a
         // client disconnecting from a program that finished on its own does.
         // that is the request already satisfied rather than a failure

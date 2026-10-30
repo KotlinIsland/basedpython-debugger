@@ -26,8 +26,9 @@
 //! program runs, and what is read off a frame is refused at once, naming what
 //! to do. the two things that must reach the program **during** a slice — stop
 //! it, or end it — cannot wait for one to end, so a reader thread owns the
-//! client's input and an [`Interrupt`], and answers `pause`, `disconnect` and
-//! `terminate` itself; everything else is queued for the main thread
+//! client's input and an [`Interrupt`], and answers `pause` and `disconnect`
+//! itself, and sends `terminate`'s signal before queueing it; everything else
+//! is queued for the main thread
 //!
 //! an editor depends on that order. intellij asks `threads` before anything
 //! else and waits for the answer — including before it sends the `pause` a
@@ -273,6 +274,42 @@ fn read_client(
                 }
             }
 
+            // the graceful end. the program is asked the way it can handle, at
+            // once, and the session goes on: the program ending is reported as
+            // any end is — `exited` with what it exited with, then
+            // `terminated` — and the request itself goes to the session, which
+            // lets go of whatever is held so the program can act on it. one that
+            // has not ended within `GRACE` is ended
+            //
+            // the spec asks no more than the signal — *"typically a debug
+            // adapter implements terminate by sending a software signal which
+            // the debuggee intercepts in order to clean things up properly
+            // before terminating itself"* — and lets a debuggee veto it. the
+            // bound is bpd's: a client that pressed Stop is not asking to be
+            // vetoed, and the intellij platform ends the process itself after
+            // asking. debugpy 1.8.20 kills on `terminate`, measured: a `SIGTERM`
+            // handler never runs there
+            //
+            // on windows there is no signal to ask with, and `terminate` ends
+            // the program the way `disconnect` does, below
+            Some("terminate") if cfg!(unix) && ask_debuggee_to_end(interrupt) => {
+                let interrupt = Arc::clone(interrupt);
+                let watching = std::thread::Builder::new()
+                    .name("bpd-dap-grace".to_string())
+                    .spawn(move || {
+                        std::thread::sleep(GRACE);
+                        // a program that ended in time is reaped, and ending a
+                        // reaped one is the request already satisfied
+                        drop(end_debuggee(&interrupt));
+                    });
+                if let Err(source) = watching {
+                    return Err(crate::wire::Error::Connection { source });
+                }
+                if queue.send(message).is_err() {
+                    return Ok(());
+                }
+            }
+
             Some("disconnect" | "terminate") => {
                 stopping.store(true, Ordering::Relaxed);
                 let ended = end_debuggee(interrupt);
@@ -305,6 +342,25 @@ fn read_client(
         }
     }
 }
+
+/// ask the debuggee to end, the way it can handle, if one was ever started
+///
+/// `false` when bpd did not start it: there is nothing to signal, and the
+/// `disconnect` path is what says so to the client
+fn ask_debuggee_to_end(interrupt: &Held) -> bool {
+    interrupt
+        .lock()
+        .expect(REACHING)
+        .as_mut()
+        .is_none_or(|reaching| reaching.ask_to_end().is_ok())
+}
+
+/// how long a program asked to end by `terminate` has before it is ended
+///
+/// long enough for a handler that saves its work or closes what it holds, and
+/// short enough for a person who pressed Stop. a handler that needs longer is
+/// asked with a `SIGTERM` to bpd, which waits for as long as the program takes
+const GRACE: Duration = Duration::from_secs(5);
 
 /// end the debuggee, if one was ever started, and say why not if it was not
 ///
@@ -782,6 +838,7 @@ impl Adapter {
             Some("setVariable") => self.set_variable(message),
             Some("evaluate") => self.evaluate(message),
             Some("continue") => self.continue_(message),
+            Some("terminate") => self.terminate(message),
             Some("next") => self.step(message, StepKind::Over),
             Some("stepIn") => self.step(message, StepKind::In),
             Some("stepInTargets") => self.step_in_targets(message),
@@ -2995,6 +3052,33 @@ impl Adapter {
             Some(serde_json::json!({ "allThreadsContinued": !single })),
         )?;
         Ok(())
+    }
+
+    /// the session's half of a `terminate`: the program has already been asked
+    /// to end, by the thread that reads the client — see `read_client`
+    ///
+    /// a thread held at a stop runs none of the program, the signal handler
+    /// among it, so everything held is let go. a program not let go at all yet
+    /// has run no line of its own and installed no handler, so it is ended.
+    /// and with no program, there is nothing for the session to wait on, and
+    /// it is over
+    fn terminate(&mut self, message: &Incoming) -> Answered {
+        if self.session.is_none() || self.exited {
+            self.respond(message, None)?;
+            return self.event("terminated", &serde_json::json!({}));
+        }
+        if !self.begun {
+            if let Err(reason) = end_debuggee(&self.interrupt) {
+                return Err(Aborted::Refuse(reason));
+            }
+            self.exited = true;
+            self.respond(message, None)?;
+            return self.event("terminated", &serde_json::json!({}));
+        }
+        if self.holding() {
+            self.resume(Which::All)?;
+        }
+        self.respond(message, None)
     }
 
     fn step(&mut self, message: &Incoming, kind: StepKind) -> Answered {

@@ -427,6 +427,10 @@ impl bpd_dap::Interrupt for Reaching {
         Ok(self.0.deliver(request)?)
     }
 
+    fn ask_to_end(&mut self) -> Result<bool, Failed> {
+        Ok(self.0.ask_to_end()?)
+    }
+
     fn terminate(&mut self) -> Result<(), Failed> {
         Ok(self.0.terminate()?)
     }

@@ -933,10 +933,12 @@ not anything is held. that split shapes the adapter:
     thread of its own while the program runs; `stackTrace`, `variables`,
     `evaluate` and the rest of what is read off a frame are refused at once,
     naming what to do, rather than waiting for a stop that may never come
-- a reader thread owns the client's input and an interrupt handle. `pause`,
-    `disconnect` and `terminate` are answered there without going through the
-    session at all, because each of them has to reach a program the session
-    may be in the middle of waiting on
+- a reader thread owns the client's input and an interrupt handle. `pause` and
+    `disconnect` are answered there without going through the session at all,
+    because each of them has to reach a program the session may be in the
+    middle of waiting on. `terminate` *asks* there — the signal goes at once —
+    and is answered by the session, which has to let held threads go; see
+    [ending the program](#ending-the-program)
 
 the order matters to a real client. intellij sends `threads` before anything
 else and sends nothing more until it is answered — including the `pause` a
@@ -962,6 +964,57 @@ the session is looked at between them, so a thread that stops while the client
 is saying nothing is announced within a slice rather than at the client's next
 move. `a_second_thread_stopping_while_the_first_is_held_is_announced_unasked`
 holds one thread and sends nothing until the other's `stopped` arrives
+
+### ending the program
+
+three things end a program bpd started, and the spec gives two of them
+different meanings:
+
+| what arrives                         | what the program gets                                   | what the client is told                       |
+| ------------------------------------ | ------------------------------------------------------- | --------------------------------------------- |
+| `terminate`                          | a `SIGTERM`, held threads let go, and after 5 s a kill  | `exited` with its code, then `terminated`     |
+| `SIGTERM` to bpd                     | the `SIGTERM`, passed on                                | `exited` with its code, then `terminated`     |
+| `disconnect`, or the client going    | a kill                                                  | `terminated`                                  |
+
+- **`terminate` is the graceful one.** the spec: *"typically a debug adapter
+    implements terminate by sending a software signal which the debuggee
+    intercepts in order to clean things up properly before terminating
+    itself"*, and `disconnect` with `terminateDebuggee` is the forced one. so
+    `terminate` sends a `SIGTERM` and the session goes on — the program's end
+    arrives the way any end does, with the code its handler chose. a thread
+    held at a stop runs no python, the handler among it, so whatever is held is
+    let go. the spec lets a debuggee veto a `terminate`; bpd gives it five
+    seconds and then ends it, because a person who pressed Stop is not asking
+    to be vetoed, and the intellij platform ends the process itself after
+    asking. debugpy does not ask: measured on 1.8.20 against the same
+    program, its `terminate` killed it — `exitCode` 247, the handler never run —
+    and with `onTerminate: KeyboardInterrupt` in the launch it raised that in
+    the program instead, and the `SIGTERM` handler still never ran
+- **a `SIGTERM` to bpd is passed on.** `by run` starts `bpd dap --listen` as
+    its program, so the signal an editor's Stop or a supervisor sends reaches
+    bpd and nothing else. measured before this: bpd ended with 143 and the
+    program ran on with no parent, its handler never run. `SIGINT`, `SIGHUP`
+    and `SIGQUIT` are passed on too, but only when bpd is outside its
+    terminal's foreground process group — inside it, the terminal sent the
+    program the same one already. this is the contract `by run` keeps for its
+    own program; the rule is in `crates/bpd/src/signals.rs`. before there is a
+    program bpd ends on the signal, `128 +` its number; a program held at a stop
+    handles it when it is let go
+- **once.** the Stop of a `by run` session sends both — the signal to the
+    process and `terminate` to the adapter — and a program handling the first
+    must not be interrupted by the second. whichever arrives first sends the
+    `SIGTERM`, and the other finds it sent
+- **and bpd exits as the program did**, under `--listen`, once the client
+    disconnects or goes after `terminated` — see
+    `the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program`
+
+windows has no signal one process can send another that it may handle and then
+end on its own. Ctrl+C and Ctrl+Break reach every process on the console, the
+program among them, so bpd leaves them to it and carries on until it has ended;
+`terminate` ends the program the way `disconnect` does, and
+`supportsTerminateRequest` is not advertised there. none of the windows half
+has been run: it is checked to build, and the rest is the reading of the
+platform above
 
 ### a disconnect answers what it overtook
 

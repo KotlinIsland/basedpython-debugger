@@ -112,6 +112,20 @@ over_each_transport!(
     a_module_namespace_spends_nothing_on_what_was_not_opened,
 );
 
+/// the scenarios about a signal: a `SIGTERM` is a unix thing, and so is the
+/// graceful `terminate` that asks with one
+#[cfg(unix)]
+mod ending {
+    use super::*;
+
+    over_each_transport!(
+        a_sigterm_to_bpd_is_passed_on_once_and_bpd_exits_as_the_program_did,
+        a_terminate_asks_the_program_to_end_the_way_it_can_handle,
+        a_sigterm_and_a_terminate_together_ask_the_program_once,
+        a_terminate_lets_a_held_program_go_so_that_it_can_handle_the_signal,
+    );
+}
+
 /// a program with a local worth writing to, and a marker after the breakpoint
 ///
 /// `total` is printed *after* the line the breakpoint is on, so a write the
@@ -2094,6 +2108,208 @@ fn the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program(trans
         client.request("disconnect", &serde_json::json!({}));
         client.finish_after_the_program_exited(*code);
     }
+}
+
+/// a program that handles `SIGTERM` by writing that it did and exiting 7, or by
+/// writing that it did and carrying on when it is given `ignore`
+const ENDS_ON_SIGTERM: &str = r#"import os, pathlib, signal, sys, time
+
+HERE = pathlib.Path(__file__).parent
+IGNORE = sys.argv[1:] == ["ignore"]
+
+
+def on_term(signum, frame):
+    with (HERE / "handled").open("a") as handled:
+        handled.write(f"{signum}\n")
+    if not IGNORE:
+        sys.exit(7)
+
+
+signal.signal(signal.SIGTERM, on_term)
+(HERE / "ready").write_text(str(os.getpid()))
+while True:
+    time.sleep(0.01)  # running
+"#;
+
+/// how a test asks the program to end
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asking {
+    /// `SIGTERM` to bpd, which is what `by run` and a supervisor send
+    Signal,
+    /// DAP's `terminate`
+    Terminate,
+    /// both, the way the intellij platform's Stop does under `by run`
+    Both,
+}
+
+/// launch [`ENDS_ON_SIGTERM`], let it run and wait until it has said it is
+/// ready, holding it at a breakpoint first when `held`
+#[cfg(unix)]
+fn running_until_asked(
+    transport: Transport,
+    fixture: &Fixture,
+    held: bool,
+    ignore: bool,
+) -> Client {
+    let mut client = Client::start(transport);
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "args": if ignore { vec!["ignore"] } else { Vec::new() },
+        }),
+    );
+    client.event("initialized");
+    if held {
+        client.request(
+            "setBreakpoints",
+            &serde_json::json!({
+                "source": { "path": fixture.path() },
+                "breakpoints": [ { "line": line_of(ENDS_ON_SIGTERM, "# running") } ],
+            }),
+        );
+    }
+    client.request("configurationDone", &serde_json::json!({}));
+    if held {
+        client.event("stopped");
+    }
+    let deadline = Instant::now() + PATIENCE;
+    while !fixture.directory().join("ready").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the program never said it was ready"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    client
+}
+
+/// ask a running program to end the way `asking` says, and require that its
+/// handler ran **once**, the client was told it exited `code`, and `bpd`
+/// exited as it did
+#[cfg(unix)]
+fn ends_once(transport: Transport, asking: Asking, held: bool) {
+    let fixture = Fixture::new("ends_on_sigterm", ENDS_ON_SIGTERM);
+    let mut client = running_until_asked(transport, &fixture, held, false);
+
+    if matches!(asking, Asking::Signal | Asking::Both) {
+        let adapter = client
+            .adapter
+            .lock()
+            .expect("nothing panics holding the adapter")
+            .id();
+        let sent = Command::new("kill")
+            .args(["-TERM", &adapter.to_string()])
+            .status()
+            .expect("`kill` runs");
+        assert!(sent.success(), "the adapter could be signalled");
+    }
+    if matches!(asking, Asking::Terminate | Asking::Both) {
+        let answered = client.request("terminate", &serde_json::json!({}));
+        assert_eq!(answered["success"], true, "{answered}");
+    }
+
+    let exited = client.event("exited");
+    assert_eq!(
+        exited["body"]["exitCode"], 7,
+        "the handler's own exit: {exited}"
+    );
+    client.event("terminated");
+    let handled = std::fs::read_to_string(fixture.directory().join("handled"))
+        .expect("the program's handler ran");
+    assert_eq!(
+        handled, "15\n",
+        "asked once, by {asking:?}, and handled once"
+    );
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish_after_the_program_exited(7);
+}
+
+#[cfg(unix)]
+fn a_sigterm_to_bpd_is_passed_on_once_and_bpd_exits_as_the_program_did(transport: Transport) {
+    // measured through `bpd dap --listen` before this: a `SIGTERM` ended bpd
+    // with 143 and left the program running with no parent, its handler never
+    // run — which is what an editor's Stop of a `by run` session sends
+    ends_once(transport, Asking::Signal, false);
+}
+
+#[cfg(unix)]
+fn a_terminate_asks_the_program_to_end_the_way_it_can_handle(transport: Transport) {
+    // measured before this: `terminate` killed the program — its handler never
+    // ran, no `exited`, and bpd ended with 137. the spec's `terminate` is the
+    // graceful one: *"typically a debug adapter implements terminate by sending
+    // a software signal which the debuggee intercepts"*
+    ends_once(transport, Asking::Terminate, false);
+}
+
+#[cfg(unix)]
+fn a_sigterm_and_a_terminate_together_ask_the_program_once(transport: Transport) {
+    // what the intellij platform's Stop sends to a `by run` session: the
+    // signal to the process it started, and the request to the adapter
+    ends_once(transport, Asking::Both, false);
+}
+
+#[cfg(unix)]
+fn a_terminate_lets_a_held_program_go_so_that_it_can_handle_the_signal(transport: Transport) {
+    // a thread held at a stop runs no python, the signal handler among it
+    ends_once(transport, Asking::Terminate, true);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_program_that_will_not_end_on_terminate_is_ended_after_a_grace() {
+    let fixture = Fixture::new("ends_on_sigterm", ENDS_ON_SIGTERM);
+    let mut client = running_until_asked(Transport::Loopback, &fixture, false, true);
+    let asked = Instant::now();
+    client.request("terminate", &serde_json::json!({}));
+
+    let exited = client.event("exited");
+    assert_eq!(exited["body"]["exitCode"], 128 + 9, "killed: {exited}");
+    let took = asked.elapsed();
+    assert!(
+        took >= Duration::from_secs(4) && took < PATIENCE,
+        "a grace of seconds, and then the end: {took:?}"
+    );
+    let handled = std::fs::read_to_string(fixture.directory().join("handled"))
+        .expect("the program's handler ran");
+    assert_eq!(handled, "15\n", "asked once before it was ended");
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish_after_the_program_exited(128 + 9);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_sigterm_before_there_is_a_program_ends_bpd_as_it_would_have() {
+    let listener = Listener::start();
+    let adapter = listener
+        .process
+        .lock()
+        .expect("nothing panics holding the adapter")
+        .id();
+    let sent = Command::new("kill")
+        .args(["-TERM", &adapter.to_string()])
+        .status()
+        .expect("`kill` runs");
+    assert!(sent.success());
+    let deadline = Instant::now() + PATIENCE;
+    let status = loop {
+        if let Some(status) = listener
+            .process
+            .lock()
+            .expect("nothing panics holding the adapter")
+            .try_wait()
+            .expect("the adapter is a real child")
+        {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "`bpd dap` outlived the signal");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(128 + 15), "{status}");
 }
 
 /// the program's own output, and the moment the client is told it is over
