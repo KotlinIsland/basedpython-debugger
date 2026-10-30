@@ -40,25 +40,24 @@ pub fn summary(value: &Value) -> String {
             let mut room = PREVIEW;
             (preview(value, &mut room), said_beside(omitted.as_ref()))
         }
+        // an object's line is its type, or what its `__repr__` said, labelled.
+        // what it holds is a level down either way, and why its attributes
+        // were cut is said after the line — except that they were not opened
+        // yet, which opening it answers
         Content::Object {
             omitted,
             repr: None,
             ..
-        } => (value.kind.clone(), omitted.as_ref()),
-        // the line is what `__repr__` said, labelled, and what the object holds
-        // is a level down, the same as without it. the text's own cut is said
-        // after it, and then why its attributes were cut — except a depth that
-        // ran out, which opening it answers, the way a container's preview
-        // leaves it unsaid
+        } => (value.kind.clone(), said_of_an_object(omitted.as_ref())),
         Content::Object {
             omitted,
             repr: Some(repr),
             ..
         } => (
             format!("{} (__repr__, {} characters)", repr.text, repr.characters),
-            repr.omitted.as_ref().or(omitted
+            repr.omitted
                 .as_ref()
-                .filter(|omitted| !matches!(omitted, Omitted::Depth { .. }))),
+                .or_else(|| said_of_an_object(omitted.as_ref())),
         ),
         Content::Unread { omitted } => (String::new(), Some(omitted)),
 
@@ -89,6 +88,15 @@ const PREVIEW: usize = 100;
 /// with nothing to read is a different fact, and is said after it
 fn said_beside(omitted: Option<&Omitted>) -> Option<&Omitted> {
     omitted.filter(|omitted| !matches!(omitted, Omitted::Depth { .. } | Omitted::Children { .. }))
+}
+
+/// the reason an object's attributes were cut that its line has to say
+///
+/// a variables view lists a scope with its objects unopened, because what an
+/// object holds is never on its line. saying so on every line would be bpd's
+/// notice where the program's value goes, so it is left to the opening
+fn said_of_an_object(omitted: Option<&Omitted>) -> Option<&Omitted> {
+    omitted.filter(|omitted| !matches!(omitted, Omitted::Unopened { .. }))
 }
 
 /// a value as the program would print it, in at most about `room` characters
@@ -203,6 +211,22 @@ fn joined(kind: &str, open: &str, close: &str, shown: &[String], length: usize) 
     }
 }
 
+/// what an opened value's own read left out of its children, if anything
+///
+/// a depth that ran out, or an object not opened yet, is not among them: the
+/// children are listed from a read that opened it, and those are answered by
+/// opening a child in turn
+pub fn left_out(value: &Value) -> Option<&Omitted> {
+    match &value.content {
+        Content::Sequence { omitted, .. }
+        | Content::Mapping { omitted, .. }
+        | Content::Object { omitted, .. } => omitted
+            .as_ref()
+            .filter(|omitted| !reachable_by_reading_deeper(omitted)),
+        _ => None,
+    }
+}
+
 /// whether opening this value would show anything more
 ///
 /// a value the *depth* cut short is expandable even though nothing of it was
@@ -232,7 +256,9 @@ pub fn expandable(value: &Value) -> bool {
 /// whether reading the same value one level deeper would answer this omission
 fn reachable_by_reading_deeper(omitted: &Omitted) -> bool {
     match omitted {
-        Omitted::Depth { .. } => true,
+        // an unopened object is opened by reading its name again, opened down
+        // to it — which is what opening it in the tree does
+        Omitted::Depth { .. } | Omitted::Unopened { .. } => true,
         // everything else is answered by a bound the launch configuration
         // carries — `budget`, `children`, `text` — or is a statement about the
         // value rather than about how far the read got: a cycle ends there
@@ -398,18 +424,20 @@ mod tests {
         assert_eq!(summary(&held), "P(a=[1, 2]) (__repr__, 11 characters)");
         assert!(expandable(&held), "its attribute is a level down");
 
-        // one the depth stopped short of is opened by asking a level deeper,
-        // and the line does not say so in the middle of the program's text
-        let deeper = value(
-            "P",
-            Content::Object {
-                attributes: Vec::new(),
-                omitted: Some(Omitted::Depth { limit: 0 }),
-                repr,
-            },
-        );
-        assert_eq!(summary(&deeper), "P(a=[1, 2]) (__repr__, 11 characters)");
-        assert!(expandable(&deeper));
+        // one a listing left unopened is opened by opening it, and neither line
+        // says so: it would be on every object of every scope
+        for repr in [repr, None] {
+            let unopened = value(
+                "P",
+                Content::Object {
+                    attributes: Vec::new(),
+                    omitted: Some(Omitted::Unopened { objects: 0 }),
+                    repr,
+                },
+            );
+            assert!(!summary(&unopened).contains("open"), "{unopened:?}");
+            assert!(expandable(&unopened));
+        }
     }
 
     #[test]

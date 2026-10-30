@@ -272,6 +272,25 @@ here was read to 0. ask again with a larger `budget`, or for one value rather
 than a whole scope
 ```
 
+### how much of a scope
+
+a scope read can be narrowed by a `Selection`, beside its bounds rather than
+among them because it says **what** is read rather than how much of it:
+
+- `names` reads only those names of the scope. the whole budget goes on them,
+    which is what "ask for one value rather than a whole scope" — the advice a
+    scope read fitted shallower gives — needs to be possible
+- `objects` opens objects only that many levels down, the scope's own values
+    being level 0. an object further down is reported `unopened`, with its
+    attributes unread, and containers there are still read to the depth. one
+    with nothing to read — no instance dictionary, or an empty one — still
+    says so, because that is a fact about it rather than about the read
+
+the DAP variables tree is what these are for: it lists a scope with `objects:
+0`, because a line shows an object's type and never what it holds, and opens a
+value with that one name and `objects` down to the level being listed. an agent
+reaches both as `names` and `objects` on the `variables` tool
+
 ## evaluating an expression
 
 an expression is compiled at the request and evaluated against the chosen frame's

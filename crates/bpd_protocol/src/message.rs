@@ -27,8 +27,8 @@ use std::io::{Read, Write};
 
 use bpd_core::{
     ContextLayer, Detail, Entry, Evaluated, Fact, Frame, FrameId, Limit, LogRecord, Mode, Omitted,
-    Recompositions, Refusal, Reported, Resolved, Retainers, Scope, Silent, SourceBreakpoint,
-    StepKind, ThreadState, TraceRecord, Trail, Which,
+    Recompositions, Refusal, Reported, Resolved, Retainers, Scope, Selection, Silent,
+    SourceBreakpoint, StepKind, ThreadState, TraceRecord, Trail, Which,
 };
 
 use crate::frame::{self, Result};
@@ -614,6 +614,9 @@ pub enum FromEngine {
         scope: Scope,
         /// how much of each value to read
         detail: Detail,
+        /// which of its names, and how far down objects are opened
+        #[serde(default)]
+        selection: Selection,
     },
 
     /// prove what can be proved about some of a frame's names
@@ -1228,6 +1231,10 @@ mod tests {
             frame,
             scope: Scope::Free,
             detail: Detail::default(),
+            selection: Selection {
+                names: Some(vec!["captured".to_string()]),
+                objects: Some(1),
+            },
         };
         let answer = FromAgent::Variables {
             frame,

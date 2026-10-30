@@ -90,6 +90,8 @@ struct Recorder {
     statements: Vec<bool>,
     /// the call each step named, if it named one
     targets: Vec<Option<u32>>,
+    /// how much of its scope each scope read asked for
+    selections: Vec<bpd_core::Selection>,
     /// the exception rules the last `setExceptionBreakpoints` carried
     classes: Vec<bpd_core::ExceptionClass>,
     /// whether each launch said the program reads the adapter's stdin
@@ -375,6 +377,26 @@ fn a_step_into_a_target_reaches_the_session_with_the_call_it_named() {
         .targets
         .clone();
     assert!(targets.contains(&Some(42)), "{targets:?}");
+}
+
+#[test]
+fn a_scope_is_listed_with_its_objects_unopened() {
+    // the claim `reach_of_facet` makes about `Facet::ScopeSelection`: listing a
+    // scope reads every name of it and opens none of its objects
+    let asked = Asked::default();
+    drive(&asked);
+    let selections = asked
+        .lock()
+        .expect("the recorder is not poisoned")
+        .selections
+        .clone();
+    assert!(
+        selections.contains(&bpd_core::Selection {
+            names: None,
+            objects: Some(0),
+        }),
+        "{selections:?}"
+    );
 }
 
 #[test]
@@ -1880,9 +1902,13 @@ impl Session for FakeSession {
                     recorder.details.push(*detail);
                     recorder.statements.push(*statements);
                 }
-                Request::Variables { detail, .. } | Request::SetVariable { detail, .. } => {
+                Request::Variables {
+                    detail, selection, ..
+                } => {
                     recorder.details.push(*detail);
+                    recorder.selections.push(selection.clone());
                 }
+                Request::SetVariable { detail, .. } => recorder.details.push(*detail),
                 Request::Query { query, .. } => recorder.details.push(query.detail),
                 _ => {}
             }

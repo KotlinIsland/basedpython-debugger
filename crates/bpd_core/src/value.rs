@@ -101,6 +101,39 @@ impl Default for Detail {
     }
 }
 
+/// how much of one scope a read covers: which of its names, and how far down
+/// it opens objects
+///
+/// what reads only what a reader is going to look at. a module namespace
+/// begins with `__builtins__`, and a read of the whole of it to the request's
+/// depth spends the byte budget on a hundred and fifty names inside an object
+/// nobody opened — measured over DAP before this, a module level stop listed
+/// its globals with "the byte budget fitted 1" and opening `p` there showed
+/// `a = [… 2 more]` for `[1, 2]`, because the opening read the whole scope again
+/// to reach it. the default is the whole scope, as deep as [`Detail::depth`]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Selection {
+    /// only these names of the scope, or every name it has
+    ///
+    /// a name the scope does not have is not an error: it is not in the answer,
+    /// the way a name that is gone by the time the scope is read again is not
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub names: Option<Vec<String>>,
+
+    /// how many levels down objects are opened, counting the scope's own
+    /// values as level 0, or as far as [`Detail::depth`] goes
+    ///
+    /// an object at this level or deeper is reported with
+    /// [`Omitted::Unopened`] and its attributes unread, while a container
+    /// there is still read to the depth. what one line of a variables view
+    /// shows of an object is its type, or its `__repr__`, and never what it
+    /// holds — so a view that lists a scope asks for `0`, and one that opens a
+    /// value asks for the levels down to it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objects: Option<u32>,
+}
+
 /// a value as the debugger read it
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Value {
@@ -328,6 +361,16 @@ pub enum Omitted {
     /// the request did not ask for an object's attributes
     AttributesNotRequested,
 
+    /// the object is as far down as the request opens objects — see
+    /// [`Selection::objects`]
+    ///
+    /// not a statement about the object. it has attributes to read, and a read
+    /// that opens objects further down reaches them
+    Unopened {
+        /// the level objects were opened down to
+        objects: u32,
+    },
+
     /// reading the instance dictionary raised
     ///
     /// which means the type made `__dict__` its own code, and that code failed
@@ -403,6 +446,12 @@ impl std::fmt::Display for Omitted {
             Self::AttributesNotRequested => formatter.write_str(
                 "the request asked for no attributes, so the object was not \
                  opened. ask again with `attributes`",
+            ),
+            Self::Unopened { objects } => write!(
+                formatter,
+                "the request opened objects {objects} levels down and this one \
+                 is further, so its attributes were not read. ask again with a \
+                 larger `objects`, or for this name alone"
             ),
             Self::AttributesRaised { error } => write!(
                 formatter,
@@ -487,6 +536,10 @@ mod tests {
             (
                 Omitted::AttributesNotRequested,
                 ["no attributes", "`attributes`"],
+            ),
+            (
+                Omitted::Unopened { objects: 1 },
+                ["1 levels down", "`objects`"],
             ),
             (Omitted::NotNames { count: 2 }, ["2 entries", "not names"]),
             (Omitted::Unencodable, ["surrogate", "U+FFFD"]),

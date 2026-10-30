@@ -109,6 +109,7 @@ over_each_transport!(
     a_breakpoints_location_says_what_its_hit_holds_and_the_policy_outlives_the_set,
     a_comment_indented_under_a_def_is_refused_rather_than_moved_out_of_it,
     an_object_read_with_its_repr_still_opens_onto_its_attributes,
+    a_module_namespace_spends_nothing_on_what_was_not_opened,
 );
 
 /// a program with a local worth writing to, and a marker after the breakpoint
@@ -3312,6 +3313,88 @@ fn an_object_read_with_its_repr_still_opens_onto_its_attributes(transport: Trans
     );
     assert_eq!(variable(&opened, "a")["value"], "[1, 2]", "{opened}");
     assert_eq!(variable(&opened, "b")["value"], "{'k': 3}", "{opened}");
+
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    client.event("exited");
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+/// the same object as [`POINT`], held at module level beside a module
+const MODULE_POINT: &str = r#"import os
+
+
+class P:
+    def __init__(self):
+        self.a = [1, 2]
+        self.b = {"k": 3}
+
+
+p = P()
+print("held", flush=True)  # held here
+"#;
+
+fn a_module_namespace_spends_nothing_on_what_was_not_opened(transport: Transport) {
+    // measured before this: at a module level stop the globals ended in
+    // `(left out) = the request asked for a depth of 3 and the byte budget
+    // fitted 1`, and opening `p` there gave `a = [… 2 more]` and
+    // `b = {… 1 more}` — `__builtins__` and `os` had spent the budget, read
+    // again in full to reach `p`. a function frame showed `[1, 2]`
+    let fixture = Fixture::new("module_point", MODULE_POINT);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line_of(MODULE_POINT, "# held here") } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let stopped = client.event("stopped");
+    let thread = stopped["body"]["threadId"].clone();
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    let frame = stack["body"]["stackFrames"][0]["id"].clone();
+    let scopes = client.request("scopes", &serde_json::json!({ "frameId": frame }));
+    let globals = scopes["body"]["scopes"][1]["variablesReference"].clone();
+    let read = client.request(
+        "variables",
+        &serde_json::json!({ "variablesReference": globals }),
+    );
+    assert!(
+        !read.to_string().contains("(left out)"),
+        "nothing of the namespace was left out: {read}"
+    );
+    for module in ["__builtins__", "os"] {
+        assert_eq!(variable(&read, module)["value"], "module", "{read}");
+        assert_ne!(variable(&read, module)["variablesReference"], 0, "{read}");
+    }
+
+    let opened = client.request(
+        "variables",
+        &serde_json::json!({ "variablesReference": variable(&read, "p")["variablesReference"] }),
+    );
+    assert_eq!(variable(&opened, "a")["value"], "[1, 2]", "{opened}");
+    assert_eq!(variable(&opened, "b")["value"], "{'k': 3}", "{opened}");
+
+    // and a module opened is its names, with what was cut said among them
+    let builtins = client.request(
+        "variables",
+        &serde_json::json!({ "variablesReference": variable(&read, "__builtins__")["variablesReference"] }),
+    );
+    let left_out = variable(&builtins, "(left out)")["value"]
+        .as_str()
+        .expect("a value is a string")
+        .to_string();
+    assert!(left_out.contains("`children`"), "{left_out}");
 
     client.request("continue", &serde_json::json!({ "threadId": thread }));
     client.event("exited");

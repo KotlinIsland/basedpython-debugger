@@ -265,11 +265,19 @@ pub enum Facet {
     /// without it stops one thread at every breakpoint, and cannot offer a
     /// breakpoint that holds the whole program or one that holds nothing
     Suspend,
+
+    /// reading some of a scope rather than all of it — [`crate::Selection`]
+    ///
+    /// a field of [`Request::Variables`], and a capability all the same: a
+    /// front end without it reads a whole module namespace to show one name
+    /// of it, and the byte budget goes on `__builtins__` before it reaches the
+    /// name that was asked about
+    ScopeSelection,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
@@ -289,6 +297,7 @@ impl Facet {
         Self::ExceptionClassLibraries,
         Self::StepTarget,
         Self::Suspend,
+        Self::ScopeSelection,
     ];
 
     /// what to call this capability in a message about it
@@ -314,6 +323,7 @@ impl Facet {
             Self::ExceptionClasses => "a rule per exception class",
             Self::StepTarget => "stepping into one chosen call of the line",
             Self::Suspend => "what a breakpoint's hit holds",
+            Self::ScopeSelection => "reading some of a scope's names, and objects only so far down",
             Self::ExceptionClassLibraries => {
                 "a class's exception rule ignoring library files on its own"
             }
@@ -770,6 +780,11 @@ fn exited_with(code: i32) -> ExitStatus {
 ///
 /// an adapter's `reach_of` is what makes a new variant impossible to ignore;
 /// this is what a coverage test drives an adapter against
+#[expect(
+    clippy::too_many_lines,
+    reason = "it is one request of every variant, in the order the enum \
+              declares them. splitting it would make a missing one harder to see"
+)]
 pub fn surface() -> Vec<Request> {
     let frame = FrameId { stop: 1, depth: 0 };
     vec![
@@ -803,6 +818,7 @@ pub fn surface() -> Vec<Request> {
             frame,
             scope: Scope::Local,
             detail: Detail::default(),
+            selection: crate::value::Selection::default(),
         },
         Request::TemplateContext {
             frame,

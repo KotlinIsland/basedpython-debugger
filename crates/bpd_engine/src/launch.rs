@@ -30,9 +30,9 @@ use bpd_core::python::Capabilities;
 use bpd_core::{
     Addressed, Again, Blindspot, Detail, Difference, Evaluated, ExceptionBreakpoints, Exit,
     Forwarded, FrameId, Joined, Jumped, LogRecord, Recomposed, Recompositions, Replacements,
-    Reporting, Request, Resolved, Response, Restarted, Running, Scope, Script, SessionId, Snapshot,
-    SnapshotId, SourceBreakpoint, Spawn, Stack, StateQuery, StepKind, Stop, TemplateContext,
-    Threads, Transcript, Variables, Which, WorldStopped,
+    Reporting, Request, Resolved, Response, Restarted, Running, Scope, Script, Selection,
+    SessionId, Snapshot, SnapshotId, SourceBreakpoint, Spawn, Stack, StateQuery, StepKind, Stop,
+    TemplateContext, Threads, Transcript, Variables, Which, WorldStopped,
 };
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine, Remapping};
@@ -565,6 +565,11 @@ impl Debuggee {
     /// session this debuggee does not hold is refused rather than answered from
     /// whichever session is nearest, and one that names none is for the only
     /// session there is — refused when there is more than one
+    #[expect(
+        clippy::too_many_lines,
+        reason = "it is the request table. one arm per variant is what makes a \
+                  request that reaches the wrong session's handler visible"
+    )]
     pub fn dispatch(
         &mut self,
         asked: Addressed,
@@ -631,8 +636,9 @@ impl Debuggee {
                 frame,
                 scope,
                 detail,
+                selection,
             } => Ok(Response::Variables(
-                self.attached[at].read_scope(frame, scope, detail, reporting)?,
+                self.attached[at].read_scope(frame, scope, detail, selection, reporting)?,
             )),
             Request::Facts {
                 frame,
@@ -953,10 +959,22 @@ impl Debuggee {
 
     /// read one scope of one frame
     pub fn variables(&mut self, frame: FrameId, scope: Scope, detail: Detail) -> Result<Variables> {
+        self.variables_selected(frame, scope, detail, Selection::default())
+    }
+
+    /// read some of one scope of one frame — see [`Selection`]
+    pub fn variables_selected(
+        &mut self,
+        frame: FrameId,
+        scope: Scope,
+        detail: Detail,
+        selection: Selection,
+    ) -> Result<Variables> {
         match self.ask_for(Request::Variables {
             frame,
             scope,
             detail,
+            selection,
         })? {
             Response::Variables(variables) => Ok(variables),
             other => unreachable!("a scope read was answered with {other:?}"),
@@ -1764,6 +1782,7 @@ impl Attached {
         frame: FrameId,
         scope: Scope,
         detail: Detail,
+        selection: Selection,
         reporting: &mut dyn Reporting,
     ) -> Result<Variables> {
         const EXPECTED: &str = "the variables of a scope";
@@ -1772,6 +1791,7 @@ impl Attached {
             frame,
             scope,
             detail,
+            selection,
         };
         match self.ask(&request, EXPECTED, reporting)? {
             FromAgent::Variables {

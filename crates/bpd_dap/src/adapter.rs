@@ -79,8 +79,8 @@ use std::time::{Duration, Instant};
 
 use bpd_core::{
     Addressed, Binding, Detail, Evaluated, Forwarded, FrameId, LogRecord, Progress, Reporting,
-    Request, Resolved, Response, Running, Scope, SessionId, SourceBreakpoint, StepKind, Stop,
-    StopReason, Suspend, Value, Which, exit_code,
+    Request, Resolved, Response, Running, Scope, Selection, SessionId, SourceBreakpoint, StepKind,
+    Stop, StopReason, Suspend, Value, Which, exit_code,
 };
 
 use crate::capabilities::capabilities;
@@ -2708,6 +2708,10 @@ impl Adapter {
                     repr: false,
                     ..self.configuration().variables
                 },
+                selection: Selection {
+                    names: Some(vec![name.to_string()]),
+                    objects: None,
+                },
             })? {
                 Response::Variables(read) => read,
                 other => unreachable!("a scope read was answered with {other:?}"),
@@ -2765,6 +2769,7 @@ impl Adapter {
             frame,
             scope,
             detail,
+            selection: selecting(path)?,
         })? {
             Response::Variables(read) => read,
             other => unreachable!("a scope read was answered with {other:?}"),
@@ -2805,6 +2810,10 @@ impl Adapter {
                 };
                 listed.push(variable(&child.name, child.value, reference));
             }
+            // what the opened value's own read left out, said where its
+            // children are, the way a scope's is. its line no longer can: the
+            // listing it is on does not open it
+            listed.extend(crate::render::left_out(node).map(left_out));
             return Ok(listed);
         }
 
@@ -2840,13 +2849,7 @@ impl Adapter {
                 "variablesReference": 0,
             }));
         }
-        for omitted in &read.omitted {
-            listed.push(serde_json::json!({
-                "name": "(left out)",
-                "value": omitted.to_string(),
-                "variablesReference": 0,
-            }));
-        }
+        listed.extend(read.omitted.iter().map(left_out));
 
         Ok(listed)
     }
@@ -4474,6 +4477,38 @@ fn rendered_binding(resolved: &Resolved, requested: &SourceBreakpoint) -> serde_
 }
 
 /// one DAP variable
+/// what a scope read covers to list what is at `path` in it
+///
+/// only the name being opened, and objects only down to the level being
+/// listed: what a line shows of an object is its type or its `__repr__`, never
+/// what it holds. measured before this, opening `p` at a module level stop read
+/// the whole namespace again, `__builtins__` and all, and the byte budget left
+/// `p.a` reading `[… 2 more]`
+fn selecting(path: &[Step]) -> Result<Selection, Aborted> {
+    Ok(Selection {
+        names: path.first().map(|first| {
+            let Step::Attribute(name) = first else {
+                unreachable!("the first step into a scope is one of its names, and was {first}")
+            };
+            vec![name.clone()]
+        }),
+        objects: Some(
+            u32::try_from(path.len()).map_err(|_| {
+                Aborted::from("a value cannot be expanded four billion levels down")
+            })?,
+        ),
+    })
+}
+
+/// the line that says what a read left out, among the variables it listed
+fn left_out(omitted: &bpd_core::Omitted) -> serde_json::Value {
+    serde_json::json!({
+        "name": "(left out)",
+        "value": omitted.to_string(),
+        "variablesReference": 0,
+    })
+}
+
 fn variable(name: &str, value: &Value, reference: i64) -> serde_json::Value {
     serde_json::json!({
         "name": name,

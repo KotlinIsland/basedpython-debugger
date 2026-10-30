@@ -42,13 +42,13 @@ use std::sync::OnceLock;
 
 use bpd_core::{
     Again, Blocked, ContextLayer, Detail, Entry, Evaluated, Frame, FrameId, FrameKind, Holding,
-    Jump, Jumped, Omitted, Refusal, Restarted, Restarting, Scope, Suspendable, Unrestartable,
-    Where,
+    Jump, Jumped, Omitted, Refusal, Restarted, Restarting, Scope, Selection, Suspendable,
+    Unrestartable, Where,
 };
 use bpd_protocol::message::FromAgent;
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList, PyString};
 
 use crate::conditions::{self, capture};
 use crate::facts::Prover;
@@ -470,6 +470,7 @@ impl<'py> Stopped<'py> {
         id: FrameId,
         scope: Scope,
         detail: Detail,
+        selection: &Selection,
     ) -> PyResult<FromAgent> {
         let frame = match self.frame(id, "the variables of a scope")? {
             Ok(frame) => frame,
@@ -486,6 +487,7 @@ impl<'py> Stopped<'py> {
                 depth: used,
                 ..detail
             },
+            selection,
         )?;
         while read.exhausted && used > 0 {
             used -= 1;
@@ -496,6 +498,7 @@ impl<'py> Stopped<'py> {
                     depth: used,
                     ..detail
                 },
+                selection,
             )?;
         }
 
@@ -594,15 +597,27 @@ impl<'py> Stopped<'py> {
     }
 
     /// one pass over a scope at one depth
-    fn scope(&self, place: &Place<'py>, scope: Scope, detail: Detail) -> PyResult<Read> {
-        let mut reader = Reader::new(self.python, detail);
+    fn scope(
+        &self,
+        place: &Place<'py>,
+        scope: Scope,
+        detail: Detail,
+        selection: &Selection,
+    ) -> PyResult<Read> {
+        let mut reader = Reader::new(self.python, detail).opening_objects_to(selection.objects);
         let mut read = Read::default();
+        let selected = |name: &str| {
+            selection
+                .names
+                .as_ref()
+                .is_none_or(|names| names.iter().any(|wanted| wanted == name))
+        };
 
         match place.names(scope) {
             // a scope the code object names one variable at a time: the names
             // are the code object's and the values are the frame's
             Some(names) => {
-                for name in names {
+                for name in names.into_iter().filter(|name| selected(name)) {
                     match place.read(scope, &name)? {
                         Held::Value(value) => read.entries.push(Entry {
                             value: reader.read(&value, &name)?,
@@ -619,8 +634,23 @@ impl<'py> Stopped<'py> {
                 let namespace = place.namespace(scope);
                 match namespace.cast::<PyDict>() {
                     Ok(mapping) => {
-                        let (entries, omitted) =
-                            reader.named(&mapping.items(), "", detail.depth)?;
+                        let mut items = mapping.items();
+                        if selection.names.is_some() {
+                            // a key that is not a string is no name, and so not
+                            // one of the names asked for
+                            let mut kept = Vec::new();
+                            for item in items.iter() {
+                                let key = item.get_item(0)?;
+                                if key
+                                    .cast::<PyString>()
+                                    .is_ok_and(|key| selected(&key.to_string_lossy()))
+                                {
+                                    kept.push(item);
+                                }
+                            }
+                            items = PyList::new(self.python, kept)?;
+                        }
+                        let (entries, omitted) = reader.named(&items, "", detail.depth)?;
                         read.entries = entries;
                         read.omitted.extend(omitted);
                     }

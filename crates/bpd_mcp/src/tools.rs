@@ -774,6 +774,18 @@ pub fn tools() -> Vec<Tool> {
                                         module namespace begins with \
                                         `__builtins__`" },
                     "detail": detail(),
+                    "names": { "type": "array", "items": { "type": "string" },
+                        "description": "only these names of the scope. the \
+                                        whole budget goes on them rather than \
+                                        on everything else the scope holds. a \
+                                        name the scope does not have is not in \
+                                        the answer" },
+                    "objects": { "type": "integer", "minimum": 0,
+                        "description": "open objects only this many levels \
+                                        down, the scope's own values being \
+                                        level 0. an object further down is \
+                                        `unopened`, while containers there are \
+                                        still read to `detail.depth`" },
                 }),
                 &["scope"],
             ),

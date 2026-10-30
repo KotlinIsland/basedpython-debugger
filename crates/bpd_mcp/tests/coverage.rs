@@ -79,6 +79,8 @@ struct Recorder {
     statements: Vec<bool>,
     /// the call each step named, if it named one
     targets: Vec<Option<u32>>,
+    /// how much of its scope each scope read asked for
+    selections: Vec<bpd_core::Selection>,
     /// the exception rules the last `set_exception_breakpoints` carried
     classes: Vec<bpd_core::ExceptionClass>,
     /// what every request was addressed to, beside what it asked for
@@ -164,6 +166,17 @@ fn the_launcher_and_statements_reach_the_session_as_they_were_asked() {
         "`{}` never reached the session: {:?}",
         Facet::StepTarget.name(),
         recorded.targets
+    );
+
+    // the names and the levels of a scope read, read off what really arrived
+    assert!(
+        recorded.selections.contains(&bpd_core::Selection {
+            names: Some(vec!["total".to_string()]),
+            objects: Some(1),
+        }),
+        "`{}` never reached the session: {:?}",
+        Facet::ScopeSelection.name(),
+        recorded.selections
     );
 
     // statements, read off what the evaluation really asked
@@ -559,7 +572,12 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
     );
     client.call(
         "variables",
-        &serde_json::json!({ "scope": "local", "detail": { "children": 7 } }),
+        &serde_json::json!({
+            "scope": "local",
+            "detail": { "children": 7 },
+            "names": ["total"],
+            "objects": 1,
+        }),
     );
     client.call(
         "facts",
@@ -1855,9 +1873,13 @@ impl FakeSession {
                 recorder.details.push(*detail);
                 recorder.statements.push(*statements);
             }
-            Request::Variables { detail, .. } | Request::SetVariable { detail, .. } => {
+            Request::Variables {
+                detail, selection, ..
+            } => {
                 recorder.details.push(*detail);
+                recorder.selections.push(selection.clone());
             }
+            Request::SetVariable { detail, .. } => recorder.details.push(*detail),
             Request::Query { query, .. } => recorder.details.push(query.detail),
             _ => {}
         }

@@ -131,8 +131,9 @@ fn answer(
             frame,
             scope,
             detail,
+            selection,
         } => {
-            let answer = stopped.variables(frame, scope, detail)?;
+            let answer = stopped.variables(frame, scope, detail, &selection)?;
             attach::send(&answer);
         }
         FromEngine::Retainers { frame, expression } => {

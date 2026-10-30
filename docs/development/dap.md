@@ -393,9 +393,26 @@ every one of them is a field of `bpd_core::Detail`:
 - `depth` applies where a value is read once and kept — an evaluated
     expression, and the value a write left behind — and in the variables *tree*
     it is how far **below** the level being listed each read goes, at least one.
-    opening a node re-reads its scope from there, so how far the tree goes is
-    however far the client has opened it, and every line in it can show what
-    its value holds
+    opening a node re-reads the one name of its scope it is under, so how far
+    the tree goes is however far the client has opened it, and every line in it
+    can show what its value holds
+- **the budget goes on what the tree shows, not on what it could.** a line
+    shows a container's items and an object's type or `__repr__` — never what
+    an object holds — so a scope is listed with its objects **unopened** and its
+    containers read to the depth, and opening a value reads that name alone,
+    with objects opened down to the level being listed. both are a
+    [`Selection`](state.md#how-much-of-a-scope) on the scope read. measured
+    before this at a module level stop: the globals ended in `(left out) = the
+    request asked for a depth of 3 and the byte budget fitted 1`, and opening
+    `p` gave `a = [… 2 more]` and `b = {… 1 more}` for `[1, 2]` and
+    `{"k": 3}` — `__builtins__`, with 159 names, had spent the budget, and was
+    read again in full to reach `p`. `pydevd` and `debugpy` reach the same place
+    another way: each reads a value's children only when it is opened, and both
+    fold `__builtins__` and the dunders into a "special variables" node read
+    only when that is opened, `pydevd` the functions, classes and modules as
+    well. what an opened value's own read left out — `__builtins__` has more
+    names than `children` allows — is said among its children as `(left out)`,
+    the way a scope's is
 
 **the layout is PyCharm's own python debugger's**, measured on 263.7607 against
 the same frame — a closure, an object whose class holds a value, and names not

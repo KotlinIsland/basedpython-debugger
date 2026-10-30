@@ -60,6 +60,9 @@ pub(crate) struct Reader<'py> {
     /// a cycle and is reported twice; a value that appears inside itself is
     /// and is reported once, naming where it came round to
     open: Vec<(usize, String)>,
+    /// the level an object is no longer opened at, counting the values read
+    /// first as level 0 — see [`bpd_core::Selection::objects`]
+    objects: Option<u32>,
 }
 
 impl<'py> Reader<'py> {
@@ -70,7 +73,15 @@ impl<'py> Reader<'py> {
             detail,
             spent: 0,
             open: Vec::new(),
+            objects: None,
         }
+    }
+
+    /// a reader that opens no object `objects` levels down or deeper, and
+    /// reads containers there to the depth all the same
+    pub(crate) const fn opening_objects_to(mut self, objects: Option<u32>) -> Self {
+        self.objects = objects;
+        self
     }
 
     /// read one value, naming it `path` in anything it has to say about itself
@@ -404,7 +415,12 @@ impl<'py> Reader<'py> {
         if let Some(cycle) = self.cycle(object) {
             return Ok((Vec::new(), Some(cycle)));
         }
-        if depth == 0 {
+        // how far down this object is, from the depth left to read below it.
+        // one past the levels objects are opened to is not opened however much
+        // depth is left, and saying the depth ran out would name the wrong bound
+        let level = self.detail.depth.saturating_sub(depth);
+        let unopened = self.objects.filter(|&objects| level >= objects);
+        if depth == 0 && unopened.is_none() {
             return Ok((
                 Vec::new(),
                 Some(Omitted::Depth {
@@ -432,6 +448,13 @@ impl<'py> Reader<'py> {
 
         let items = stored.items();
         class_attributes(object, &stored, &items)?;
+        // one with nothing to read is said to be empty rather than unopened,
+        // because that is a statement about it a view can show — nothing to
+        // open — and it costs a length rather than a read
+        if let Some(objects) = unopened {
+            let omitted = (!items.is_empty()).then_some(Omitted::Unopened { objects });
+            return Ok((Vec::new(), omitted));
+        }
         self.enter(object, path);
         let named = self.named(&items, path, depth - 1)?;
         self.leave();

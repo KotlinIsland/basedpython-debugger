@@ -292,6 +292,15 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         // DAP has nowhere on a request to carry them, so they come from the
         // launch configuration instead — one setting for the session rather
         // than one per read. that is a narrower way to reach it, not a gap
+        // DAP has no field for it and needs none: the tree is what says which
+        // names a reader is looking at. a scope is listed with its objects
+        // unopened, and opening a value reads that one name of its scope,
+        // opened down to the level being listed
+        Facet::ScopeSelection => Reach::OnItsOwn(
+            "listing a scope in `variables`, which opens none of its objects, \
+             and opening a value there, which reads that one name of its scope",
+        ),
+
         Facet::ValueBounds => Reach::Direct(
             "the `variables` object of the launch configuration, every field of \
              which is a field of `bpd_core::Detail` — and per call on the \

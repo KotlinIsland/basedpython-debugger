@@ -466,6 +466,10 @@ impl<'a> Server<'a> {
                         frame,
                         scope: args.scope,
                         detail: args.detail,
+                        selection: bpd_core::Selection {
+                            names: args.names,
+                            objects: args.objects,
+                        },
                     },
                 )? {
                     Response::Variables(read) => Ok(render::variables(&read)),
@@ -1864,6 +1868,10 @@ struct VariablesArgs {
     scope: Scope,
     #[serde(default)]
     detail: Detail,
+    #[serde(default)]
+    names: Option<Vec<String>>,
+    #[serde(default)]
+    objects: Option<u32>,
 }
 
 #[derive(serde::Deserialize)]

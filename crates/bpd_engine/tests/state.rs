@@ -17,7 +17,7 @@ use std::path::Path;
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
-    Binding, Content, Detail, Evaluated, FrameId, Omitted, Resolved, Running, Scope,
+    Binding, Content, Detail, Evaluated, FrameId, Omitted, Resolved, Running, Scope, Selection,
     SourceBreakpoint, StopReason, Value, Variables,
 };
 use bpd_engine::{Debuggee, Launched};
@@ -928,6 +928,92 @@ fn an_object_is_read_from_its_instance_dictionary_and_repr_is_never_run_unasked(
             repr: None,
         }
     );
+
+    to_exit(&mut debuggee);
+}
+
+#[test]
+fn a_selection_reads_only_the_names_it_names_and_objects_only_so_far_down() {
+    // measured over DAP before this: opening `p` at a module level stop read the
+    // whole namespace again to reach it, and `__builtins__` left `p.a` reading
+    // `[… 2 more]`. a read of some of a scope spends nothing on the rest
+    let fixture = Fixture::new("values", VALUES);
+    let mut debuggee = stopped_over_values(&fixture);
+
+    let one = debuggee
+        .variables_selected(
+            top(),
+            Scope::Local,
+            Detail::default(),
+            Selection {
+                names: Some(vec!["first".to_string(), "absent".to_string()]),
+                objects: None,
+            },
+        )
+        .expect("the locals were answered");
+    assert_eq!(
+        one.entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["first"],
+        "a name the scope does not have is not in the answer"
+    );
+    assert!(one.omitted.is_empty(), "{:?}", one.omitted);
+
+    // a listing opens no object and still reads every container to the depth:
+    // what a line shows of an object is its type, and of a list its items
+    let listing = debuggee
+        .variables_selected(
+            top(),
+            Scope::Local,
+            Detail::default(),
+            Selection {
+                names: None,
+                objects: Some(0),
+            },
+        )
+        .expect("the locals were answered");
+    let Content::Object {
+        attributes,
+        omitted,
+        ..
+    } = &held(&listing, "first").content
+    else {
+        panic!("expected an object")
+    };
+    assert!(attributes.is_empty());
+    assert_eq!(*omitted, Some(Omitted::Unopened { objects: 0 }));
+    // an absence is still said as one: unopened is not a claim about the object
+    let Content::Object { omitted, .. } = &held(&listing, "slotted").content else {
+        panic!("expected an object")
+    };
+    assert_eq!(*omitted, Some(Omitted::NoAttributes));
+    let Content::Sequence { items, .. } = &held(&listing, "numbers").content else {
+        panic!("expected a sequence")
+    };
+    assert_eq!(items.len(), 100, "a container is read to the depth");
+
+    // opened one level, the object is read and what it holds is not
+    let opened = debuggee
+        .variables_selected(
+            top(),
+            Scope::Local,
+            Detail::default(),
+            Selection {
+                names: Some(vec!["first".to_string()]),
+                objects: Some(1),
+            },
+        )
+        .expect("the locals were answered");
+    let Content::Object { attributes, .. } = &held(&opened, "first").content else {
+        panic!("expected an object")
+    };
+    assert_eq!(text_of(&attributes[0].value), "first");
+    let Content::Object { omitted, .. } = &attributes[1].value.content else {
+        panic!("expected `first.next` to be an object")
+    };
+    assert_eq!(*omitted, Some(Omitted::Unopened { objects: 1 }));
 
     to_exit(&mut debuggee);
 }

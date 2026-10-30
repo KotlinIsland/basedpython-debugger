@@ -27,7 +27,7 @@
 
 use bpd_core::{
     Answer, Detail, Difference, FrameState, NotRead, Omitted, QueryPart, Reporting, ScopeState,
-    Snapshot, SnapshotId, Source, State, StateQuery, Wanted,
+    Selection, Snapshot, SnapshotId, Source, State, StateQuery, Wanted,
 };
 use bpd_protocol::message::{FromAgent, FromEngine};
 use sha2::{Digest as _, Sha256};
@@ -158,7 +158,13 @@ impl Attached {
                 if reading.gone(part) {
                     continue;
                 }
-                let read = self.read_scope(frame.id, *scope, query.detail, reporting)?;
+                let read = self.read_scope(
+                    frame.id,
+                    *scope,
+                    query.detail,
+                    Selection::default(),
+                    reporting,
+                )?;
                 let read = ScopeState {
                     scope: *scope,
                     entries: read.entries,

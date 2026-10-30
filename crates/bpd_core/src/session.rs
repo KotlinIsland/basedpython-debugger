@@ -26,7 +26,7 @@ use crate::script::{Script, Transcript};
 use crate::spawn::{Blindspot, Spawn};
 use crate::stop::{Mode, StepKind, Stop};
 use crate::thread::{ThreadState, Which};
-use crate::value::{Detail, Entry, Evaluated, Omitted, Value};
+use crate::value::{Detail, Entry, Evaluated, Omitted, Selection, Value};
 
 /// which debug session something belongs to
 ///
@@ -324,6 +324,8 @@ pub enum Request {
         scope: Scope,
         /// how much of each value to read
         detail: Detail,
+        /// which of its names, and how far down objects are opened
+        selection: Selection,
     },
 
     /// read the django template context of a template frame, layer by layer
@@ -1808,6 +1810,7 @@ mod tests {
                 frame: FrameId { stop: 1, depth: 0 },
                 scope: Scope::Local,
                 detail: Detail::default(),
+                selection: Selection::default(),
             },
             &known,
         );
