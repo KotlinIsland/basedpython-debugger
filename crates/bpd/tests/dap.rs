@@ -123,6 +123,8 @@ mod ending {
         a_terminate_asks_the_program_to_end_the_way_it_can_handle,
         a_sigterm_and_a_terminate_together_ask_the_program_once,
         a_terminate_lets_a_held_program_go_so_that_it_can_handle_the_signal,
+        a_disconnect_keeping_the_debuggee_lets_a_terminates_grace_run,
+        a_disconnect_keeping_the_debuggee_leaves_it_running,
     );
 }
 
@@ -2110,17 +2112,23 @@ fn the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program(trans
     }
 }
 
-/// a program that handles `SIGTERM` by writing that it did and exiting 7, or by
-/// writing that it did and carrying on when it is given `ignore`
+/// a program that handles `SIGTERM` by writing that it did and exiting 7 — or,
+/// given `ignore`, by writing that it did and carrying on, and given `slow`, by
+/// taking a second to clean up first
 const ENDS_ON_SIGTERM: &str = r#"import os, pathlib, signal, sys, time
 
 HERE = pathlib.Path(__file__).parent
 IGNORE = sys.argv[1:] == ["ignore"]
+SLOW = sys.argv[1:] == ["slow"]
 
 
 def on_term(signum, frame):
     with (HERE / "handled").open("a") as handled:
         handled.write(f"{signum}\n")
+    if SLOW:
+        time.sleep(1)
+        with (HERE / "handled").open("a") as handled:
+            handled.write("cleaned up\n")
     if not IGNORE:
         sys.exit(7)
 
@@ -2144,13 +2152,13 @@ enum Asking {
 }
 
 /// launch [`ENDS_ON_SIGTERM`], let it run and wait until it has said it is
-/// ready, holding it at a breakpoint first when `held`
+/// ready, holding it at a breakpoint first when `held`, and handing it `args`
 #[cfg(unix)]
 fn running_until_asked(
     transport: Transport,
     fixture: &Fixture,
     held: bool,
-    ignore: bool,
+    args: &[&str],
 ) -> Client {
     let mut client = Client::start(transport);
     client.request("initialize", &serde_json::json!({}));
@@ -2159,7 +2167,7 @@ fn running_until_asked(
         &serde_json::json!({
             "program": fixture.path(),
             "python": interpreter(),
-            "args": if ignore { vec!["ignore"] } else { Vec::new() },
+            "args": args,
         }),
     );
     client.event("initialized");
@@ -2193,7 +2201,7 @@ fn running_until_asked(
 #[cfg(unix)]
 fn ends_once(transport: Transport, asking: Asking, held: bool) {
     let fixture = Fixture::new("ends_on_sigterm", ENDS_ON_SIGTERM);
-    let mut client = running_until_asked(transport, &fixture, held, false);
+    let mut client = running_until_asked(transport, &fixture, held, &[]);
 
     if matches!(asking, Asking::Signal | Asking::Both) {
         let adapter = client
@@ -2259,10 +2267,78 @@ fn a_terminate_lets_a_held_program_go_so_that_it_can_handle_the_signal(transport
 }
 
 #[cfg(unix)]
+fn a_disconnect_keeping_the_debuggee_lets_a_terminates_grace_run(transport: Transport) {
+    // measured in pycharm 263.7649: Stop sends `terminate`, and the moment it
+    // is answered `disconnect` with `terminateDebuggee: false`. bpd killed the
+    // program on that, and its handler had 26 ms of the grace it was promised
+    let fixture = Fixture::new("ends_on_sigterm", ENDS_ON_SIGTERM);
+    let mut client = running_until_asked(transport, &fixture, false, &["slow"]);
+    let answered = client.request("terminate", &serde_json::json!({}));
+    assert_eq!(answered["success"], true, "{answered}");
+    let left = client.request(
+        "disconnect",
+        &serde_json::json!({ "terminateDebuggee": false }),
+    );
+    assert_eq!(left["success"], true, "{left}");
+
+    client.finish_after_the_program_exited(7);
+    assert_eq!(
+        std::fs::read_to_string(fixture.directory().join("handled"))
+            .expect("the program's handler ran"),
+        "15\ncleaned up\n",
+        "the handler had its time, and was asked once"
+    );
+}
+
+#[cfg(unix)]
+fn a_disconnect_keeping_the_debuggee_leaves_it_running(transport: Transport) {
+    // the spec ends a launched debuggee on `disconnect` *unless*
+    // `terminateDebuggee` says otherwise, and bpd advertises honouring it. the
+    // program runs on, undebugged, with bpd still its parent — so what is sent
+    // to bpd still reaches it, and bpd exits as it does
+    let fixture = Fixture::new("ends_on_sigterm", ENDS_ON_SIGTERM);
+    let mut client = running_until_asked(transport, &fixture, true, &[]);
+    let left = client.request(
+        "disconnect",
+        &serde_json::json!({ "terminateDebuggee": false }),
+    );
+    assert_eq!(left["success"], true, "{left}");
+
+    // let go of the breakpoint it was held at, and stopped by it no more
+    let program = std::fs::read_to_string(fixture.directory().join("ready"))
+        .expect("the program wrote its pid");
+    std::thread::sleep(Duration::from_secs(1));
+    let alive = Command::new("kill")
+        .args(["-0", &program])
+        .status()
+        .expect("`kill` runs");
+    assert!(
+        alive.success(),
+        "the program was ended on a disconnect that kept it"
+    );
+    assert!(
+        !fixture.directory().join("handled").exists(),
+        "nothing asked it to end"
+    );
+
+    let adapter = client
+        .adapter
+        .lock()
+        .expect("nothing panics holding the adapter")
+        .id();
+    let sent = Command::new("kill")
+        .args(["-TERM", &adapter.to_string()])
+        .status()
+        .expect("`kill` runs");
+    assert!(sent.success());
+    client.finish_after_the_program_exited(7);
+}
+
+#[cfg(unix)]
 #[test]
 fn a_program_that_will_not_end_on_terminate_is_ended_after_a_grace() {
     let fixture = Fixture::new("ends_on_sigterm", ENDS_ON_SIGTERM);
-    let mut client = running_until_asked(Transport::Loopback, &fixture, false, true);
+    let mut client = running_until_asked(Transport::Loopback, &fixture, false, &["ignore"]);
     let asked = Instant::now();
     client.request("terminate", &serde_json::json!({}));
 

@@ -227,6 +227,9 @@ fn read_client(
     queue: &Sender<Incoming>,
     stopping: &AtomicBool,
 ) -> Result<(), crate::wire::Error> {
+    // whether a `terminate` has asked the program to end and its grace is
+    // running, which a `disconnect` after it must not cut short
+    let mut terminating = false;
     loop {
         let message = match reader.next_message() {
             Ok(Some(message)) => message,
@@ -305,9 +308,33 @@ fn read_client(
                 if let Err(source) = watching {
                     return Err(crate::wire::Error::Connection { source });
                 }
+                terminating = true;
                 if queue.send(message).is_err() {
                     return Ok(());
                 }
+            }
+
+            // a `disconnect` that does not end the program: `terminateDebuggee:
+            // false`, which bpd advertises honouring, and one that leaves it
+            // unsaid while a `terminate`'s grace is running. the spec ends a
+            // launched debuggee on `disconnect` *unless* that field says
+            // otherwise, and a graceful end under way is the debuggee being
+            // ended — measured in pycharm 263.7649, whose Stop sends
+            // `terminate` and then `disconnect` with `terminateDebuggee: false`
+            // 3 ms later: a kill here gave the program's handler 26 ms
+            //
+            // the session lets the program go and waits for it to end — so it
+            // goes to the session, and this thread reads no further: the
+            // client going after this is not a reason to end the program
+            Some("disconnect")
+                if !message.arguments["terminateDebuggee"]
+                    .as_bool()
+                    .unwrap_or(!terminating) =>
+            {
+                // a session that has stopped taking messages has ended
+                // already, and there is nothing left to let go
+                drop(queue.send(message));
+                return Ok(());
             }
 
             Some("disconnect" | "terminate") => {
@@ -341,6 +368,19 @@ fn read_client(
             }
         }
     }
+}
+
+/// where a released program's reports go: nowhere, because the client that
+/// would have been told has disconnected
+struct Unheard;
+
+impl Reporting for Unheard {
+    fn logged(&mut self, _: LogRecord) {}
+    fn pausing(&mut self, _: Vec<u64>) {}
+    fn spawned(&mut self, _: bpd_core::Spawn) {}
+    fn blind_to(&mut self, _: bpd_core::Blindspot) {}
+    fn attached(&mut self, _: SessionId) {}
+    fn recomposed(&mut self, _: bpd_core::Recomposed) {}
 }
 
 /// ask the debuggee to end, the way it can handle, if one was ever started
@@ -692,6 +732,13 @@ impl Adapter {
             }
 
             let handled = self.handle(launcher, &message, commands);
+            // the only `disconnect` the reader hands the session is one that
+            // lets the program go — see [`Self::release`] — and what is left is
+            // waiting for it to end
+            if message.command.as_deref() == Some("disconnect") {
+                self.wait_out();
+                return Ok(Ended::WithTheClient);
+            }
             match handled {
                 Ok(()) => {}
                 Err(Aborted::Refuse(reason)) => {
@@ -839,6 +886,7 @@ impl Adapter {
             Some("evaluate") => self.evaluate(message),
             Some("continue") => self.continue_(message),
             Some("terminate") => self.terminate(message),
+            Some("disconnect") => self.release(message),
             Some("next") => self.step(message, StepKind::Over),
             Some("stepIn") => self.step(message, StepKind::In),
             Some("stepInTargets") => self.step_in_targets(message),
@@ -3079,6 +3127,79 @@ impl Adapter {
             self.resume(Which::All)?;
         }
         self.respond(message, None)
+    }
+
+    /// the session's half of a `disconnect` that does not end the program —
+    /// see `read_client`
+    ///
+    /// the client is done with it, so nothing may stop it again: the
+    /// breakpoints and the exception filters are cleared and whatever is held
+    /// is let go. the session is over for the client, and [`Self::wait_out`]
+    /// waits for the program to end — bpd is its parent, and leaving it would
+    /// be leaving it with nobody to reap it or say how it ended
+    fn release(&mut self, message: &Incoming) -> Answered {
+        // the client is answered whatever clearing came to: a stop it did not
+        // prevent is let go by the wait all the same
+        let cleared = if self.session.is_some() && !self.exited {
+            self.ask(Request::SetBreakpoints {
+                breakpoints: Vec::new(),
+            })
+            .and_then(|_| {
+                self.ask(Request::SetExceptionBreakpoints {
+                    raised: false,
+                    uncaught: false,
+                    classes: Vec::new(),
+                })
+            })
+            .map(|_| ())
+        } else {
+            Ok(())
+        };
+        self.respond(message, None)?;
+        self.event("terminated", &serde_json::json!({}))?;
+        cleared
+    }
+
+    /// run a released program to its end, letting go of anything that stops
+    ///
+    /// nobody is told anything: the client has disconnected. what is kept is
+    /// how the program exited, which is this process's exit under `--listen`
+    fn wait_out(&mut self) {
+        if self.exited {
+            return;
+        }
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        // a stop the cleared set did not prevent — the entry stop of a program
+        // never let go, a thread already on its way into one, a program that
+        // ended with threads held — is let go, and the program waited on again.
+        // a resume with nothing held is refused, which is nothing to act on
+        let let_go = |session: &mut Box<dyn Session>| {
+            drop(session.dispatch(
+                Addressed::unnamed(Request::Resume { which: Which::All }),
+                &mut Unheard,
+            ));
+        };
+        let_go(session);
+        loop {
+            match session.dispatch(
+                Addressed::unnamed(Request::Wait { deadline: None }),
+                &mut Unheard,
+            ) {
+                Ok(Response::Ran(Running::Exited { status, .. })) => {
+                    self.program_exit = Some(status);
+                    return;
+                }
+                Ok(Response::Ran(
+                    Running::Stopped { .. }
+                    | Running::Finishing { .. }
+                    | Running::StillRunning { .. },
+                )) => let_go(session),
+                Ok(Response::Ran(Running::Ended { .. })) | Err(_) => return,
+                Ok(other) => unreachable!("a wait was answered with {other:?}"),
+            }
+        }
     }
 
     fn step(&mut self, message: &Incoming, kind: StepKind) -> Answered {

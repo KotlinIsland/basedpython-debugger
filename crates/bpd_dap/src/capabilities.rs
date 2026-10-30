@@ -41,6 +41,11 @@ pub fn capabilities() -> serde_json::Value {
         // `read_client`. not on windows, where there is no such signal
         "supportsTerminateRequest": cfg!(unix),
 
+        // `disconnect` honours `terminateDebuggee: false`: the program is let
+        // go, nothing stops it again, and bpd waits for it to end rather than
+        // leaving it with no parent. see `Adapter::release`
+        "supportTerminateDebuggee": true,
+
         // the client tells bpd when it has finished sending breakpoints, which
         // is what lets the program be held at entry until they are all bound
         "supportsConfigurationDoneRequest": true,
@@ -142,6 +147,7 @@ mod tests {
         // the list is written out rather than counted, so adding a capability
         // to the json without implementing the request behind it fails here
         let mut expected = vec![
+            "supportTerminateDebuggee",
             "supportsConditionalBreakpoints",
             "supportsConfigurationDoneRequest",
             "supportsExceptionInfoRequest",

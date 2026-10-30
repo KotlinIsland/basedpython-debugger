@@ -970,11 +970,37 @@ holds one thread and sends nothing until the other's `stopped` arrives
 three things end a program bpd started, and the spec gives two of them
 different meanings:
 
-| what arrives                         | what the program gets                                   | what the client is told                       |
-| ------------------------------------ | ------------------------------------------------------- | --------------------------------------------- |
-| `terminate`                          | a `SIGTERM`, held threads let go, and after 5 s a kill  | `exited` with its code, then `terminated`     |
-| `SIGTERM` to bpd                     | the `SIGTERM`, passed on                                | `exited` with its code, then `terminated`     |
-| `disconnect`, or the client going    | a kill                                                  | `terminated`                                  |
+| what arrives                                         | what the program gets                                       | what the client is told                   |
+| ---------------------------------------------------- | ----------------------------------------------------------- | ----------------------------------------- |
+| `terminate`                                          | a `SIGTERM`, held threads let go, and after 5 s a kill      | `exited` with its code, then `terminated` |
+| `SIGTERM` to bpd                                     | the `SIGTERM`, passed on                                    | `exited` with its code, then `terminated` |
+| `disconnect`, or the client going                    | a kill                                                      | `terminated`                              |
+| `disconnect` with `terminateDebuggee: false`         | let go, never stopped again, and left to run to its end     | `terminated`                              |
+| `disconnect` without the field, during a `terminate` | the rest of the `terminate`'s grace                         | `terminated`                              |
+
+the spec's `disconnect`: *"the debug adapter must terminate the debuggee if it
+was started with the `launch` request"*, and *"this implicit behavior … can be
+overridden with the `terminateDebuggee` argument (which is only supported by a
+debug adapter if the corresponding capability `supportTerminateDebuggee` is
+true)"*; unsaid, the adapter *"is free to do whatever it thinks is best"*. bpd
+advertises `supportTerminateDebuggee` and honours it:
+
+- **`true` ends the program now**, a `terminate` under way or not — it is
+    how a client forces the end it asked for gracefully
+- **`false` never ends it.** the breakpoints and exception filters are
+    cleared, whatever is held is let go, and the session is over for the
+    client. bpd stays the program's parent and waits for it, so it is not left
+    with nobody to reap it — the agent does not run a program on without a
+    debugger — and under `--listen` exits as it does. a signal sent to bpd
+    still reaches it
+- **unsaid, during a `terminate`**, the program is being ended already, and a
+    graceful end is ending it: the grace runs its course. unsaid otherwise, a
+    launched program is ended, as the spec asks
+- measured in pycharm 263.7649 before this: Stop sends `terminate`, and the
+    moment it is answered `disconnect` with `terminateDebuggee: false`, 3 ms
+    later. bpd killed the program on that, and its `SIGTERM` handler had 26 ms.
+    debugpy 1.8.20 does not advertise the capability, and ended its program
+    with `exitCode` 247 on a `disconnect` saying `false`, measured
 
 - **`terminate` is the graceful one.** the spec: *"typically a debug adapter
     implements terminate by sending a software signal which the debuggee
