@@ -893,7 +893,7 @@ fn terminal_launch(advertised: bool) -> Transcript {
             },
             Box::new(to_adapter),
             Box::new(from_adapter),
-            &bpd_dap::Reachable::Nowhere,
+            &bpd_dap::Transport::Stdio,
         )
     });
 
@@ -1002,7 +1002,7 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
                 &Fake { asked, ending },
                 Box::new(to_adapter),
                 Box::new(from_adapter),
-                &bpd_dap::Reachable::At {
+                &bpd_dap::Transport::Listening {
                     host: "127.0.0.1".to_string(),
                     port: 4711,
                     header: "X-Bpd-Token",

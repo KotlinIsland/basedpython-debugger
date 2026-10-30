@@ -90,7 +90,7 @@ use crate::exceptions::{self, Exceptions};
 use crate::handles::{Handle, Handles, Step};
 use crate::render::{expandable, summary};
 use crate::session::{
-    Failed, Interrupt, Launcher, ProgramOutput, Reachable, Session, Started, Stream, describe,
+    Failed, Interrupt, Launcher, ProgramOutput, Session, Started, Stream, Transport, describe,
 };
 use crate::wire::{Incoming, Reader, Writer};
 
@@ -153,9 +153,9 @@ pub fn serve(
     launcher: &dyn Launcher,
     input: Box<dyn Read + Send>,
     output: Box<dyn Write + Send>,
-    reachable: &Reachable,
+    transport: &Transport,
 ) -> Result<Option<ExitStatus>, crate::wire::Error> {
-    serve_writing(launcher, input, Writer::new(output), reachable)
+    serve_writing(launcher, input, Writer::new(output), transport)
 }
 
 /// [`serve`], writing through a writer that may already have said something —
@@ -164,7 +164,7 @@ pub(crate) fn serve_writing(
     launcher: &dyn Launcher,
     input: Box<dyn Read + Send>,
     output: Writer<Box<dyn Write + Send>>,
-    reachable: &Reachable,
+    transport: &Transport,
 ) -> Result<Option<ExitStatus>, crate::wire::Error> {
     let output: Output = Arc::new(Mutex::new(output));
     let interrupt: Held = Arc::new(Mutex::new(None));
@@ -181,7 +181,7 @@ pub(crate) fn serve_writing(
         })
         .map_err(|source| crate::wire::Error::Connection { source })?;
 
-    let mut adapter = Adapter::new(output, interrupt, stopping, reachable.clone());
+    let mut adapter = Adapter::new(output, interrupt, stopping, transport.clone());
     let served = adapter.run(launcher, &commands);
 
     // whatever the client sent and has not been answered, before the connection
@@ -475,7 +475,7 @@ struct Adapter {
     /// read once, when a launch asks for the program's forked children to be
     /// debugged: a `startDebugging` reverse request is only honest if the
     /// session it asks for can arrive
-    reachable: Reachable,
+    transport: Transport,
     /// what the client said it could do, in `initialize`
     client: ClientCan,
     /// what the client has sent and has not been answered yet, oldest first
@@ -577,13 +577,13 @@ impl Adapter {
         output: Output,
         interrupt: Held,
         stopping: Arc<AtomicBool>,
-        reachable: Reachable,
+        transport: Transport,
     ) -> Self {
         Self {
             output,
             interrupt,
             stopping,
-            reachable,
+            transport,
             client: ClientCan::default(),
             deferred: Vec::new(),
             session: None,
@@ -1124,12 +1124,12 @@ impl Adapter {
         // program would make the program a second reader of the client's
         // messages. and a terminal is the client's own, with its own stdin
         if configuration.inherit_stdin {
-            if matches!(self.reachable, Reachable::Nowhere) {
+            if self.transport.stdin_is_the_protocol() {
                 return Err(Aborted::Refuse(
                     "`inheritStdin` hands the program the stdin this adapter was started \
                      with, and over stdio that stdin is the protocol: the program would \
-                     read the client's next message. it needs `bpd dap --listen`, where \
-                     the protocol is on the socket"
+                     read the client's next message. it needs `bpd dap --listen` or \
+                     `bpd dap --connect`, where the protocol is on a socket"
                         .to_string(),
                 ));
             }
@@ -4017,8 +4017,9 @@ impl Adapter {
                     .to_string(),
             ));
         }
-        if matches!(self.reachable, Reachable::Nowhere) {
-            return Err(Aborted::Refuse(
+        match self.transport {
+            Transport::Listening { .. } => Ok(()),
+            Transport::Stdio => Err(Aborted::Refuse(
                 "`debugChildren` needs this adapter to be reachable by a second \
                  connection, and it is speaking on the pipes it was spawned \
                  with. the second session `startDebugging` asks for would be \
@@ -4026,9 +4027,20 @@ impl Adapter {
                  debuggee is not in. run `bpd dap --listen <PORT>` and connect \
                  to it instead — the same listener serves the child's session"
                     .to_string(),
-            ));
+            )),
+            // bpd dialled its client because the client could not reach a port
+            // bpd binds, and a second connection would be no different
+            Transport::Dialled => Err(Aborted::Refuse(
+                "`debugChildren` needs this adapter to be reachable by a second \
+                 connection, and it reached its client by connecting out with \
+                 `--connect`: it listens on nothing, so the second session \
+                 `startDebugging` asks for has nowhere to connect to. a client \
+                 that can reach the machine bpd runs on can use \
+                 `bpd dap --listen <PORT>` instead, whose listener serves the \
+                 child's session"
+                    .to_string(),
+            )),
         }
-        Ok(())
     }
 
     /// ask the client to start a session for each debuggee that joined
@@ -4043,12 +4055,12 @@ impl Adapter {
     /// a fresh adapter would start a fresh engine, which does not hold the child
     fn tell_the_client_to_start(&mut self, joined: &[SessionId]) -> Answered {
         for session in joined {
-            let Reachable::At {
+            let Transport::Listening {
                 host,
                 port,
                 header,
                 token,
-            } = &self.reachable
+            } = &self.transport
             else {
                 // `debugChildren` is refused unless a second session can arrive,
                 // so a debuggee that joined without one is a session the engine

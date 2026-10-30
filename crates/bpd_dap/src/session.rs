@@ -22,28 +22,35 @@ use bpd_core::{Addressed, Reporting, Request, Response, Stop};
 /// failures carry the socket or the process that actually went wrong
 pub type Failed = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// where a **second** session of this adapter's debuggee can be reached
+/// how this adapter reaches its client, which decides two things the adapter
+/// is asked to do
 ///
-/// DAP's answer to a debuggee that became two processes is the `startDebugging`
-/// reverse request: the adapter asks the client to start a second debug session.
-/// that only works if the second session can reach the same engine — a client
-/// that spawned this adapter on a pipe would start another `bpd dap` process,
-/// and another process has another engine, with no [`Session`] of the first one
-/// in it
+/// **whether its stdin is the protocol.** over stdio it is, and a program
+/// handed it would read the client's next message; over either socket it is
+/// whatever started bpd's, and a program may be handed it
 ///
-/// so this is the difference between the two transports, and it is a difference
-/// in what is **possible** rather than in what is configured. a debugged child
-/// is refused on a transport that cannot carry a second session, with the reason
-/// and what to run instead — a client that was told to start a session it cannot
+/// **whether a second session can arrive.** DAP's answer to a debuggee that
+/// became two processes is the `startDebugging` reverse request: the adapter
+/// asks the client to start a second debug session, and that only works if the
+/// second session can reach the same engine. a client that spawned this adapter
+/// on a pipe would start another `bpd dap` process, with an engine of its own
+/// and no [`Session`] of the first one in it; an adapter that dialled its client
+/// listens on nothing at all. only a listening one can be reached again
+///
+/// both are differences in what is **possible** rather than in what is
+/// configured, so a launch that asks for the impossible is refused with the
+/// reason and what to run instead. a client told to start a session it cannot
 /// have would leave the child held for ever, which is the hang this whole
 /// feature is arranged around
 #[derive(Debug, Clone)]
-pub enum Reachable {
-    /// nothing else can connect: this adapter is on the pipes it was spawned with
-    Nowhere,
+pub enum Transport {
+    /// the pipes this adapter was spawned with: its stdin is the protocol, and
+    /// nothing else can connect
+    Stdio,
 
-    /// a client can open a second connection to this adapter
-    At {
+    /// a loopback socket this adapter listens on, which a client can open a
+    /// second connection to
+    Listening {
         /// the loopback address to connect to
         host: String,
         /// the port
@@ -58,6 +65,18 @@ pub enum Reachable {
         /// authenticated to with this one
         token: String,
     },
+
+    /// a socket this adapter dialled, to a client that listens — see
+    /// [`crate::connect`]. its stdin is not the protocol, and nothing can
+    /// connect to it: it listens on nothing
+    Dialled,
+}
+
+impl Transport {
+    /// whether this adapter's stdin carries the client's messages
+    pub const fn stdin_is_the_protocol(&self) -> bool {
+        matches!(self, Self::Stdio)
+    }
 }
 
 /// a debug session: something that answers the capability surface

@@ -167,7 +167,7 @@ fn a_session_whose_exit_bpd_cannot_read_is_terminated_and_never_exited() {
             &Fake,
             Box::new(to_adapter),
             Box::new(from_adapter),
-            &bpd_dap::Reachable::Nowhere,
+            &bpd_dap::Transport::Stdio,
         )
     });
 

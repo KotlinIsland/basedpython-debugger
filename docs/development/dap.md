@@ -193,8 +193,10 @@ BPD_DAP_TOKEN=5b1c… bpd dap --connect host.docker.internal:51241
     reads that one message, compares the token in constant time, and only then
     hands the stream to its DAP machinery — beginning with its `initialize`; a
     connection presenting the wrong token, or none, it closes
-- **one session.** a debugged fork would need a second connection and nothing
-    can ask for one, so `debugChildren` is refused as it is on stdio
+- **one session.** a debugged fork would need a second connection and bpd
+    listens on nothing, so `debugChildren` is refused, saying so. its stdin is
+    not the protocol, so `inheritStdin` is honoured as under `--listen` — the
+    adapter is told which transport it serves, rather than which it is not
 - **the exit is the program's**, as under `--listen`, and everything in
     [ending the program](#ending-the-program) holds — a `SIGTERM` to bpd, a
     `terminate`, a `disconnect` with `terminateDebuggee: false`

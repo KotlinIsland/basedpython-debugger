@@ -51,7 +51,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::session::{Launcher, Reachable};
+use crate::session::{Launcher, Transport};
 use crate::wire::{self, TOKEN_HEADER, Writer};
 
 /// how many bytes of randomness a session token is
@@ -336,18 +336,18 @@ impl Listening {
             })?;
 
         let ended = Arc::new(AtomicBool::new(false));
-        let reachable = self.reachable();
+        let transport = self.transport();
         // scoped, so `say` and `launcher` can be borrowed rather than owned:
         // what the later connections serve is a session of the **same**
         // debuggee, which is the thing the launcher holds
         std::thread::scope(|scope| {
             let more = scope.spawn(|| {
-                admit_the_rest(self, &extra, &ended, launcher, say, &reachable);
+                admit_the_rest(self, &extra, &ended, launcher, say, &transport);
             });
 
             let input = Cursor::new(admitted.headers).chain(admitted.buffered);
             let served =
-                crate::adapter::serve(launcher, Box::new(input), Box::new(stream), &reachable);
+                crate::adapter::serve(launcher, Box::new(input), Box::new(stream), &transport);
 
             ended.store(true, Ordering::Relaxed);
             match more.join() {
@@ -362,8 +362,8 @@ impl Listening {
     }
 
     /// what a second session of this debuggee is told to connect to
-    fn reachable(&self) -> Reachable {
-        Reachable::At {
+    fn transport(&self) -> Transport {
+        Transport::Listening {
             host: Ipv4Addr::LOCALHOST.to_string(),
             port: self.port,
             header: TOKEN_HEADER,
@@ -442,7 +442,7 @@ fn admit_the_rest(
     ended: &Arc<AtomicBool>,
     launcher: &(dyn Launcher + Sync),
     say: &(dyn Fn(&str) + Send + Sync),
-    reachable: &Reachable,
+    transport: &Transport,
 ) {
     // every later connection, so that each can be shut down when the first
     // client goes. a `shutdown` is what ends the read its thread is blocked in;
@@ -531,7 +531,7 @@ fn admit_the_rest(
                             launcher,
                             Box::new(input),
                             Box::new(stream),
-                            reachable,
+                            transport,
                         );
                         if let Err(error) = served {
                             // it is one session of several, so this is not the

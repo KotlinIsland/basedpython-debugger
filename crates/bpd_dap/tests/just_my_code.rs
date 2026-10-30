@@ -146,7 +146,7 @@ fn said(took: bool, order: Order) -> Vec<(String, String)> {
             &Fake { took },
             Box::new(to_adapter),
             Box::new(from_adapter),
-            &bpd_dap::Reachable::Nowhere,
+            &bpd_dap::Transport::Stdio,
         )
     });
 

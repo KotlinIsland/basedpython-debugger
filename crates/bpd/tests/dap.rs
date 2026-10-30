@@ -3482,7 +3482,9 @@ fn dialled_by_bpd(token: Option<&str>) -> (Dialling, TcpStream, Option<(Option<S
     command
         .args(["dap", "--connect", &endpoint.to_string()])
         .env_remove("BPD_DAP_TOKEN")
-        .stdin(Stdio::null())
+        // the protocol is on the socket, so this holds the marker a listening
+        // adapter's stdin does — see [`NOT_THE_DEBUGGEES`]
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     if let Some(token) = token {
@@ -3491,6 +3493,9 @@ fn dialled_by_bpd(token: Option<&str>) -> (Dialling, TcpStream, Option<(Option<S
     let mut process = command
         .spawn()
         .expect("the binary was built by the same cargo invocation as this test");
+    let mut feeding = process.stdin.take().expect("stdin was asked for");
+    writeln!(feeding, "{NOT_THE_DEBUGGEES}").expect("nothing has read the adapter's stdin");
+    drop(feeding);
     let said = captured(process.stderr.take().expect("stderr was asked for"));
     let process = Arc::new(Mutex::new(process));
 
@@ -3578,6 +3583,51 @@ fn an_adapter_that_connects_out_passes_a_stop_on_the_way_a_listening_one_does() 
     // started, and `terminate` to the adapter — once to the program, and bpd
     // exits as it did
     ends_once(Transport::Connect, Asking::Both, false);
+}
+
+#[test]
+fn an_adapter_that_connects_out_hands_the_program_its_stdin_when_asked() {
+    // measured by the plugin against 95641f8: `inheritStdin` was refused under
+    // `--connect` as if stdin were the protocol, which it is only over stdio —
+    // the adapter was serving a dialled socket in the state stdio is in
+    a_program_reads_the_adapters_stdin_when_the_client_says_it_is_the_programs(Transport::Connect);
+}
+
+#[test]
+fn debugging_a_forked_child_is_refused_on_a_connection_bpd_dialled_and_says_why() {
+    // the same refusal as stdio's, for a reason of its own: an adapter that
+    // dialled its client listens on nothing, so the session `startDebugging`
+    // asks for has nowhere to connect
+    let fixture = Fixture::new("forker", A_FORK);
+    let mut client = Client::start(Transport::Connect);
+
+    client.request(
+        "initialize",
+        &serde_json::json!({ "adapterID": "bpd", "supportsStartDebuggingRequest": true }),
+    );
+    let refused = client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "debugChildren": true,
+        }),
+    );
+    assert_eq!(refused["success"], false, "{refused}");
+    let said = refused["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a refusal says why: {refused}"));
+    assert!(
+        said.contains("--connect") && said.contains("listens on nothing"),
+        "the reason is this transport's, and said {said:?}"
+    );
+    assert!(
+        !said.contains("pipes"),
+        "and not stdio's, which this is not: {said:?}"
+    );
+
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
 }
 
 #[test]

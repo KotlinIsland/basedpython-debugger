@@ -33,7 +33,7 @@ use std::thread::JoinHandle;
 use bpd_core::python::Capabilities;
 use bpd_core::{Addressed, Reporting, Request, Response, SessionId, Stop};
 use bpd_dap::{
-    Configuration, Failed, Launcher, Listening, ProgramOutput, Reachable, Session, Started, Stream,
+    Configuration, Failed, Launcher, Listening, ProgramOutput, Session, Started, Stream, Transport,
 };
 use bpd_engine::{Debuggee, Forwarders, Launched, Program};
 
@@ -122,7 +122,7 @@ pub(crate) fn run(args: &Args) -> std::process::ExitCode {
             &Engine::default(),
             Box::new(std::io::stdin()),
             Box::new(std::io::stdout()),
-            &Reachable::Nowhere,
+            &Transport::Stdio,
         )
         .map(|_| std::process::ExitCode::SUCCESS)
         .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),

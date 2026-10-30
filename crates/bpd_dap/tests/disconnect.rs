@@ -171,7 +171,7 @@ fn every_request_a_disconnect_overtook_is_answered_rather_than_dropped() {
             },
             Box::new(to_adapter),
             Box::new(from_adapter),
-            &bpd_dap::Reachable::Nowhere,
+            &bpd_dap::Transport::Stdio,
         )
     });
 

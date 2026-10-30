@@ -66,6 +66,6 @@ pub use configuration::{Configuration, Console, SuspendPolicy};
 pub use coverage::{carriage_of, reach_of, reach_of_facet, surface};
 pub use listen::Listening;
 pub use session::{
-    Failed, Interrupt, Invocation, Launcher, ProgramOutput, Reachable, Session, Started, Stream,
+    Failed, Interrupt, Invocation, Launcher, ProgramOutput, Session, Started, Stream, Transport,
     describe,
 };

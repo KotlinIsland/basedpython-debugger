@@ -44,7 +44,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::session::{Launcher, Reachable};
+use crate::session::{Launcher, Transport};
 use crate::wire::{self, Writer};
 
 /// the environment variable a connecting adapter reads its token from
@@ -165,8 +165,9 @@ pub fn token(value: Option<&str>) -> Result<String, Error> {
 ///
 /// what it returns is what the program the client launched exited with, when
 /// bpd read one — see [`crate::serve`]. it is **one** session: a debugged fork
-/// would need a second connection, and nothing here can ask for one, so
-/// `debugChildren` is refused the way it is on stdio
+/// would need a second connection, and this listens on nothing, so
+/// `debugChildren` is refused. its stdin is not the protocol, so `inheritStdin`
+/// is not — see [`Transport::Dialled`]
 ///
 /// # errors
 ///
@@ -205,7 +206,7 @@ pub fn serve(
         spoke: Arc::clone(&spoke),
     };
     let served =
-        crate::adapter::serve_writing(launcher, Box::new(input), output, &Reachable::Nowhere);
+        crate::adapter::serve_writing(launcher, Box::new(input), output, &Transport::Dialled);
 
     if !spoke.load(Ordering::Relaxed) {
         return Err(Error::Unanswered {
