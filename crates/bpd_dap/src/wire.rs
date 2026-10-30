@@ -431,7 +431,32 @@ impl<W: Write> Writer<W> {
         }))
     }
 
-    fn send(&mut self, mut message: serde_json::Value) -> Result<(), Error> {
+    /// say something that answers nothing, presenting `token` on it
+    ///
+    /// the [`TOKEN_HEADER`] a `--listen` client puts on its first message, put
+    /// by this adapter on **its** first message when it is the one that
+    /// connected — see [`crate::connect`]
+    pub fn presenting(
+        &mut self,
+        token: &str,
+        event: &str,
+        body: &serde_json::Value,
+    ) -> Result<(), Error> {
+        self.framed(
+            serde_json::json!({
+                "type": "event",
+                "event": event,
+                "body": body,
+            }),
+            &format!("{TOKEN_HEADER}: {token}\r\n"),
+        )
+    }
+
+    fn send(&mut self, message: serde_json::Value) -> Result<(), Error> {
+        self.framed(message, "")
+    }
+
+    fn framed(&mut self, mut message: serde_json::Value, headers: &str) -> Result<(), Error> {
         self.seq += 1;
         message["seq"] = self.seq.into();
 
@@ -440,7 +465,7 @@ impl<W: Write> Writer<W> {
         // the header and the body in one write, so a message leaves as one
         // rather than as a header the client can do nothing with, ahead of a
         // body that waits on that header's acknowledgement wherever nagle is on
-        let mut framed = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        let mut framed = format!("Content-Length: {}\r\n{headers}\r\n", body.len()).into_bytes();
         framed.extend_from_slice(&body);
 
         // **a client that is gone is not a failed write.** on unix the last

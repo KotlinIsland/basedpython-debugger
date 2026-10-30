@@ -155,7 +155,18 @@ pub fn serve(
     output: Box<dyn Write + Send>,
     reachable: &Reachable,
 ) -> Result<Option<ExitStatus>, crate::wire::Error> {
-    let output: Output = Arc::new(Mutex::new(Writer::new(output)));
+    serve_writing(launcher, input, Writer::new(output), reachable)
+}
+
+/// [`serve`], writing through a writer that may already have said something —
+/// the introduction an adapter that connected out makes, see [`crate::connect`]
+pub(crate) fn serve_writing(
+    launcher: &dyn Launcher,
+    input: Box<dyn Read + Send>,
+    output: Writer<Box<dyn Write + Send>>,
+    reachable: &Reachable,
+) -> Result<Option<ExitStatus>, crate::wire::Error> {
+    let output: Output = Arc::new(Mutex::new(output));
     let interrupt: Held = Arc::new(Mutex::new(None));
     let stopping = Arc::new(AtomicBool::new(false));
     let (queue, commands) = channel();

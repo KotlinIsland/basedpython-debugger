@@ -58,11 +58,39 @@ pub(crate) struct Args {
     /// the address is not configurable and the port is all this takes: a DAP
     /// message runs the debuggee's own code, so this listens on 127.0.0.1 and
     /// there is nothing to widen it to
-    #[arg(long, value_name = "PORT")]
+    #[arg(long, value_name = "PORT", conflicts_with = "connect")]
     listen: Option<u16>,
+
+    /// connect to a client listening at this address, instead of speaking on
+    /// stdin and stdout
+    ///
+    /// the other way round from `--listen`, for a client that cannot reach a
+    /// port bpd binds — a container's loopback is not reachable through a
+    /// published port. the client chooses a token and hands it over in
+    /// `BPD_DAP_TOKEN`, never on the command line, and bpd presents it on its
+    /// first message. a client that is not there, or closes the connection
+    /// without a request, ends bpd with status 69
+    #[arg(long, value_name = "HOST:PORT")]
+    connect: Option<String>,
 }
 
+/// what `bpd dap --connect` exits with when the client was not there to serve
+///
+/// `EX_UNAVAILABLE` from `sysexits.h`: a status of its own, so that whoever
+/// started bpd can tell a client that never answered from a session that ran —
+/// whose status is the program's
+const UNREACHED: u8 = 69;
+
+/// what it exits with when there is no token it could present
+///
+/// the status a command line refused for its usage gets, which is what a
+/// missing token is
+const NO_TOKEN: u8 = 2;
+
 pub(crate) fn run(args: &Args) -> std::process::ExitCode {
+    if let Some(address) = &args.connect {
+        return connect(address);
+    }
     let served = match args.listen {
         // **the program's exit is this process's.** an adapter that listens was
         // not spawned by the client it serves, and the one thing that starts it
@@ -108,6 +136,36 @@ pub(crate) fn run(args: &Args) -> std::process::ExitCode {
             // which is where an editor keeps its adapter log
             report_error(error.as_ref());
             std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// dial the client at `address` and serve it, exiting as `--listen` does
+///
+/// **the program's exit is this process's**, for the reason it is under
+/// `--listen`: what starts bpd this way starts it in the program's place
+fn connect(address: &str) -> std::process::ExitCode {
+    use bpd_dap::connect;
+
+    let token = std::env::var(connect::TOKEN_VARIABLE).ok();
+    let token = match connect::token(token.as_deref()) {
+        Ok(token) => token,
+        Err(error) => {
+            report_error(&error);
+            return std::process::ExitCode::from(NO_TOKEN);
+        }
+    };
+    match connect::serve(address, &token, &Engine::default()) {
+        Ok(exit) => exit.map_or(std::process::ExitCode::SUCCESS, |status| {
+            std::process::ExitCode::from(crate::launch::exit_code(status))
+        }),
+        Err(error) => {
+            report_error(&error);
+            if error.unreached() {
+                std::process::ExitCode::from(UNREACHED)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
         }
     }
 }

@@ -17,17 +17,19 @@ where `bpd_engine` is put behind it. an adapter that could reach the engine
 would be an adapter shaped by how the agent happens to report something, and
 how the agent reports something would become what a DAP client sees
 
-## the two transports
+## the transports
 
-DAP defines two, and this speaks both. they end at the same `bpd_dap::serve`: a
-transport is where a client's bytes come from, and nothing past that point knows
-which one it was
+DAP defines two, and this speaks both — the socket one either way round. they
+end at the same `bpd_dap::serve`: a transport is where a client's bytes come
+from, and nothing past that point knows which one it was
 
 - **stdin and stdout**, with no flag. the adapter is spawned by its client,
     which is what an editor does
 - **a loopback socket**, with `--listen`, for a client that did **not** spawn the
     adapter. a script, a tooling integration, and the second session a
     `startDebugging` reverse request has a client start
+- **a socket the client listens on**, with `--connect HOST:PORT`, for a client
+    that cannot reach a port bpd binds — see [connecting out](#connecting-out)
 
 a transport is not a capability of `bpd_core`, so this adds nothing to the parity
 table and nothing to MCP. `bpd_core::Request` is unchanged, `surface()` is
@@ -153,6 +155,62 @@ the two tokens are separate values with separate lifetimes. this one
 authenticates a client to the adapter; the agent's authenticates the debuggee to
 the engine. one shared between them would make a DAP client that has this token
 able to open the debuggee's control plane directly
+
+### connecting out
+
+`--listen` binds loopback, and on a run target that is what cannot be reached:
+docker publishes a container's port by connecting to the container's
+`0.0.0.0`, so a listener on its `127.0.0.1` answers the editor with a reset —
+measured by the plugin, with the wildcard reached. widening the bind is the one
+thing `--listen` is built not to be able to do, so the direction turns round:
+the **client** listens, where the person is, and hands bpd the address that
+reaches it; bpd dials out and serves that connection exactly as a `--listen`
+one. bpd still listens on nothing but loopback — here, on nothing at all
+
+```sh
+BPD_DAP_TOKEN=5b1c… bpd dap --connect host.docker.internal:51241
+```
+
+- **the token is the client's**, chosen by it and handed over in
+    `BPD_DAP_TOKEN` — never on the command line, where `ps` shows it to every
+    user. at least 32 characters of printable ascii, so it is no weaker than
+    the 64 hex digits `--listen` mints. the program bpd starts does not inherit
+    it
+- **bpd presents it first.** the first message on the connection is bpd's, a
+    `bpd/connected` event carrying the token on the header a `--listen` client
+    puts on its first message:
+
+    ```text
+    Content-Length: 78
+    x-bpd-token: 5b1c…
+
+    {"body":{"version":"0.0.1-a3"},"event":"bpd/connected","seq":1,"type":"event"}
+    ```
+
+    a listening client has the problem a listening adapter has — whoever
+    reaches the port first is served, and what an adapter sends is not harmless
+    to its client: a `runInTerminal` asks it to start a process. so the client
+    reads that one message, compares the token in constant time, and only then
+    hands the stream to its DAP machinery — beginning with its `initialize`; a
+    connection presenting the wrong token, or none, it closes
+- **one session.** a debugged fork would need a second connection and nothing
+    can ask for one, so `debugChildren` is refused as it is on stdio
+- **the exit is the program's**, as under `--listen`, and everything in
+    [ending the program](#ending-the-program) holds — a `SIGTERM` to bpd, a
+    `terminate`, a `disconnect` with `terminateDebuggee: false`
+- **a client that is not there is a status of its own, never a hang.** the
+    connect is bounded by ten seconds per address the name resolves to, and so
+    is the wait for the client's first message. nothing accepting, a name that
+    resolves to nothing, and a connection closed or silent before a request —
+    which is how a client turns a wrong token away — exit **69**
+    (`EX_UNAVAILABLE`), naming the address. a token that is absent or too weak
+    exits **2** before anything is dialled. anything else that fails is **1**
+
+under `by run --launcher` the launcher is what starts bpd, so it is where the
+flag goes: the plugin's wrapper execs `bpd dap --connect "$ADDRESS"` in place
+of `bpd dap --listen "$PORT"`, with the address and `BPD_DAP_TOKEN` in the run's
+environment. `by run` hands its environment to the launcher unchanged, so it
+needs nothing new
 
 ## setting it up in an editor
 

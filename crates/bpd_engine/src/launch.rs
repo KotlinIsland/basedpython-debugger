@@ -2800,6 +2800,12 @@ fn start(
     spawned_here(interpreter, &arguments, &environment, piped, listener, map)
 }
 
+/// the variables bpd reads for itself, which the program it starts never sees
+///
+/// [`bpd_core::DAP_TOKEN_VARIABLE`] is the token `bpd dap --connect` presents
+/// to its client, and a program that inherited it could show it to anything
+const WITHHELD: [&str; 1] = [bpd_core::DAP_TOKEN_VARIABLE];
+
 /// spawn the interpreter here, and wait for the agent in the child bpd holds
 ///
 /// the ordinary half of a launch, and the one that has a **child**: an exit
@@ -2817,6 +2823,11 @@ fn spawned_here(
     command.args(&arguments[1..]);
     for (name, value) in environment {
         command.env(name, value);
+    }
+    // what bpd was handed for itself is not the program's to read: a token
+    // left in its environment is one every process it starts can present
+    for withheld in WITHHELD {
+        command.env_remove(withheld);
     }
 
     if let Some((_, stdin)) = &piped {

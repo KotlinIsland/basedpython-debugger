@@ -49,6 +49,8 @@ enum Transport {
     Stdio,
     /// the adapter listens on a loopback port and the client connects to it
     Loopback,
+    /// the client listens and the adapter connects to it — `--connect`
+    Connect,
 }
 
 /// give a scenario a `#[test]` on each transport
@@ -2115,6 +2117,7 @@ fn the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program(trans
 /// a program that handles `SIGTERM` by writing that it did and exiting 7 — or,
 /// given `ignore`, by writing that it did and carrying on, and given `slow`, by
 /// taking a second to clean up first
+#[cfg(unix)]
 const ENDS_ON_SIGTERM: &str = r#"import os, pathlib, signal, sys, time
 
 HERE = pathlib.Path(__file__).parent
@@ -3459,6 +3462,217 @@ fn a_breakpoints_location_says_what_its_hit_holds_and_the_policy_outlives_the_se
     client.finish_after_the_program_exited(0);
 }
 
+/// a `bpd dap --connect` that has been started, before or after it connected
+struct Dialling {
+    process: Arc<Mutex<Child>>,
+    /// everything it wrote to its stderr — see [`captured`]
+    said: Arc<Mutex<String>>,
+}
+
+/// listen on loopback, start `bpd dap --connect` at it with `token` in its
+/// environment, accept the connection and read the adapter's first message
+///
+/// what comes back is the adapter, the connection, and the token that first
+/// message presented with its event name — or `None` when the adapter hung up
+/// without sending one
+fn dialled_by_bpd(token: Option<&str>) -> (Dialling, TcpStream, Option<(Option<String>, String)>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+    let endpoint = listener.local_addr().expect("the listener is bound");
+    let mut command = Command::new(BPD);
+    command
+        .args(["dap", "--connect", &endpoint.to_string()])
+        .env_remove("BPD_DAP_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if let Some(token) = token {
+        command.env("BPD_DAP_TOKEN", token);
+    }
+    let mut process = command
+        .spawn()
+        .expect("the binary was built by the same cargo invocation as this test");
+    let said = captured(process.stderr.take().expect("stderr was asked for"));
+    let process = Arc::new(Mutex::new(process));
+
+    let (socket, _) = listener.accept().expect("the adapter connects");
+    socket
+        .set_read_timeout(Some(PATIENCE))
+        .expect("the connection takes a read timeout");
+    let hello = first_message(&socket);
+    socket
+        .set_read_timeout(None)
+        .expect("the connection's read timeout clears");
+    (Dialling { process, said }, socket, hello)
+}
+
+/// read one DAP message off `socket`: the token its headers presented, if
+/// any, and its event name. `None` when the connection closed first
+fn first_message(socket: &TcpStream) -> Option<(Option<String>, String)> {
+    let mut reading = BufReader::new(socket);
+    let mut length = None;
+    let mut token = None;
+    loop {
+        let mut line = String::new();
+        if reading
+            .read_line(&mut line)
+            .expect("the adapter's headers read")
+            == 0
+        {
+            return None;
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        let (name, value) = line.split_once(':').expect("a header is `name: value`");
+        if name.eq_ignore_ascii_case("content-length") {
+            length = Some(value.trim().parse::<usize>().expect("a length is a number"));
+        } else if name.eq_ignore_ascii_case("x-bpd-token") {
+            token = Some(value.trim().to_string());
+        }
+    }
+    let mut body = vec![0; length.expect("a message has a length")];
+    reading.read_exact(&mut body).expect("the body follows");
+    assert!(
+        reading.buffer().is_empty(),
+        "the adapter said nothing more before it was answered"
+    );
+    let message: serde_json::Value = serde_json::from_slice(&body).expect("the body is json");
+    Some((
+        token,
+        message["event"].as_str().unwrap_or_default().to_string(),
+    ))
+}
+
+/// wait for a `bpd dap --connect` to end, and say how
+fn exit_of(dialling: &Dialling) -> std::process::ExitStatus {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if let Some(status) = dialling
+            .process
+            .lock()
+            .expect("nothing panics holding the adapter")
+            .try_wait()
+            .expect("the adapter is a real child")
+        {
+            return status;
+        }
+        assert!(Instant::now() < deadline, "`bpd dap --connect` did not end");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn an_adapter_that_connects_out_runs_a_session_the_way_a_listening_one_does() {
+    // docker publishes a container's port by connecting to its `0.0.0.0`, and
+    // `--listen` binds loopback and nothing else — measured by the plugin: a
+    // listener on the container's 127.0.0.1 answered with a reset. so the
+    // client listens, and bpd dials it
+    a_breakpoint_is_hit_a_local_is_written_and_the_program_sees_the_write(Transport::Connect);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_adapter_that_connects_out_passes_a_stop_on_the_way_a_listening_one_does() {
+    // what the intellij platform's Stop sends: the signal to the process it
+    // started, and `terminate` to the adapter — once to the program, and bpd
+    // exits as it did
+    ends_once(Transport::Connect, Asking::Both, false);
+}
+
+#[test]
+fn an_adapter_that_connects_out_hands_the_program_none_of_its_token() {
+    const READS_THE_TOKEN: &str = "import os, pathlib\n\
+        pathlib.Path(__file__).with_name('seen').write_text(\
+        repr(os.environ.get('BPD_DAP_TOKEN')))\n";
+    let fixture = Fixture::new("reads_the_token", READS_THE_TOKEN);
+    let mut client = Client::start(Transport::Connect);
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+    client.event("exited");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish_after_the_program_exited(0);
+    assert_eq!(
+        std::fs::read_to_string(fixture.directory().join("seen")).expect("the program ran"),
+        "None",
+        "a token in the program's environment is one it could show to anything"
+    );
+}
+
+#[test]
+fn an_adapter_with_nothing_listening_where_it_was_sent_says_so_and_exits_69() {
+    let free = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("loopback binds an arbitrary port");
+    let ran = Command::new(BPD)
+        .args(["dap", "--connect", &free.to_string()])
+        .env("BPD_DAP_TOKEN", "0123456789abcdef".repeat(4))
+        .stdin(Stdio::null())
+        .output()
+        .expect("the binary runs");
+    let said = String::from_utf8_lossy(&ran.stderr);
+    assert_eq!(ran.status.code(), Some(69), "{said}");
+    assert!(
+        said.contains(&free.to_string()) && said.contains("accepted"),
+        "{said}"
+    );
+}
+
+#[test]
+fn an_adapter_with_no_token_to_present_dials_nothing_and_exits_2() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+    listener
+        .set_nonblocking(true)
+        .expect("the listener goes non-blocking");
+    let endpoint = listener.local_addr().expect("the listener is bound");
+    for token in [None, Some("short")] {
+        let mut command = Command::new(BPD);
+        command
+            .args(["dap", "--connect", &endpoint.to_string()])
+            .env_remove("BPD_DAP_TOKEN")
+            .stdin(Stdio::null());
+        if let Some(token) = token {
+            command.env("BPD_DAP_TOKEN", token);
+        }
+        let ran = command.output().expect("the binary runs");
+        let said = String::from_utf8_lossy(&ran.stderr);
+        assert_eq!(ran.status.code(), Some(2), "{token:?}: {said}");
+        assert!(said.contains("BPD_DAP_TOKEN"), "{said}");
+        assert!(
+            listener.accept().is_err(),
+            "nothing is dialled without a token to present"
+        );
+    }
+}
+
+#[test]
+fn an_adapter_its_client_turns_away_for_the_token_says_so_and_exits_69() {
+    // the client compares the token on the adapter's first message and closes
+    // a connection that presents the wrong one — which is all bpd can see of it
+    let (dialling, socket, hello) = dialled_by_bpd(Some(&"f".repeat(64)));
+    let (presented, event) = hello.expect("the adapter introduced itself");
+    assert_eq!(event, "bpd/connected");
+    assert_ne!(
+        presented.as_deref(),
+        Some("0123456789abcdef".repeat(4).as_str())
+    );
+    drop(socket);
+
+    let status = exit_of(&dialling);
+    let said = dialling
+        .said
+        .lock()
+        .expect("nothing panics holding it")
+        .clone();
+    assert_eq!(status.code(), Some(69), "{said}");
+    assert!(said.contains("without sending a request"), "{said}");
+}
+
 /// the interpreter the built agent matches
 fn interpreter() -> String {
     bpd_test::agent::matching_interpreter()
@@ -3748,6 +3962,10 @@ struct Client {
     reads: Box<dyn BufRead + Send>,
     /// the port this adapter bound, when it is listening on one
     listening: Option<Listener>,
+    /// whether the adapter connected to this client, rather than the other way
+    ///
+    /// it then stands where the program would have, as a listening one does
+    connected: bool,
     /// the program **this client** started, when it was asked to start one
     ///
     /// only a `runInTerminal` produces one, and it is held for the reason the
@@ -3869,6 +4087,7 @@ impl Listener {
             reads: Box::new(BufReader::new(socket)),
             token: Some(self.token.clone()),
             listening: Some(self),
+            connected: false,
             started: None,
             seen: Vec::new(),
             taken: 0,
@@ -3891,6 +4110,39 @@ impl Client {
         match transport {
             Transport::Stdio => Self::spawned(),
             Transport::Loopback => Listener::start().client(),
+            Transport::Connect => Self::connected(),
+        }
+    }
+
+    /// the adapter connecting out to this client, which listens and checks the
+    /// token the adapter presents on its first message
+    fn connected() -> Self {
+        let token = "0123456789abcdef".repeat(4);
+        let (adapter, socket, hello) = dialled_by_bpd(Some(&token));
+        let presented = hello
+            .expect("the adapter's first message is its introduction")
+            .0;
+        assert_eq!(
+            presented.as_deref(),
+            Some(token.as_str()),
+            "the token it was handed"
+        );
+
+        let finished = Arc::new(AtomicBool::new(false));
+        watch(&adapter.process, &finished);
+        Self {
+            adapter: adapter.process,
+            finished,
+            said: adapter.said,
+            writes: Box::new(socket.try_clone().expect("a connected socket clones")),
+            reads: Box::new(BufReader::new(socket)),
+            listening: None,
+            connected: true,
+            started: None,
+            token: None,
+            seen: Vec::new(),
+            taken: 0,
+            seq: 0,
         }
     }
 
@@ -3919,6 +4171,7 @@ impl Client {
             writes: Box::new(writes),
             reads: Box::new(reads),
             listening: None,
+            connected: false,
             started: None,
             token: None,
             seen: Vec::new(),
@@ -4204,7 +4457,11 @@ impl Client {
     /// program would have — `by run --launcher` starts it as the program — so
     /// its exit is the program's
     fn finish_after_the_program_exited(self, code: i32) {
-        let expected = if self.listening.is_some() { code } else { 0 };
+        let expected = if self.listening.is_some() || self.connected {
+            code
+        } else {
+            0
+        };
         let status = self.ended();
         assert_eq!(
             status.code(),

@@ -512,7 +512,9 @@ and `crates/bpd/tests/mcp.rs` spawn the front end as a real process against a
 real interpreter; and `crates/bpd/tests/parity.rs` fails when a capability is
 out of one adapter's reach and nobody has written down why
 
-`bpd dap` has [two transports](dap.md#the-two-transports), and every scenario in
+`bpd dap` has [three transports](dap.md#the-transports). `--connect`, which
+dials a client rather than being reached by one, runs a breakpoint session and
+a Stop through the same scenario functions in tests of its own; every scenario in
 `crates/bpd/tests/dap.rs` is a function taking which one — a macro gives each
 scenario a `#[test]` on stdio and one on a loopback socket. so the assertions
 that prove a session works exist **once** and are run over both. two copies kept

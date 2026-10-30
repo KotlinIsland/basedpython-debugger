@@ -63,6 +63,15 @@ pub use jump::{
 };
 pub use parity::{Carried, Facet, Naming, Reach, Told, ran, ran_as, say, surface};
 pub use peer::peer_is_gone;
+
+/// the environment variable `bpd dap --connect` reads the token it presents
+/// to its client from
+///
+/// here rather than in the adapter, because the engine is what keeps it out of
+/// the program's environment, and two copies of a variable's name is one copy
+/// too many. it is in the environment rather than on a command line so that
+/// `ps` does not show it
+pub const DAP_TOKEN_VARIABLE: &str = "BPD_DAP_TOKEN";
 pub use query::{
     Answer, Appeared, Changed, Difference, FrameState, Frames, Moved, NotCompared, NotRead,
     QueryPart, ScopeState, Seen, Side, Snapshot, SnapshotId, Source, State, StateQuery, Subject,
