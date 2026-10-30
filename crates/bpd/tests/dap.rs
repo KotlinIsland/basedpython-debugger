@@ -107,6 +107,7 @@ over_each_transport!(
     the_adapters_own_exit_is_the_programs_when_it_stands_in_for_the_program,
     a_rule_per_class_comes_in_beside_the_filters_and_neither_replaces_the_other,
     a_breakpoints_location_says_what_its_hit_holds_and_the_policy_outlives_the_set,
+    a_comment_indented_under_a_def_is_refused_rather_than_moved_out_of_it,
 );
 
 /// a program with a local worth writing to, and a marker after the breakpoint
@@ -2546,6 +2547,52 @@ fn a_frames_names_are_one_list_and_an_object_shows_what_its_class_gives_it(trans
     assert_eq!(written["success"], true, "{written}");
 
     client.request("continue", &serde_json::json!({ "threadId": thread }));
+    client.event("exited");
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+/// a function whose body ends in a comment, and a module statement after it
+const TRAILING_COMMENT: &str = r#"def f():
+    x = 1
+    # the end of f
+print("ran", flush=True)
+f()
+"#;
+
+fn a_comment_indented_under_a_def_is_refused_rather_than_moved_out_of_it(transport: Transport) {
+    // measured before this: `verified: true, line: 4`, "line 3 is not
+    // executable, so this moved to line 4", and a stop in `<module>` at import —
+    // outside `f`, before it had run
+    let fixture = Fixture::new("trailing_comment", TRAILING_COMMENT);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    let set = client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line_of(TRAILING_COMMENT, "# the end of f") } ],
+        }),
+    );
+    let breakpoint = &set["body"]["breakpoints"][0];
+    assert_eq!(breakpoint["verified"], false, "{set}");
+    assert_eq!(breakpoint["reason"], "failed", "{set}");
+    let message = breakpoint["message"]
+        .as_str()
+        .expect("an unbound breakpoint says why");
+    assert!(
+        message.contains("is outside `f`"),
+        "it names the definition the move would have left: {message}"
+    );
+
+    client.request("configurationDone", &serde_json::json!({}));
     client.event("exited");
     client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));

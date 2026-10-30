@@ -473,6 +473,146 @@ second()
     finish(debuggee);
 }
 
+/// a definition of each kind with a comment after its last statement,
+/// indented under it, and comments no deeper than the `def` beside them
+///
+/// `plain` begins on line 1, which is the module's first line too
+const INDENTED: &str = r"def plain():
+    x = 1
+    # plain's, after its last statement
+after_plain = 1
+import functools
+
+
+@functools.cache
+def decorated():
+    y = 2
+
+    # decorated's, after a blank line
+# the module's
+after_decorated = 2
+
+
+class Holder:
+    def method(self):
+        z = 3
+    # the class's
+after_holder = 3
+
+
+def outer():
+    def inner():
+        w = 4
+        # inner's
+    # outer's
+    v = 5
+    return inner
+
+
+plain()
+decorated()
+Holder().method()
+outer()()
+";
+
+#[test]
+fn a_breakpoint_never_moves_out_of_a_definition_its_indentation_holds_it_in() {
+    // measured over DAP before this: a comment indented under a function after
+    // its last statement moved to the module's next statement — "line 9 is not
+    // executable, so this moved to line 10" — and stopped there, in `<module>`,
+    // at import. the comment is past the last line the function's code runs on,
+    // and it is still the function's to whoever wrote it there
+    let fixture = Fixture::new("indented", INDENTED);
+    let plains = line_of(INDENTED, "# plain's");
+    let decorateds = line_of(INDENTED, "# decorated's");
+    let modules = line_of(INDENTED, "# the module's");
+    let classes = line_of(INDENTED, "# the class's");
+    let inners = line_of(INDENTED, "# inner's");
+    let outers = line_of(INDENTED, "# outer's");
+
+    let mut debuggee = launch(&fixture);
+    let resolved = debuggee
+        .set_breakpoints(at(
+            &fixture.path(),
+            &[
+                (1, plains),
+                (2, decorateds),
+                // the blank line between `decorated`'s statement and its comment
+                (3, decorateds - 1),
+                (4, classes),
+                (5, inners),
+                (6, modules),
+                (7, outers),
+            ],
+        ))
+        .expect("the breakpoint request was answered");
+
+    // the class is named rather than its method: the widest edge, which is the
+    // definition a person means
+    for (refused, definition, next) in [
+        (&resolved[0], "plain", line_of(INDENTED, "after_plain = 1")),
+        (
+            &resolved[1],
+            "decorated",
+            line_of(INDENTED, "after_decorated = 2"),
+        ),
+        (
+            &resolved[2],
+            "decorated",
+            line_of(INDENTED, "after_decorated = 2"),
+        ),
+        (
+            &resolved[3],
+            "Holder",
+            line_of(INDENTED, "after_holder = 3"),
+        ),
+        (
+            &resolved[4],
+            "outer.<locals>.inner",
+            line_of(INDENTED, "v = 5"),
+        ),
+    ] {
+        let Unbound::CrossesADefinition {
+            next: refused_next,
+            definition: refused_definition,
+            into,
+            ..
+        } = unbound(refused)
+        else {
+            panic!("expected the move to be refused, got {refused:?}")
+        };
+        assert_eq!(
+            (refused_definition.as_str(), *refused_next, *into),
+            (definition, next, false),
+            "{refused:?}"
+        );
+    }
+
+    // a comment no deeper than the `def` is not the function's, and still
+    // moves: to the module's next statement, and to `outer`'s
+    for (moved, next, inside) in [
+        (
+            &resolved[5],
+            line_of(INDENTED, "after_decorated = 2"),
+            "<module>",
+        ),
+        (&resolved[6], line_of(INDENTED, "v = 5"), "outer"),
+    ] {
+        let (line, sites) = bound(moved);
+        assert_eq!(line, next, "{moved:?}");
+        assert_eq!(
+            sites
+                .iter()
+                .map(|site| site.qualname.as_str())
+                .collect::<Vec<_>>(),
+            [inside],
+            "{moved:?}"
+        );
+    }
+
+    finish(debuggee);
+}
+
 #[test]
 fn a_breakpoint_moves_onto_a_line_whose_lambda_or_generator_runs_in_the_same_definition() {
     // a lambda and a generator expression are code objects of their own, each

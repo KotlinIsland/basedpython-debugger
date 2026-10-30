@@ -549,7 +549,7 @@ fn resolve(
         });
     };
 
-    if let Some(refused) = crossing(request, line, &units) {
+    if let Some(refused) = crossing(python, request, line, &executable, &units)? {
         return Ok(Binding::Unbound { reason: refused });
     }
 
@@ -601,58 +601,203 @@ fn resolve(
 ///
 /// a move goes no further than the definitions the asked-for line is in. every
 /// unit of the file is a definition — the module, a class body, a function, a
-/// lambda — and its lines run from its first to the last its code runs on. one
-/// that holds exactly one of the two lines is an edge the move would cross —
-/// unless every line its code runs on is also run by a unit that holds the
-/// asked-for line. that is a lambda or a generator expression inside a
-/// statement, and cpython 3.14's `__annotate__` on a `def` line: what runs
-/// there runs in the code around it too, at the same time, so it is no edge
+/// lambda — and its lines are its block, see [`blocks`]. one that holds exactly
+/// one of the two lines is an edge the move would cross — unless every line its
+/// code runs on is also run by a unit that holds the asked-for line. that is a
+/// lambda or a generator expression inside a statement, and cpython 3.14's
+/// `__annotate__` on a `def` line: what runs there runs in the code around it
+/// too, at the same time, so it is no edge
 ///
 /// the widest edge is the one named, because the definition a person means is
 /// the outermost one the move leaves or enters
-fn crossing(request: &SourceBreakpoint, line: u32, units: &[code::Unit]) -> Option<Unbound> {
+fn crossing(
+    python: Python<'_>,
+    request: &SourceBreakpoint,
+    line: u32,
+    executable: &BTreeSet<u32>,
+    units: &[code::Unit],
+) -> PyResult<Option<Unbound>> {
     if line == request.line {
-        return None;
+        return Ok(None);
     }
-    let span = |unit: &code::Unit| {
-        let last = unit.lines.keys().copied().filter(|&at| at != 0).max()?;
-        Some((unit.first_line, last))
+    let blocks = blocks(python, request.line, line, executable, units)?;
+    let holds = |unit: usize, at: u32| {
+        blocks[unit].is_some_and(|(first, last)| (first..=last).contains(&at))
     };
-    let around: Vec<&code::Unit> = units
-        .iter()
-        .filter(|unit| {
-            span(unit).is_some_and(|(first, last)| (first..=last).contains(&request.line))
-        })
+    let around: Vec<usize> = (0..units.len())
+        .filter(|&unit| holds(unit, request.line))
         .collect();
-    let inline = |unit: &code::Unit| {
-        unit.lines.keys().filter(|&&at| at != 0).all(|at| {
+    let inline = |unit: usize| {
+        units[unit].lines.keys().filter(|&&at| at != 0).all(|at| {
             around
                 .iter()
-                .any(|other| !std::ptr::eq(*other, unit) && other.lines.contains_key(at))
+                .any(|&other| other != unit && units[other].lines.contains_key(at))
         })
     };
-    let (_, definition, into) = units
-        .iter()
-        .filter(|unit| !inline(unit))
+    let edge = (0..units.len())
+        .filter(|&unit| !inline(unit))
         .filter_map(|unit| {
-            let (first, last) = span(unit)?;
-            let holds = |at: u32| first <= at && at <= last;
-            (holds(request.line) != holds(line)).then(|| {
+            let (first, last) = blocks[unit]?;
+            (holds(unit, request.line) != holds(unit, line)).then(|| {
                 (
                     last.saturating_sub(first),
-                    unit.qualname.clone(),
-                    holds(line),
+                    units[unit].qualname.clone(),
+                    holds(unit, line),
                 )
             })
         })
-        .max_by_key(|(width, ..)| *width)?;
-    Some(Unbound::CrossesADefinition {
-        file: request.file.clone(),
-        requested: request.line,
-        next: line,
-        definition,
-        into,
-    })
+        .max_by_key(|(width, ..)| *width);
+    Ok(
+        edge.map(|(_, definition, into)| Unbound::CrossesADefinition {
+            file: request.file.clone(),
+            requested: request.line,
+            next: line,
+            definition,
+            into,
+        }),
+    )
+}
+
+/// the lines each unit holds, from its first to the last line of its block, or
+/// `None` for a unit its code puts on no line
+///
+/// a block runs past the last line its own code runs on in two ways. a
+/// definition nested in it is part of it: a class body's code ends at its last
+/// method's `def`, and that method's body is the class's too. and the lines
+/// after the last statement that its **indentation** still holds are its own —
+/// see [`indented_to`]. measured before this: a breakpoint on a comment
+/// indented under a function, after its last statement, moved to the module's
+/// next statement and stopped there, in `<module>`, at import — the move across
+/// an edge this exists to refuse, made because the comment was past the last
+/// line the function's code runs on
+///
+/// indentation is read only from text proved to be what the interpreter
+/// compiled, the way a frame's source is shown, and only for a block that ended
+/// above `requested` with nothing run in between, which is the only one it can
+/// change the answer for. a file that no longer proves — edited since it was
+/// imported — has its blocks end where its code does
+fn blocks(
+    python: Python<'_>,
+    requested: u32,
+    next: u32,
+    executable: &BTreeSet<u32>,
+    units: &[code::Unit],
+) -> PyResult<Vec<Option<(u32, u32)>>> {
+    let own: Vec<Option<(u32, u32)>> = units
+        .iter()
+        .map(|unit| {
+            let last = unit.lines.keys().copied().filter(|&at| at != 0).max()?;
+            Some((unit.first_line, last))
+        })
+        .collect();
+    let mut by_first: Vec<(u32, u32)> = own.iter().flatten().copied().collect();
+    by_first.sort_unstable();
+    // a definition nested in another begins on a later line the outer one
+    // runs, so walking by first line, everything that begins after it and
+    // before the reach so far is inside it. one that begins on the **same**
+    // line is not: the module begins on line 1 with a `def` written there, and
+    // a lambda in a decorator or a default begins on the `def`'s first line
+    let reach = |(first, last): (u32, u32)| {
+        let from = by_first.partition_point(|&(other, _)| other <= first);
+        let mut reach = last;
+        for &(other_first, other_last) in &by_first[from..] {
+            if other_first > reach {
+                break;
+            }
+            reach = reach.max(other_last);
+        }
+        reach
+    };
+
+    let mut blocks = Vec::with_capacity(units.len());
+    for (unit, own) in units.iter().zip(own) {
+        let Some((first, last)) = own else {
+            blocks.push(None);
+            continue;
+        };
+        let reach = reach((first, last));
+        let indented = reach < requested && executable.range(reach + 1..requested).next().is_none();
+        let end = if indented {
+            match crate::source::numbered(python, unit.code.bind(python))? {
+                Ok(text) => indented_to(&crate::source::split(&text), first, reach, next),
+                Err(_unproved) => reach,
+            }
+        } else {
+            reach
+        };
+        blocks.push(Some((first, end)));
+    }
+    Ok(blocks)
+}
+
+/// the last line a block's indentation holds, given the last line its code
+/// reaches and the next line any code runs on
+///
+/// what lies between is lines no code runs on: blank lines, comments, a bare
+/// string. one indented deeper than the block's first line — its `def`, its
+/// `class` or its first decorator — is inside the block, the way python's own
+/// grammar would put a statement written there, and the block ends at the last
+/// such line before one that is not. a blank line says nothing about where it
+/// belongs, so it is the block's only between two lines that are
+///
+/// only a `def`, a `class` or a decorator opens a block. a lambda or a
+/// generator expression is an expression, and a line indented under the one it
+/// starts on is a line of the statement around it
+fn indented_to(lines: &[&[u8]], first: u32, reach: u32, next: u32) -> u32 {
+    let text = |at: u32| {
+        at.checked_sub(1)
+            .and_then(|index| lines.get(usize::try_from(index).ok()?))
+            .copied()
+    };
+    let Some(header) = text(first) else {
+        return reach;
+    };
+    if !opens_a_block(header) {
+        return reach;
+    }
+    let depth = indentation(header);
+    let mut end = reach;
+    for at in reach + 1..next {
+        let Some(text) = text(at) else {
+            break;
+        };
+        if text.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        if indentation(text) <= depth {
+            break;
+        }
+        end = at;
+    }
+    end
+}
+
+/// whether a line starts a `def`, an `async def`, a `class` or a decorator
+fn opens_a_block(line: &[u8]) -> bool {
+    let line = line.trim_ascii_start();
+    if line.starts_with(b"@") {
+        return true;
+    }
+    let word = line
+        .iter()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_'))
+        .map_or(line, |end| &line[..end]);
+    matches!(word, b"def" | b"class" | b"async")
+}
+
+/// a line's indentation in columns, counted the way cpython's tokenizer counts
+/// it: a tab moves to the next multiple of eight and a form feed starts over
+fn indentation(line: &[u8]) -> usize {
+    let mut column = 0;
+    for byte in line {
+        match byte {
+            b' ' => column += 1,
+            b'\t' => column = (column / 8 + 1) * 8,
+            b'\x0c' => column = 0,
+            _ => break,
+        }
+    }
+    column
 }
 
 /// make the interpreter's instrumentation match the new `armed` set
@@ -689,4 +834,70 @@ fn arm(python: Python<'_>, previous: &BTreeMap<usize, Armed>) -> PyResult<()> {
     // reported again. a breakpoint that lands on one has to undo that, and PEP
     // 669 has no per-location undo
     events::restart(python)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(text: &str) -> Vec<&[u8]> {
+        text.lines().map(str::as_bytes).collect()
+    }
+
+    #[test]
+    fn a_comment_indented_under_a_def_after_its_last_statement_is_in_its_block() {
+        let text = lines("def f():\n    x = 1\n    # comment\ny = 2\n");
+        assert_eq!(indented_to(&text, 1, 2, 4), 3);
+    }
+
+    #[test]
+    fn a_comment_at_the_definitions_own_depth_is_not_in_its_block() {
+        let text = lines("def f():\n    x = 1\n# module\ny = 2\n");
+        assert_eq!(indented_to(&text, 1, 2, 4), 2);
+        // a nested def's block ends where its parent's depth comes back
+        let nested =
+            lines("def outer():\n    def inner():\n        x = 1\n    # outer's\n    y = 2\n");
+        assert_eq!(indented_to(&nested, 2, 3, 5), 3);
+        let deeper =
+            lines("def outer():\n    def inner():\n        x = 1\n        # inner's\n    y = 2\n");
+        assert_eq!(indented_to(&deeper, 2, 3, 5), 4);
+    }
+
+    #[test]
+    fn a_blank_line_is_in_a_block_only_between_two_lines_that_are() {
+        let text = lines("def f():\n    x = 1\n\n    # comment\n\n\ny = 2\n");
+        assert_eq!(indented_to(&text, 1, 2, 7), 4);
+        let trailing = lines("def f():\n    x = 1\n\n\ny = 2\n");
+        assert_eq!(indented_to(&trailing, 1, 2, 5), 2);
+    }
+
+    #[test]
+    fn a_shallower_line_ends_the_block_even_with_a_deeper_one_after_it() {
+        let text = lines("def f():\n    x = 1\n# module\n    # stray\ny = 2\n");
+        assert_eq!(indented_to(&text, 1, 2, 5), 2);
+    }
+
+    #[test]
+    fn a_decorator_or_a_class_opens_a_block_and_a_lambda_does_not() {
+        let decorated = lines("@wraps\ndef f():\n    x = 1\n    # comment\ny = 2\n");
+        assert_eq!(indented_to(&decorated, 1, 3, 5), 4);
+        let class = lines("class C:\n    def m(self):\n        pass\n    # comment\nx = 1\n");
+        assert_eq!(indented_to(&class, 1, 3, 5), 4);
+        let asynchronous = lines("async def f():\n    x = 1\n    # comment\ny = 2\n");
+        assert_eq!(indented_to(&asynchronous, 1, 2, 4), 3);
+        let lambda = lines("total = map(lambda y:\n    y + 1,\n    # comment\n    ys)\n");
+        assert_eq!(indented_to(&lambda, 1, 2, 4), 2);
+        assert!(!opens_a_block(b"definitely = 1"));
+        assert!(!opens_a_block(b"classes = []"));
+    }
+
+    #[test]
+    fn indentation_is_counted_the_way_the_tokenizer_counts_it() {
+        assert_eq!(indentation(b"x"), 0);
+        assert_eq!(indentation(b"    x"), 4);
+        assert_eq!(indentation(b"\tx"), 8);
+        assert_eq!(indentation(b"  \tx"), 8);
+        assert_eq!(indentation(b"\t  x"), 10);
+        assert_eq!(indentation(b"    \x0cx"), 0);
+    }
 }

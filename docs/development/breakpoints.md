@@ -101,7 +101,19 @@ rather than against numbers written down here:
     names the last line that could have held one
 - **a move never crosses a definition's edge.** every code object of the file is
     a definition — the module, a class body, a function, a lambda — and it spans
-    the lines from its first to the last its code runs on. a move is refused when
+    its block: the lines from its first to the last its code, or a definition
+    nested in it, runs on, and then the lines its indentation still holds. a
+    comment indented deeper than a `def`, a `class` or its first decorator, after
+    the last statement, is inside it — and so is a blank line between two such
+    lines, but not one after the last of them. measured over DAP before this: a
+    comment indented under a function's last statement moved to the module's
+    next statement and stopped there, at import, in `<module>`. the indentation
+    is read from the file only once it is proved to be what the interpreter
+    compiled — the proof [the source a frame shows](agent-interface.md) is held
+    to — so a file edited since it was imported has its blocks end where its
+    code does. a lambda or a generator expression opens no block: a line
+    indented under the one it starts on belongs to the statement around it. a
+    move is refused when
     one of them holds exactly one of the two lines, and the reason names the line
     the move would have gone to and the definition in between. measured in the
     IDE before this: a breakpoint on the blank line after one function's body

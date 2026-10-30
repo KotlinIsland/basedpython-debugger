@@ -268,6 +268,25 @@ pub(crate) fn proved(
     Ok(plain(python, code, &file)?.map(|(bytes, _)| Proved::Own(bytes)))
 }
 
+/// the text whose lines a code object's line numbers count, proved the way
+/// [`around`] proves a frame's source
+///
+/// what reading a line's **indentation** needs, which a line table does not
+/// carry. a python file's own bytes, or a staged module's `.by`: the runner
+/// moved every location onto the `.by`'s lines, columns or not, so its lines
+/// are the ones numbered — unlike [`proved`], which wants the text the
+/// positions' **columns** index into
+pub(crate) fn numbered(
+    python: Python<'_>,
+    code: &Bound<'_, PyAny>,
+) -> PyResult<Result<Vec<u8>, Unverified>> {
+    let file: String = code.getattr("co_filename")?.extract()?;
+    if let Some(table) = crate::sources::staged_as(&file) {
+        return Ok(staged_proof(python, code, &file, &table)?.map(|staged| staged.by));
+    }
+    Ok(plain(python, code, &file)?.map(|(bytes, _)| bytes))
+}
+
 /// a python file's bytes, proved by compiling them and finding `code` in what
 /// comes out
 fn plain(
@@ -483,7 +502,7 @@ fn extent(code: &Bound<'_, PyAny>, from: u32) -> PyResult<(u32, u32)> {
 /// the endings are dropped rather than carried, because what is wanted is the
 /// text of a line and an answer that carried them would differ between two
 /// checkouts of the same file
-fn split(bytes: &[u8]) -> Vec<&[u8]> {
+pub(crate) fn split(bytes: &[u8]) -> Vec<&[u8]> {
     let mut lines = Vec::new();
     let mut start = 0;
     let mut at = 0;
