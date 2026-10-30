@@ -205,7 +205,11 @@ a few of those are decisions rather than mechanics:
 - `repr`, **off by default**, calls `__repr__`. that is arbitrary user code: it
     can hang, mutate the program, or reach the network, and the result is
     labelled as having come from `__repr__` rather than being presented as the
-    value
+    value. it is carried **beside** an object's attributes, as the object's
+    `repr`, never in their place: it changes how an object reads, not what it
+    holds. measured over DAP before this: with `repr` on, an object read as its
+    `__repr__` and could not be opened, where with it off its attributes were
+    there
 
 the roadmap for this work asked for `__repr__` "under an explicit budget and
 timeout". the budget exists; **the timeout does not, and is not claimed**.

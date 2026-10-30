@@ -90,4 +90,4 @@ pub use source_map::{Located, MapError, MappedFile, Mapping, Run, SourceMap, Unm
 pub use spawn::{Blindspot, Spawn, Verdict};
 pub use stop::{Abandoned, Holding, Mode, Part, Reported, StepKind, Stop, StopReason};
 pub use thread::{Progress, ThreadState, Where, Which};
-pub use value::{Content, Detail, Entry, Evaluated, Omitted, Pair, Value};
+pub use value::{Content, Detail, Entry, Evaluated, Omitted, Pair, Repr, Value};

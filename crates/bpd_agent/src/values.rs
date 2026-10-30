@@ -31,7 +31,7 @@
 
 use std::fmt::Write as _;
 
-use bpd_core::{Content, Detail, Entry, Omitted, Pair, Value};
+use bpd_core::{Content, Detail, Entry, Omitted, Pair, Repr, Value};
 use pyo3::prelude::*;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet, PyString,
@@ -361,33 +361,56 @@ impl<'py> Reader<'py> {
         })
     }
 
-    /// an object, read from the dictionary it stores its attributes in
+    /// an object, read from the dictionary it stores its attributes in, and
+    /// with what its `__repr__` says when the request asked for that too
     fn object(&mut self, object: &Bound<'py, PyAny>, path: &str, depth: u32) -> PyResult<Content> {
-        if self.detail.repr {
+        let repr = if self.detail.repr {
             let text = events::repr(self.python, object)?;
             let (text, characters, omitted) = self.cut(&text);
-            return Ok(Content::Repr {
+            Some(Repr {
                 text,
                 characters,
                 omitted,
-            });
+            })
+        } else {
+            None
+        };
+        let (attributes, omitted) = self.attributes(object, path, depth)?;
+        match omitted {
+            // a cycle with nothing else to say is a value that was not read. one
+            // with a `__repr__` was read, and is an object that ends here
+            Some(cycle @ Omitted::Cycle { .. }) if repr.is_none() => {
+                Ok(Content::Unread { omitted: cycle })
+            }
+            omitted => Ok(Content::Object {
+                attributes,
+                omitted,
+                repr,
+            }),
         }
+    }
+
+    /// what an object stores in its instance dictionary, and why not all of it
+    /// is here
+    fn attributes(
+        &mut self,
+        object: &Bound<'py, PyAny>,
+        path: &str,
+        depth: u32,
+    ) -> PyResult<(Vec<Entry>, Option<Omitted>)> {
         if !self.detail.attributes {
-            return Ok(Content::Object {
-                attributes: Vec::new(),
-                omitted: Some(Omitted::AttributesNotRequested),
-            });
+            return Ok((Vec::new(), Some(Omitted::AttributesNotRequested)));
         }
         if let Some(cycle) = self.cycle(object) {
-            return Ok(Content::Unread { omitted: cycle });
+            return Ok((Vec::new(), Some(cycle)));
         }
         if depth == 0 {
-            return Ok(Content::Object {
-                attributes: Vec::new(),
-                omitted: Some(Omitted::Depth {
+            return Ok((
+                Vec::new(),
+                Some(Omitted::Depth {
                     limit: self.detail.depth,
                 }),
-            });
+            ));
         }
 
         // off the object, not as `__dict__`: that is an attribute read, and an
@@ -396,31 +419,23 @@ impl<'py> Reader<'py> {
         // or a type implemented in C — is an absence rather than a failure
         let stored = match storage::instance_dict(object) {
             Ok(Some(stored)) => stored,
-            Ok(None) => {
-                return Ok(Content::Object {
-                    attributes: Vec::new(),
-                    omitted: Some(Omitted::NoAttributes),
-                });
-            }
+            Ok(None) => return Ok((Vec::new(), Some(Omitted::NoAttributes))),
             Err(error) => {
-                return Ok(Content::Object {
-                    attributes: Vec::new(),
-                    omitted: Some(Omitted::AttributesRaised {
+                return Ok((
+                    Vec::new(),
+                    Some(Omitted::AttributesRaised {
                         error: capture(self.python, &error),
                     }),
-                });
+                ));
             }
         };
 
         let items = stored.items();
         class_attributes(object, &stored, &items)?;
         self.enter(object, path);
-        let (attributes, omitted) = self.named(&items, path, depth - 1)?;
+        let named = self.named(&items, path, depth - 1)?;
         self.leave();
-        Ok(Content::Object {
-            attributes,
-            omitted,
-        })
+        Ok(named)
     }
 
     /// read a namespace mapping as names and values

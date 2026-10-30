@@ -387,7 +387,9 @@ every one of them is a field of `bpd_core::Detail`:
     somewhere to raise it, which is what this exists for
 - `repr` is **off** by default because `__repr__` is arbitrary user code. bpd
     cannot interrupt it once it has started, so a `__repr__` that hangs hangs the
-    debuggee
+    debuggee. on, an object's line is what its `__repr__` said, labelled
+    `(__repr__, n characters)`, and it opens onto its attributes exactly as it
+    does with `repr` off
 - `depth` applies where a value is read once and kept — an evaluated
     expression, and the value a write left behind — and in the variables *tree*
     it is how far **below** the level being listed each read goes, at least one.

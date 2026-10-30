@@ -40,14 +40,25 @@ pub fn summary(value: &Value) -> String {
             let mut room = PREVIEW;
             (preview(value, &mut room), said_beside(omitted.as_ref()))
         }
-        Content::Object { omitted, .. } => (value.kind.clone(), omitted.as_ref()),
-        Content::Repr {
-            text,
-            characters,
+        Content::Object {
             omitted,
+            repr: None,
+            ..
+        } => (value.kind.clone(), omitted.as_ref()),
+        // the line is what `__repr__` said, labelled, and what the object holds
+        // is a level down, the same as without it. the text's own cut is said
+        // after it, and then why its attributes were cut — except a depth that
+        // ran out, which opening it answers, the way a container's preview
+        // leaves it unsaid
+        Content::Object {
+            omitted,
+            repr: Some(repr),
+            ..
         } => (
-            format!("{text} (__repr__, {characters} characters)"),
-            omitted.as_ref(),
+            format!("{} (__repr__, {} characters)", repr.text, repr.characters),
+            repr.omitted.as_ref().or(omitted
+                .as_ref()
+                .filter(|omitted| !matches!(omitted, Omitted::Depth { .. }))),
         ),
         Content::Unread { omitted } => (String::new(), Some(omitted)),
 
@@ -94,7 +105,10 @@ fn preview(value: &Value, room: &mut usize) -> String {
             omitted: None,
         }
         | Content::Float { text }
-        | Content::Repr { text, .. } => text.clone(),
+        | Content::Object {
+            repr: Some(bpd_core::Repr { text, .. }),
+            ..
+        } => text.clone(),
         Content::Str {
             text,
             characters,
@@ -208,7 +222,7 @@ pub fn expandable(value: &Value) -> bool {
         | Content::Object { omitted, .. } => {
             omitted.as_ref().is_some_and(reachable_by_reading_deeper)
         }
-        // a number, a string and a repr have nothing inside them, and neither
+        // a number and a string have nothing inside them, and neither
         // has a form this adapter has not been taught — `Content` is
         // `#[non_exhaustive]` and a claim about an unknown form is a guess
         _ => false,
@@ -361,6 +375,41 @@ mod tests {
         let said = summary(&budget);
         assert!(said.starts_with("[1, … 8 more] — "), "said {said}");
         assert!(said.contains("budget"), "said {said}");
+    }
+
+    #[test]
+    fn an_object_read_with_its_repr_still_opens_onto_what_it_holds() {
+        let repr = Some(bpd_core::Repr {
+            text: "P(a=[1, 2])".to_string(),
+            characters: 11,
+            omitted: None,
+        });
+        let held = value(
+            "P",
+            Content::Object {
+                attributes: vec![bpd_core::Entry {
+                    name: "a".to_string(),
+                    value: int("1"),
+                }],
+                omitted: None,
+                repr: repr.clone(),
+            },
+        );
+        assert_eq!(summary(&held), "P(a=[1, 2]) (__repr__, 11 characters)");
+        assert!(expandable(&held), "its attribute is a level down");
+
+        // one the depth stopped short of is opened by asking a level deeper,
+        // and the line does not say so in the middle of the program's text
+        let deeper = value(
+            "P",
+            Content::Object {
+                attributes: Vec::new(),
+                omitted: Some(Omitted::Depth { limit: 0 }),
+                repr,
+            },
+        );
+        assert_eq!(summary(&deeper), "P(a=[1, 2]) (__repr__, 11 characters)");
+        assert!(expandable(&deeper));
     }
 
     #[test]

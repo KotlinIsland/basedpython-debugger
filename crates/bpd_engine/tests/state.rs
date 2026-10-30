@@ -835,6 +835,7 @@ fn an_object_is_read_from_its_instance_dictionary_and_repr_is_never_run_unasked(
     let Content::Object {
         attributes,
         omitted,
+        ..
     } = &held(&locals, "first").content
     else {
         panic!("expected an object")
@@ -848,6 +849,7 @@ fn an_object_is_read_from_its_instance_dictionary_and_repr_is_never_run_unasked(
     let Content::Object {
         attributes,
         omitted,
+        ..
     } = &held(&locals, "slotted").content
     else {
         panic!("expected an object")
@@ -865,6 +867,7 @@ fn an_object_is_read_from_its_instance_dictionary_and_repr_is_never_run_unasked(
     let Content::Object {
         attributes,
         omitted,
+        ..
     } = &held(&locals, "proxied").content
     else {
         panic!("expected an object")
@@ -886,9 +889,25 @@ fn an_object_is_read_from_its_instance_dictionary_and_repr_is_never_run_unasked(
     };
     let locals = values_at(&mut debuggee, asked);
     match &held(&locals, "talkative").content {
-        Content::Repr { text, .. } => assert_eq!(text, "<talkative>"),
+        Content::Object {
+            repr: Some(repr), ..
+        } => assert_eq!(repr.text, "<talkative>"),
         other => panic!("expected a repr, got {other:?}"),
     }
+    // and it is said beside what the object holds, never instead of it:
+    // `__repr__` changes how an object reads, not whether it can be opened
+    let Content::Object {
+        attributes,
+        omitted,
+        repr: Some(repr),
+    } = &held(&locals, "first").content
+    else {
+        panic!("expected an object with its repr")
+    };
+    assert_eq!(*omitted, None);
+    assert_eq!(attributes[0].name, "name");
+    assert_eq!(text_of(&attributes[0].value), "first");
+    assert!(repr.text.starts_with('<'), "object's own repr: {repr:?}");
     assert!(
         ran.exists(),
         "the request asked for `__repr__` and it did not run"
@@ -906,6 +925,7 @@ fn an_object_is_read_from_its_instance_dictionary_and_repr_is_never_run_unasked(
         Content::Object {
             attributes: Vec::new(),
             omitted: Some(Omitted::AttributesNotRequested),
+            repr: None,
         }
     );
 
@@ -1038,6 +1058,7 @@ fn everything_a_limit_left_out_is_named_with_what_to_ask_for_instead() {
     let Content::Object {
         attributes,
         omitted,
+        ..
     } = &held(&locals, "first").content
     else {
         panic!("expected an object")

@@ -204,19 +204,14 @@ pub enum Content {
         attributes: Vec<Entry>,
         /// why they are not all here, or why there are none
         omitted: Option<Omitted>,
-    },
-
-    /// what `__repr__` said, because the request asked for it
-    ///
-    /// labelled, so nothing can mistake user code's opinion of a value for the
-    /// value
-    Repr {
-        /// the text, cut to the request's limit
-        text: String,
-        /// how many characters it produced
-        characters: usize,
-        /// why they are not all here
-        omitted: Option<Omitted>,
+        /// what its `__repr__` said, when the request asked for it
+        ///
+        /// beside the attributes rather than instead of them: `__repr__`
+        /// changes how an object reads, not what it holds. measured over DAP
+        /// before this: with `repr` on, an object read as its `__repr__` and
+        /// could not be opened, where with it off its attributes were there
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repr: Option<Repr>,
     },
 
     /// nothing was read, and this is why
@@ -226,6 +221,20 @@ pub enum Content {
         /// what stopped it
         omitted: Omitted,
     },
+}
+
+/// what `__repr__` said about an object, because the request asked for it
+///
+/// labelled, so nothing can mistake user code's opinion of a value for the
+/// value
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Repr {
+    /// the text, cut to the request's limit
+    pub text: String,
+    /// how many characters it produced
+    pub characters: usize,
+    /// why they are not all here
+    pub omitted: Option<Omitted>,
 }
 
 /// one named thing: a variable, or an attribute

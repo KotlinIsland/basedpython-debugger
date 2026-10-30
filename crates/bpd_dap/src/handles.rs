@@ -490,6 +490,7 @@ mod tests {
                     },
                 }],
                 omitted: None,
+                repr: None,
             },
         };
 

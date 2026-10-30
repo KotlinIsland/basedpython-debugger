@@ -108,6 +108,7 @@ over_each_transport!(
     a_rule_per_class_comes_in_beside_the_filters_and_neither_replaces_the_other,
     a_breakpoints_location_says_what_its_hit_holds_and_the_policy_outlives_the_set,
     a_comment_indented_under_a_def_is_refused_rather_than_moved_out_of_it,
+    an_object_read_with_its_repr_still_opens_onto_its_attributes,
 );
 
 /// a program with a local worth writing to, and a marker after the breakpoint
@@ -3238,6 +3239,79 @@ fn writing_a_name_of_the_locals_list_runs_no_repr_to_find_its_scope(transport: T
         !fixture.directory().join("repr_ran").exists(),
         "finding the scope of `loud` ran `__repr__` on the frame's values"
     );
+
+    client.request("continue", &serde_json::json!({ "threadId": thread }));
+    client.event("exited");
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish();
+}
+
+/// an object with two attributes, held in a function
+const POINT: &str = r#"class P:
+    def __init__(self):
+        self.a = [1, 2]
+        self.b = {"k": 3}
+
+
+def g():
+    p = P()
+    return p  # held here
+
+
+g()
+"#;
+
+fn an_object_read_with_its_repr_still_opens_onto_its_attributes(transport: Transport) {
+    // measured before this: with `repr` on, `p = <__main__.P object at …>
+    // (__repr__, 34 characters)` and `variablesReference: 0`, where with it off
+    // `p` opened onto `a` and `b`
+    let fixture = Fixture::new("point", POINT);
+    let mut client = Client::start(transport);
+
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "variables": { "repr": true },
+        }),
+    );
+    client.event("initialized");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line_of(POINT, "# held here") } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let stopped = client.event("stopped");
+    let thread = stopped["body"]["threadId"].clone();
+    let stack = client.request("stackTrace", &serde_json::json!({ "threadId": thread }));
+    let frame = stack["body"]["stackFrames"][0]["id"].clone();
+    let scopes = client.request("scopes", &serde_json::json!({ "frameId": frame }));
+    let locals = scopes["body"]["scopes"][0]["variablesReference"].clone();
+    let read = client.request(
+        "variables",
+        &serde_json::json!({ "variablesReference": locals }),
+    );
+
+    let point = variable(&read, "p");
+    let shown = point["value"].as_str().expect("a value is a string");
+    assert!(
+        shown.starts_with("<__main__.P object at ") && shown.contains("(__repr__, "),
+        "the line is what `__repr__` said, labelled: {shown}"
+    );
+    assert_ne!(point["variablesReference"], 0, "{read}");
+    let opened = client.request(
+        "variables",
+        &serde_json::json!({ "variablesReference": point["variablesReference"] }),
+    );
+    assert_eq!(variable(&opened, "a")["value"], "[1, 2]", "{opened}");
+    assert_eq!(variable(&opened, "b")["value"], "{'k': 3}", "{opened}");
 
     client.request("continue", &serde_json::json!({ "threadId": thread }));
     client.event("exited");

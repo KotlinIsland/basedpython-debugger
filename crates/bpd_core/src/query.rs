@@ -784,8 +784,7 @@ fn elision(value: &Value) -> Option<Omitted> {
         Content::None | Content::Bool { .. } | Content::Float { .. } => None,
         Content::Int { omitted, .. }
         | Content::Str { omitted, .. }
-        | Content::Bytes { omitted, .. }
-        | Content::Repr { omitted, .. } => omitted.clone(),
+        | Content::Bytes { omitted, .. } => omitted.clone(),
         Content::Unread { omitted } => Some(omitted.clone()),
         Content::Sequence { items, omitted, .. } => {
             omitted.clone().or_else(|| items.iter().find_map(elision))
@@ -800,8 +799,10 @@ fn elision(value: &Value) -> Option<Omitted> {
         Content::Object {
             attributes,
             omitted,
+            repr,
         } => omitted
             .clone()
+            .or_else(|| repr.as_ref().and_then(|repr| repr.omitted.clone()))
             .or_else(|| attributes.iter().find_map(|entry| elision(&entry.value))),
     }
 }
@@ -1308,6 +1309,7 @@ mod tests {
                         content: Content::Object {
                             attributes: Vec::new(),
                             omitted: Some(Omitted::Depth { limit: 3 }),
+                            repr: None,
                         },
                     },
                 }],
