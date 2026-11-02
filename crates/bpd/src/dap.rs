@@ -147,7 +147,10 @@ pub(crate) fn run(args: &Args) -> std::process::ExitCode {
 fn connect(address: &str) -> std::process::ExitCode {
     use bpd_dap::connect;
 
-    let token = std::env::var(connect::TOKEN_VARIABLE).ok();
+    // lossily, so that a value that is not unicode is refused for what it holds
+    // rather than reported as absent
+    let token =
+        std::env::var_os(connect::TOKEN_VARIABLE).map(|token| token.to_string_lossy().into_owned());
     let token = match connect::token(token.as_deref()) {
         Ok(token) => token,
         Err(error) => {
@@ -485,7 +488,7 @@ impl bpd_dap::Interrupt for Reaching {
         Ok(self.0.deliver(request)?)
     }
 
-    fn ask_to_end(&mut self) -> Result<bool, Failed> {
+    fn ask_to_end(&mut self) -> Result<(), Failed> {
         Ok(self.0.ask_to_end()?)
     }
 

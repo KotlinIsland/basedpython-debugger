@@ -173,9 +173,9 @@ BPD_DAP_TOKEN=5b1c… bpd dap --connect host.docker.internal:51241
 
 - **the token is the client's**, chosen by it and handed over in
     `BPD_DAP_TOKEN` — never on the command line, where `ps` shows it to every
-    user. at least 32 characters of printable ascii, so it is no weaker than
-    the 64 hex digits `--listen` mints. the program bpd starts does not inherit
-    it
+    user. at least 64 characters of printable ascii, so that one written the
+    same way is no weaker than the 64 hex digits `--listen` mints. neither the
+    program bpd starts nor the probe of its interpreter inherits it
 - **bpd presents it first.** the first message on the connection is bpd's, a
     `bpd/connected` event carrying the token on the header a `--listen` client
     puts on its first message:
@@ -1030,13 +1030,13 @@ holds one thread and sends nothing until the other's `stopped` arrives
 three things end a program bpd started, and the spec gives two of them
 different meanings:
 
-| what arrives                                         | what the program gets                                       | what the client is told                   |
-| ---------------------------------------------------- | ----------------------------------------------------------- | ----------------------------------------- |
-| `terminate`                                          | a `SIGTERM`, held threads let go, and after 5 s a kill      | `exited` with its code, then `terminated` |
-| `SIGTERM` to bpd                                     | the `SIGTERM`, passed on                                    | `exited` with its code, then `terminated` |
-| `disconnect`, or the client going                    | a kill                                                      | `terminated`                              |
-| `disconnect` with `terminateDebuggee: false`         | let go, never stopped again, and left to run to its end     | `terminated`                              |
-| `disconnect` without the field, during a `terminate` | the rest of the `terminate`'s grace                         | `terminated`                              |
+| what arrives                                         | what the program gets                                   | what the client is told                   |
+| ---------------------------------------------------- | ------------------------------------------------------- | ----------------------------------------- |
+| `terminate`                                          | a `SIGTERM`, held threads let go, and after 5 s a kill  | `exited` with its code, then `terminated` |
+| `SIGTERM` to bpd                                     | the `SIGTERM`, passed on                                | `exited` with its code, then `terminated` |
+| `disconnect`, or the client going                    | a kill — unless a `terminate`'s grace is running        | `terminated`                              |
+| `disconnect` with `terminateDebuggee: false`         | let go, never stopped again, and left to run to its end | `terminated`                              |
+| `disconnect` without the field, during a `terminate` | the rest of the `terminate`'s grace                     | `terminated`                              |
 
 the spec's `disconnect`: *"the debug adapter must terminate the debuggee if it
 was started with the `launch` request"*, and *"this implicit behavior … can be
@@ -1076,16 +1076,24 @@ advertises `supportTerminateDebuggee` and honours it:
     program, its `terminate` killed it — `exitCode` 247, the handler never run —
     and with `onTerminate: KeyboardInterrupt` in the launch it raised that in
     the program instead, and the `SIGTERM` handler still never ran
+- **a stop during the grace is let go.** it holds a thread that runs no python,
+    and the handler may be what that thread is in, so bpd lets it go rather
+    than ending the program with its cleanup undone
+- **a client that goes during the grace leaves it running.** it has said how it
+    wants the program ended; bpd waits for that end and exits as it does
 - **a `SIGTERM` to bpd is passed on.** `by run` starts `bpd dap --listen` as
     its program, so the signal an editor's Stop or a supervisor sends reaches
     bpd and nothing else. measured before this: bpd ended with 143 and the
     program ran on with no parent, its handler never run. `SIGINT`, `SIGHUP`
     and `SIGQUIT` are passed on too, but only when bpd is outside its
     terminal's foreground process group — inside it, the terminal sent the
-    program the same one already. this is the contract `by run` keeps for its
-    own program; the rule is in `crates/bpd/src/signals.rs`. before there is a
-    program bpd ends on the signal, `128 +` its number; a program held at a stop
-    handles it when it is let go
+    program the same one already. a signal bpd was started ignoring stays
+    ignored, by bpd and by the program. this is the contract `by run` keeps for
+    its own program; the rule is in `crates/bpd/src/signals.rs`, and
+    [launching](launching.md#the-signals-that-end-bpd) has all of it. with no
+    program running — before there is one, or after it ended — bpd ends on the
+    signal, `128 +` its number; a program held at a stop handles it when it is
+    let go
 - **once.** the Stop of a `by run` session sends both — the signal to the
     process and `terminate` to the adapter — and a program handling the first
     must not be interrupted by the second. whichever arrives first sends the

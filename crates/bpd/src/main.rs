@@ -61,11 +61,13 @@ fn report_error(error: &dyn std::error::Error) {
 
 fn main() -> ExitCode {
     let command = Cli::parse().command;
-    // the two commands that start a program in their own place: `launch`, and
-    // `dap`, which `by run` starts as its program. what is sent to end them is
-    // passed on to it — see `signals`
-    if matches!(command, Command::Launch(_) | Command::Dap(_))
-        && let Err(error) = signals::install()
+    // the commands that start a program: `launch`, `dap`, which `by run` starts
+    // as its program, and `mcp`. nothing else names what they started, so what
+    // is sent to end them is passed on to it — see `signals`
+    if matches!(
+        command,
+        Command::Launch(_) | Command::Dap(_) | Command::Mcp(_)
+    ) && let Err(error) = signals::install()
     {
         report_error(&error);
         return ExitCode::FAILURE;

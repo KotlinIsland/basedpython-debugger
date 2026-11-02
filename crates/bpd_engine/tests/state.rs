@@ -1019,6 +1019,80 @@ fn a_selection_reads_only_the_names_it_names_and_objects_only_so_far_down() {
 }
 
 #[test]
+fn an_unopened_object_is_said_to_have_something_exactly_when_an_opened_one_does() {
+    // what an unopened object says costs less to find out than opening it, and
+    // this pins the shortcut to the full read: an instance attribute, a class
+    // attribute alone, and neither
+    const OBJECTS: &str = r"class Stored:
+    def __init__(self):
+        self.held = 1
+
+
+class FromItsClass:
+    held = 1
+
+
+class Holding:
+    pass
+
+
+def main():
+    stored = Stored()
+    from_its_class = FromItsClass()
+    holding = Holding()
+    marker = 1
+
+
+main()
+";
+    let fixture = Fixture::new("objects", OBJECTS);
+    let mut debuggee = launch(&fixture);
+    stop_at(
+        &mut debuggee,
+        &fixture.path(),
+        line_of(OBJECTS, "marker = 1"),
+    );
+
+    for name in ["stored", "from_its_class", "holding"] {
+        let opened = debuggee
+            .variables_selected(
+                top(),
+                Scope::Local,
+                Detail::default(),
+                Selection {
+                    names: Some(vec![name.to_string()]),
+                    objects: None,
+                },
+            )
+            .expect("the scope was answered");
+        let unopened = debuggee
+            .variables_selected(
+                top(),
+                Scope::Local,
+                Detail::default(),
+                Selection {
+                    names: Some(vec![name.to_string()]),
+                    objects: Some(0),
+                },
+            )
+            .expect("the scope was answered");
+        let Content::Object { attributes, .. } = &held(&opened, name).content else {
+            panic!("expected an object")
+        };
+        let Content::Object { omitted, .. } = &held(&unopened, name).content else {
+            panic!("expected an object")
+        };
+        assert_eq!(
+            omitted.is_some(),
+            !attributes.is_empty(),
+            "{name}: {omitted:?} against {attributes:?}"
+        );
+    }
+
+    to_exit(&mut debuggee);
+}
+
+#[test]
 fn a_structure_that_points_back_at_itself_terminates_and_says_where() {
     let fixture = Fixture::new("values", VALUES);
     let mut debuggee = stopped_over_values(&fixture);

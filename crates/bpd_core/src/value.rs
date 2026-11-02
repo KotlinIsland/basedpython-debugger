@@ -121,15 +121,16 @@ pub struct Selection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub names: Option<Vec<String>>,
 
-    /// how many levels down objects are opened, counting the scope's own
-    /// values as level 0, or as far as [`Detail::depth`] goes
+    /// the first level at which objects are not opened, the scope's own values
+    /// being level 0, or `None` for as far as [`Detail::depth`] goes
     ///
-    /// an object at this level or deeper is reported with
+    /// so `0` opens no object, and `1` opens the scope's own and not what they
+    /// hold. an object at this level or deeper is reported with
     /// [`Omitted::Unopened`] and its attributes unread, while a container
     /// there is still read to the depth. what one line of a variables view
     /// shows of an object is its type, or its `__repr__`, and never what it
     /// holds — so a view that lists a scope asks for `0`, and one that opens a
-    /// value asks for the levels down to it
+    /// value asks for the number of levels down to its children
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objects: Option<u32>,
 }
@@ -367,7 +368,7 @@ pub enum Omitted {
     /// not a statement about the object. it has attributes to read, and a read
     /// that opens objects further down reaches them
     Unopened {
-        /// the level objects were opened down to
+        /// the first level objects were not opened at
         objects: u32,
     },
 
@@ -449,9 +450,9 @@ impl std::fmt::Display for Omitted {
             ),
             Self::Unopened { objects } => write!(
                 formatter,
-                "the request opened objects {objects} levels down and this one \
-                 is further, so its attributes were not read. ask again with a \
-                 larger `objects`, or for this name alone"
+                "the request opened no object at level {objects} or below, and \
+                 this one is, so its attributes were not read. ask again with a \
+                 larger `objects`"
             ),
             Self::AttributesRaised { error } => write!(
                 formatter,
@@ -537,10 +538,7 @@ mod tests {
                 Omitted::AttributesNotRequested,
                 ["no attributes", "`attributes`"],
             ),
-            (
-                Omitted::Unopened { objects: 1 },
-                ["1 levels down", "`objects`"],
-            ),
+            (Omitted::Unopened { objects: 1 }, ["level 1", "`objects`"]),
             (Omitted::NotNames { count: 2 }, ["2 entries", "not names"]),
             (Omitted::Unencodable, ["surrogate", "U+FFFD"]),
             (Omitted::NotADictionary, ["metaclass", "not a `dict`"]),

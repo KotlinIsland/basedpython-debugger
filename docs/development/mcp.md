@@ -123,7 +123,7 @@ shape of what bpd can see from here
 | `state`                            | describe a whole stop in one call, and keep the answer               |
 | `diff`                             | what changed between two of those answers                            |
 | `run_script`                       | run a whole investigation, and return what happened at every step    |
-| `terminate`                        | end the debuggee                                                     |
+| `terminate`                        | end the debuggee, or with `graceful` ask it to                       |
 
 ### the schema of a script is its documentation
 

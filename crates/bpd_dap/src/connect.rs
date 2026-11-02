@@ -54,9 +54,9 @@ pub const TOKEN_VARIABLE: &str = bpd_core::DAP_TOKEN_VARIABLE;
 ///
 /// what `--listen` mints is 32 bytes of the operating system's randomness,
 /// written as 64 hex digits. a client choosing its own is held to the same
-/// bytes' worth of hex at the least, so that a token cannot be weaker than the
-/// one it stands in for
-pub const TOKEN_MINIMUM: usize = 32;
+/// length at the least, so that a token written the same way cannot be weaker
+/// than the one it stands in for
+pub const TOKEN_MINIMUM: usize = 64;
 
 /// how long the connection may take, and then the client's first message
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -89,9 +89,9 @@ pub enum Error {
 
     /// nothing at the address accepted the connection in time
     #[error(
-        "nothing at `{address}` accepted a connection within {PATIENCE:?}. the \
-         client listens there and hands that address to bpd, so it is not \
-         listening yet, or the address does not reach it from here"
+        "nothing at `{address}` accepted a connection. the client listens there \
+         and hands that address to bpd, so it is not listening yet, or the \
+         address does not reach it from here"
     )]
     Connect {
         /// the address as given
@@ -103,9 +103,10 @@ pub enum Error {
 
     /// the client hung up, or said nothing, before it sent a request
     #[error(
-        "the client at `{address}` closed the connection without sending a \
-         request, within {PATIENCE:?} of bpd presenting its token. a client that \
-         does not accept the token it is shown closes the connection that way"
+        "the client at `{address}` sent no request: it closed the connection, or \
+         said nothing for {PATIENCE:?}, after bpd presented its token. a client \
+         that does not accept the token it is shown closes the connection that \
+         way"
     )]
     Unanswered {
         /// the address as given
@@ -274,9 +275,12 @@ mod tests {
     fn a_token_is_one_a_header_can_carry_and_no_weaker_than_a_minted_one() {
         assert!(matches!(token(None), Err(Error::Token { .. })));
         assert!(matches!(token(Some("short")), Err(Error::Token { .. })));
-        let spaced = format!("{} {}", "a".repeat(20), "b".repeat(20));
+        // half the digits of a minted token is half its bits
+        let half = "0123456789abcdef".repeat(2);
+        assert!(matches!(token(Some(&half)), Err(Error::Token { .. })));
+        let spaced = format!("{} {}", "a".repeat(40), "b".repeat(40));
         assert!(matches!(token(Some(&spaced)), Err(Error::Token { .. })));
-        let broken = format!("{}\r\nX-Other: 1", "a".repeat(40));
+        let broken = format!("{}\r\nX-Other: 1", "a".repeat(80));
         assert!(matches!(token(Some(&broken)), Err(Error::Token { .. })));
         let fine = "0123456789abcdef".repeat(4);
         assert_eq!(token(Some(&fine)).expect("64 hex digits"), fine);

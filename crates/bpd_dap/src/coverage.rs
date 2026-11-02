@@ -289,9 +289,6 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
              launch for the first",
         ),
 
-        // DAP has nowhere on a request to carry them, so they come from the
-        // launch configuration instead — one setting for the session rather
-        // than one per read. that is a narrower way to reach it, not a gap
         // DAP has no field for it and needs none: the tree is what says which
         // names a reader is looking at. a scope is listed with its objects
         // unopened, and opening a value reads that one name of its scope,
@@ -301,6 +298,13 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
              and opening a value there, which reads that one name of its scope",
         ),
 
+        // the spec's own `terminate`, and it is unix's: windows has no signal
+        // to ask with, and `supportsTerminateRequest` is not advertised there
+        Facet::GracefulEnd => Reach::Direct("the `terminate` request"),
+
+        // DAP has nowhere on a request to carry them, so they come from the
+        // launch configuration instead — one setting for the session rather
+        // than one per read. that is a narrower way to reach it, not a gap
         Facet::ValueBounds => Reach::Direct(
             "the `variables` object of the launch configuration, every field of \
              which is a field of `bpd_core::Detail` — and per call on the \

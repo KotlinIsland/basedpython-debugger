@@ -103,7 +103,7 @@ impl Interrupt for Reaching {
         Err(format!("this fake is never interrupted, and got {request:?}").into())
     }
 
-    fn ask_to_end(&mut self) -> Result<bool, Failed> {
+    fn ask_to_end(&mut self) -> Result<(), Failed> {
         Err("bpd did not start that process and is not its parent".into())
     }
 

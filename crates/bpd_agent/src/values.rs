@@ -446,11 +446,17 @@ impl<'py> Reader<'py> {
             }
         };
 
-        let items = stored.items();
-        class_attributes(object, &stored, &items)?;
         // one with nothing to read is said to be empty rather than unopened,
         // because that is a statement about it a view can show — nothing to
-        // open — and it costs a length rather than a read
+        // open. anything in its own dictionary settles that with a length, and
+        // only an empty one costs the walk of its classes
+        if let Some(objects) = unopened
+            && !stored.is_empty()
+        {
+            return Ok((Vec::new(), Some(Omitted::Unopened { objects })));
+        }
+        let items = stored.items();
+        class_attributes(object, &stored, &items)?;
         if let Some(objects) = unopened {
             let omitted = (!items.is_empty()).then_some(Omitted::Unopened { objects });
             return Ok((Vec::new(), omitted));

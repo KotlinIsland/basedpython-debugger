@@ -614,6 +614,25 @@ fn a_breakpoint_never_moves_out_of_a_definition_its_indentation_holds_it_in() {
 }
 
 #[test]
+fn a_definition_on_the_first_line_of_a_file_with_a_byte_order_mark_holds_its_indentation() {
+    // cpython's tokenizer skips the mark, so the `def` really is what the line
+    // starts with. this fails if it stops doing that, because the file would no
+    // longer compile
+    let text = "\u{feff}def plain():\n    x = 1\n    # plain's\nafter_plain = 1\nplain()\n";
+    let fixture = Fixture::new("marked", text);
+    let comment = line_of(text, "# plain's");
+    let mut debuggee = launch(&fixture);
+    let resolved = debuggee
+        .set_breakpoints(at(&fixture.path(), &[(1, comment)]))
+        .expect("the breakpoint request was answered");
+    let Unbound::CrossesADefinition { definition, .. } = unbound(&resolved[0]) else {
+        panic!("expected the move to be refused, got {:?}", resolved[0])
+    };
+    assert_eq!(definition, "plain");
+    finish(debuggee);
+}
+
+#[test]
 fn a_breakpoint_moves_onto_a_line_whose_lambda_or_generator_runs_in_the_same_definition() {
     // a lambda and a generator expression are code objects of their own, each
     // spanning only the line it is written on — which is a line the function

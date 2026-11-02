@@ -505,6 +505,39 @@ compiled would print `bpd`'s bootstrap as the program's source, with a caret
 under it. the entry is removed for every form, and the command form then
 registers its own source through the same function `pythonrun.c` uses
 
+## the signals that end bpd
+
+a debugged program is bpd's child, and nothing else names it: whatever stops
+`bpd launch`, `bpd dap` or `bpd mcp` — a supervisor, `docker stop`, an editor's
+Stop, `kill` — reaches bpd and only bpd. left to the defaults a `SIGTERM` ended
+bpd and left the program running with no parent, so on unix bpd handles the four
+signals that ask a process to end, and `crates/bpd/src/signals.rs` is the rule:
+
+- **`SIGTERM` is passed on to every program still running, at most once to
+    each**, whether it arrives here or as DAP's `terminate` or MCP's graceful
+    `terminate`. bpd then exits as `bpd launch` and `--listen` do when a program
+    ends: as the program did. `bpd dap` over stdio and `bpd mcp` stay for their
+    client, and a second signal, with the program gone, ends them
+- **`SIGINT`, `SIGHUP` and `SIGQUIT` are passed on only when bpd is outside its
+    terminal's foreground process group.** inside it the terminal has sent the
+    program the same one, and sending it again would interrupt whatever the
+    program does about the first. a hangup takes the terminal with it, so bpd
+    remembers having had one. a terminal hanging up signals only its
+    controlling process, so when that is bpd it does pass the hangup on
+- **a signal bpd was started ignoring is left alone.** `nohup`, and a shell
+    starting a background job with no job control, start their command with it
+    ignored. a handled signal goes back to its default across `exec`, so
+    handling it would take that away from the program
+- **with no program running, bpd ends on the signal**, `128 +` its number,
+    whoever sent it: before one has started, and after every one has ended, once
+    its report of that end has had a moment to get out
+
+windows has no signal to pass on. Ctrl+C and Ctrl+Break reach every process on
+the console, so bpd leaves them to the program and carries on until it has ended
+
+`crates/bpd/tests/signals.rs` runs these against a real interpreter, on a real
+pseudo-terminal where a terminal is what sends them
+
 ## failures belong to the program
 
 a program that cannot be compiled, or a script that cannot be opened, never

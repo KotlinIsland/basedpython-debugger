@@ -127,6 +127,7 @@ mod ending {
         a_terminate_lets_a_held_program_go_so_that_it_can_handle_the_signal,
         a_disconnect_keeping_the_debuggee_lets_a_terminates_grace_run,
         a_disconnect_keeping_the_debuggee_leaves_it_running,
+        a_stop_during_a_terminates_grace_is_let_go,
     );
 }
 
@@ -2338,6 +2339,212 @@ fn a_disconnect_keeping_the_debuggee_leaves_it_running(transport: Transport) {
 }
 
 #[cfg(unix)]
+fn a_stop_during_a_terminates_grace_is_let_go(transport: Transport) {
+    // a stop that arrives after the `terminate` was answered is held like any
+    // other: its thread runs no python, so the handler it is in never finished
+    // and the program was killed when the grace ran out, its cleanup undone
+    const STOPS_WHILE_ENDING: &str = r#"import pathlib, signal, sys, time
+
+HERE = pathlib.Path(__file__).parent
+
+
+def clean_up():
+    (HERE / "cleaned").write_text("up")  # cleaning
+
+
+def on_term(signum, frame):
+    while not (HERE / "answered").exists():
+        time.sleep(0.01)
+    clean_up()
+    sys.exit(7)
+
+
+signal.signal(signal.SIGTERM, on_term)
+(HERE / "ready").write_text("")
+while True:
+    time.sleep(0.01)
+"#;
+    let fixture = Fixture::new("stops_while_ending", STOPS_WHILE_ENDING);
+    let mut client = Client::start(transport);
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line_of(STOPS_WHILE_ENDING, "# cleaning") } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+    let deadline = Instant::now() + PATIENCE;
+    while !fixture.directory().join("ready").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the program never said it was ready"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let answered = client.request("terminate", &serde_json::json!({}));
+    assert_eq!(answered["success"], true, "{answered}");
+    // the handler holds off until now, so the stop cannot come before the
+    // `terminate` was dealt with, where letting go of it was never in doubt
+    std::fs::write(fixture.directory().join("answered"), "").expect("the fixture is writable");
+    let exited = client.event("exited");
+    assert!(
+        client.seen_event("stopped"),
+        "the breakpoint in the handler was reached, or this proves nothing"
+    );
+    assert_eq!(
+        exited["body"]["exitCode"], 7,
+        "the handler's own exit, rather than a kill: {exited}"
+    );
+    assert!(fixture.directory().join("cleaned").exists());
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish_after_the_program_exited(7);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_program_killed_after_its_client_let_go_of_it_still_exits_as_it_did() {
+    // the kill comes while the session is waiting the program out, with nobody
+    // left to tell, and how it ended is all that is left of the session
+    let fixture = Fixture::new("ends_on_sigterm", ENDS_ON_SIGTERM);
+    let mut client = running_until_asked(Transport::Loopback, &fixture, false, &["ignore"]);
+    client.request("terminate", &serde_json::json!({}));
+    let left = client.request(
+        "disconnect",
+        &serde_json::json!({ "terminateDebuggee": false }),
+    );
+    assert_eq!(left["success"], true, "{left}");
+    client.finish_after_the_program_exited(128 + 9);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_client_that_hangs_up_after_a_terminate_leaves_the_program_its_grace() {
+    // the client going is an end the program does not get to handle, unless it
+    // was already asked to end: then it is the same `terminate` it was, and
+    // cutting it short is what a `disconnect` with the field unsaid no longer does
+    let fixture = Fixture::new("ends_on_sigterm", ENDS_ON_SIGTERM);
+    let mut client = running_until_asked(Transport::Stdio, &fixture, false, &["slow"]);
+    let answered = client.request("terminate", &serde_json::json!({}));
+    assert_eq!(answered["success"], true, "{answered}");
+    client.writes = Box::new(std::io::sink());
+
+    client.ended();
+    assert_eq!(
+        std::fs::read_to_string(fixture.directory().join("handled"))
+            .expect("the program's handler ran"),
+        "15\ncleaned up\n",
+        "the handler had its time"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_sigterm_after_the_program_ended_ends_bpd_rather_than_being_swallowed() {
+    // the program is gone, the client has been told and has not left, and there
+    // is nothing left for the signal to reach. saying nothing about it left a
+    // supervisor with no way to end bpd short of a kill
+    let fixture = Fixture::new("ending", ENDINGS);
+    let mut client = Client::start(Transport::Loopback);
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "args": ["code"],
+        }),
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+    client.event("exited");
+    client.event("terminated");
+
+    let adapter = client
+        .adapter
+        .lock()
+        .expect("nothing panics holding the adapter")
+        .id();
+    let sent = Command::new("kill")
+        .args(["-TERM", &adapter.to_string()])
+        .status()
+        .expect("`kill` runs");
+    assert!(sent.success());
+    assert_eq!(client.ended().code(), Some(128 + 15));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_disconnect_keeping_the_debuggee_holds_nothing_up_for_another_session() {
+    // the engine is one object behind one lock, which is why the adapter's wait
+    // is sliced. the wait for a released program was not: it held the lock until
+    // the program ended, and here the program is waiting for its child, whose
+    // session could not ask for anything to let it go
+    let fixture = Fixture::new("forker", A_FORK);
+    let mut client = Client::start(Transport::Loopback);
+    client.request(
+        "initialize",
+        &serde_json::json!({ "adapterID": "bpd", "supportsStartDebuggingRequest": true }),
+    );
+    client.request(
+        "launch",
+        &serde_json::json!({
+            "program": fixture.path(),
+            "python": interpreter(),
+            "debugChildren": true,
+        }),
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+
+    let asked = client.reverse_request("startDebugging");
+    let session = asked["arguments"]["configuration"]["bpdSession"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the configuration names the session: {asked}"));
+    let (endpoint, token) = client.listening_at();
+
+    let left = client.request(
+        "disconnect",
+        &serde_json::json!({ "terminateDebuggee": false }),
+    );
+    assert_eq!(left["success"], true, "{left}");
+
+    let mut second = Bystander::connect(endpoint);
+    second.send(
+        &format!("X-Bpd-Token: {token}\r\n"),
+        &format!(
+            r#"{{"seq":1,"type":"request","command":"attach","arguments":{{"bpdSession":{session},"program":"{}"}}}}"#,
+            fixture.path().display()
+        ),
+    );
+    let answered = second.next_message();
+    assert_eq!(answered["success"], true, "{answered}");
+    second.send(
+        "",
+        r#"{"seq":2,"type":"request","command":"configurationDone","arguments":{}}"#,
+    );
+    loop {
+        let message = second.next_message();
+        if message["type"] == "event" && message["event"] == "stopped" {
+            break;
+        }
+    }
+    second.send(
+        "",
+        r#"{"seq":3,"type":"request","command":"continue","arguments":{"threadId":1}}"#,
+    );
+    client.finish_after_the_program_exited(0);
+}
+
+#[cfg(unix)]
 #[test]
 fn a_program_that_will_not_end_on_terminate_is_ended_after_a_grace() {
     let fixture = Fixture::new("ends_on_sigterm", ENDS_ON_SIGTERM);
@@ -3654,6 +3861,65 @@ fn an_adapter_that_connects_out_hands_the_program_none_of_its_token() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn an_adapter_that_connects_out_hands_its_token_to_no_interpreter_it_runs() {
+    // the program does not inherit it, and neither does anything else bpd starts:
+    // the interpreter is the launch's to choose, and it is run to ask what it is
+    // before any program exists
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = Fixture::new("runs_under_a_wrapper", "");
+    let wrapper = fixture.directory().join("python-wrapper");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\necho \"${{BPD_DAP_TOKEN:-none}}\" >> \"{}\"\nexec \"{}\" \"$@\"\n",
+            fixture.directory().join("seen").display(),
+            interpreter()
+        ),
+    )
+    .expect("the fixture's directory is there");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("the wrapper was just written");
+
+    let mut client = Client::start(Transport::Connect);
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": wrapper }),
+    );
+    client.event("initialized");
+    client.request("configurationDone", &serde_json::json!({}));
+    client.event("exited");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish_after_the_program_exited(0);
+
+    let seen = std::fs::read_to_string(fixture.directory().join("seen"))
+        .expect("the wrapper was run at least to ask what it is");
+    assert!(
+        seen.lines().all(|line| line == "none"),
+        "an interpreter saw the token: {seen}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_token_that_is_not_unicode_is_not_reported_as_not_being_set() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let ran = Command::new(BPD)
+        .args(["dap", "--connect", "127.0.0.1:1"])
+        .env("BPD_DAP_TOKEN", std::ffi::OsStr::from_bytes(&[0xff; 80]))
+        .stdin(Stdio::null())
+        .output()
+        .expect("the binary runs");
+    let said = String::from_utf8_lossy(&ran.stderr);
+    assert_eq!(ran.status.code(), Some(2), "{said}");
+    assert!(said.contains("printable ascii"), "{said}");
+    assert!(!said.contains("is not set"), "{said}");
+}
+
 #[test]
 fn an_adapter_with_nothing_listening_where_it_was_sent_says_so_and_exits_69() {
     let free = std::net::TcpListener::bind("127.0.0.1:0")
@@ -3720,7 +3986,7 @@ fn an_adapter_its_client_turns_away_for_the_token_says_so_and_exits_69() {
         .expect("nothing panics holding it")
         .clone();
     assert_eq!(status.code(), Some(69), "{said}");
-    assert!(said.contains("without sending a request"), "{said}");
+    assert!(said.contains("sent no request"), "{said}");
 }
 
 /// the interpreter the built agent matches

@@ -24,8 +24,6 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::Arc;
-
-use crate::ending::Started;
 use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
@@ -39,6 +37,7 @@ use bpd_core::{
 use bpd_protocol::env;
 use bpd_protocol::message::{FromAgent, FromEngine, Remapping};
 
+use crate::ending::Started;
 use crate::{Error, Interrupt, Listener, Result, Session, agent, mapping};
 
 /// the [`Reporting`] sink for a request whose answer is what is waited for
@@ -1466,7 +1465,7 @@ impl Debuggee {
                     let Some(child) = self.attached[at].child.as_ref() else {
                         return Ok(Running::Ended { rebound });
                     };
-                    let status = child.child().wait().map_err(|source| Error::Spawn {
+                    let status = child.wait().map_err(|source| Error::Spawn {
                         interpreter: PathBuf::from("the debuggee"),
                         source,
                     })?;
@@ -2906,7 +2905,7 @@ fn spawned_here(
     let stop = match session.expect_stop() {
         Ok(stop) => stop,
         Err(Error::AgentGone { .. }) => {
-            let status = started.child().wait().map_err(|source| Error::Spawn {
+            let status = started.wait().map_err(|source| Error::Spawn {
                 interpreter: interpreter.to_start().to_path_buf(),
                 source,
             })?;

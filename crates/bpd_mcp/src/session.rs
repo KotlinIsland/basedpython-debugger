@@ -88,6 +88,13 @@ pub trait Session {
     /// a `terminate` that quietly did nothing is one a client reads as a program
     /// that has been ended
     fn terminate(&mut self, session: Option<SessionId>) -> Result<(), Failed>;
+
+    /// ask one session's debuggee to end, the way it can handle: a `SIGTERM`, at
+    /// most once
+    ///
+    /// nothing waits for it to end. refused for a session bpd did not start, as
+    /// [`Self::terminate`] is, and on a platform with no such signal
+    fn ask_to_end(&mut self, session: Option<SessionId>) -> Result<(), Failed>;
 }
 
 /// which of its own streams the program wrote to

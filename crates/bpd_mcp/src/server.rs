@@ -753,8 +753,11 @@ impl<'a> Server<'a> {
                 }
             }
             "terminate" => {
-                let args: SessionOnly = parse(name, arguments)?;
+                let args: TerminateArgs = parse(name, arguments)?;
                 let named = self.session_named(args.session, "ending the program")?;
+                if args.graceful {
+                    return self.ask_to_end(args.session, named);
+                }
                 let last = self.session_ids().len() <= 1;
                 let held = self
                     .session
@@ -775,6 +778,31 @@ impl<'a> Server<'a> {
     }
 
     // ---- the tools that need more than one request -----------------------
+
+    /// the graceful `terminate`: the signal, and then everything held let go
+    ///
+    /// a thread held at a stop runs no python, the program's handler among it.
+    /// the session goes on and the agent is the one that waits, because a tool
+    /// call is not somewhere a program's cleanup can take as long as it takes
+    fn ask_to_end(&mut self, given: Option<u64>, named: Option<SessionId>) -> Answered {
+        let held = self
+            .session
+            .as_mut()
+            .ok_or_else(|| NO_PROGRAM.to_string())?;
+        held.ask_to_end(named)
+            .map_err(|error| describe(error.as_ref()))?;
+        let holding = held
+            .held()
+            .iter()
+            .any(|stop| named.is_none_or(|named| stop.session == named));
+        if holding {
+            match self.ask_in(given, Request::Resume { which: Which::All })? {
+                Response::Resumed { .. } => {}
+                other => unreachable!("a resume was answered with {other:?}"),
+            }
+        }
+        Ok(serde_json::json!({ "asked": true }))
+    }
 
     fn launch(&mut self, args: Launch) -> Answered {
         if self.session.is_some() {
@@ -1686,6 +1714,15 @@ struct SessionOnly {
     session: Option<u64>,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminateArgs {
+    #[serde(default)]
+    session: Option<u64>,
+    #[serde(default)]
+    graceful: bool,
+}
+
 /// what a forked child of the program should do
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2438,7 +2475,7 @@ mod tests {
         "run_script" => RunScript,
         "state" => StateArgs,
         "diff" => DiffArgs,
-        "terminate" => SessionOnly,
+        "terminate" => TerminateArgs,
     }
 
     #[test]

@@ -716,11 +716,24 @@ impl Session {
             looked = true;
             #[cfg(not(unix))]
             let left = left.max(Self::A_LOOK);
-            self.reading
-                .set_read_timeout(Some(left))
-                .map_err(|source| Error::Control {
-                    source: frame::Error::Io(source),
-                })?;
+            match self.reading.set_read_timeout(Some(left)) {
+                Ok(()) => {}
+                // macos refuses the option on a socket whose peer has gone, with
+                // `EINVAL`, where linux sets it and the read says so. it is the
+                // end of the session like any other, and the read that follows
+                // this answers `None` — measured on a program killed while it
+                // was being waited for, reported as a broken connection
+                Err(error)
+                    if cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput =>
+                {
+                    return Ok(true);
+                }
+                Err(source) => {
+                    return Err(Error::Control {
+                        source: frame::Error::Io(source),
+                    });
+                }
+            }
 
             let mut first = [0u8; 1];
             match self.reading.peek(&mut first) {
@@ -949,8 +962,8 @@ impl Interrupt {
     /// terminate by sending a software signal which the debuggee intercepts in
     /// order to clean things up properly before terminating itself"*. it is sent
     /// at most once, whether this asks first or a `SIGTERM` bpd was sent and
-    /// passed on did — see [`crate::ending`] — and `false` says it was not sent
-    /// this time: the program has ended, or was already asked
+    /// passed on did — see [`crate::ending`] — and not at all to a program that
+    /// has ended
     ///
     /// nothing here waits for it to end. whoever asked decides how long the
     /// program gets, and [`Self::terminate`] is what ends one that took longer
@@ -961,14 +974,15 @@ impl Interrupt {
     ///
     /// when bpd did not start the process, for the reason [`Self::terminate`]
     /// refuses one
-    pub fn ask_to_end(&mut self) -> Result<bool> {
+    pub fn ask_to_end(&mut self) -> Result<()> {
         let Some(held) = self.child.as_ref() else {
             return Err(bpd_core::Error::NotOurProcess {
                 session: self.session,
             }
             .into());
         };
-        Ok(ending::ask_to_end(held))
+        ending::ask_to_end(held);
+        Ok(())
     }
 
     /// end the debuggee, whatever it is doing

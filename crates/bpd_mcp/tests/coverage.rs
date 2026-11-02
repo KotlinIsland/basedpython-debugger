@@ -81,6 +81,8 @@ struct Recorder {
     targets: Vec<Option<u32>>,
     /// how much of its scope each scope read asked for
     selections: Vec<bpd_core::Selection>,
+    /// whether the program was asked to end rather than ended
+    asked_to_end: bool,
     /// the exception rules the last `set_exception_breakpoints` carried
     classes: Vec<bpd_core::ExceptionClass>,
     /// what every request was addressed to, beside what it asked for
@@ -177,6 +179,12 @@ fn the_launcher_and_statements_reach_the_session_as_they_were_asked() {
         "`{}` never reached the session: {:?}",
         Facet::ScopeSelection.name(),
         recorded.selections
+    );
+
+    assert!(
+        recorded.asked_to_end,
+        "`{}` never reached the session",
+        Facet::GracefulEnd.name()
     );
 
     // statements, read off what the evaluation really asked
@@ -726,6 +734,7 @@ fn drive_with(asked: &Asked, extra: &[(&str, serde_json::Value)], ending: Told) 
 
     // a method this server does not implement, under an id the test can find
     client.under(&serde_json::json!(9_001), "completion/complete");
+    client.call("terminate", &serde_json::json!({ "graceful": true }));
     client.call("terminate", &serde_json::json!({}));
 
     let Client { writes, reads, .. } = client;
@@ -1427,6 +1436,14 @@ impl Session for FakeSession {
 
     fn terminate(&mut self, _session: Option<SessionId>) -> Result<(), Failed> {
         self.held.clear();
+        Ok(())
+    }
+
+    fn ask_to_end(&mut self, _session: Option<SessionId>) -> Result<(), Failed> {
+        self.asked
+            .lock()
+            .expect("the recorder is not poisoned")
+            .asked_to_end = true;
         Ok(())
     }
 

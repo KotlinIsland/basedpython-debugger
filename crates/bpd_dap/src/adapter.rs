@@ -244,6 +244,12 @@ fn read_client(
     loop {
         let message = match reader.next_message() {
             Ok(Some(message)) => message,
+            // a client going during a `terminate` is a client that has said how
+            // it wants the program ended and is not staying to watch: the grace
+            // runs its course, which is what the session waits out when this
+            // thread has gone without saying the session is stopping
+            Ok(None) if terminating => return Ok(()),
+            Err(error) if terminating => return Err(error),
             Ok(None) => {
                 // the client vanished without saying so. the debuggee is not
                 // left running with nothing watching it — and a failure here is
@@ -466,6 +472,11 @@ const REACHING: &str =
     "nothing panics holding the interrupt: every path through it is a send or a kill";
 
 /// how the DAP adapter answers one client
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a separate fact about the session that the protocol's order \
+              of events decides, and they do not make up one state machine"
+)]
 struct Adapter {
     output: Output,
     interrupt: Held,
@@ -507,6 +518,9 @@ struct Adapter {
     /// session things, so a gate that was already open by then would announce
     /// the entry stop of a program the client asked to run straight past
     begun: bool,
+    /// whether a `terminate` has asked the program to end, so that whatever
+    /// stops from here on is let go — see [`Self::terminate`]
+    ending: bool,
     /// how this connection's session came to it — see [`Arrival`]
     arrival: Arrival,
     exited: bool,
@@ -590,6 +604,7 @@ impl Adapter {
             configuration: None,
             configured: false,
             begun: false,
+            ending: false,
             arrival: Arrival::Launched,
             exited: false,
             program_exit: None,
@@ -616,6 +631,8 @@ impl Adapter {
                 return Ok(Ended::WithTheClient);
             }
 
+            self.let_go_of_what_stopped_while_ending()?;
+
             // whether the client has already said something. it is taken off
             // the channel into `deferred` rather than into hand, so that
             // whatever ends this turn early — a disconnect, the program going —
@@ -627,7 +644,7 @@ impl Adapter {
                         true
                     }
                     Err(TryRecvError::Empty) => false,
-                    Err(TryRecvError::Disconnected) => return Ok(Ended::WithTheClient),
+                    Err(TryRecvError::Disconnected) => return self.client_left(),
                 }
             } else {
                 true
@@ -706,11 +723,11 @@ impl Adapter {
                         self.finish(looked)?;
                         continue;
                     }
-                    Err(RecvTimeoutError::Disconnected) => return Ok(Ended::WithTheClient),
+                    Err(RecvTimeoutError::Disconnected) => return self.client_left(),
                 }
             } else {
                 let Ok(message) = commands.recv() else {
-                    return Ok(Ended::WithTheClient);
+                    return self.client_left();
                 };
                 message
             };
@@ -747,8 +764,7 @@ impl Adapter {
             // lets the program go — see [`Self::release`] — and what is left is
             // waiting for it to end
             if message.command.as_deref() == Some("disconnect") {
-                self.wait_out();
-                return Ok(Ended::WithTheClient);
+                return self.released(handled);
             }
             match handled {
                 Ok(()) => {}
@@ -787,6 +803,19 @@ impl Adapter {
                 Err(Aborted::Wire(error)) => return Err(error),
             }
         }
+    }
+
+    /// a stop that arrived after a `terminate` was answered holds a thread that
+    /// runs no python, and the program's handler may be what that thread is in.
+    /// nothing else would let it go, and the grace would end the program with
+    /// its cleanup undone
+    fn let_go_of_what_stopped_while_ending(&mut self) -> Result<(), crate::wire::Error> {
+        if !self.ending || !self.holding() {
+            return Ok(());
+        }
+        let let_go = self.resume(Which::All);
+        self.ending = let_go.is_ok();
+        self.finish(let_go)
     }
 
     /// read whatever the program has said while the client was quiet
@@ -3117,7 +3146,8 @@ impl Adapter {
     /// to end, by the thread that reads the client — see `read_client`
     ///
     /// a thread held at a stop runs none of the program, the signal handler
-    /// among it, so everything held is let go. a program not let go at all yet
+    /// among it, so everything held is let go, now and for as long as the
+    /// program takes. a program not let go at all yet
     /// has run no line of its own and installed no handler, so it is ended.
     /// and with no program, there is nothing for the session to wait on, and
     /// it is over
@@ -3134,6 +3164,7 @@ impl Adapter {
             self.respond(message, None)?;
             return self.event("terminated", &serde_json::json!({}));
         }
+        self.ending = true;
         if self.holding() {
             self.resume(Which::All)?;
         }
@@ -3149,8 +3180,6 @@ impl Adapter {
     /// waits for the program to end — bpd is its parent, and leaving it would
     /// be leaving it with nobody to reap it or say how it ended
     fn release(&mut self, message: &Incoming) -> Answered {
-        // the client is answered whatever clearing came to: a stop it did not
-        // prevent is let go by the wait all the same
         let cleared = if self.session.is_some() && !self.exited {
             self.ask(Request::SetBreakpoints {
                 breakpoints: Vec::new(),
@@ -3166,21 +3195,50 @@ impl Adapter {
         } else {
             Ok(())
         };
+        // the client is answered whatever clearing came to, and told: a stop it
+        // did not prevent is let go by the wait all the same
+        self.finish(cleared).map_err(Aborted::Wire)?;
         self.respond(message, None)?;
-        self.event("terminated", &serde_json::json!({}))?;
-        cleared
+        self.event("terminated", &serde_json::json!({}))
+    }
+
+    /// a `disconnect` that lets the program go has been answered, and what is
+    /// left is the program
+    ///
+    /// what answering it came to is reported after the wait: a client that could
+    /// not be told is no reason to leave the program
+    fn released(&mut self, answered: Answered) -> Result<Ended, crate::wire::Error> {
+        let answered = self.finish(answered);
+        let ended = self.client_left()?;
+        answered?;
+        Ok(ended)
+    }
+
+    /// the thread reading the client has gone, and what is left is the program
+    /// the client left behind, unless it was ended on the way out
+    fn client_left(&mut self) -> Result<Ended, crate::wire::Error> {
+        if !self.stopping.load(Ordering::Relaxed) {
+            self.wait_out()?;
+        }
+        Ok(Ended::WithTheClient)
     }
 
     /// run a released program to its end, letting go of anything that stops
     ///
-    /// nobody is told anything: the client has disconnected. what is kept is
-    /// how the program exited, which is this process's exit under `--listen`
-    fn wait_out(&mut self) {
+    /// nobody is told anything about the program: the client has disconnected.
+    /// what is kept is how it exited, which is this process's exit under
+    /// `--listen`, and losing that is the one thing that has to be said, so it
+    /// is an error for whoever started this process to read
+    ///
+    /// waited on in slices for the reason [`WAIT_SLICE`] gives: the engine is one
+    /// object behind one lock, and a second connection needs it for as long as
+    /// this program runs
+    fn wait_out(&mut self) -> Result<(), crate::wire::Error> {
         if self.exited {
-            return;
+            return Ok(());
         }
         let Some(session) = self.session.as_mut() else {
-            return;
+            return Ok(());
         };
         // a stop the cleared set did not prevent — the entry stop of a program
         // never let go, a thread already on its way into one, a program that
@@ -3195,20 +3253,26 @@ impl Adapter {
         let_go(session);
         loop {
             match session.dispatch(
-                Addressed::unnamed(Request::Wait { deadline: None }),
+                Addressed::unnamed(Request::Wait {
+                    deadline: Some(WAIT_SLICE),
+                }),
                 &mut Unheard,
             ) {
                 Ok(Response::Ran(Running::Exited { status, .. })) => {
                     self.program_exit = Some(status);
-                    return;
+                    return Ok(());
                 }
-                Ok(Response::Ran(
-                    Running::Stopped { .. }
-                    | Running::Finishing { .. }
-                    | Running::StillRunning { .. },
-                )) => let_go(session),
-                Ok(Response::Ran(Running::Ended { .. })) | Err(_) => return,
+                Ok(Response::Ran(Running::Stopped { .. } | Running::Finishing { .. })) => {
+                    let_go(session);
+                }
+                Ok(Response::Ran(Running::StillRunning { .. })) => {}
+                Ok(Response::Ran(Running::Ended { .. })) => return Ok(()),
                 Ok(other) => unreachable!("a wait was answered with {other:?}"),
+                Err(error) => {
+                    return Err(crate::wire::Error::ProgramLost {
+                        reason: describe(error.as_ref()),
+                    });
+                }
             }
         }
     }
@@ -4704,7 +4768,6 @@ fn rendered_binding(resolved: &Resolved, requested: &SourceBreakpoint) -> serde_
     }
 }
 
-/// one DAP variable
 /// what a scope read covers to list what is at `path` in it
 ///
 /// only the name being opened, and objects only down to the level being
@@ -4737,6 +4800,7 @@ fn left_out(omitted: &bpd_core::Omitted) -> serde_json::Value {
     })
 }
 
+/// one DAP variable
 fn variable(name: &str, value: &Value, reference: i64) -> serde_json::Value {
     serde_json::json!({
         "name": name,

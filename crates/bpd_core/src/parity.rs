@@ -273,11 +273,18 @@ pub enum Facet {
     /// of it, and the byte budget goes on `__builtins__` before it reaches the
     /// name that was asked about
     ScopeSelection,
+
+    /// asking the program to end the way it can handle, rather than ending it
+    ///
+    /// not on [`Request`] because it has to reach a program that is running, so
+    /// it goes through the engine's `Interrupt` — and a capability all the same:
+    /// a front end without it can only kill, and a program's cleanup never runs
+    GracefulEnd,
 }
 
 impl Facet {
     /// every facet, for a test that has to cover all of them
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::HitCondition,
         Self::ValueBounds,
         Self::Session,
@@ -298,6 +305,7 @@ impl Facet {
         Self::StepTarget,
         Self::Suspend,
         Self::ScopeSelection,
+        Self::GracefulEnd,
     ];
 
     /// what to call this capability in a message about it
@@ -324,6 +332,7 @@ impl Facet {
             Self::StepTarget => "stepping into one chosen call of the line",
             Self::Suspend => "what a breakpoint's hit holds",
             Self::ScopeSelection => "reading some of a scope's names, and objects only so far down",
+            Self::GracefulEnd => "asking the program to end the way it can handle",
             Self::ExceptionClassLibraries => {
                 "a class's exception rule ignoring library files on its own"
             }

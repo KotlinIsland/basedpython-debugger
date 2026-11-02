@@ -774,6 +774,9 @@ fn indented_to(lines: &[&[u8]], first: u32, reach: u32, next: u32) -> u32 {
 
 /// whether a line starts a `def`, an `async def`, a `class` or a decorator
 fn opens_a_block(line: &[u8]) -> bool {
+    // the first line of a file may begin with the mark cpython's tokenizer
+    // skips, and it is still the line the `def` is on
+    let line = line.strip_prefix(b"\xef\xbb\xbf").unwrap_or(line);
     let line = line.trim_ascii_start();
     if line.starts_with(b"@") {
         return true;
@@ -887,6 +890,7 @@ mod tests {
         assert_eq!(indented_to(&asynchronous, 1, 2, 4), 3);
         let lambda = lines("total = map(lambda y:\n    y + 1,\n    # comment\n    ys)\n");
         assert_eq!(indented_to(&lambda, 1, 2, 4), 2);
+        assert!(opens_a_block(b"\xef\xbb\xbfdef f():"));
         assert!(!opens_a_block(b"definitely = 1"));
         assert!(!opens_a_block(b"classes = []"));
     }

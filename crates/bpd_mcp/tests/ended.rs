@@ -96,6 +96,10 @@ impl Session for NotOurs {
     fn terminate(&mut self, _session: Option<SessionId>) -> Result<(), Failed> {
         Err("bpd did not start that process and is not its parent".into())
     }
+
+    fn ask_to_end(&mut self, _session: Option<SessionId>) -> Result<(), Failed> {
+        Err("this fake started no process and is not its parent".into())
+    }
 }
 
 struct Fake;

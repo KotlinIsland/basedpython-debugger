@@ -781,11 +781,13 @@ pub fn tools() -> Vec<Tool> {
                                         name the scope does not have is not in \
                                         the answer" },
                     "objects": { "type": "integer", "minimum": 0,
-                        "description": "open objects only this many levels \
-                                        down, the scope's own values being \
-                                        level 0. an object further down is \
-                                        `unopened`, while containers there are \
-                                        still read to `detail.depth`" },
+                        "description": "the first level at which objects \
+                                        are not opened, the scope's own values \
+                                        being level 0: `0` opens none, `1` \
+                                        opens the scope's own and not what they \
+                                        hold. an object at that level or below \
+                                        is `unopened`, while containers there \
+                                        are still read to `detail.depth`" },
                 }),
                 &["scope"],
             ),
@@ -1563,9 +1565,23 @@ pub fn tools() -> Vec<Tool> {
                 resume: a program that is running cannot be asked for a stack \
                 or a value, so this is what is left when it will not stop on its \
                 own and will not pause. the \
-                session has no program after it."
+                session has no program after it. \
+                with `graceful`, ask instead: the program is sent a `SIGTERM` it \
+                can handle, once, and every held thread is let go so that it can. \
+                nothing is ended by this and the session goes on, so call `wait` \
+                for how it exits, and `terminate` without `graceful` if it does \
+                not."
                 .to_string(),
-            schema: object(serde_json::json!({ "session": integer(SESSION) }), &[]),
+            schema: object(
+                serde_json::json!({
+                    "session": integer(SESSION),
+                    "graceful": { "type": "boolean",
+                        "description": "ask the program to end the way it can \
+                                        handle rather than killing it. refused on \
+                                        windows, which has no such signal" },
+                }),
+                &[],
+            ),
         },
     ]
 }

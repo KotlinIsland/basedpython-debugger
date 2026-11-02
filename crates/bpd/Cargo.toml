@@ -23,6 +23,7 @@ clap = { workspace = true }
 # passing on the signals that ask bpd to end, and telling whether a terminal
 # sent the program the same one already — see `src/signals.rs`
 [target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 rustix = { workspace = true, features = ["fs", "termios"] }
 signal-hook = { workspace = true }
 

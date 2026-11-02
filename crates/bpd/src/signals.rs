@@ -23,11 +23,17 @@
 //!   anything, and all four are passed on
 //! - **to the program only**, and then bpd carries on as it does when a program
 //!   ends: it reports how, and exits as the program did
+//! - **a signal bpd was started ignoring is left alone.** `nohup`, and a shell
+//!   starting a background job with no job control, start their command with
+//!   the signal ignored, and that is inherited across `exec` where a handled
+//!   signal goes back to its default. handling it would take the protection
+//!   away from the program, and then send it the signal
 //!
-//! before any program has started there is nothing to pass a signal on to, and
-//! bpd exits with `128` and its number, the way it would have ended without a
-//! handler. a program held at a stop handles a signal when it is let go — a
-//! client's `terminate` is what lets it go
+//! with no program running there is nothing to pass a signal on to, whoever
+//! sent it, and bpd exits with `128` and its number, the way it would have ended
+//! without a handler. after a program has ended that waits a moment, for what
+//! bpd is about to say about how it ended. a program held at a stop handles a
+//! signal when it is let go — a client's `terminate` is what lets it go
 //!
 //! on windows, Ctrl+C and Ctrl+Break reach every process attached to the
 //! console, the program among them, so there is nothing to pass on: bpd leaves
@@ -38,13 +44,27 @@ pub(crate) use platform::install;
 
 #[cfg(unix)]
 mod platform {
+    use std::io;
+    use std::time::Duration;
+
     use bpd_engine::{Ending, Passed};
     use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
     use signal_hook::iterator::Signals;
 
+    /// how long bpd lets its report of a program's end get out, when a signal
+    /// comes after that end
+    const LAST_WORD: Duration = Duration::from_secs(1);
+
     /// handle the signals that ask bpd to end, from now until it exits
-    pub(crate) fn install() -> std::io::Result<()> {
-        let mut signals = Signals::new([SIGTERM, SIGINT, SIGHUP, SIGQUIT])?;
+    pub(crate) fn install() -> io::Result<()> {
+        let mut handled = Vec::new();
+        for signal in [SIGTERM, SIGINT, SIGHUP, SIGQUIT] {
+            if !started_ignoring(signal)? {
+                handled.push(signal);
+            }
+        }
+        let mut signals = Signals::new(handled)?;
+        let had_a_terminal = terminal_foreground().is_some();
         std::thread::Builder::new()
             .name("bpd-signals".to_string())
             .spawn(move || {
@@ -56,37 +76,90 @@ mod platform {
                         SIGQUIT => Ending::Quit,
                         other => unreachable!("only the four were registered, and {other} came"),
                     };
-                    if ending != Ending::Terminate && in_terminal_foreground() {
-                        continue;
-                    }
-                    if bpd_engine::pass_on(ending) == Passed::NothingStarted {
-                        #[expect(
-                            clippy::exit,
-                            reason = "the signal's default, which this handler \
-                                      replaced: with no program, bpd ends on it \
-                                      as it would have without one"
-                        )]
-                        std::process::exit(128 + signal);
+                    let send =
+                        ending == Ending::Terminate || !terminal_sent(ending, had_a_terminal);
+                    match bpd_engine::pass_on(ending, send) {
+                        Passed::Running => {}
+                        Passed::NothingStarted => end_on(signal),
+                        Passed::Over => {
+                            std::thread::sleep(LAST_WORD);
+                            end_on(signal);
+                        }
                     }
                 }
             })?;
         Ok(())
     }
 
-    /// whether bpd is in the foreground process group of its controlling
-    /// terminal, the group a terminal sends Ctrl+C, Ctrl+\ and a hangup to
-    ///
-    /// a process with no controlling terminal is in nobody's foreground, and
-    /// opening `/dev/tty` is how it finds out it has none. which process sent
-    /// a signal does not settle it: macos names the process that wrote the
-    /// Ctrl+C to the terminal as its sender, just as it names a `kill`'s
-    fn in_terminal_foreground() -> bool {
-        use rustix::fs::{Mode, OFlags, open};
-        let Ok(terminal) = open("/dev/tty", OFlags::RDONLY | OFlags::NOCTTY, Mode::empty()) else {
-            return false;
+    /// the signal's default, which the handler replaced: with no program, bpd
+    /// ends on it as it would have without one
+    fn end_on(signal: i32) -> ! {
+        #[expect(
+            clippy::exit,
+            reason = "bpd is ending on a signal, on a thread that owns nothing \
+                      the main thread would have to give back"
+        )]
+        std::process::exit(128 + signal)
+    }
+
+    /// whether this process was started with `signal` ignored
+    #[expect(
+        unsafe_code,
+        reason = "`sigaction` is the only way to read a signal's disposition, and \
+                  neither `signal-hook` nor `rustix` has a safe way to ask"
+    )]
+    fn started_ignoring(signal: i32) -> io::Result<bool> {
+        // SAFETY: a zeroed `sigaction` is a valid value of that plain struct,
+        // and with a null new action the call only writes through the pointer
+        // it is given, which is to a live local
+        let (read, current) = unsafe {
+            let mut current: libc::sigaction = std::mem::zeroed();
+            let read = libc::sigaction(signal, std::ptr::null(), &raw mut current);
+            (read, current)
         };
-        rustix::termios::tcgetpgrp(&terminal)
-            .is_ok_and(|foreground| foreground == rustix::process::getpgrp())
+        if read != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(current.sa_sigaction == libc::SIG_IGN)
+    }
+
+    /// whether the terminal has already sent the program this signal, because
+    /// bpd and the program are in the group it sends to
+    ///
+    /// which process sent a signal does not settle it: macos names the process
+    /// that wrote the Ctrl+C to the terminal as its sender, just as it names a
+    /// `kill`'s
+    fn terminal_sent(ending: Ending, had_a_terminal: bool) -> bool {
+        let hangup = ending == Ending::Hangup;
+        // a hung up terminal signals its controlling process alone, on linux and
+        // macos both, and its foreground group only hears once that process has
+        // gone. so when that process is bpd nothing else has been sent anything.
+        // asked first, because linux has already taken the terminal from the
+        // whole session by the time the signal arrives, and `/dev/tty` says
+        // nothing more
+        let controlling =
+            rustix::process::getsid(None).is_ok_and(|session| session == rustix::process::getpid());
+        if hangup && controlling {
+            return false;
+        }
+        let Some(foreground) = terminal_foreground() else {
+            // a hangup takes the terminal with it, so it can no longer say who
+            // was in its foreground. what is sent then, after the controlling
+            // process has gone, goes to the group, the program's as well as bpd's
+            return hangup && had_a_terminal;
+        };
+        foreground == rustix::process::getpgrp()
+    }
+
+    /// the foreground process group of bpd's controlling terminal, the group a
+    /// terminal sends Ctrl+C, Ctrl+\ and a hangup to
+    ///
+    /// a process with no controlling terminal has none, and opening `/dev/tty`
+    /// is how it finds out
+    fn terminal_foreground() -> Option<rustix::process::Pid> {
+        use rustix::fs::{Mode, OFlags, open};
+        let terminal = open("/dev/tty", OFlags::RDONLY | OFlags::NOCTTY, Mode::empty()).ok()?;
+        rustix::termios::tcgetpgrp(&terminal).ok()
     }
 }
 

@@ -45,6 +45,16 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// a program the client let go of could not be waited for to its end
+    #[error(
+        "bpd lost the program its client let go of, and cannot say how it ended: \
+         {reason}"
+    )]
+    ProgramLost {
+        /// why the wait for it failed
+        reason: String,
+    },
+
     /// a header line was not `Name: value`
     #[error("`{line}` is not a `Name: value` header line")]
     Header {

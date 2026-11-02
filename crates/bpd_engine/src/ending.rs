@@ -10,12 +10,15 @@
 //! a program is signalled only while it is unreaped. the lock on its [`Child`]
 //! is held across the check and the signal, so it cannot be reaped in between —
 //! a reaped process id is one the system can hand to another process, which the
-//! signal would then reach
+//! signal would then reach. and it is **never held across waiting for the
+//! program**, see [`Started::wait`]: a program still running is exactly the one
+//! a signal has to be able to reach
 
 use std::io;
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::time::Duration;
 
 /// a program bpd started
 #[derive(Debug)]
@@ -35,6 +38,29 @@ impl Started {
         // a `Child` is never left half-written: every path through it is one
         // call into std
         self.child.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// wait for it to end, and reap it
+    ///
+    /// looked at rather than blocked on, because `Child::wait` would hold the
+    /// lock for as long as the program runs, and everything that ends a program
+    /// goes through that lock. the connection closing is what sends the engine
+    /// here and a process can run on after that, by closing the descriptor or
+    /// in a slow exit: blocking made it the one program nothing could end
+    pub(crate) fn wait(&self) -> io::Result<ExitStatus> {
+        let mut pause = Duration::from_millis(1);
+        loop {
+            if let Some(status) = self.child().try_wait()? {
+                return Ok(status);
+            }
+            std::thread::sleep(pause);
+            pause = (pause * 2).min(Duration::from_millis(20));
+        }
+    }
+
+    /// whether it has not ended yet
+    fn running(&self) -> bool {
+        matches!(self.child().try_wait(), Ok(None))
     }
 }
 
@@ -76,12 +102,6 @@ pub enum Ending {
 }
 
 impl Ending {
-    /// its number, which is what `128 +` an exit is made of
-    #[cfg(unix)]
-    pub fn number(self) -> i32 {
-        self.signal().as_raw()
-    }
-
     #[cfg(unix)]
     fn signal(self) -> rustix::process::Signal {
         use rustix::process::Signal;
@@ -94,76 +114,81 @@ impl Ending {
     }
 }
 
-/// what passing an ending on came to
+/// what is left for a signal to reach
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Passed {
-    /// bpd has started no program, so there is nothing to pass it on to
+    /// bpd has started no program
     NothingStarted,
-    /// every program bpd started had already ended, or had already been asked
-    Nowhere,
-    /// it reached this many programs
-    To(usize),
+    /// every program bpd started has ended
+    Over,
+    /// a program is running, and has been passed the signal if it was to be
+    Running,
 }
 
 /// pass a signal bpd was sent on to every program it started that is still
-/// running
+/// running, or only say whether there is one when `send` is false — which is
+/// a signal something else has already sent them
 ///
 /// a `SIGTERM` reaches each program at most once, whichever route asked first —
 /// see [`ask_to_end`]. the others are passed on every time: they are not
 /// requests to end bpd's way but the program's own keys and terminal
-pub fn pass_on(ending: Ending) -> Passed {
+pub fn pass_on(ending: Ending, send: bool) -> Passed {
     let all = started();
     if all.is_empty() {
         return Passed::NothingStarted;
     }
-    let reached = all
+    let running: Vec<Arc<Started>> = all
         .iter()
         .filter_map(Weak::upgrade)
-        .filter(|started| signal(started, ending))
-        .count();
-    if reached == 0 {
-        Passed::Nowhere
-    } else {
-        Passed::To(reached)
+        .filter(|started| started.running())
+        .collect();
+    if running.is_empty() {
+        return Passed::Over;
     }
+    if send {
+        for started in &running {
+            signal(started, ending);
+        }
+    }
+    Passed::Running
 }
 
 /// ask one program to end, the graceful way: a `SIGTERM` it can handle
 ///
-/// `false` when it was not sent — the program has ended, or was already asked
-pub(crate) fn ask_to_end(started: &Started) -> bool {
-    signal(started, Ending::Terminate)
+/// nothing is sent to a program that has ended or was already asked
+pub(crate) fn ask_to_end(started: &Started) {
+    signal(started, Ending::Terminate);
 }
 
 #[cfg(unix)]
-fn signal(started: &Started, ending: Ending) -> bool {
+fn signal(started: &Started, ending: Ending) {
     let mut child = started.child();
     // `try_wait` reaps a program that has ended and std keeps its status for
     // the `wait` that comes after. one still running stays unreaped for as long
     // as the lock is held, so its id is still its own when the signal goes
     if !matches!(child.try_wait(), Ok(None)) {
-        return false;
+        return;
     }
     if ending == Ending::Terminate
         && started
             .asked
             .swap(true, std::sync::atomic::Ordering::SeqCst)
     {
-        return false;
+        return;
     }
-    let Some(pid) = i32::try_from(child.id())
+    let pid = i32::try_from(child.id())
         .ok()
         .and_then(rustix::process::Pid::from_raw)
-    else {
-        return false;
-    };
-    rustix::process::kill_process(pid, ending.signal()).is_ok()
+        .expect("the id of a process bpd started and has not reaped is a positive `pid_t`");
+    let sent = rustix::process::kill_process(pid, ending.signal());
+    debug_assert!(
+        sent.is_ok(),
+        "a child that has not been reaped can be signalled, and this was {sent:?}"
+    );
 }
 
 /// windows has no signal to pass on: Ctrl+C and Ctrl+Break reach every process
 /// on the console, the program among them, and there is nothing a process can
 /// send another that it may handle and then end on its own
 #[cfg(not(unix))]
-const fn signal(_started: &Started, _ending: Ending) -> bool {
-    false
-}
+const fn signal(_started: &Started, _ending: Ending) {}

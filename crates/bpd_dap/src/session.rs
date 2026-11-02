@@ -129,11 +129,11 @@ pub trait Interrupt: Send {
     fn deliver(&mut self, request: &Request) -> Result<(), Failed>;
 
     /// ask the debuggee to end, the way it can handle — a `SIGTERM`, at most
-    /// once — and say whether it was asked this time
+    /// once
     ///
     /// nothing waits for it to end: [`Self::terminate`] is what ends one that
     /// takes longer than the adapter gives it
-    fn ask_to_end(&mut self) -> Result<bool, Failed>;
+    fn ask_to_end(&mut self) -> Result<(), Failed>;
 
     /// end the debuggee
     fn terminate(&mut self) -> Result<(), Failed>;

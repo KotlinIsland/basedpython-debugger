@@ -176,6 +176,8 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
 
         Facet::ScopeSelection => Reach::Direct("`names` and `objects` on the `variables` tool"),
 
+        Facet::GracefulEnd => Reach::Direct("`graceful` on the `terminate` tool"),
+
         Facet::ValueBounds => Reach::Direct(
             "the `detail` object of `variables`, `evaluate`, `set_variable` and \
              `state`, which is per call rather than per session",

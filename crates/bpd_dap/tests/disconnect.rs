@@ -101,13 +101,26 @@ impl Interrupt for Reaching {
         Err(format!("this fake is never interrupted, and got {request:?}").into())
     }
 
-    fn ask_to_end(&mut self) -> Result<bool, Failed> {
+    fn ask_to_end(&mut self) -> Result<(), Failed> {
         Err("this fake started no process and is not its parent".into())
     }
 
     fn terminate(&mut self) -> Result<(), Failed> {
         Err("this fake started no process and is not its parent".into())
     }
+}
+
+/// the stop a program launched with `stopOnEntry` is held at
+fn entry_stop() -> Stop {
+    Reported {
+        stop: 1,
+        thread: THREAD,
+        reason: StopReason::Entry,
+        holding: Vec::new(),
+    }
+    .in_session(SessionId::new(
+        std::num::NonZeroU64::new(7).expect("7 is not zero"),
+    ))
 }
 
 struct Fake {
@@ -130,17 +143,7 @@ impl Launcher for Fake {
         Ok(Started::Stopped(Box::new(Willing {
             entered,
             released,
-            held: vec![
-                Reported {
-                    stop: 1,
-                    thread: THREAD,
-                    reason: StopReason::Entry,
-                    holding: Vec::new(),
-                }
-                .in_session(SessionId::new(
-                    std::num::NonZeroU64::new(7).expect("7 is not zero"),
-                )),
-            ],
+            held: vec![entry_stop()],
         })))
     }
 
@@ -155,6 +158,107 @@ impl Launcher for Fake {
     fn attach(&self, session: u64) -> Result<Started, Failed> {
         Err(format!("this fake holds no session {session}").into())
     }
+}
+
+/// a session that fails everything letting a program go is made of
+struct Losing {
+    held: Vec<Stop>,
+}
+
+impl Session for Losing {
+    fn dispatch(
+        &mut self,
+        asked: Addressed,
+        _reporting: &mut dyn Reporting,
+    ) -> Result<Response, Failed> {
+        match asked.request {
+            Request::JustMyCode { on } => Ok(Response::JustMyCode(bpd_core::JustMyCode {
+                on,
+                libraries: Vec::new(),
+            })),
+            Request::SetBreakpoints { .. } => Err("the breakpoints could not be cleared".into()),
+            Request::Wait { .. } => Err("the connection to the program went".into()),
+            other => Err(format!("this fake has no program, and got {other:?}").into()),
+        }
+    }
+
+    fn held(&self) -> Vec<Stop> {
+        self.held.clone()
+    }
+
+    fn interrupt(&self) -> Result<Box<dyn Interrupt>, Failed> {
+        Ok(Box::new(Reaching))
+    }
+}
+
+struct LaunchesLosing;
+
+impl Launcher for LaunchesLosing {
+    fn launch(
+        &self,
+        _configuration: &Configuration,
+        _output: Arc<dyn ProgramOutput>,
+    ) -> Result<Started, Failed> {
+        Ok(Started::Stopped(Box::new(Losing {
+            held: vec![entry_stop()],
+        })))
+    }
+
+    fn launch_in_terminal(
+        &self,
+        _configuration: &Configuration,
+        _ask: &mut dyn FnMut(&bpd_dap::Invocation) -> Result<(), Failed>,
+    ) -> Result<Started, Failed> {
+        Err("this fake starts nothing in a terminal".into())
+    }
+
+    fn attach(&self, session: u64) -> Result<Started, Failed> {
+        Err(format!("this fake holds no session {session}").into())
+    }
+}
+
+#[test]
+fn what_letting_a_program_go_failed_at_is_said_rather_than_swallowed() {
+    let (to_adapter, mut writes) = std::io::pipe().expect("a pipe is available");
+    let (reads, from_adapter) = std::io::pipe().expect("a pipe is available");
+    let served = std::thread::spawn(move || {
+        bpd_dap::serve(
+            &LaunchesLosing,
+            Box::new(to_adapter),
+            Box::new(from_adapter),
+            &bpd_dap::Transport::Stdio,
+        )
+    });
+
+    let mut reader = Messages::new(reads);
+    let mut messages = Vec::new();
+    ask(&mut writes, 1, "initialize");
+    ask(&mut writes, 2, "launch");
+    read_until(&mut reader, &mut messages, 2);
+    let body = serde_json::json!({
+        "seq": 3, "type": "request", "command": "disconnect",
+        "arguments": { "terminateDebuggee": false },
+    })
+    .to_string();
+    write!(writes, "Content-Length: {}\r\n\r\n{body}", body.len()).expect("the adapter is reading");
+    drop(writes);
+    messages.extend(reader.collect());
+
+    assert_eq!(answer_to(&messages, 3)["success"], true);
+    let said = serde_json::to_string(&messages).expect("the messages are json");
+    assert!(
+        said.contains("the breakpoints could not be cleared"),
+        "the client is told what it did not get: {said}"
+    );
+    let lost = served
+        .join()
+        .expect("the adapter thread ended cleanly")
+        .expect_err("a program nobody could wait for has no exit to report");
+    assert!(
+        lost.to_string()
+            .contains("the connection to the program went"),
+        "whoever started bpd is told why it cannot say how the program ended: {lost}"
+    );
 }
 
 #[test]

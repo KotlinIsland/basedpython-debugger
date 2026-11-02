@@ -228,6 +228,10 @@ impl Capabilities {
     pub fn probe(interpreter: &Path) -> Result<Self> {
         let output = Command::new(interpreter)
             .args(["-I", "-c", PROBE])
+            // what the launch is about to withhold from the program, withheld
+            // here too: this is the same interpreter, the launch's to choose,
+            // and it may be a wrapper or run a `.pth` of its own
+            .env_remove(crate::DAP_TOKEN_VARIABLE)
             .output()
             .map_err(|source| Error::InterpreterLaunch {
                 path: interpreter.to_path_buf(),

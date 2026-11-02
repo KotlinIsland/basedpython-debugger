@@ -899,6 +899,110 @@ fn a_program_that_reads_its_stdin_gets_an_empty_one_rather_than_the_servers() {
     client.finish();
 }
 
+/// a program that writes that it handled `SIGTERM` and exits 7
+#[cfg(unix)]
+const ENDS_ON_SIGTERM: &str = r#"import pathlib, signal, sys, time
+
+HERE = pathlib.Path(__file__).parent
+
+
+def on_term(signum, frame):
+    with (HERE / "handled").open("a") as handled:
+        handled.write(f"{signum}\n")
+    sys.exit(7)
+
+
+signal.signal(signal.SIGTERM, on_term)
+(HERE / "ready").write_text("")
+while True:
+    time.sleep(0.01)  # running
+"#;
+
+#[cfg(unix)]
+#[test]
+fn a_graceful_terminate_lets_the_program_handle_it_and_be_waited_for() {
+    // what DAP's `terminate` does, and an agent can do what a person can. the
+    // agent is the one that waits, and a plain `terminate` is its way to stop
+    // waiting
+    let fixture = Fixture::new("ends_on_sigterm", ENDS_ON_SIGTERM);
+    let mut client = Client::start();
+    client.ask(
+        "initialize",
+        &serde_json::json!({ "protocolVersion": bpd_mcp::PROTOCOL_VERSION }),
+    );
+    client.call(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    let line = line_of(ENDS_ON_SIGTERM, "# running");
+    client.call(
+        "set_breakpoints",
+        &serde_json::json!({ "breakpoints": [ { "file": fixture.path(), "line": line } ] }),
+    );
+    let hit = client.call("continue_", &serde_json::json!({ "deadline_ms": GENEROUS }));
+    assert_eq!(hit["outcome"], "stopped", "{hit}");
+
+    let asked = client.call("terminate", &serde_json::json!({ "graceful": true }));
+    assert_eq!(asked["asked"], true, "{asked}");
+    let ended = client.call("wait", &serde_json::json!({ "deadline_ms": GENEROUS }));
+    assert_eq!(ended["outcome"], "exited", "{ended}");
+    assert_eq!(ended["exit_code"], 7, "the handler's own exit: {ended}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.directory().join("handled"))
+            .expect("the program's handler ran"),
+        "15\n"
+    );
+    client.finish();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_sigterm_to_bpd_mcp_is_passed_on_to_its_program() {
+    // `bpd mcp` starts programs as `bpd launch` and `bpd dap` do, and a host ends
+    // a server it started with this signal
+    let fixture = Fixture::new("ends_on_sigterm", ENDS_ON_SIGTERM);
+    let mut client = Client::start();
+    client.ask(
+        "initialize",
+        &serde_json::json!({ "protocolVersion": bpd_mcp::PROTOCOL_VERSION }),
+    );
+    client.call(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    let ran = client.call("continue_", &serde_json::json!({ "deadline_ms": 100 }));
+    assert_eq!(ran["outcome"], "timed_out", "{ran}");
+    let deadline = Instant::now() + PATIENCE;
+    while !fixture.directory().join("ready").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the program never said it was ready"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let server = client
+        .server
+        .lock()
+        .expect("nothing panics holding the server")
+        .id();
+    let sent = Command::new("kill")
+        .args(["-TERM", &server.to_string()])
+        .status()
+        .expect("`kill` runs");
+    assert!(sent.success());
+
+    let ended = client.call("wait", &serde_json::json!({ "deadline_ms": GENEROUS }));
+    assert_eq!(ended["outcome"], "exited", "{ended}");
+    assert_eq!(ended["exit_code"], 7, "the handler's own exit: {ended}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.directory().join("handled"))
+            .expect("the program's handler ran"),
+        "15\n"
+    );
+    client.finish();
+}
+
 /// the interpreter the built agent matches
 fn interpreter() -> String {
     bpd_test::agent::matching_interpreter()

@@ -160,6 +160,17 @@ impl Session for Attached {
     fn terminate(&mut self, session: Option<SessionId>) -> Result<(), Failed> {
         Ok(self.0.interrupt(session)?.terminate()?)
     }
+
+    fn ask_to_end(&mut self, session: Option<SessionId>) -> Result<(), Failed> {
+        if cfg!(windows) {
+            return Err(
+                "windows has no signal one process can send another that it may handle \
+                 and then end on its own. `terminate` without `graceful` ends the program"
+                    .into(),
+            );
+        }
+        Ok(self.0.interrupt(session)?.ask_to_end()?)
+    }
 }
 
 /// what the configuration asks to run, and whether it is the program or what
