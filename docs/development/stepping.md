@@ -193,22 +193,22 @@ what is offered is held to what the step can do:
     and only for a call on one line. `naïve = compute(x)` puts `compute` at 9,
     where its byte offset would have said 10
 
-a module `by run` compiled as its `.by` is named in the `.by`'s own words. since
-`by` a110d7d8 the map carries `COLUMNS` — which byte columns of each generated
-line are text the `.by` spells — and the runner gives each location the
-author's columns, a qualifier like `_by_lazy.` left out, or the `.by` line with
-no columns for code the transpiler wrote. so the frame's own positions are read,
-the label is the `.by` text, the target carries `.by` columns, and a call with no
-columns is the transpiler's and is not offered. measured on `byproj`:
+a module `by run` compiled as its `.by` is named in the `.by`'s own words. the
+map carries `COLUMNS` — which byte columns of each generated line are text the
+`.by` spells — and the runner gives each location the author's columns, a
+qualifier like `_by_lazy.` left out, or the `.by` line with no columns for code
+the transpiler wrote. so the frame's own positions are read, the label is the
+`.by` text, the target carries `.by` columns, and a call with no columns is the
+transpiler's and is not offered. measured on `byproj`:
 
-| line                                     | `by` f566374c                          | `by` a110d7d8             |
-| ---------------------------------------- | -------------------------------------- | ------------------------- |
-| `origin = Point(0.0, 0.0)`               | `_by_lazy.Point`                       | `Point`, columns 14–29    |
-| `labels = [classify(s) for s in shapes]` | `_soundness_iter`, `_by_lazy.classify` | `classify`, columns 15–26 |
+| line                                     | offered                   |
+| ---------------------------------------- | ------------------------- |
+| `origin = Point(0.0, 0.0)`               | `Point`, columns 14–29    |
+| `labels = [classify(s) for s in shapes]` | `classify`, columns 15–26 |
 
-a build from a `by` before columns has a map with no `COLUMNS` and a runner that
-gives every location the whole line, and there the generated python is compiled
-again and its positions name the call, without columns, as before
+the generated python behind those lines calls `_by_lazy.Point`, `_soundness_iter`
+and `_by_lazy.classify`: the first and last are the author's names read through
+the lazy-import holder, and `_soundness_iter` is a call the author never wrote
 
 DAP: `supportsStepInTargetsRequest`, `stepInTargets` answering `{id, label,
 line, column?, endColumn?}`, and `stepIn` with `targetId`. MCP: `step_in_targets`

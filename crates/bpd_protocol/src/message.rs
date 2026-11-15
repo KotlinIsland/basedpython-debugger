@@ -1416,14 +1416,14 @@ mod tests {
                     source: PathBuf::from("/src/demo.by"),
                     digest: "sha256:00".to_string(),
                     lines: vec![None, Some(0)],
-                    columns: Some(vec![
+                    columns: vec![
                         Vec::new(),
                         vec![bpd_core::Run {
                             start: 0,
                             end: 4,
                             from: Some((0, 0)),
                         }],
-                    ]),
+                    ],
                 }],
                 breakpoints: vec![SourceBreakpoint::at(1, "/tmp/build/demo.py", 2)],
             }),

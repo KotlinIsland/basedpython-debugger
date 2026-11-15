@@ -80,9 +80,10 @@ pub enum ParseError {
 
     /// a table the reader needs is not in the file
     #[error(
-        "there is no `{name}` in it. a source map carries `SOURCEMAP` and \
-         `DIGESTS`, and one written without both cannot be checked against the \
-         files it describes"
+        "there is no `{name}` in it. a source map carries `SOURCEMAP`, \
+         `DIGESTS` and `COLUMNS`, and one written without all three either \
+         cannot be checked against the files it describes or is from a `by` \
+         older than this bpd reads"
     )]
     MissingTable {
         /// the table that is not there
@@ -107,6 +108,24 @@ pub enum ParseError {
         found: String,
         /// what it is written as
         expected: &'static str,
+    },
+
+    /// an entry of a table is a list, as a `by` before 422bbe56 wrote one
+    ///
+    /// formats move freely until basedpython 0.0.1, and this bpd reads only
+    /// the packed strings `by` 422bbe56 and later write. the program is
+    /// transpiled again by running it with a newer `by`
+    #[error(
+        "the `{name}` entry for `{key}` is a list, which is how a `by` older \
+         than 422bbe56 wrote its tables. this bpd reads the packed strings a \
+         newer `by` writes: run the program with a newer `by`, so that it is \
+         transpiled again"
+    )]
+    OlderBy {
+        /// the table the entry is in
+        name: &'static str,
+        /// the key it is under
+        key: String,
     },
 
     /// an entry of a table is not the shape an entry is
@@ -135,7 +154,7 @@ pub(super) struct Entry {
     /// the digests of the pair, when `DIGESTS` carries one for it
     pub(super) digests: Option<Digests>,
     /// the column runs of each generated line — see `MappedFile::columns`
-    pub(super) columns: Option<Vec<Vec<super::Run>>>,
+    pub(super) columns: Vec<Vec<super::Run>>,
 }
 
 /// the two digests one entry of `DIGESTS` carries, algorithm prefix and all
@@ -226,11 +245,6 @@ fn own(assignments: &[(String, Literal)]) -> Result<Own, ParseError> {
 fn tables(assignments: &[(String, Literal)]) -> Result<Vec<Entry>, ParseError> {
     let sourcemap = table(assignments, "SOURCEMAP")?;
     let all_digests = table(assignments, "DIGESTS")?;
-    // newer than the other two, and absent from a map an older `by` wrote
-    let all_columns = match assignments.iter().find(|(name, _)| name == "COLUMNS") {
-        None => None,
-        Some(_) => Some(table(assignments, "COLUMNS")?),
-    };
 
     let mut entries = Vec::with_capacity(sourcemap.len());
     for (key, value) in sourcemap {
@@ -243,43 +257,77 @@ fn tables(assignments: &[(String, Literal)]) -> Result<Vec<Entry>, ParseError> {
                 expected: "an entry is `(path, [lines])`",
             });
         };
-        let [Literal::Str(source), Literal::List(lines)] = &parts[..] else {
+        let [Literal::Str(source), lines] = &parts[..] else {
             return Err(ParseError::MalformedEntry {
                 name: "SOURCEMAP",
                 key: generated.display().to_string(),
                 found: format!("a tuple of {} values", parts.len()),
-                expected: "an entry is `(path, [lines])`",
+                expected: "an entry is `(path, lines)`",
             });
         };
-        let mut table = Vec::with_capacity(lines.len());
-        for line in lines {
-            match line {
-                Literal::None => table.push(None),
-                Literal::Int(line) => table.push(Some(*line)),
-                other => {
-                    return Err(ParseError::MalformedEntry {
-                        name: "SOURCEMAP",
-                        key: generated.display().to_string(),
-                        found: other.describe().to_owned(),
-                        expected: "every element of the line table is an integer or `None`",
-                    });
-                }
-            }
-        }
-        let digests = digest_for(all_digests, key)?;
-        let columns = match all_columns {
-            None => None,
-            Some(all) => Some(columns_for(all, key, &generated, table.len())?),
+        let malformed = |found: String| ParseError::MalformedEntry {
+            name: "SOURCEMAP",
+            key: generated.display().to_string(),
+            found,
+            expected: "the line table is one string of integers and `-` joined by `,`",
         };
+        let line_table = match lines {
+            Literal::Str(packed) => packed_lines(packed, &malformed)?,
+            Literal::List(_) => {
+                return Err(ParseError::OlderBy {
+                    name: "SOURCEMAP",
+                    key: generated.display().to_string(),
+                });
+            }
+            other => return Err(malformed(other.describe().to_owned())),
+        };
+        let digests = digest_for(all_digests, key)?;
+        // asked for after the line table, so that a map an older `by` wrote,
+        // which has no `COLUMNS` and holds lists, is refused as that `by`'s
+        let all_columns = table(assignments, "COLUMNS")?;
+        let columns = columns_for(all_columns, key, &generated, line_table.len())?;
         entries.push(Entry {
             generated,
             source: PathBuf::from(source),
-            lines: table,
+            lines: line_table,
             digests,
             columns,
         });
     }
+    table(assignments, "COLUMNS")?;
     Ok(entries)
+}
+
+/// a line table packed into one string, as `by` 422bbe56 writes it:
+/// `"-,0,1"`, the zero-based `.by` line of each generated line or `-` for one
+/// the transpiler wrote, joined by `,`. the empty string is a file of no lines
+fn packed_lines(
+    packed: &str,
+    malformed: &impl Fn(String) -> ParseError,
+) -> Result<Vec<Option<u32>>, ParseError> {
+    if packed.is_empty() {
+        return Ok(Vec::new());
+    }
+    packed
+        .split(',')
+        .map(|line| match line {
+            "-" => Ok(None),
+            line => packed_number(line)
+                .map(Some)
+                .ok_or_else(|| malformed(format!("a packed line table holding `{line}`"))),
+        })
+        .collect()
+}
+
+/// a number in a packed string: decimal digits with no leading zero but `0`'s
+/// own, which is all `by` writes there. `str::parse` would take a sign and a
+/// leading zero as well, and no map was written with either
+fn packed_number(text: &str) -> Option<u32> {
+    let digits = text.bytes().all(|byte| byte.is_ascii_digit());
+    if text.is_empty() || !digits || (text.len() > 1 && text.starts_with('0')) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 /// the column runs for one entry of a map that has `COLUMNS`
@@ -305,60 +353,100 @@ fn columns_for(
         name: "COLUMNS",
         key: generated.display().to_string(),
         found,
-        expected: "an entry is a list of lines, each a list of \
-                   `(start, end, by_line, by_column)` runs",
+        expected: "an entry is one string of lines each ended by `;`, their runs \
+                   `start end by_line by_column` or `start end` joined by `,`",
     };
-    let Literal::List(lines) = value else {
-        return Err(malformed(value.describe().to_owned()));
+    let read = match value {
+        Literal::Str(packed) => packed_columns(packed, &malformed)?,
+        Literal::List(_) => {
+            return Err(ParseError::OlderBy {
+                name: "COLUMNS",
+                key: generated.display().to_string(),
+            });
+        }
+        other => return Err(malformed(other.describe().to_owned())),
     };
-    if lines.len() > lines_mapped {
+    checked_columns(read, lines_mapped, &malformed)
+}
+
+/// columns as they were read, held to what the runner relies on — see
+/// [`columns_for`]
+fn checked_columns(
+    read: Vec<Vec<super::Run>>,
+    lines_mapped: usize,
+    malformed: &impl Fn(String) -> ParseError,
+) -> Result<Vec<Vec<super::Run>>, ParseError> {
+    if read.len() > lines_mapped {
         return Err(malformed(format!(
             "{} lines, where `SOURCEMAP` maps {lines_mapped}",
-            lines.len()
+            read.len()
         )));
     }
-    let mut read = Vec::with_capacity(lines.len());
-    for line in lines {
-        let Literal::List(runs) = line else {
-            return Err(malformed(format!("a line that is {}", line.describe())));
-        };
-        let mut parsed: Vec<super::Run> = Vec::with_capacity(runs.len());
-        for run in runs {
-            let from = match run {
-                Literal::Tuple(parts) => match &parts[..] {
-                    [
-                        Literal::Int(start),
-                        Literal::Int(end),
-                        Literal::Int(line),
-                        Literal::Int(column),
-                    ] => (*start, *end, Some((*line, *column))),
-                    [
-                        Literal::Int(start),
-                        Literal::Int(end),
-                        Literal::None,
-                        Literal::None,
-                    ] => (*start, *end, None),
-                    _ => return Err(malformed(format!("a run of {} values", parts.len()))),
-                },
-                other => return Err(malformed(format!("a run that is {}", other.describe()))),
-            };
-            let (start, end, from) = from;
-            if start >= end {
-                return Err(malformed(format!("a run from column {start} to {end}")));
-            }
-            if let Some(before) = parsed.last()
-                && start < before.end
-            {
+    for runs in &read {
+        for (index, run) in runs.iter().enumerate() {
+            if run.start >= run.end {
                 return Err(malformed(format!(
-                    "a run from column {start} after one that ends at {}",
-                    before.end
+                    "a run from column {} to {}",
+                    run.start, run.end
                 )));
             }
-            parsed.push(super::Run { start, end, from });
+            if let Some(before) = index.checked_sub(1).map(|before| &runs[before])
+                && run.start < before.end
+            {
+                return Err(malformed(format!(
+                    "a run from column {} after one that ends at {}",
+                    run.start, before.end
+                )));
+            }
         }
-        read.push(parsed);
     }
     Ok(read)
+}
+
+/// columns packed into one string: `";0 4 1 0,4 13;"`, each line's runs joined
+/// by `,` and ended by `;`, a run `start end by_line by_column`, or `start end`
+/// for a qualifier
+///
+/// a line is ended rather than separated so that a line with no runs is still
+/// a line, and a string whose last line is not ended was not written whole
+fn packed_columns(
+    packed: &str,
+    malformed: &impl Fn(String) -> ParseError,
+) -> Result<Vec<Vec<super::Run>>, ParseError> {
+    if packed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(lines) = packed.strip_suffix(';') else {
+        return Err(malformed(
+            "packed columns whose last line is not ended by `;`".to_owned(),
+        ));
+    };
+    lines
+        .split(';')
+        .map(|line| {
+            if line.is_empty() {
+                return Ok(Vec::new());
+            }
+            line.split(',')
+                .map(|run| {
+                    let numbers: Option<Vec<u32>> = run.split(' ').map(packed_number).collect();
+                    match numbers.as_deref() {
+                        Some(&[start, end, line, column]) => Ok(super::Run {
+                            start,
+                            end,
+                            from: Some((line, column)),
+                        }),
+                        Some(&[start, end]) => Ok(super::Run {
+                            start,
+                            end,
+                            from: None,
+                        }),
+                        _ => Err(malformed(format!("a packed run `{run}`"))),
+                    }
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// the digests for one entry, when `DIGESTS` carries one for it
@@ -707,74 +795,138 @@ mod tests {
     }
 
     /// a map with one entry, so a test can change one thing about it
-    fn map(sourcemap: &str, digests: &str) -> String {
-        format!("SOURCEMAP = {{{sourcemap}}}\nDIGESTS = {{{digests}}}\n")
+    fn map(sourcemap: &str, digests: &str, columns: &str) -> String {
+        format!("SOURCEMAP = {{{sourcemap}}}\nDIGESTS = {{{digests}}}\nCOLUMNS = {{{columns}}}\n")
     }
 
+    const DIGESTS: &str = "\"/b/demo.py\": {\"by\": \"sha256:aa\", \"py\": \"sha256:bb\"},";
+
     #[test]
-    fn the_column_runs_are_read_as_by_a110d7d8_writes_them_and_absent_is_not_empty() {
-        let sourcemap = "\"/b/demo.py\": (\"/a/demo.by\", [0, 1]),";
-        let digests = "\"/b/demo.py\": {\"by\": \"sha256:aa\", \"py\": \"sha256:bb\"},";
-
-        // no `COLUMNS` at all: a map from a `by` before columns
-        let older = tables(&map(sourcemap, digests)).expect("a well formed map");
-        assert_eq!(older[0].columns, None);
-
-        // a table with nothing for the file: every column the transpiler's
-        let empty = format!("{}COLUMNS = {{}}\n", map(sourcemap, digests));
-        assert_eq!(
-            tables(&empty).expect("a well formed map")[0].columns,
-            Some(Vec::new())
-        );
-
-        let written = format!(
-            "{}COLUMNS = {{\n    \"/b/demo.py\": [[], [(0, 4, 1, 0), (4, 13, None, None), (13, 20, 1, 4)]],\n}}\n",
-            map(sourcemap, digests)
-        );
+    fn the_packed_tables_are_read_as_by_writes_them() {
+        let read = tables(&map(
+            "\"/b/demo.py\": (\"/a/demo.by\", \"-,0,1\"),",
+            DIGESTS,
+            "\"/b/demo.py\": \";0 4 1 0,4 13,13 20 1 4;;\",",
+        ))
+        .expect("a well formed map");
+        assert_eq!(read[0].lines, vec![None, Some(0), Some(1)]);
         let run = |start, end, from| super::super::Run { start, end, from };
         assert_eq!(
-            tables(&written).expect("a well formed map")[0].columns,
-            Some(vec![
+            read[0].columns,
+            vec![
                 Vec::new(),
                 vec![
                     run(0, 4, Some((1, 0))),
                     run(4, 13, None),
                     run(13, 20, Some((1, 4)))
                 ],
-            ])
+                Vec::new(),
+            ]
         );
 
-        let wrong = format!(
-            "{}COLUMNS = {{\"/b/demo.py\": [[(0, 4, 1)]]}}\n",
-            map(sourcemap, digests)
-        );
-        assert!(matches!(
-            tables(&wrong),
-            Err(ParseError::MalformedEntry {
-                name: "COLUMNS",
-                ..
-            })
-        ));
+        // the empty string is a file of no lines, in either table
+        let empty = tables(&map(
+            "\"/b/demo.py\": (\"/a/demo.by\", \"\"),",
+            DIGESTS,
+            "\"/b/demo.py\": \"\",",
+        ))
+        .expect("a well formed map");
+        assert_eq!(empty[0].lines, Vec::new());
+        assert_eq!(empty[0].columns, Vec::<Vec<super::super::Run>>::new());
+
+        // and a file `COLUMNS` has nothing for has no runs on any line: every
+        // column of it is the transpiler's, which is how the runner reads it
+        let absent = tables(&map(
+            "\"/b/demo.py\": (\"/a/demo.by\", \"0\"),",
+            DIGESTS,
+            "",
+        ))
+        .expect("a well formed map");
+        assert_eq!(absent[0].columns, Vec::<Vec<super::super::Run>>::new());
     }
 
     #[test]
-    fn column_runs_that_cannot_describe_the_generated_file_are_refused() {
-        // the runner reads a line's runs in order, each covering its columns
-        // once. a run that ends before it starts, runs out of order or over one
-        // another, and more lines than `SOURCEMAP` has for the file, describe no
-        // file the runner could have relined — and a map is total or absent
-        let sourcemap = "\"/b/demo.py\": (\"/a/demo.by\", [0, 1]),";
-        let digests = "\"/b/demo.py\": {\"by\": \"sha256:aa\", \"py\": \"sha256:bb\"},";
-        for (runs, why) in [
-            ("[[(4, 2, 0, 0)]]", "a run that ends before it starts"),
-            ("[[(0, 0, 0, 0)]]", "a run that covers nothing"),
-            ("[[(4, 8, 0, 4), (0, 4, 0, 0)]]", "runs out of order"),
-            ("[[(0, 6, 0, 0), (4, 8, 0, 4)]]", "runs over one another"),
-            ("[[], [], []]", "more lines than the file has"),
+    fn a_map_an_older_by_wrote_is_refused_naming_the_by_that_wrote_it() {
+        // a `by` before 422bbe56 wrote its tables as lists. formats move freely
+        // until basedpython 0.0.1, so this bpd reads only the packed strings,
+        // and says which `by` it would need rather than reading a list as some
+        // other table
+        for (sourcemap, columns, table) in [
+            (
+                "\"/b/demo.py\": (\"/a/demo.by\", [None, 0]),",
+                "\"/b/demo.py\": \";;\",",
+                "SOURCEMAP",
+            ),
+            (
+                "\"/b/demo.py\": (\"/a/demo.by\", \"-,0\"),",
+                "\"/b/demo.py\": [[], []],",
+                "COLUMNS",
+            ),
         ] {
-            let written = format!(
-                "{}COLUMNS = {{\"/b/demo.py\": {runs}}}\n",
-                map(sourcemap, digests)
+            let refused = tables(&map(sourcemap, DIGESTS, columns)).expect_err("a list is refused");
+            assert_eq!(
+                refused,
+                ParseError::OlderBy {
+                    name: table,
+                    key: "/b/demo.py".to_owned()
+                }
+            );
+            let said = refused.to_string();
+            assert!(
+                said.contains("422bbe56") && said.contains("newer `by`"),
+                "{said}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_packed_string_by_cannot_write_is_refused() {
+        // a packed string is read as exactly what `by` writes there and nothing
+        // else: a sign, a space, an empty number or a missing end is not a table
+        // any `by` wrote, and a guess at what it meant is a guess at a location
+        for (lines, why) in [
+            ("0,,1", "an empty element"),
+            ("+1,0", "a sign"),
+            ("007", "a leading zero"),
+            ("0, 1", "a space"),
+            ("None", "a word"),
+            ("-1", "a negative line"),
+            ("4294967296", "a line past 32 bits"),
+        ] {
+            let written = map(
+                &format!("\"/b/demo.py\": (\"/a/demo.by\", \"{lines}\"),"),
+                DIGESTS,
+                "",
+            );
+            assert!(
+                matches!(
+                    tables(&written),
+                    Err(ParseError::MalformedEntry {
+                        name: "SOURCEMAP",
+                        ..
+                    })
+                ),
+                "{why} was accepted"
+            );
+        }
+        let sourcemap = "\"/b/demo.py\": (\"/a/demo.by\", \"-,0,1\"),";
+        for (columns, why) in [
+            ("0 4 1 0", "a last line that is not ended"),
+            ("0 4 1;", "a run of three numbers"),
+            ("0 4 1 0 2;", "a run of five numbers"),
+            ("0  4;", "an empty number"),
+            ("00 4;", "a leading zero"),
+            ("0 x;", "a word"),
+            ("4 2;", "a run that ends before it starts"),
+            ("0 0;", "a run that covers nothing"),
+            ("4 8 0 4,0 4 0 0;", "runs out of order"),
+            ("0 6 0 0,4 8 0 4;", "runs over one another"),
+            (";;;;", "more lines than the file has"),
+        ] {
+            let written = map(
+                sourcemap,
+                DIGESTS,
+                &format!("\"/b/demo.py\": \"{columns}\""),
             );
             assert!(
                 matches!(
@@ -787,14 +939,130 @@ mod tests {
                 "{why} was accepted"
             );
         }
-        let fewer = format!(
-            "{}COLUMNS = {{\"/b/demo.py\": [[(0, 4, 0, 0), (4, 6, None, None)]]}}\n",
-            map(sourcemap, digests)
+    }
+
+    /// the unpacking the runner `by` bb1fdd2a writes carries, cut out of it
+    fn runner_unpacking() -> &'static str {
+        let runner = bpd_test::basedpython::RUNNER;
+        let start = runner
+            .find("import re\n")
+            .expect("the runner's unpacking starts with its import");
+        let length = runner[start..]
+            .find("\n\n\n# ")
+            .expect("the runner goes on after its unpacking");
+        &runner[start..start + length]
+    }
+
+    /// what bpd reads packed line tables and packed columns as, each in the
+    /// json the runner's unpacking is printed in below, or `"refused"`.
+    /// columns are read against a line table of three lines
+    fn as_bpd_reads(lines: &[&str], columns: &[&str]) -> Vec<serde_json::Value> {
+        let malformed = |found: String| ParseError::MalformedEntry {
+            name: "COLUMNS",
+            key: String::new(),
+            found,
+            expected: "",
+        };
+        let refused = |_| serde_json::json!("refused");
+        let run = |run: &super::super::Run| match run.from {
+            Some((line, column)) => serde_json::json!([run.start, run.end, line, column]),
+            None => serde_json::json!([run.start, run.end, null, null]),
+        };
+        let read_lines = lines.iter().map(|packed| {
+            packed_lines(packed, &malformed).map_or_else(refused, |read| serde_json::json!(read))
+        });
+        let read_columns = columns.iter().map(|packed| {
+            packed_columns(packed, &malformed)
+                .and_then(|read| checked_columns(read, 3, &malformed))
+                .map_or_else(refused, |read| {
+                    read.iter()
+                        .map(|runs| runs.iter().map(run).collect::<serde_json::Value>())
+                        .collect()
+                })
+        });
+        read_lines.chain(read_columns).collect()
+    }
+
+    /// what the runner's unpacking answers for the same strings, read the same
+    /// way
+    fn as_the_runner_unpacks(lines: &[&str], columns: &[&str]) -> Vec<serde_json::Value> {
+        let input = serde_json::json!([lines, columns]).to_string();
+        let script = format!(
+            "{unpacking}\nimport json\n\
+             def answer(unpack, packed):\n    \
+                 try:\n        return unpack(packed)\n    except ValueError:\n        return 'refused'\n\
+             lines, columns = json.loads({input})\n\
+             print(json.dumps([answer(_unpack_lines, packed) for packed in lines]\n    \
+                 + [answer(lambda packed: _unpack_columns(packed, 3), packed) for packed in columns]))\n",
+            unpacking = runner_unpacking(),
+            input = serde_json::Value::String(input),
         );
-        assert!(
-            tables(&fewer).is_ok(),
-            "a line it has no runs for is the transpiler's"
-        );
+        let interpreter = bpd_test::discovered().require()[0];
+        serde_json::from_str(&bpd_test::eval(interpreter, &script))
+            .expect("the runner's answers are json")
+    }
+
+    #[test]
+    fn a_packed_string_is_read_exactly_as_the_runner_unpacks_it() {
+        // two readers of one map: the runner, which compiles a module at the
+        // lines and columns its entry says, and bpd, which proves a frame's code
+        // by compiling it the same way. a string one reads and the other refuses,
+        // or reads otherwise, is a frame bpd proves against a different table
+        // from the one it ran with. so each string goes through both, valid and
+        // invalid alike, and the answers have to be the same
+        let lines = [
+            "",
+            "-",
+            "0",
+            "-,0,1,12",
+            "4294967295",
+            " 7 ",
+            "007",
+            "-1",
+            "+1",
+            "1_0",
+            "٤",
+            "0,,1",
+            "0, 1",
+            "None",
+            "4294967296",
+            ",",
+            "0,",
+            "--",
+        ];
+        let columns = [
+            "",
+            ";",
+            ";;;",
+            ";0 4 1 0,4 13,13 20 1 4;",
+            "0 4294967295 4294967295 4294967295;",
+            "0 4 1 0",
+            "0 4 1;",
+            "0 4 1 0 2;",
+            "0 x;",
+            "0 4 -1 0;",
+            "0 4 +1 0;",
+            "0 4_0;",
+            "4 2;",
+            "0 0;",
+            "0 ٤;",
+            "00 4;",
+            "0  4;",
+            " 0 4;",
+            "4 8 0 4,0 4 0 0;",
+            "0 4,;",
+            "0 4294967296;",
+            ";;;;",
+        ];
+        let bpd = as_bpd_reads(&lines, &columns);
+        let runner = as_the_runner_unpacks(&lines, &columns);
+        assert_eq!(bpd.len(), runner.len());
+        for ((packed, bpd), runner) in lines.iter().chain(&columns).zip(&bpd).zip(&runner) {
+            assert_eq!(
+                bpd, runner,
+                "bpd and the runner read {packed:?} differently"
+            );
+        }
     }
 
     #[test]
@@ -808,7 +1076,7 @@ mod tests {
              # the launcher, the runtime's helpers, this map\n\
              BY_CODE = [\n    \"/var/folders/x/T/.tmp1/_by_runner.py\",\n    \
              \"/var/folders/x/T/.tmp1/_by_runtime.py\",\n]\n",
-            map("", "")
+            map("", "", "")
         );
         assert_eq!(
             own(&written).expect("a well formed map"),
@@ -821,16 +1089,17 @@ mod tests {
             }
         );
 
-        // `by build` names no launcher, and an older `by` names nothing at all
-        let built = format!("{}LAUNCHER = None\nBY_CODE = []\n", map("", ""));
+        // `by build` names no launcher, and a map that names neither says
+        // nothing of either
+        let built = format!("{}LAUNCHER = None\nBY_CODE = []\n", map("", "", ""));
         assert_eq!(own(&built).expect("a well formed map"), Own::default());
         assert_eq!(
-            own(&map("", "")).expect("a well formed map"),
+            own(&map("", "", "")).expect("a well formed map"),
             Own::default()
         );
 
         // and a shape it is not written in is refused by name
-        let wrong = format!("{}LAUNCHER = [\"/a\"]\n", map("", ""));
+        let wrong = format!("{}LAUNCHER = [\"/a\"]\n", map("", "", ""));
         assert!(matches!(
             own(&wrong),
             Err(ParseError::MalformedName {
@@ -843,8 +1112,9 @@ mod tests {
     #[test]
     fn the_two_tables_are_read_and_paired_by_the_generated_path() {
         let entries = tables(&map(
-            "\"/b/demo.py\": (\"/a/demo.by\", [None, 0, 1]),",
-            "\"/b/demo.py\": {\"by\": \"sha256:aa\", \"py\": \"sha256:bb\"},",
+            "\"/b/demo.py\": (\"/a/demo.by\", \"-,0,1\"),",
+            DIGESTS,
+            "",
         ))
         .expect("a well formed map");
 
@@ -860,8 +1130,9 @@ mod tests {
     #[test]
     fn comments_and_whitespace_carry_nothing() {
         let entries = tables(
-            "# a comment\n\nSOURCEMAP = {\n    # another\n    \"/b.py\": (\"/a.by\", [0]),\n}\n\
-             \nDIGESTS = {\n    \"/b.py\": {\"by\": \"sha256:aa\", \"py\": \"sha256:bb\"},\n}\n",
+            "# a comment\n\nSOURCEMAP = {\n    # another\n    \"/b.py\": (\"/a.by\", \"0\"),\n}\n\
+             \nDIGESTS = {\n    \"/b.py\": {\"by\": \"sha256:aa\", \"py\": \"sha256:bb\"},\n}\n\
+             \n# and another\nCOLUMNS = {}\n",
         )
         .expect("comments are trivia");
         assert_eq!(entries.len(), 1);
@@ -870,14 +1141,15 @@ mod tests {
     #[test]
     fn an_escape_the_emitter_writes_is_read_and_one_it_cannot_is_refused() {
         let entries = tables(&map(
-            "\"/b/say \\\"hi\\\".py\": (\"/a\\\\b.by\", [0]),",
+            "\"/b/say \\\"hi\\\".py\": (\"/a\\\\b.by\", \"0\"),",
             "\"/b/say \\\"hi\\\".py\": {\"by\": \"sha256:aa\", \"py\": \"sha256:bb\"},",
+            "",
         ))
         .expect("both escapes are ones `py_str_literal` writes");
         assert_eq!(entries[0].generated, PathBuf::from("/b/say \"hi\".py"));
         assert_eq!(entries[0].source, PathBuf::from("/a\\b.by"));
 
-        let refused = tables(&map("\"/b\\x41.py\": (\"/a.by\", [0]),", "")).expect_err(
+        let refused = tables(&map("\"/b\\x41.py\": (\"/a.by\", \"0\"),", "", "")).expect_err(
             "the emitter cannot write `\\x41`, so a file holding one is not one it wrote",
         );
         assert!(
@@ -907,10 +1179,11 @@ mod tests {
     }
 
     #[test]
-    fn a_map_missing_either_table_cannot_be_verified_and_says_so() {
+    fn a_map_missing_any_table_says_which() {
         for (source, missing) in [
-            ("SOURCEMAP = {}\n", "DIGESTS"),
-            ("DIGESTS = {}\n", "SOURCEMAP"),
+            ("DIGESTS = {}\nCOLUMNS = {}\n", "SOURCEMAP"),
+            ("SOURCEMAP = {}\nCOLUMNS = {}\n", "DIGESTS"),
+            ("SOURCEMAP = {}\nDIGESTS = {}\n", "COLUMNS"),
         ] {
             let refused = tables(source).expect_err("one table is not a map");
             assert_eq!(refused, ParseError::MissingTable { name: missing });
@@ -919,7 +1192,8 @@ mod tests {
 
     #[test]
     fn an_entry_that_is_not_the_shape_of_an_entry_names_the_file_it_is_under() {
-        let refused = tables(&map("\"/b.py\": \"/a.by\",", "")).expect_err("not a `(path, lines)`");
+        let refused =
+            tables(&map("\"/b.py\": \"/a.by\",", "", "")).expect_err("not a `(path, lines)`");
         let ParseError::MalformedEntry { key, .. } = &refused else {
             panic!("expected a malformed entry, got {refused:?}")
         };
@@ -929,8 +1203,9 @@ mod tests {
     #[test]
     fn a_digest_entry_without_both_sides_is_refused() {
         let refused = tables(&map(
-            "\"/b.py\": (\"/a.by\", [0]),",
+            "\"/b.py\": (\"/a.by\", \"0\"),",
             "\"/b.py\": {\"by\": \"sha256:aa\"},",
+            "",
         ))
         .expect_err("a pair with one digest cannot be checked on both sides");
         assert!(
@@ -948,7 +1223,7 @@ mod tests {
     #[test]
     fn a_file_that_ends_in_the_middle_of_something_says_what_was_open() {
         for (source, inside) in [
-            ("SOURCEMAP = {\"/b.py\": (\"/a.by\", [0]),", "a dict"),
+            ("SOURCEMAP = {\"/b.py\": (\"/a.by\", \"0\"),", "a dict"),
             ("SOURCEMAP = {\"/b.py\": (\"/a.by\", [0", "a list"),
             ("SOURCEMAP = {\"/b.py", "a string"),
         ] {

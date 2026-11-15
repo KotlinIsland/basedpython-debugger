@@ -5,10 +5,9 @@
 //! whole code object tree onto the `.by`: every code object is named after the
 //! `.by` path, and every location in it is the `.by` line the generated line came
 //! from. a line the transpiler wrote on its own has no `.by` line, and is line
-//! `0`. the columns depend on the build: a runner from `by` a110d7d8 on reads the
-//! map's `COLUMNS` and gives a location the author's own `.by` columns, or none
-//! for code the transpiler wrote (see [`Relining::by_span`]); an older runner,
-//! whose map has no `COLUMNS`, spans the whole line. that is what the program reads its own locations
+//! `0`. the runner reads the map's `COLUMNS` and gives a location the author's
+//! own `.by` columns, or none for code the transpiler wrote (see
+//! [`Relining::by_span`]). that is what the program reads its own locations
 //! back from — a traceback, a warning, `inspect` — and it is what the interpreter
 //! reports to a debugger
 //!
@@ -80,7 +79,7 @@ pub(crate) fn compile<'py>(
     let relining = Relining {
         lines: &table.lines,
         widths: widths(source),
-        columns: table.columns.as_deref(),
+        columns: &table.columns,
         generated_widths: widths(generated),
     };
     relining.apply(&code, named)
@@ -109,9 +108,8 @@ struct Relining<'a> {
     lines: &'a [Option<u32>],
     /// the `.by`'s lines, in bytes
     widths: Vec<u32>,
-    /// the map's column runs, when the map has `COLUMNS` — a build from a `by`
-    /// whose runner gives a location the author's own columns
-    columns: Option<&'a [Vec<Run>]>,
+    /// the map's column runs, indexed by zero-based generated line
+    columns: &'a [Vec<Run>],
     /// the generated python's lines, in bytes
     generated_widths: Vec<u32>,
 }
@@ -217,11 +215,7 @@ impl Relining<'_> {
         position: (Option<u32>, Option<u32>, Option<u32>, Option<u32>),
     ) -> Option<Location> {
         let line = position.0?;
-        let Some(columns) = self.columns else {
-            let at = self.by_line(line);
-            return Some((at, at, Some(0), Some(self.width(at))));
-        };
-        if let Some(span) = self.by_span(columns, position) {
+        if let Some(span) = self.by_span(self.columns, position) {
             return Some(span);
         }
         let at = self.by_line(line);
@@ -243,7 +237,14 @@ impl Relining<'_> {
             });
         }
 
-        let first = self.by_line(code.getattr("co_firstlineno")?.extract()?);
+        // the runner starts a module's code at line 1 whatever is written there,
+        // as python's own does, rather than at line 0 when the transpiler wrote
+        // that line — an import it needed — on its own
+        let first = if code.getattr("co_name")?.extract::<String>()? == "<module>" {
+            1
+        } else {
+            self.by_line(code.getattr("co_firstlineno")?.extract()?)
+        };
         let mut lines: Vec<Option<Location>> = Vec::new();
         for position in code.call_method0("co_positions")?.try_iter()? {
             lines.push(self.located(position?.extract()?));
@@ -330,13 +331,9 @@ mod tests {
         assert!(widths(b"").is_empty());
     }
 
-    /// the runner's `_by_span`, run by an interpreter over every span of a
-    /// small build, against this port of it over the same spans
-    ///
-    /// against the runner's **own** text — the function is cut out of the
-    /// runner `by` a110d7d8 writes and run as it is — because a port checked
-    /// against a second port proves the two agree with each other
-    /// column runs as the map writes them, which is a python literal
+    /// column runs as the python literal `_by_span` takes them: a list of
+    /// lines, each a list of `(start, end, by_line, by_column)` tuples, which
+    /// is what the runner unpacks a map's entry into
     fn as_python(columns: &[Vec<Run>]) -> String {
         let lines: Vec<String> = columns
             .iter()
@@ -371,6 +368,12 @@ mod tests {
         String::from_utf8(ran.stdout).expect("the answers are text")
     }
 
+    /// the runner's `_by_span`, run by an interpreter over every span of a
+    /// small build, against this port of it over the same spans
+    ///
+    /// against the runner's **own** text — the function is cut out of the
+    /// runner `by` bb1fdd2a writes and run as it is — because a port checked
+    /// against a second port proves the two agree with each other
     #[test]
     fn every_span_is_located_exactly_as_the_runners_own_by_span_locates_it() {
         let generated = "\
@@ -404,11 +407,11 @@ def main() -> None:
         let relining = Relining {
             lines: &lines,
             widths: widths(by.as_bytes()),
-            columns: Some(&columns),
+            columns: &columns,
             generated_widths: widths(generated.as_bytes()),
         };
 
-        let runner = bpd_test::basedpython::RUNNER_WITH_COLUMNS;
+        let runner = bpd_test::basedpython::RUNNER;
         let start = runner
             .find("def _by_span(")
             .expect("the runner defines `_by_span`");

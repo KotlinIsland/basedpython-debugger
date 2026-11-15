@@ -96,9 +96,7 @@ fn staged(
     around: u32,
     table: &MappedFile,
 ) -> PyResult<Source> {
-    let Staged {
-        by: bytes, wanted, ..
-    } = match staged_proof(python, code, &file, table)? {
+    let Staged { by: bytes, wanted } = match staged_proof(python, code, &file, table)? {
         Ok(proved) => proved,
         Err(why) => return Ok(Source::Unverified { why }),
     };
@@ -239,33 +237,20 @@ fn mapped(file: &str, line: u32, lowest: u32, highest: u32) -> Result<Option<Map
 }
 
 /// the text a code object's positions are columns of, proved to be what it
-/// was compiled from — what naming a call by its source text needs
-pub(crate) enum Proved {
-    /// the code's own positions index into these bytes: a python file, or a
-    /// `.by` whose runner gave each location the author's own columns
-    Own(Vec<u8>),
-    /// a `.by` from a `by` before columns, whose positions span whole lines.
-    /// these are the generated python's bytes, which the code was compiled from
-    /// and whose own positions do have columns
-    Generated(Vec<u8>),
-}
-
-/// prove the text behind `code`, the way [`around`] proves a frame's source
+/// was compiled from — what naming a call by its source text needs: a python
+/// file's own bytes, or a staged module's `.by`, since the runner gave each
+/// location the author's own columns
+///
+/// proved the way [`around`] proves a frame's source
 pub(crate) fn proved(
     python: Python<'_>,
     code: &Bound<'_, PyAny>,
-) -> PyResult<Result<Proved, Unverified>> {
+) -> PyResult<Result<Vec<u8>, Unverified>> {
     let file: String = code.getattr("co_filename")?.extract()?;
     if let Some(table) = crate::sources::staged_as(&file) {
-        return Ok(staged_proof(python, code, &file, &table)?.map(|staged| {
-            if table.columns.is_some() {
-                Proved::Own(staged.by)
-            } else {
-                Proved::Generated(staged.python)
-            }
-        }));
+        return Ok(staged_proof(python, code, &file, &table)?.map(|staged| staged.by));
     }
-    Ok(plain(python, code, &file)?.map(|(bytes, _)| Proved::Own(bytes)))
+    Ok(plain(python, code, &file)?.map(|(bytes, _)| bytes))
 }
 
 /// the text whose lines a code object's line numbers count, proved the way
@@ -323,10 +308,9 @@ fn plain(
     Ok(Ok((bytes, wanted)))
 }
 
-/// a staged `.by` module's two files, both proved
+/// a staged `.by` module's `.by`, proved with the generated python it was
+/// compiled from
 struct Staged {
-    /// the generated python the module was compiled from
-    python: Vec<u8>,
     /// the `.by` its locations are lines of
     by: Vec<u8>,
     /// the code object found in what the generated python compiles to
@@ -379,11 +363,7 @@ fn staged_proof(
             first_line: wanted.first_line,
         }));
     }
-    Ok(Ok(Staged {
-        python: python_bytes,
-        by: bytes,
-        wanted,
-    }))
+    Ok(Ok(Staged { by: bytes, wanted }))
 }
 
 /// compile the file's bytes the way the import machinery does

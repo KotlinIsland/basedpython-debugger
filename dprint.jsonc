@@ -48,7 +48,10 @@
     // IDE's configuration. none of it is ours
     "**/.gradle",
     "**/.intellijPlatform",
-    "editors/intellij/build"
+    "editors/intellij/build",
+    // `by run`'s runner as `by` wrote it, kept byte for byte: a test cuts code
+    // out of it and runs it as by's own, so a reformat is a different runner
+    "crates/bpd_test/src/by_runner*.py"
   ],
   // markdown, toml, python, yaml, and the json and javascript the vs code
   // extension is made of. a python code block inside markdown is formatted by

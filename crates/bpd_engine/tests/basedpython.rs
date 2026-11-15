@@ -804,7 +804,8 @@ _by_lazy.classify = classify
 main()
 ";
 
-/// a build of [`COLUMNED`] with the map's `COLUMNS`, and the runner that reads it
+/// a build of [`COLUMNED`] with the map's `COLUMNS`, and the runner that reads
+/// it
 fn columned() -> (Build, PathBuf) {
     let lines = vec![
         None,
@@ -842,7 +843,8 @@ fn columned() -> (Build, PathBuf) {
         (56, 62, Some((5, 31))),
         (68, 69, Some((5, 37))),
     ];
-    let runner = build.columns(&runs);
+    build.write_map_with(&lines, &runs);
+    let runner = build.runner();
     (build, runner)
 }
 
@@ -850,11 +852,10 @@ fn columned() -> (Build, PathBuf) {
 fn a_frame_compiled_with_the_authors_columns_is_proved_the_way_the_runner_compiled_it() {
     // the source beside a frame is proved by compiling the generated python the
     // way `by run` did and finding the frame's code object, line table and all.
-    // since `by` a110d7d8 that line table holds the `.by`'s own columns, and a
-    // relining that gave every location the whole line — which is what bpd did
-    // — no longer finds the frame's code, and the source is refused. the runner
-    // here is `by`'s own, captured, so this is bpd against it rather than
-    // against a copy of itself
+    // that line table holds the `.by`'s own columns, and a relining that gave
+    // every location the whole line would not find the frame's code, and would
+    // refuse the source. the runner here is `by`'s own, captured, so this is
+    // bpd against it rather than against a copy of itself
     let (build, runner) = columned();
     let mut debuggee = launch_program(&runner, &build.arguments());
     let held = bpd_test::debuggee::line_of(COLUMNED, "# held here");
@@ -870,10 +871,9 @@ fn a_frame_compiled_with_the_authors_columns_is_proved_the_way_the_runner_compil
 
 #[test]
 fn a_by_lines_calls_are_named_by_the_text_the_author_wrote() {
-    // measured against `by` f566374c, before columns: the comprehension's line
-    // offered `_soundness_iter` and `_by_lazy.classify`. the first is a call the
-    // transpiler wrote, and the second is the author's `classify` read through
-    // the lazy-import holder
+    // the comprehension's line holds `_soundness_iter`, a call the transpiler
+    // wrote, and `_by_lazy.classify`, the author's `classify` read through the
+    // lazy-import holder. only the author's is offered, by the author's text
     let (build, runner) = columned();
     let mut debuggee = launch_program(&runner, &build.arguments());
     let held = bpd_test::debuggee::line_of(COLUMNED, "# held here");

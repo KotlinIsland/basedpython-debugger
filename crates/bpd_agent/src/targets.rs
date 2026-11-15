@@ -17,25 +17,16 @@
 //!
 //! ## a module `by run` compiled as its `.by`
 //!
-//! since `by` a110d7d8 the runner gives each location the author's own `.by`
-//! columns — the text they wrote, with a qualifier like `_by_lazy.` in front of
-//! a name left out — and a location of code the transpiler wrote the `.by` line
-//! with no columns. so the frame's positions are read as they are, the label is
-//! the `.by`'s own text, and a call with no columns is the transpiler's and is
-//! not offered: `_soundness_iter` around a comprehension's iterable is no call
-//! the author can see on the line
-//!
-//! a build from a `by` before columns — a map with no `COLUMNS` — gave every
-//! location the **whole** of its `.by` line, so there the generated python is
-//! compiled again and the code object with the same name and the same bytecode
-//! is the one whose positions are read. the label is the generated python's
-//! text for the call, and the target carries no columns, because the frame the
-//! client sees has none
+//! the runner gives each location the author's own `.by` columns — the text
+//! they wrote, with a qualifier like `_by_lazy.` in front of a name left out —
+//! and a location of code the transpiler wrote the `.by` line with no columns.
+//! so the frame's positions are read as they are, the label is the `.by`'s own
+//! text, and a call with no columns is the transpiler's and is not offered:
+//! `_soundness_iter` around a comprehension's iterable is no call the author
+//! can see on the line
 
 use bpd_core::{StepInTarget, Unverified};
 use pyo3::prelude::*;
-
-use crate::source::Proved;
 
 /// the instructions that call
 const CALLING: &[&str] = &["CALL", "CALL_KW", "CALL_FUNCTION_EX"];
@@ -77,23 +68,17 @@ pub(crate) fn of(
         return Ok(Ok(Vec::new()));
     }
 
-    let (spanned, columns_too, only_the_authors) = match crate::source::proved(python, &code)? {
+    let bytes = match crate::source::proved(python, &code)? {
         Err(why) => return Ok(Err(why)),
-        // a `.by` whose runner read the map's `COLUMNS`: the code's own
-        // positions are the `.by`'s, columns and all, for text the author
-        // wrote — and a call the transpiler wrote, `_soundness_iter` around a
-        // comprehension's iterable, has none. that call is not one the author
-        // can see on the line, and stepping into it is stepping into `by`'s
-        // runtime, so it is not offered
-        Ok(Proved::Own(bytes)) => {
-            let staged = crate::sources::staged_as(&file).is_some();
-            (spans(&code, &bytes)?, true, staged)
-        }
-        // a `.by` from a `by` before columns: every location is the whole line
-        Ok(Proved::Generated(bytes)) => {
-            (generated_spans(python, &code, &file, &bytes)?, false, false)
-        }
+        Ok(bytes) => bytes,
     };
+    let spanned = spans(&code, &bytes)?;
+    // a `.by`'s code has the `.by`'s own positions, columns and all, for text
+    // the author wrote — and a call the transpiler wrote, `_soundness_iter`
+    // around a comprehension's iterable, has none. that call is not one the
+    // author can see on the line, and stepping into it is stepping into `by`'s
+    // runtime, so it is not offered
+    let only_the_authors = crate::sources::staged_as(&file).is_some();
 
     let reported = crate::sources::locate(file, line).line;
     let mut targets = Vec::with_capacity(calls.len());
@@ -103,7 +88,7 @@ pub(crate) fn of(
             continue;
         }
         let (label, columns) = match found.and_then(|call| Some((call, call.text.as_ref()?))) {
-            Some((call, text)) => (callee(text), call.columns.filter(|_| columns_too)),
+            Some((call, text)) => (callee(text), call.columns),
             // the call is in the frame and the proved text has none for it — a
             // position the compiler did not give, or a file in an encoding that
             // is not utf-8. it is still a call, named by where it is rather
@@ -130,57 +115,6 @@ struct Spanned {
     /// where on its line the call begins and ends, in utf-16 code units
     /// counting from one — DAP's unit for a column — when it is on one line
     columns: Option<(u32, u32)>,
-}
-
-/// the calls of the generated python behind a `.by` module, at the offsets the
-/// frame's code has — see the module's own documentation
-///
-/// `bytes` is proved: the frame's code object was found in what they compile
-/// to. they are compiled again here plainly, the way the import system would,
-/// because those positions are the generated python's own, columns and all
-fn generated_spans(
-    python: Python<'_>,
-    code: &Bound<'_, PyAny>,
-    file: &str,
-    bytes: &[u8],
-) -> PyResult<Vec<Spanned>> {
-    let generated = crate::sources::staged_as(file)
-        .expect("only a staged module's proof hands back its generated python")
-        .generated
-        .display()
-        .to_string();
-    let compiled = crate::source::compile(python, bytes, &generated)?;
-    let twin = same_code(&compiled, code)?.unwrap_or_else(|| {
-        unreachable!(
-            "the generated python was proved by finding this code object in what it \
-             compiles to, so compiling it again holds the same bytecode"
-        )
-    });
-    spans(&twin, bytes)
-}
-
-/// the code object in `tree` with the same name and the same bytecode as `code`
-fn same_code<'py>(
-    tree: &Bound<'py, PyAny>,
-    code: &Bound<'_, PyAny>,
-) -> PyResult<Option<Bound<'py, PyAny>>> {
-    if tree
-        .getattr("co_qualname")?
-        .eq(code.getattr("co_qualname")?)?
-        && tree.getattr("co_code")?.eq(code.getattr("co_code")?)?
-    {
-        return Ok(Some(tree.clone()));
-    }
-    let kind = tree.get_type();
-    for constant in tree.getattr("co_consts")?.try_iter()? {
-        let constant = constant?;
-        if constant.is_instance(&kind)?
-            && let Some(found) = same_code(&constant, code)?
-        {
-            return Ok(Some(found));
-        }
-    }
-    Ok(None)
 }
 
 /// every call of `code`, with the text of `source` its position spans

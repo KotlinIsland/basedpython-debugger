@@ -163,12 +163,18 @@ fn a_step_into_a_builtin_lands_where_a_step_over_would() {
 }
 
 #[test]
-fn a_by_lines_calls_are_named_by_the_generated_python_and_carry_no_columns() {
-    // `by run` gives every location of a `.by` module the whole of its line, so
-    // the frame has no columns to read a call from. the bytecode is the
-    // generated python's, and that is where the label comes from
+fn a_by_lines_calls_are_named_by_the_text_it_copied_and_carry_its_columns() {
+    // a `.by` line the transpile copied whole is the author's text, column for
+    // column, so the runner gives the frame the `.by`'s own positions and the
+    // call is named, and placed, by them
     let build = Build::demo();
     let line = line_of(SOURCE, "answer = add(2, 3)");
+    let text = SOURCE
+        .lines()
+        .nth(line as usize - 1)
+        .expect("the line is in the source");
+    let at =
+        u32::try_from(text.find("add(2, 3)").expect("the call is there")).expect("a column fits");
 
     let mut debuggee = launch(&build.runner(), &build.arguments());
     let stop = held_at(&mut debuggee, &build.source, line);
@@ -178,7 +184,7 @@ fn a_by_lines_calls_are_named_by_the_generated_python_and_carry_no_columns() {
     assert_eq!(targets.len(), 1, "{targets:?}");
     assert_eq!(targets[0].label, "add");
     assert_eq!(targets[0].line, line);
-    assert_eq!(targets[0].columns, None);
+    assert_eq!(targets[0].columns, Some((at + 1, at + 1 + 9)));
 
     debuggee
         .step_into(stop, targets[0].offset)

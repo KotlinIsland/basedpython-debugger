@@ -1086,10 +1086,8 @@ pub struct StepInTarget {
     /// counting from one — DAP's unit for a column — when the interpreter knows
     /// and the call is on one line
     ///
-    /// `None` for a module of a build from a `by` before columns: its runner
-    /// gives every location the whole of its `.by` line, so a column there
-    /// would be one the interpreter does not have. the label is still the
-    /// generated python's own text for the call
+    /// `None` when the interpreter's position for the call has no columns or
+    /// spans more than one line
     pub columns: Option<(u32, u32)>,
 }
 
