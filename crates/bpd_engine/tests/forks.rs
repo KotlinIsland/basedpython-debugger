@@ -32,7 +32,7 @@
 //! debugging there by name for the same reason
 #![cfg(unix)]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bpd_core::python::Capabilities;
 use bpd_core::{
@@ -390,12 +390,16 @@ fn a_fork_leaves_the_parents_session_exactly_as_it_was() {
 /// the loop is released by the test rather than counted out, so the forking and
 /// the asking really do overlap. the count is a backstop — a program that
 /// forked for ever would hold the test binary's own output pipe open
+///
+/// every fork it finishes adds a byte to `forks`, which is how the test knows
+/// that forks landed while it was asking
 const A_FORK_WHILE_A_THREAD_IS_HELD: &str = r#"import os
 import pathlib
 import signal
 import threading
 
 HERE = pathlib.Path(__file__).parent
+FORKS = os.open(HERE / "forks", os.O_WRONLY | os.O_CREAT | os.O_APPEND)
 
 
 def held_here():
@@ -422,6 +426,7 @@ for _ in range(2000):
         signal.alarm(120)
         os._exit(0)
     os.waitpid(pid, 0)
+    os.write(FORKS, b".")
 
 thread.join()
 "#;
@@ -451,7 +456,20 @@ fn a_thread_held_at_a_breakpoint_is_still_answered_while_another_thread_forks() 
     // asked while the other thread is forking. a request that arrived in a
     // window and was dropped would hang here, and one that desynchronised the
     // stream would come back as a frame this build cannot decode
-    for round in 0..20 {
+    //
+    // asked until forks have landed during the asking, as well as twenty times.
+    // the forking thread can be slower to reach its first fork than twenty
+    // answers are to come back, and then nothing was interfering with them
+    let forks = fixture.directory().join("forks");
+    let forked = || std::fs::metadata(&forks).map_or(0, |forks| forks.len());
+    let held_from = forked();
+    let deadline = Instant::now() + LONG_ENOUGH;
+    let mut round = 0;
+    while round < 20 || forked() == held_from {
+        assert!(
+            Instant::now() < deadline,
+            "the program never forked while the worker was held"
+        );
         let stack = debuggee
             .stack(stop.stop, Some(1))
             .expect("the held thread walked its own stack");
@@ -471,6 +489,7 @@ fn a_thread_held_at_a_breakpoint_is_still_answered_while_another_thread_forks() 
             ),
             Evaluated::Raised { error } => panic!("`1 + 1` raised {error} in round {round}"),
         }
+        round += 1;
     }
 
     std::fs::write(fixture.directory().join("release"), "go")
@@ -487,10 +506,12 @@ fn a_thread_held_at_a_breakpoint_is_still_answered_while_another_thread_forks() 
         other => panic!("the program did not end: {other:?}"),
     }
 
-    assert!(
-        !seen.started.is_empty(),
-        "the program has to have forked while the worker was held, or this \
-         asked twenty questions of a session nothing was interfering with"
+    assert_eq!(
+        seen.started.len() as u64,
+        forked(),
+        "every fork the program made is reported, once, including those made \
+         while the worker was held: {:?}",
+        seen.started
     );
 }
 
