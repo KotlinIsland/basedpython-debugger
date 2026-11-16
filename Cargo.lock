@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "bpd"
-version = "0.0.1-a3"
+version = "0.0.1-a4"
 dependencies = [
  "bpd_core",
  "bpd_dap",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "bpd_agent"
-version = "0.0.1-a3"
+version = "0.0.1-a4"
 dependencies = [
  "bpd_core",
  "bpd_protocol",
@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "bpd_core"
-version = "0.0.1-a3"
+version = "0.0.1-a4"
 dependencies = [
  "bpd_test",
  "serde",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "bpd_dap"
-version = "0.0.1-a3"
+version = "0.0.1-a4"
 dependencies = [
  "bpd_core",
  "getrandom",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "bpd_engine"
-version = "0.0.1-a3"
+version = "0.0.1-a4"
 dependencies = [
  "bpd_core",
  "bpd_protocol",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "bpd_mcp"
-version = "0.0.1-a3"
+version = "0.0.1-a4"
 dependencies = [
  "bpd_core",
  "serde",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "bpd_protocol"
-version = "0.0.1-a3"
+version = "0.0.1-a4"
 dependencies = [
  "bpd_core",
  "bpd_test",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "bpd_release"
-version = "0.0.1-a3"
+version = "0.0.1-a4"
 dependencies = [
  "bpd_core",
  "bpd_engine",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "bpd_test"
-version = "0.0.1-a3"
+version = "0.0.1-a4"
 dependencies = [
  "bpd_core",
  "bpd_engine",
