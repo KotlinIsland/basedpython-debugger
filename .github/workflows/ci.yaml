@@ -310,8 +310,13 @@ jobs:
         with:
           python-version: "3.14"
       # the IntelliJ Platform 2026.2 is compiled for java 25, and `product-info.json`
-      # refuses anything older
+      # refuses anything older. the jetbrains distribution lists its releases
+      # through the github api, authenticated only by `GITHUB_TOKEN` in the
+      # environment rather than the action's `token` input, and unauthenticated
+      # from a shared runner address it runs out of rate limit
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           distribution: jetbrains
           java-version: "25"
