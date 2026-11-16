@@ -25,10 +25,6 @@ use std::time::Duration;
 pub(crate) struct Started {
     child: Mutex<Child>,
     /// whether it has been asked to end — a `SIGTERM`, from either route
-    #[cfg_attr(
-        not(unix),
-        expect(dead_code, reason = "windows has nothing to ask with")
-    )]
     asked: AtomicBool,
 }
 
@@ -56,6 +52,12 @@ impl Started {
             std::thread::sleep(pause);
             pause = (pause * 2).min(Duration::from_millis(20));
         }
+    }
+
+    /// whether it has been sent the `SIGTERM` that asks it to end, from either
+    /// route. never on windows, which has nothing to ask with
+    pub(crate) fn asked(&self) -> bool {
+        self.asked.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// whether it has not ended yet

@@ -128,6 +128,7 @@ mod ending {
         a_disconnect_keeping_the_debuggee_lets_a_terminates_grace_run,
         a_disconnect_keeping_the_debuggee_leaves_it_running,
         a_stop_during_a_terminates_grace_is_let_go,
+        a_terminate_answers_for_a_held_program_the_signal_ends_at_once,
     );
 }
 
@@ -2407,6 +2408,50 @@ while True:
     client.event("terminated");
     client.request("disconnect", &serde_json::json!({}));
     client.finish_after_the_program_exited(7);
+}
+
+#[cfg(unix)]
+fn a_terminate_answers_for_a_held_program_the_signal_ends_at_once(transport: Transport) {
+    // a program with no handler of its own is ended by the `SIGTERM` itself,
+    // held or not, and the resume that follows found no agent to take it.
+    // measured on 0.0.1-a4, 3 of 3: the `terminate` was refused with `the agent
+    // disconnected while the engine was waiting for the threads to be resumed`,
+    // which the intellij platform shows as an error on every Stop at a stop
+    const HAS_NO_HANDLER: &str = r#"import pathlib, time
+
+(pathlib.Path(__file__).parent / "ready").write_text("")
+while True:
+    time.sleep(0.01)  # running
+"#;
+    let fixture = Fixture::new("has_no_handler", HAS_NO_HANDLER);
+    let mut client = Client::start(transport);
+    client.request("initialize", &serde_json::json!({}));
+    client.request(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    client.event("initialized");
+    client.request(
+        "setBreakpoints",
+        &serde_json::json!({
+            "source": { "path": fixture.path() },
+            "breakpoints": [ { "line": line_of(HAS_NO_HANDLER, "# running") } ],
+        }),
+    );
+    client.request("configurationDone", &serde_json::json!({}));
+    client.event("stopped");
+
+    let answered = client.request("terminate", &serde_json::json!({}));
+    assert_eq!(answered["success"], true, "{answered}");
+    let exited = client.event("exited");
+    assert_eq!(
+        exited["body"]["exitCode"],
+        128 + 15,
+        "ended by the signal it was asked with: {exited}"
+    );
+    client.event("terminated");
+    client.request("disconnect", &serde_json::json!({}));
+    client.finish_after_the_program_exited(128 + 15);
 }
 
 #[cfg(unix)]

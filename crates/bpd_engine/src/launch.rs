@@ -608,7 +608,7 @@ impl Debuggee {
                 Ok(Response::Ran(self.wait_for(at, deadline, reporting)?))
             }
             Request::Resume { which } => Ok(Response::Resumed {
-                threads: self.attached[at].let_go(which, reporting)?,
+                threads: self.attached[at].let_go_or_asked_to_end(which, reporting)?,
             }),
             Request::Step { stop, kind, target } => {
                 if let Some(target) = target {
@@ -2361,6 +2361,34 @@ impl Attached {
         match self.let_go(Which::All, reporting) {
             Ok(_) | Err(Error::AgentGone { .. }) => Ok(()),
             Err(error) => Err(error),
+        }
+    }
+
+    /// let held threads go, for a `Resume` — where the agent being gone is an
+    /// answer once the program was asked to end
+    ///
+    /// a program asked to end while a thread is held is let go so that its
+    /// handler can run, and that is the resume. but a program with no handler
+    /// of its own is ended by the `SIGTERM` itself, held or not — the default
+    /// action is the kernel's and runs no python — so the resume can find
+    /// nobody to take it. that is what was asked for, and the wait that follows
+    /// reads how it ended off the closed connection and the child. no thread
+    /// is running again, so none is named
+    ///
+    /// a program nothing asked to end keeps the error, as
+    /// [`Self::let_go_or_ended`] says
+    fn let_go_or_asked_to_end(
+        &mut self,
+        which: Which,
+        reporting: &mut dyn Reporting,
+    ) -> Result<Vec<u64>> {
+        match self.let_go(which, reporting) {
+            Err(Error::AgentGone { .. })
+                if self.child.as_ref().is_some_and(|started| started.asked()) =>
+            {
+                Ok(Vec::new())
+            }
+            answered => answered,
         }
     }
 

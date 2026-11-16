@@ -680,12 +680,17 @@ impl Session {
     pub fn readable_by(&mut self, deadline: Instant) -> Result<bool> {
         let readable = self.peek_until(deadline);
         // whatever came of it, the stream goes back to blocking before anything
-        // reads a frame off it
-        self.reading
-            .set_read_timeout(None)
-            .map_err(|source| Error::Control {
-                source: frame::Error::Io(source),
-            })?;
+        // reads a frame off it. one that cannot be set back is one whose peer
+        // has gone, and there is nothing left on it to read part of a frame of
+        match self.reading.set_read_timeout(None) {
+            Ok(()) => {}
+            Err(error) if refused_for_a_gone_peer(&error) => {}
+            Err(source) => {
+                return Err(Error::Control {
+                    source: frame::Error::Io(source),
+                });
+            }
+        }
         readable
     }
 
@@ -718,16 +723,10 @@ impl Session {
             let left = left.max(Self::A_LOOK);
             match self.reading.set_read_timeout(Some(left)) {
                 Ok(()) => {}
-                // macos refuses the option on a socket whose peer has gone, with
-                // `EINVAL`, where linux sets it and the read says so. it is the
-                // end of the session like any other, and the read that follows
-                // this answers `None` — measured on a program killed while it
-                // was being waited for, reported as a broken connection
-                Err(error)
-                    if cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput =>
-                {
-                    return Ok(true);
-                }
+                // the end of the session like any other, and the read that
+                // follows this answers `None` — measured on a program killed
+                // while it was being waited for, reported as a broken connection
+                Err(error) if refused_for_a_gone_peer(&error) => return Ok(true),
                 Err(source) => {
                     return Err(Error::Control {
                         source: frame::Error::Io(source),
@@ -878,6 +877,18 @@ impl Session {
     pub(crate) fn writer(&self) -> Arc<Mutex<Writing>> {
         Arc::clone(&self.writing)
     }
+}
+
+/// whether a socket option was refused because the peer is gone
+///
+/// macos refuses every option on a socket whose peer has **reset** it, with
+/// `EINVAL`, where linux sets it and the read says so. a reset is what an
+/// agent's socket becomes when its process ends with something bpd wrote still
+/// unread — measured as a resume sent to a held program that the `SIGTERM` of
+/// a `terminate` had already ended, which reported a broken connection over
+/// the program's exit
+fn refused_for_a_gone_peer(error: &io::Error) -> bool {
+    cfg!(target_os = "macos") && error.kind() == io::ErrorKind::InvalidInput
 }
 
 fn write_to(writing: &mut Writing, request: &FromEngine) -> Result<()> {

@@ -957,6 +957,47 @@ fn a_graceful_terminate_lets_the_program_handle_it_and_be_waited_for() {
 
 #[cfg(unix)]
 #[test]
+fn a_graceful_terminate_answers_for_a_held_program_the_signal_ends_at_once() {
+    // a program with no handler of its own is ended by the `SIGTERM` itself,
+    // held or not, and the resume that lets go of what is held finds no agent
+    // to take it. that is what was asked for, and `wait` says how it ended
+    const HAS_NO_HANDLER: &str = r"import time
+
+while True:
+    time.sleep(0.01)  # running
+";
+    let fixture = Fixture::new("has_no_handler", HAS_NO_HANDLER);
+    let mut client = Client::start();
+    client.ask(
+        "initialize",
+        &serde_json::json!({ "protocolVersion": bpd_mcp::PROTOCOL_VERSION }),
+    );
+    client.call(
+        "launch",
+        &serde_json::json!({ "program": fixture.path(), "python": interpreter() }),
+    );
+    let line = line_of(HAS_NO_HANDLER, "# running");
+    client.call(
+        "set_breakpoints",
+        &serde_json::json!({ "breakpoints": [ { "file": fixture.path(), "line": line } ] }),
+    );
+    let hit = client.call("continue_", &serde_json::json!({ "deadline_ms": GENEROUS }));
+    assert_eq!(hit["outcome"], "stopped", "{hit}");
+
+    let asked = client.call("terminate", &serde_json::json!({ "graceful": true }));
+    assert_eq!(asked["asked"], true, "{asked}");
+    let ended = client.call("wait", &serde_json::json!({ "deadline_ms": GENEROUS }));
+    assert_eq!(ended["outcome"], "exited", "{ended}");
+    assert_eq!(
+        ended["exit_code"],
+        128 + 15,
+        "ended by the signal it was asked with: {ended}"
+    );
+    client.finish();
+}
+
+#[cfg(unix)]
+#[test]
 fn a_sigterm_to_bpd_mcp_is_passed_on_to_its_program() {
     // `bpd mcp` starts programs as `bpd launch` and `bpd dap` do, and a host ends
     // a server it started with this signal

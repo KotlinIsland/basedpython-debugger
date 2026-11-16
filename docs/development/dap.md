@@ -1076,6 +1076,16 @@ advertises `supportTerminateDebuggee` and honours it:
     program, its `terminate` killed it — `exitCode` 247, the handler never run —
     and with `onTerminate: KeyboardInterrupt` in the launch it raised that in
     the program instead, and the `SIGTERM` handler still never ran
+- **a program with no handler of its own is ended by the signal**, held or
+    not: `SIGTERM`'s default action is the kernel's and runs no python. so
+    the letting go can find nothing left to let go, and that is what was
+    asked for — `terminate` is answered, then `exited` with `128 + 15` and
+    `terminated`, and so is MCP's graceful `terminate`. measured on
+    0.0.1-a4 before this: the `terminate` was refused with *"the agent
+    disconnected while the engine was waiting for the threads to be
+    resumed"*, which the intellij platform shows as an error on every Stop
+    at a stop — see
+    `a_terminate_answers_for_a_held_program_the_signal_ends_at_once`
 - **a stop during the grace is let go.** it holds a thread that runs no python,
     and the handler may be what that thread is in, so bpd lets it go rather
     than ending the program with its cleanup undone
