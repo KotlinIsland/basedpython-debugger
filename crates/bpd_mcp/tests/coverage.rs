@@ -261,7 +261,7 @@ fn every_capability_carried_inside_a_request_reaches_the_session() {
     // version of the code when it is on two — and a `reaches()` that is only a
     // claim would not notice
     assert!(
-        client.answered(&["\"still_running\"", "two versions of one function"]),
+        client.answered(&["\"still_running\"", "finishes on the old code"]),
         "`{}` is said to reach an agent and the answer never carried it",
         Facet::LiveReplacement.name()
     );

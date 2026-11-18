@@ -269,6 +269,14 @@ breakpoint, a frame and a source read go through. **transpiling has not moved
 here and will not**: by the time the request arrives, `by` has already written the
 bytes, and what this compiles is the generated python it always compiled
 
+a hand-written `.py` the build copied is the other way round. the runner
+compiles the copy **as the project file** — `_by_project.py` lists each one in
+`CARRIED` — so every code object of it is named after the file the user edits,
+and none after the copy. a request may name either: the copy, which is what `by
+restage` answers with, is resolved to the project file, and the answer names
+whichever the client asked about. before that, naming the copy was refused as
+code that had never run, about the file the program was stopped in
+
 ### `remap`, and why it is not its own request
 
 staging one file of a build again rewrites `_by_sourcemap.py` beside the

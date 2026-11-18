@@ -68,6 +68,11 @@ pub use literal::ParseError;
 /// the file `by run` writes beside the python it generated
 pub const MAP_FILENAME: &str = "_by_sourcemap.py";
 
+/// the file `by run` writes beside the map naming the project the tree was
+/// staged from, and every hand-written `.py` it copied in — see
+/// [`SourceMap::carried_from`]
+pub const PROJECT_FILENAME: &str = "_by_project.py";
+
 /// the digest algorithm this reader can recompute
 ///
 /// the algorithm is named in the value on purpose, so upstream can change it
@@ -306,6 +311,9 @@ pub struct SourceMap {
     /// every file the map names in `BY_CODE`, canonical: `by`'s own python in
     /// the tree, none of it the program's
     by_code: Vec<PathBuf>,
+    /// each hand-written `.py` copied into the tree, by its canonical path
+    /// there, with the project file the runner compiles it as
+    carried: BTreeMap<PathBuf, PathBuf>,
 }
 
 /// why a location has no counterpart, which is never answered with a guess
@@ -655,6 +663,7 @@ impl SourceMap {
             pairs,
             launcher,
             by_code,
+            carried: carried_in(directory)?,
         })
     }
 
@@ -749,6 +758,19 @@ impl SourceMap {
         &self.by_code
     }
 
+    /// the project file a hand-written `.py` copied into the tree stands for
+    ///
+    /// `by run` copies every `.py` of the project into the tree, and its runner
+    /// compiles each copy under the **project** path, so tracebacks and
+    /// breakpoints name the file the user edits. that makes the copy a path no
+    /// code object in the process is named after: a request naming the copy is
+    /// about the project file. `None` for anything that is not a carried copy
+    #[must_use]
+    pub fn carried_from(&self, staged: &Path) -> Option<&Path> {
+        let staged = crate::path::resolved(staged).ok()?;
+        self.carried.get(&staged).map(PathBuf::as_path)
+    }
+
     /// the pair whose generated python is that file
     fn pair_generating(&self, file: &Path) -> Option<&MappedFile> {
         let file = crate::path::resolved(file).ok()?;
@@ -772,6 +794,34 @@ impl SourceMap {
 #[must_use]
 pub fn digest(bytes: &[u8]) -> String {
     format!("{ALGORITHM}:{}", digest_of(bytes))
+}
+
+/// what [`PROJECT_FILENAME`] says was carried into the tree, keyed by the
+/// canonical path of each copy
+///
+/// a tree with no project file, or one that names no `CARRIED`, carried
+/// nothing. a copy the tree no longer holds is left out rather than refused:
+/// nothing in the process can be named after it, so there is nothing for it to
+/// translate
+fn carried_in(directory: &Path) -> Result<BTreeMap<PathBuf, PathBuf>, MapError> {
+    let path = directory.join(PROJECT_FILENAME);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(source) => return Err(MapError::Unreadable { path, source }),
+    };
+    let carried = literal::carried(&text).map_err(|source| MapError::Malformed {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(carried
+        .into_iter()
+        .filter_map(|(staged, source)| {
+            let staged = crate::path::resolved(&directory.join(staged)).ok()?;
+            let source = crate::path::resolved(&source).unwrap_or(source);
+            Some((staged, source))
+        })
+        .collect())
 }
 
 /// a path as the filesystem really spells it, in the form an interpreter

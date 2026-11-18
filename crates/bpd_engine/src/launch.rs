@@ -1953,13 +1953,15 @@ impl Attached {
             None => self.map.as_deref(),
         };
 
-        // a `.by` is not python, so what goes to the agent is the generated
-        // python it was transpiled into: the file on disk the new code is
-        // compiled from, as its `.by`
-        let files = files
-            .into_iter()
-            .map(|file| generated_for(map, file))
+        // what goes to the agent is the file the interpreter compiled: the
+        // generated python behind a `.by`, and the project file behind a `.py`
+        // the build carried — see [`compiled_as`]
+        let asked = files;
+        let files = asked
+            .iter()
+            .map(|file| compiled_as(map, file.clone()))
             .collect::<Result<Vec<_>>>()?;
+        let names: Vec<(PathBuf, PathBuf)> = files.iter().cloned().zip(asked).collect();
 
         let payload = remapping.as_ref().map(|(map, sent)| Remapping {
             files: map.files(),
@@ -1976,6 +1978,11 @@ impl Attached {
             reporting,
         )? {
             FromAgent::Replaced { mut replaced } => {
+                for one in &mut replaced.files {
+                    for (sent, asked) in &names {
+                        one.renamed(sent, asked);
+                    }
+                }
                 // adopted only where the agent adopted it. the two must not be
                 // able to disagree about which tree they are describing
                 if let Some((map, _)) = remapping
@@ -2986,19 +2993,23 @@ fn attached_in_terminal(listener: Listener, map: Option<bpd_core::SourceMap>) ->
     Ok(Launched::Stopped(debuggee))
 }
 
-/// the file on disk a replacement is compiled from, for the file a client named
-///
-/// a `.py` is already it. under `by run` that is the copy in the build tree
-/// rather than the one in the project — the tree is what `sys.path[0]` is and
-/// what the interpreter imported — and naming it is the client's job, because
-/// the client is what knows which of the two it means.
+/// the file a replacement is about, for the file a client named
 ///
 /// a `.by` is not python: `by run` compiled the generated python behind it, and
 /// the map says which file that is. one the map does not describe is refused
 /// rather than answered about the python nearest it.
-fn generated_for(map: Option<&bpd_core::SourceMap>, file: PathBuf) -> Result<PathBuf> {
+///
+/// a hand-written `.py` of the project is **copied** into the build tree, and
+/// the runner compiles the copy as the project file, so every code object of
+/// it is named after the project file and none after the copy. a client
+/// handed the copy by `by restage` names the copy, and is asking about the
+/// project file: the bytes are the same, and it is the only name the process
+/// knows the code by. any other `.py` is already the file.
+fn compiled_as(map: Option<&bpd_core::SourceMap>, file: PathBuf) -> Result<PathBuf> {
     if !mapping::is_source(&file) {
-        return Ok(file);
+        return Ok(map
+            .and_then(|map| map.carried_from(&file))
+            .map_or(file, Path::to_path_buf));
     }
     let map = map.ok_or(Error::NotABasedpythonBuild {
         wanted: "resolve a `.by` through",

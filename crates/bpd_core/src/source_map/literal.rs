@@ -236,6 +236,42 @@ fn own(assignments: &[(String, Literal)]) -> Result<Own, ParseError> {
     Ok(Own { launcher, by_code })
 }
 
+/// read `CARRIED` out of `_by_project.py`: each hand-written `.py` `by run`
+/// copied into the tree, as its path relative to the tree, with the project
+/// file it is a copy of
+///
+/// the runner compiles a carried copy **as** that project file, so its frames
+/// and its code objects are named after the file the user edits and never after
+/// the copy. a project file with no `CARRIED` is one from a `by` that copied
+/// nothing, or wrote no such table, and carries nothing
+pub(super) fn carried(text: &str) -> Result<Vec<(PathBuf, PathBuf)>, ParseError> {
+    let assignments = Reader::new(text).module()?;
+    let Some((_, value)) = assignments.iter().find(|(name, _)| name == "CARRIED") else {
+        return Ok(Vec::new());
+    };
+    let malformed = |found: String| ParseError::MalformedName {
+        name: "CARRIED",
+        found,
+        expected: "it maps each copy's path in the tree to the project file, both strings",
+    };
+    let Literal::Dict(entries) = value else {
+        return Err(malformed(value.describe().to_owned()));
+    };
+    entries
+        .iter()
+        .map(|entry| match entry {
+            (Literal::Str(staged), Literal::Str(source)) => {
+                Ok((PathBuf::from(staged), PathBuf::from(source)))
+            }
+            (key, value) => Err(malformed(format!(
+                "a dict with {} for {}",
+                value.describe(),
+                key.describe()
+            ))),
+        })
+        .collect()
+}
+
 /// the entries `SOURCEMAP` and `DIGESTS` describe between them, in file order
 ///
 /// an entry of `SOURCEMAP` with no `DIGESTS` beside it keeps a `None` digest

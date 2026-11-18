@@ -1293,3 +1293,109 @@ fn a_by_breakpoint_binds_and_hits_in_the_code_a_restage_replaced() {
         "the program ran the edit, not the code it was launched with"
     );
 }
+
+// ── a hand-written `.py` the build carried ──────────────────────────────────
+
+/// a module of the project written as python, which `by run` copies into the
+/// tree rather than transpiling
+const CARRIED: &str = "\
+import sys
+
+
+def f():
+    a = 1
+    with open(sys.argv[1], \"a\") as out: out.write(f\"{a}\\n\")
+
+
+f()
+f()
+";
+
+/// **the reload a person does first.** stopped inside `f` of the program's own
+/// `main.py`, they change `a = 1` to `a = 2` and reload.
+///
+/// `by run` copied `main.py` into the build tree and its runner compiled the
+/// copy **as the project file**, so no code object in the process is named
+/// after the copy — and the copy is what `by restage` names and an editor
+/// hands bpd. the replacement is about the project file, and lands: the call
+/// that is stopped finishes on the old code, and the next one runs the edit
+#[test]
+fn a_python_file_the_build_carried_is_replaced_through_the_copy_the_editor_names() {
+    let build = Build::demo();
+    let project = tempfile::tempdir().expect("a project directory");
+    let project = bpd_core::path::resolved(project.path()).expect("the directory was just made");
+    let edited = project.join("main.py");
+    let copy = build.root().join("main.py");
+    std::fs::write(&edited, CARRIED).expect("the project file is written");
+    std::fs::write(&copy, CARRIED).expect("the copy is written into the tree");
+
+    let runner = build.runner();
+    std::fs::write(
+        build.root().join("_by_project.py"),
+        format!(
+            "ROOT = \"{}\"\nCARRIED = {{\"main.py\": \"{}\"}}\n",
+            project.display(),
+            edited.display()
+        ),
+    )
+    .expect("the project file names what was carried");
+    let mut debuggee = launch_program(&runner, &build.arguments_running("main"));
+
+    let line = bpd_test::debuggee::line_of(CARRIED, "with open");
+    set(&mut debuggee, line, &edited);
+    let (reason, _) = run_to_stop(&mut debuggee);
+    assert!(
+        matches!(&reason, StopReason::Breakpoint { file, .. } if Path::new(file) == edited),
+        "the runner compiles the copy as the project file, so the stop names it: {reason:?}"
+    );
+
+    let changed = CARRIED.replace("a = 1", "a = 2");
+    std::fs::write(&edited, &changed).expect("the user edits the project file");
+    std::fs::write(&copy, &changed).expect("the copy is restaged");
+
+    let replaced = debuggee
+        .replace_code_even_under_a_live_frame(copy.clone())
+        .expect("the replacement was answered");
+    let [only] =
+        <[bpd_core::Replaced; 1]>::try_from(replaced.files).expect("one file was replaced");
+    assert_eq!(
+        only.file, copy,
+        "the answer names the file it was asked about"
+    );
+    let bpd_core::Replacement::Applied {
+        changed,
+        still_running,
+        ..
+    } = &only.outcome
+    else {
+        panic!(
+            "the copy is the project file's code, and replaceable: {:#?}",
+            only.outcome
+        )
+    };
+    assert_eq!(
+        changed
+            .iter()
+            .map(|one| one.function.as_str())
+            .collect::<Vec<_>>(),
+        ["f"]
+    );
+    assert_eq!(
+        still_running
+            .iter()
+            .map(|one| one.function.as_str())
+            .collect::<Vec<_>>(),
+        ["f"],
+        "the call it is stopped in goes on with the code it started with"
+    );
+
+    debuggee
+        .set_breakpoints(Vec::new())
+        .expect("the breakpoint is cleared");
+    run_to_exit(&mut debuggee);
+    assert_eq!(
+        build.answer(),
+        "1\n2\n",
+        "the stopped call finished on the old code and the next ran the edit"
+    );
+}

@@ -106,7 +106,7 @@
 //! three requests would leave two windows in which another thread's logpoint
 //! record is mapped through a table that no longer describes what it is running
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::breakpoint::Resolved;
 use crate::exception::PythonError;
@@ -277,6 +277,50 @@ pub struct Replaced {
     pub file: PathBuf,
     /// what became of it
     pub outcome: Replacement,
+}
+
+impl Replaced {
+    /// put the client's name for a file back wherever the answer names it by
+    /// the name it was sent under
+    ///
+    /// a `.by` is sent as the generated python behind it, and a `.py` the build
+    /// carried as the project file the runner compiles it as. the answer is
+    /// about what the client asked, so it names what the client named — in the
+    /// entry and in every refusal of it
+    pub fn renamed(&mut self, sent: &Path, asked: &Path) {
+        let rename = |file: &mut PathBuf| {
+            if file == sent {
+                *file = asked.to_path_buf();
+            }
+        };
+        rename(&mut self.file);
+        if let Replacement::Refused { because } = &mut self.outcome {
+            for refusal in because {
+                match refusal {
+                    Unreplaceable::NotAFile { file, .. }
+                    | Unreplaceable::DoesNotCompile { file, .. }
+                    | Unreplaceable::NotLoaded { file }
+                    | Unreplaceable::CompiledMoreThanOnce { file, .. }
+                    | Unreplaceable::PartiallyLoaded { file }
+                    | Unreplaceable::TopLevelChanged { file, .. }
+                    | Unreplaceable::NoSourceMap { file }
+                    | Unreplaceable::Unmappable { file, .. }
+                    | Unreplaceable::NotTheSameSource { file, .. } => rename(file),
+                    Unreplaceable::Withheld { file, because_of } => {
+                        rename(file);
+                        because_of.iter_mut().for_each(rename);
+                    }
+                    Unreplaceable::Orphaned { .. }
+                    | Unreplaceable::SignatureChanged { .. }
+                    | Unreplaceable::ClassLayoutChanged { .. }
+                    | Unreplaceable::Running { .. }
+                    | Unreplaceable::Ambiguous { .. }
+                    | Unreplaceable::RefusedByTheProcess { .. }
+                    | Unreplaceable::ClosureChanged { .. } => {}
+                }
+            }
+        }
+    }
 }
 
 /// what became of a replacement
@@ -585,35 +629,49 @@ impl std::fmt::Display for Divergence {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Defines { added, removed } => {
-                formatter.write_str("it defines different things")?;
-                names(formatter, added, removed)
+                names(formatter, "defines", "adds", added, "removes", removed)
             }
-            Self::Names { added, removed } => {
-                formatter.write_str("it reads or writes different names")?;
-                names(formatter, added, removed)
-            }
-            Self::Instructions => formatter.write_str("it runs different instructions"),
+            Self::Names { added, removed } => names(
+                formatter,
+                "uses different names",
+                "now uses",
+                added,
+                "no longer uses",
+                removed,
+            ),
+            Self::Instructions => formatter.write_str("its code changed"),
         }
     }
 }
 
-/// the added and removed halves of a difference, when there are any
+/// the added and removed halves of a difference, or `otherwise` when neither
+/// says anything
 fn names(
     formatter: &mut std::fmt::Formatter<'_>,
+    otherwise: &str,
+    adding: &str,
     added: &[String],
+    removing: &str,
     removed: &[String],
 ) -> std::fmt::Result {
-    if !added.is_empty() {
-        write!(formatter, " — {added:?} is new")?;
-    }
-    if !removed.is_empty() {
-        write!(
+    let quoted = |names: &[String]| {
+        names
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match (added.is_empty(), removed.is_empty()) {
+        (true, true) => formatter.write_str(otherwise),
+        (false, true) => write!(formatter, "{adding} {}", quoted(added)),
+        (true, false) => write!(formatter, "{removing} {}", quoted(removed)),
+        (false, false) => write!(
             formatter,
-            "{} {removed:?} is gone",
-            if added.is_empty() { " —" } else { " and" }
-        )?;
+            "{adding} {} and {removing} {}",
+            quoted(added),
+            quoted(removed)
+        ),
     }
-    Ok(())
 }
 
 /// a frame that will finish on the code a replacement replaced
@@ -640,9 +698,8 @@ impl std::fmt::Display for StillRunning {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "`{}` was replaced while {} — that frame finishes on the code it \
-             started with, so until it returns the process is running two \
-             versions of one function",
+            "`{}` is {}; that call finishes on the old code, and the next call \
+             runs the new code",
             self.function, self.frame
         )
     }
@@ -689,162 +746,104 @@ pub enum LiveFrame {
 impl std::fmt::Display for LiveFrame {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Thread { thread, line, held } => {
-                write!(formatter, "thread {thread} is executing line {line} of it")?;
-                match held {
-                    Some(stop) => write!(formatter, ", held by stop {stop}"),
-                    None => formatter.write_str(", and is running"),
-                }
-            }
+            Self::Thread {
+                line,
+                held: Some(_),
+                ..
+            } => write!(formatter, "stopped at line {line}"),
+            Self::Thread {
+                thread,
+                line,
+                held: None,
+            } => write!(formatter, "running at line {line} on thread {thread}"),
             Self::Suspended {
                 kind,
                 line,
-                started,
-            } => write!(
-                formatter,
-                "{kind} {} at line {line}",
-                if *started {
-                    "is suspended"
-                } else {
-                    "was created and never advanced, and would start"
-                }
-            ),
+                started: true,
+            } => write!(formatter, "{kind} suspended at line {line}"),
+            Self::Suspended {
+                kind,
+                started: false,
+                ..
+            } => write!(formatter, "{kind} that has not started yet"),
         }
     }
+}
+
+/// a file as a message names it: by its name alone
+///
+/// the whole path is in the answer's data. in a sentence it is noise, and under
+/// `by run` it is a temporary directory the user never chose
+fn named(file: &Path) -> std::path::Display<'_> {
+    file.file_name().map_or(file, Path::new).display()
 }
 
 impl std::fmt::Display for Unreplaceable {
     #[expect(
         clippy::too_many_lines,
-        reason = "one arm per refusal, and every one of them is a whole \
-                  sentence about what stood in the way and what to do instead. \
-                  splitting them out would put half of a message somewhere \
-                  nobody reading the variant would find it"
+        reason = "one arm per refusal, each a sentence about what stood in the \
+                  way and what to do instead"
     )]
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const RESTART: &str = "restart to apply the edit";
         match self {
-            Self::NotAFile { file, reason } => write!(
-                formatter,
-                "`{}` is not a file the debuggee can read: {reason}. the file is \
-                 read on the debuggee's own filesystem, which is where the \
-                 interpreter read it from",
-                file.display()
-            ),
-            Self::DoesNotCompile { file, error } => write!(
-                formatter,
-                "`{}` does not compile: {error}. nothing of the process was \
-                 touched — compiling runs none of the program, so this is the \
-                 edit rather than the debuggee",
-                file.display()
-            ),
+            Self::NotAFile { file, reason } => {
+                write!(formatter, "`{}` cannot be read: {reason}", named(file))
+            }
+            Self::DoesNotCompile { file, error } => {
+                write!(formatter, "`{}` does not compile: {error}", named(file))
+            }
             Self::NotLoaded { file } => write!(
                 formatter,
-                "no code from `{}` has run since bpd attached, so there is none \
-                 of it to replace. if the program has not imported it yet, \
-                 nothing needs doing: the import will compile the file as it is \
-                 on disk now, edit and all. if it has, it imported it where bpd \
-                 is never shown the code — before bpd attached, from a `.pth` \
-                 file or `sitecustomize`, or for the first time inside an \
-                 expression bpd was evaluating — and only restarting the \
-                 program runs the edit",
-                file.display()
+                "none of `{}` has run yet, so there is nothing to reload — the \
+                 edit is used when it is imported",
+                named(file)
             ),
             Self::CompiledMoreThanOnce { file, copies } => write!(
                 formatter,
-                "the interpreter has compiled `{}` {copies} times, so there are \
-                 {copies} versions of its code alive at once — `runpy`, a \
-                 re-import after `del sys.modules[...]` and an explicit \
-                 `compile` of the same path all do this. which live function \
-                 object belongs to which copy is not answerable from the file, \
-                 and answering it by resemblance is what a debugger must never \
-                 do. restart the process",
-                file.display()
+                "`{}` was loaded {copies} times, so which copy to update is \
+                 ambiguous; {RESTART}",
+                named(file)
             ),
             Self::Orphaned { function, objects } => write!(
                 formatter,
-                "{objects} function objects in the process run `{function}`, and \
-                 the file on disk no longer defines it — a closure handed out by \
-                 a factory whose body has since dropped it. replacing everything \
-                 around them would leave them running code that is in no version \
-                 of the file, which is the half-replaced process this refuses to \
-                 make. restart the process, or put it back"
+                "`{function}` was removed, but {objects} live function objects \
+                 still run it; {RESTART}, or put it back"
             ),
             Self::PartiallyLoaded { file } => write!(
                 formatter,
-                "bpd has seen only part of the code compiled from `{}` — its \
-                 module-level code object was never registered, so the tree \
-                 under it cannot be walked. a partial view answers every \
-                 question about a file wrongly and plausibly, so nothing is \
-                 answered from one",
-                file.display()
+                "only part of `{}` has been seen running, so it cannot be \
+                 reloaded safely; {RESTART}",
+                named(file)
             ),
             Self::TopLevelChanged { file, differences } => {
-                write!(
-                    formatter,
-                    "the module body of `{}` is different code now",
-                    file.display()
-                )?;
+                write!(formatter, "module-level code in `{}` changed", named(file))?;
                 each(formatter, differences)?;
-                formatter.write_str(
-                    ". applying that would mean re-running the top level, which \
-                     is running the program a second time rather than reloading \
-                     it: its imports, its calls and its registrations would all \
-                     happen again, and every name it binds would become a new \
-                     object that anything already holding the old one would \
-                     never see. restart the process, or put the edit inside a \
-                     function body",
-                )
+                write!(formatter, "; only function bodies reload — {RESTART}")
             }
             Self::ClassLayoutChanged { class, differences } => {
-                write!(formatter, "the body of class `{class}` is different code")?;
+                write!(formatter, "the body of class `{class}` changed")?;
                 each(formatter, differences)?;
-                formatter.write_str(
-                    ". a method is a function object and its code is replaceable \
-                     like any other, but the class **body** is the code that \
-                     built the class — applying a change to it would mean \
-                     writing the dictionary of a type whose instances already \
-                     exist, and those instances were built by the old body. \
-                     restart the process",
-                )
+                write!(formatter, "; only method bodies reload — {RESTART}")
             }
             Self::SignatureChanged { function, was, now } => write!(
                 formatter,
-                "`{function}` takes `{now}` on disk and `{was}` in the process. \
-                 a call already in flight was made against `{was}`, and the \
-                 callers that have not been reached yet were compiled against it \
-                 too — replacing the body under a different parameter list would \
-                 make them pass arguments the function no longer has. restart \
-                 the process, or keep the parameters and change the body"
+                "the parameters of `{function}` changed from `{was}` to \
+                 `{now}`; only function bodies reload — {RESTART}"
             ),
             Self::Running { function, frame } => write!(
                 formatter,
-                "`{function}` is being run right now: {frame}. replacing its code \
-                 would be accepted by cpython — a frame holds its own reference \
-                 to the code object, so the frame in flight would run the old \
-                 code to completion and the next call would get the new one — \
-                 and that is exactly what is refused: until that frame returns \
-                 the process is running two versions of one function, and a \
-                 stack whose frames behave two different ways is evidence about \
-                 neither. let it return first"
+                "`{function}` is {frame}; let it return, then reload"
             ),
             Self::Ambiguous { function, nested } => write!(
                 formatter,
-                "the body of `{function}` changed, and it holds more than one \
-                 nested code object named `{nested}` — two lambdas written in \
-                 one function share a name. matching them to the new ones by \
-                 position is not available once the body moved, so there is \
-                 nothing that says which new one replaces which old one, and \
-                 picking either would be a coin toss over which body a live \
-                 closure runs. give them names by making them `def`s, or restart \
-                 the process"
+                "`{function}` holds more than one `{nested}`, so which new one \
+                 replaces which is ambiguous; make them named `def`s, or restart"
             ),
             Self::RefusedByTheProcess { function, error } => write!(
                 formatter,
-                "the process refused to have `{function}`'s code replaced: an \
-                 audit hook raised {}: {} at `object.__setattr__` for \
-                 `__code__`. cpython audits that assignment before it makes \
-                 it, and the hook is the program's own — nothing was written, \
-                 and nothing can be until the hook allows it",
+                "an audit hook in the program refused replacing `{function}`: \
+                 {}: {}",
                 error.kind, error.message
             ),
             Self::ClosureChanged {
@@ -853,57 +852,40 @@ impl std::fmt::Display for Unreplaceable {
                 wanted,
             } => write!(
                 formatter,
-                "`{function}` holds {cells} closure cells and the code on disk \
-                 wants {wanted} free variables. cpython refuses that assignment, \
-                 and it is checked before anything is written rather than found \
-                 half way through — the enclosing function's variables are what \
-                 changed, so replace it from the outside or restart the process"
+                "the variables `{function}` closes over changed ({cells} before, \
+                 {wanted} now); {RESTART}"
             ),
             Self::Withheld { file, because_of } => {
+                let others = because_of
+                    .iter()
+                    .map(|other| format!("`{}`", named(other)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 write!(
                     formatter,
-                    "nothing about `{}` stood in the way, and it was not replaced \
-                     either: this request named {} file(s) and they are applied \
-                     at once or not at all, because a process half way between \
-                     two versions of a build produces evidence about neither. \
-                     what stood in the way is under",
-                    file.display(),
-                    because_of.len() + 1
-                )?;
-                for (index, other) in because_of.iter().enumerate() {
-                    write!(
-                        formatter,
-                        "{} `{}`",
-                        if index == 0 { "" } else { " and" },
-                        other.display()
-                    )?;
-                }
-                Ok(())
+                    "`{}` was not reloaded because {others} could not be — files \
+                     reload together or not at all",
+                    named(file)
+                )
             }
             Self::NoSourceMap { file } => write!(
                 formatter,
-                "`{}` is basedpython source and bpd has no map of the build it \
-                 belongs to, so there is nothing to say which generated python \
-                 the interpreter is running for it. the map is the file `by run` \
-                 writes into the build directory — run the program out of that \
-                 directory and bpd finds it",
-                file.display()
+                "`{}` is basedpython, and the program is not running from a \
+                 `by run` build, so there is no generated code to replace",
+                named(file)
             ),
-            Self::Unmappable { file, reason } => write!(
+            // the reason is in the answer's data. as text it is a paragraph
+            // about the map, and what the reader does is the same whichever it is
+            Self::Unmappable { file, .. } => write!(
                 formatter,
-                "`{}` cannot be placed in the build that is running: {reason}",
-                file.display()
+                "`{}` is not part of the running build; {RESTART}",
+                named(file)
             ),
-            Self::NotTheSameSource { file, generated } => write!(
+            Self::NotTheSameSource { file, .. } => write!(
                 formatter,
-                "`{}` is not the file `{}` was transpiled from — it has been \
-                 edited since the build was made. the code the process runs is \
-                 the generated python, so replacing it with what is beside it in \
-                 the build tree would succeed and change nothing at all. \
-                 transpile that file into the build again, and replace the code \
-                 that comes out",
-                file.display(),
-                generated.display()
+                "`{}` changed since it was transpiled, so the build is out of \
+                 date; transpile it into the build again, then reload",
+                named(file)
             ),
         }
     }
@@ -912,8 +894,11 @@ impl std::fmt::Display for Unreplaceable {
 /// the differences of one body, as a list a sentence can hold
 fn each(formatter: &mut std::fmt::Formatter<'_>, differences: &[Divergence]) -> std::fmt::Result {
     for (index, difference) in differences.iter().enumerate() {
-        formatter.write_str(if index == 0 { ": " } else { ", and " })?;
+        formatter.write_str(if index == 0 { " (" } else { ", " })?;
         write!(formatter, "{difference}")?;
+    }
+    if !differences.is_empty() {
+        formatter.write_str(")")?;
     }
     Ok(())
 }
@@ -939,12 +924,7 @@ mod tests {
                         traceback: Vec::new(),
                     },
                 },
-                vec![
-                    "plain",
-                    "audit hook",
-                    "RuntimeError: code is sealed here",
-                    "nothing was written",
-                ],
+                vec!["plain", "audit hook", "RuntimeError: code is sealed here"],
             ),
             (
                 Unreplaceable::TopLevelChanged {
@@ -955,12 +935,10 @@ mod tests {
                     }],
                 },
                 vec![
-                    "/tmp/victim.py",
-                    "\"helper\"] is new",
-                    // the roadmap's own objection, and the thing a caller has to
-                    // understand before it asks again
-                    "running the program a second time",
-                    "restart the process",
+                    "`victim.py`",
+                    "adds `helper`",
+                    "only function bodies reload",
+                    "restart",
                 ],
             ),
             (
@@ -968,7 +946,7 @@ mod tests {
                     class: "Widget".to_string(),
                     differences: vec![Divergence::Instructions],
                 },
-                vec!["Widget", "different instructions", "instances already"],
+                vec!["Widget", "its code changed", "only method bodies reload"],
             ),
             (
                 Unreplaceable::SignatureChanged {
@@ -976,7 +954,7 @@ mod tests {
                     was: "(request)".to_string(),
                     now: "(request, timeout)".to_string(),
                 },
-                vec!["handle", "(request, timeout)", "in flight"],
+                vec!["handle", "`(request)` to `(request, timeout)`", "restart"],
             ),
             (
                 Unreplaceable::Running {
@@ -987,15 +965,7 @@ mod tests {
                         held: Some(3),
                     },
                 },
-                vec![
-                    "worker",
-                    "thread 12",
-                    "stop 3",
-                    // the reason is the two-version process, and it must never
-                    // be given as crash prevention: cpython accepts this, and a
-                    // reason that is false is worse than no reason
-                    "two versions of one function",
-                ],
+                vec!["worker", "stopped at line 40", "let it return"],
             ),
             (
                 Unreplaceable::Running {
@@ -1006,14 +976,14 @@ mod tests {
                         started: false,
                     },
                 },
-                vec!["a generator", "never advanced", "line 9"],
+                vec!["a generator", "not started yet"],
             ),
             (
                 Unreplaceable::Ambiguous {
                     function: "build".to_string(),
                     nested: "build.<locals>.<lambda>".to_string(),
                 },
-                vec!["build", "<lambda>", "coin toss"],
+                vec!["build", "<lambda>", "named `def`s"],
             ),
             (
                 Unreplaceable::ClosureChanged {
@@ -1021,33 +991,26 @@ mod tests {
                     cells: 1,
                     wanted: 2,
                 },
-                vec!["inner", "1 closure cells", "2 free variables"],
+                vec!["inner", "closes over", "1 before, 2 now"],
             ),
             (
                 Unreplaceable::PartiallyLoaded {
                     file: PathBuf::from("/tmp/half.py"),
                 },
-                vec!["/tmp/half.py", "module-level code object"],
+                vec!["`half.py`", "restart"],
             ),
             (
                 Unreplaceable::NotLoaded {
                     file: PathBuf::from("/tmp/never.py"),
                 },
-                vec![
-                    "/tmp/never.py",
-                    "since bpd attached",
-                    // the common case is not a problem at all, and saying what
-                    // to do about the rare one is the point of the message
-                    "nothing needs doing",
-                    "only restarting",
-                ],
+                vec!["`never.py`", "nothing to reload", "when it is imported"],
             ),
             (
                 Unreplaceable::NotAFile {
                     file: PathBuf::from("/tmp/gone.py"),
                     reason: "No such file or directory".to_string(),
                 },
-                vec!["/tmp/gone.py", "No such file or directory"],
+                vec!["`gone.py`", "No such file or directory"],
             ),
             (
                 Unreplaceable::DoesNotCompile {
@@ -1058,26 +1021,20 @@ mod tests {
                         traceback: Vec::new(),
                     },
                 },
-                vec!["SyntaxError", "runs none of the program"],
+                vec!["`broken.py`", "does not compile", "SyntaxError"],
             ),
             (
                 Unreplaceable::Withheld {
                     file: PathBuf::from("/tmp/build/fine.py"),
                     because_of: vec![PathBuf::from("/tmp/build/broken.py")],
                 },
-                vec![
-                    "/tmp/build/fine.py",
-                    "/tmp/build/broken.py",
-                    // the whole of why a file nothing was wrong with is in the
-                    // answer at all
-                    "at once or not at all",
-                ],
+                vec!["`fine.py`", "`broken.py`", "together or not at all"],
             ),
             (
                 Unreplaceable::NoSourceMap {
                     file: PathBuf::from("/src/app.by"),
                 },
-                vec!["/src/app.by", "build directory"],
+                vec!["`app.by`", "`by run` build"],
             ),
             (
                 Unreplaceable::Unmappable {
@@ -1086,22 +1043,14 @@ mod tests {
                         file: PathBuf::from("/src/app.by"),
                     },
                 },
-                vec!["/src/app.by", "says nothing about"],
+                vec!["`app.by`", "not part of the running build"],
             ),
             (
                 Unreplaceable::NotTheSameSource {
                     file: PathBuf::from("/src/app.by"),
                     generated: PathBuf::from("/tmp/build/app.py"),
                 },
-                vec![
-                    "/src/app.by",
-                    "/tmp/build/app.py",
-                    // the trap this refusal exists for: without it the answer is
-                    // a truthful "nothing needed replacing" about a file the
-                    // person is not looking at
-                    "change nothing at all",
-                    "transpile",
-                ],
+                vec!["`app.by`", "out of date", "transpile"],
             ),
         ];
 
@@ -1110,6 +1059,18 @@ mod tests {
             for wanted in expected {
                 assert!(said.contains(wanted), "expected {wanted:?} in {said:?}");
             }
+            // a refusal is read in a debug console by someone who pressed a
+            // button and wants to know what to do next. a paragraph about the
+            // debugger's reasoning is the thing this guards against
+            assert!(
+                said.len() <= 160,
+                "a refusal is one short sentence, and this is {} characters: {said}",
+                said.len()
+            );
+            assert!(
+                !said.contains("/tmp/") && !said.contains("/src/"),
+                "a refusal names a file by its name, not its path: {said}"
+            );
         }
     }
 
@@ -1135,10 +1096,23 @@ mod tests {
                 "the refusal claims {forbidden:?}, which cpython does not do: {said}"
             );
         }
-        assert!(
-            said.contains("would be accepted by cpython"),
-            "the refusal has to say that cpython permits this, or a reader will \
-             assume it does not, and said {said}"
+    }
+
+    #[test]
+    fn a_frame_left_on_the_old_code_says_which_call_gets_the_new_one() {
+        let said = StillRunning {
+            function: "f".to_string(),
+            frame: LiveFrame::Thread {
+                thread: 1,
+                line: 3,
+                held: Some(2),
+            },
+        }
+        .to_string();
+        assert_eq!(
+            said,
+            "`f` is stopped at line 3; that call finishes on the old code, and \
+             the next call runs the new code"
         );
     }
 }

@@ -2504,61 +2504,33 @@ impl Adapter {
             other => unreachable!("a code replacement was answered with {other:?}"),
         };
 
-        // said first because it happened first, and because it is the half a user
-        // cannot otherwise see: the tables moved under every `.by` line of the
-        // build a moment before any code was replaced
-        if let Some(remapped) = &replaced.remapped {
-            self.event(
-                "output",
-                &serde_json::json!({
-                    "category": "important",
-                    "output": format!("{remapped}\n"),
-                }),
-            )?;
-        }
-
+        // one line per thing the user has to know, on the `output` stream a client
+        // already shows: why a file was not reloaded, and which calls go on running
+        // the old code of one that was. everything else — the tables moving, which
+        // functions changed — is in the body for a client that wants to say it
         for one in &replaced.files {
-            let named = one.file.display();
-
-            // every refusal, as its own sentence, on the `output` stream the
-            // client already shows a user — the body carries the same facts as
-            // data, and a user watching a debug console is the one who has to
-            // decide what to change about their edit. the file is named because
-            // there can now be several, and a reason with no file in front of it
-            // is a reason about whichever one the reader assumes
-            if let bpd_core::Replacement::Refused { because } = &one.outcome {
-                for reason in because {
-                    self.event(
-                        "output",
-                        &serde_json::json!({
-                            "category": "important",
-                            "output": format!("bpd did not replace the code in `{named}`: {reason}\n"),
-                        }),
-                    )?;
+            match &one.outcome {
+                bpd_core::Replacement::Refused { because } => {
+                    for reason in because {
+                        self.event(
+                            "output",
+                            &serde_json::json!({
+                                "category": "important",
+                                "output": format!("not reloaded: {reason}\n"),
+                            }),
+                        )?;
+                    }
                 }
-            }
-
-            // and the other way round: a replacement that **was** applied under a
-            // live frame is the one case where succeeding costs something, and
-            // the cost goes where a refusal's reason goes. a user who asked for
-            // this and then read an unqualified success would have been told the
-            // process is on one version of the code when it is on two
-            if let bpd_core::Replacement::Applied { still_running, .. } = &one.outcome {
-                for running in still_running {
-                    self.event(
-                        "output",
-                        &serde_json::json!({
-                            "category": "important",
-                            // the file goes after the phrase rather than inside
-                            // it: "replaced the code under a live frame" is what
-                            // tells this apart from the refusal in the same
-                            // conversation, which says the same thing about why
-                            // it refused
-                            "output": format!(
-                                "bpd replaced the code under a live frame in `{named}`: {running}\n"
-                            ),
-                        }),
-                    )?;
+                bpd_core::Replacement::Applied { still_running, .. } => {
+                    for running in still_running {
+                        self.event(
+                            "output",
+                            &serde_json::json!({
+                                "category": "important",
+                                "output": format!("reloaded, but {running}\n"),
+                            }),
+                        )?;
+                    }
                 }
             }
         }

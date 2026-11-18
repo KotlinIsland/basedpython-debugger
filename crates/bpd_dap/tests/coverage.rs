@@ -571,12 +571,12 @@ fn a_replacement_under_a_live_frame_that_is_not_a_boolean_is_refused_rather_than
         .filter(|event| {
             event["body"]["output"]
                 .as_str()
-                // the applied case by its own words. "two versions of one
-                // function" alone matches the **refusal** in the same
-                // conversation, which says the same thing about why it refused
-                // — an assertion that cannot tell those apart passes with the
-                // report it is checking for deleted
-                .is_some_and(|text| text.contains("bpd replaced the code under a live frame"))
+                // the applied case by its own words: a refusal of the same
+                // replacement starts "not reloaded", and an assertion that could
+                // not tell the two apart would pass with this report deleted
+                .is_some_and(|text| {
+                    text.starts_with("reloaded, but") && text.contains("finishes on the old code")
+                })
         })
         .collect();
     assert!(

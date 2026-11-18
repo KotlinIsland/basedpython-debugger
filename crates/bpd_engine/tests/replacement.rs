@@ -514,10 +514,8 @@ fn a_changed_module_body_is_refused_as_something_only_re_running_it_could_apply(
         "the refusal has to name what the body now defines, and said {differences:#?}"
     );
     assert!(
-        named
-            .to_string()
-            .contains("running the program a second time"),
-        "the refusal has to say why re-running the top level is not a reload"
+        named.to_string().contains("only function bodies reload"),
+        "the refusal has to say what can be reloaded instead"
     );
 
     to_exit(&mut debuggee);
@@ -615,7 +613,7 @@ fn a_replacement_asked_for_under_a_live_frame_is_applied_and_names_every_frame_i
     // would have been told a fact and not its consequence
     let said = named.to_string();
     assert!(
-        said.contains("two versions of one function"),
+        said.contains("finishes on the old code") && said.contains("next call runs the new code"),
         "the report has to name what it cost, and said {said}"
     );
 
@@ -689,13 +687,15 @@ fn a_frame_running_the_code_refuses_the_replacement_and_names_where_it_is() {
          from a thread that is running and was sampled"
     );
 
-    // the reason must never be given as crash prevention. measured on 3.13,
-    // 3.14, 3.15 and 3.14t, cpython accepts this assignment and nothing aborts
+    // where the frame is and what to do about it, in one sentence. never
+    // crash prevention: measured on 3.13, 3.14, 3.15 and 3.14t, cpython
+    // accepts this assignment and nothing aborts
     let said = named.to_string();
     assert!(
-        said.contains("would be accepted by cpython") && said.contains("two versions"),
-        "the refusal has to give the honest reason, and said {said}"
+        said.contains("stopped at line") && said.contains("let it return"),
+        "the refusal has to say where the frame is and what to do, and said {said}"
     );
+    assert!(!said.contains("crash"), "{said}");
 
     to_exit(&mut debuggee);
     assert!(recorded(&fixture).contains("('before', 1)"));
