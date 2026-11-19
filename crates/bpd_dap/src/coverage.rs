@@ -194,12 +194,11 @@ pub const fn reach_of_facet(facet: Facet) -> Reach {
         ),
 
         // a boolean on the custom request that carries the replacement itself,
-        // and the report comes back two ways: in the body, whole, and as a
-        // console line per frame — the same place a refusal's reason goes,
-        // because succeeding here costs the same thing failing usually saves
+        // and every frame still on the old code comes back in the body. not on
+        // the console: a reload answers the button that asked for it
         Facet::LiveReplacement => Reach::Direct(
             "`evenUnderALiveFrame` on `bpd/replaceCode`, with every frame still \
-             on the old code in the answer and on the console",
+             on the old code in the answer",
         ),
 
         // the list on the same custom request that carries a single file. the

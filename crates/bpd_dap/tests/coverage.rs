@@ -560,36 +560,21 @@ fn a_replacement_under_a_live_frame_that_is_not_a_boolean_is_refused_rather_than
     // adapter that read `"yes"` as truthy would make that trade on a typo
     let client = drive(&Asked::default());
 
-    // the console half of the claim in `reach_of_facet`, read rather than
-    // believed. the body carries the report because serde does that for free;
-    // the console line is what a user watching a debug console sees, and it is
-    // the same place a refusal's reason goes — succeeding here costs what
-    // failing usually saves, so it belongs in the same stream
-    let told: Vec<&serde_json::Value> = client
+    // a reload answers the button that asked for it, and nothing of it goes on
+    // the console: a line per press there is noise in the program's own output
+    let reloads: Vec<&serde_json::Value> = client
         .events("output")
         .into_iter()
         .filter(|event| {
-            event["body"]["output"]
-                .as_str()
-                // the applied case by its own words: a refusal of the same
-                // replacement starts "not reloaded", and an assertion that could
-                // not tell the two apart would pass with this report deleted
-                .is_some_and(|text| {
-                    text.starts_with("reloaded, but") && text.contains("finishes on the old code")
-                })
+            event["body"]["output"].as_str().is_some_and(|text| {
+                text.contains("finishes on the old code") || text.starts_with("not reloaded")
+            })
         })
         .collect();
     assert!(
-        !told.is_empty(),
-        "a replacement was applied under a live frame and the console never \
-         said what it cost"
+        reloads.is_empty(),
+        "a reload wrote to the console: {reloads:?}"
     );
-    for event in told {
-        assert_eq!(
-            event["body"]["category"], "important",
-            "DAP has a category for exactly this and it was not used: {event}"
-        );
-    }
 
     let said = client
         .refusal_of("bpd/replaceCode")
@@ -1276,6 +1261,13 @@ fn drive_until(asked: &Asked, ending: Told) -> Transcript {
         replaced["body"]["files"][0]["outcome"]["replaced"], "refused",
         "the fake refuses, and the adapter has to carry the whole answer rather \
          than a yes or a no: {replaced}"
+    );
+    assert!(
+        replaced["body"]["files"][0]["said"][0]
+            .as_str()
+            .is_some_and(|said| !said.is_empty()),
+        "each refusal comes back as bpd's sentence, for a client to show where \
+         the user pressed the button: {replaced}"
     );
 
     // the same request with the guarantee traded away, which is the only route

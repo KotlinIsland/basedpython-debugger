@@ -2504,39 +2504,24 @@ impl Adapter {
             other => unreachable!("a code replacement was answered with {other:?}"),
         };
 
-        // one line per thing the user has to know, on the `output` stream a client
-        // already shows: why a file was not reloaded, and which calls go on running
-        // the old code of one that was. everything else — the tables moving, which
-        // functions changed — is in the body for a client that wants to say it
-        for one in &replaced.files {
-            match &one.outcome {
-                bpd_core::Replacement::Refused { because } => {
-                    for reason in because {
-                        self.event(
-                            "output",
-                            &serde_json::json!({
-                                "category": "important",
-                                "output": format!("not reloaded: {reason}\n"),
-                            }),
-                        )?;
-                    }
-                }
-                bpd_core::Replacement::Applied { still_running, .. } => {
-                    for running in still_running {
-                        self.event(
-                            "output",
-                            &serde_json::json!({
-                                "category": "important",
-                                "output": format!("reloaded, but {running}\n"),
-                            }),
-                        )?;
-                    }
-                }
+        // nothing on the `output` stream. a reload is something the user pressed
+        // a button for, and its answer goes back to the button: an editor shows a
+        // refusal where the user is looking, and a debug console filling with a
+        // line per press is noise in the program's own output. so each file's
+        // refusals ride in the body as `said`, one sentence each, so a client
+        // shows bpd's words rather than writing its own from the variants
+        let mut body = serde_json::to_value(&replaced)
+            .expect("a replacement is built from types whose serde is derived");
+        for (one, answered) in replaced.files.iter().zip(
+            body["files"]
+                .as_array_mut()
+                .expect("`Replacements::files` serialises as a list")
+                .iter_mut(),
+        ) {
+            if let bpd_core::Replacement::Refused { because } = &one.outcome {
+                answered["said"] = because.iter().map(ToString::to_string).collect();
             }
         }
-
-        let body = serde_json::to_value(&replaced)
-            .expect("a replacement is built from types whose serde is derived");
         self.respond(message, Some(body))?;
         Ok(())
     }

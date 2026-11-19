@@ -219,11 +219,10 @@ method, `replace_code_even_under_a_live_frame`, because a bare `true` at a call
 site says nothing about what it buys
 
 what comes back is `applied`, with every frame that will finish on the old code
-named in `still_running`. both front ends put it where a refusal's reason goes —
-an `important` console event under DAP, the first note of the answer under MCP —
-because this is the one case where *succeeding* costs what failing usually saves,
-and a caller who read an unqualified success would have been told the process is
-on one version of the code when it is on two
+named in `still_running`, so a caller who asked for this has what it cost. MCP
+also puts it in the first note of the answer. DAP puts nothing on the console: a
+reload answers the button that asked for it, and an editor decides whether a
+person needs telling that the call they are stopped in finishes on the old code
 
 **that list is true when it is made and not afterwards**, which is the part worth
 saying twice. the frames on it return on their own schedule and nothing reports
@@ -351,5 +350,7 @@ alone
 
 both carry the whole answer. a client given only "yes" cannot show what is now
 different about the process, and one given only "no" cannot show which of the
-user's edits to undo. the DAP adapter additionally writes each refusal to the
-`output` stream a user is already looking at
+user's edits to undo. the DAP adapter adds `said` to each refused file, bpd's
+sentence for every refusal, so an editor shows the reason where the button was
+pressed in bpd's words rather than its own — and writes nothing about a reload to
+the `output` stream, which is the program's
