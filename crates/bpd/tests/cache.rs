@@ -262,8 +262,12 @@ fn clearing_takes_the_child_hook_and_the_bytecode_an_interpreter_left_beside_it(
     let hook = home.stage_hook();
 
     let interpreter = &bpd_test::agent::matching_interpreter().executable;
+    // the bytecode is what this test clears over, and an environment that asked
+    // cpython not to write any would leave it nothing to clear
     let ran = Command::new(interpreter)
         .env("PYTHONPATH", &hook)
+        .env_remove("PYTHONDONTWRITEBYTECODE")
+        .env_remove("PYTHONPYCACHEPREFIX")
         .args(["-c", "pass"])
         .output()
         .unwrap_or_else(|error| panic!("could not run `{}`: {error}", interpreter.display()));

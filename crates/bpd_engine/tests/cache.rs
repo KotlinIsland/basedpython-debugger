@@ -121,10 +121,14 @@ fn an_interpreter_that_imports_the_child_hook_leaves_bytecode_the_entry_accounts
     // the entry on `PYTHONPATH` and nothing else, which is what a child of a
     // debuggee with child debugging on has. with none of the `BPD_CHILD_*`
     // variables set the hook reads three of them and returns, so what this runs
-    // is the import and not the attach
+    // is the import and not the attach. the bytecode is what this test is
+    // about, so an environment that asked cpython not to write it, or to write
+    // it somewhere else, is not the one it runs in
     let interpreter = &bpd_test::agent::matching_interpreter().executable;
     let ran = std::process::Command::new(interpreter)
         .env("PYTHONPATH", &entry)
+        .env_remove("PYTHONDONTWRITEBYTECODE")
+        .env_remove("PYTHONPYCACHEPREFIX")
         .args([
             "-c",
             "import sys; print(sys.modules['sitecustomize'].__file__)",
