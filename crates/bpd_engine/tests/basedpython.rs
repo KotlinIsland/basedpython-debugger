@@ -1298,13 +1298,16 @@ fn a_by_breakpoint_binds_and_hits_in_the_code_a_restage_replaced() {
 
 /// a module of the project written as python, which `by run` copies into the
 /// tree rather than transpiling
+///
+/// it writes `\n` whatever the platform, since a text-mode file on windows
+/// writes `\r\n` and the answer is compared byte for byte
 const CARRIED: &str = "\
 import sys
 
 
 def f():
     a = 1
-    with open(sys.argv[1], \"a\") as out: out.write(f\"{a}\\n\")
+    with open(sys.argv[1], \"a\", newline=\"\\n\") as out: out.write(f\"{a}\\n\")
 
 
 f()
