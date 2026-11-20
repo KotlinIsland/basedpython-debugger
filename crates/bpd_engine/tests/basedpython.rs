@@ -1329,16 +1329,7 @@ fn a_python_file_the_build_carried_is_replaced_through_the_copy_the_editor_names
     std::fs::write(&edited, CARRIED).expect("the project file is written");
     std::fs::write(&copy, CARRIED).expect("the copy is written into the tree");
 
-    let runner = build.runner();
-    std::fs::write(
-        build.root().join("_by_project.py"),
-        format!(
-            "ROOT = \"{}\"\nCARRIED = {{\"main.py\": \"{}\"}}\n",
-            project.display(),
-            edited.display()
-        ),
-    )
-    .expect("the project file names what was carried");
+    let runner = build.runner_of_project(&project, &[("main.py", &edited)]);
     let mut debuggee = launch_program(&runner, &build.arguments_running("main"));
 
     let line = bpd_test::debuggee::line_of(CARRIED, "with open");

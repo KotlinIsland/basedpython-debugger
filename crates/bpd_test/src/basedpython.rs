@@ -391,9 +391,28 @@ impl Build {
     /// the import machinery it goes through, none of which is basedpython
     #[must_use]
     pub fn runner(&self) -> PathBuf {
+        self.runner_of_project(&self.root(), &[])
+    }
+
+    /// [`Self::runner`], for a build whose project lives at `root` and which
+    /// carried each `(copy, project file)` in `carried`: the copy's path
+    /// relative to the tree, and the hand-written `.py` it is a copy of
+    #[must_use]
+    pub fn runner_of_project(&self, root: &Path, carried: &[(&str, &Path)]) -> PathBuf {
+        let carried = carried
+            .iter()
+            .map(|(copy, source)| {
+                format!(
+                    "\"{}\": \"{}\"",
+                    in_a_map(Path::new(copy)),
+                    in_a_map(source)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         std::fs::write(
             self.root().join("_by_project.py"),
-            format!("ROOT = \"{}\"\nCARRIED = {{}}\n", in_a_map(&self.root())),
+            format!("ROOT = \"{}\"\nCARRIED = {{{carried}}}\n", in_a_map(root)),
         )
         .expect("the project file is written");
         let path = self.root().join("_by_runner.py");
